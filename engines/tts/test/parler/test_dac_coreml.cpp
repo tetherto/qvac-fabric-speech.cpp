@@ -41,11 +41,14 @@
 //     same GGUF adopt it (route cached) without generating again;
 //   * the same --min-snr / --min-speech-snr gates as above on the generated
 //     sidecar (lowered under `all` only for the chips with a measured floor,
-//     see GENERATED_ALL_UNITS_FLOORS), and the Engine reports it per call;
+//     see GENERATED_ALL_UNITS_FLOORS; a floor that is no longer needed
+//     fails), and the Engine reports it per call;
 //   * fit charges the generated envelope (route generate, validated); a
 //     budget only the ggml projection fits resolves use = off (fit and Engine);
-//   * --units-sweep (report only): the generated artifact's SNR against ggml
-//     for each compute-unit policy, for recording per-host parity figures.
+//   * --units-sweep: the generated artifact's SNR against ggml for each
+//     compute-unit policy, for recording per-host parity figures; reported
+//     only, except that a chip with a floor under `all` holds cpu_and_ane
+//     to --min-snr.
 // --memory-schedule DIR (TTS_CPP_COREML, generated route): ggml decodes run
 // while the sidecar is generated, compiled, loaded and warmed into DIR; the
 // footprint increment over the warm ggml baseline must stay within the
@@ -66,6 +69,7 @@
 #include <chrono>
 #include <cmath>
 #include <fstream>
+#include <iterator>
 #include <thread>
 
 #if defined(__APPLE__)
@@ -222,6 +226,8 @@ struct parity_floor {
     double min_snr;
 };
 constexpr parity_floor GENERATED_ALL_UNITS_FLOORS[] = {{"Apple M4 Max", 50.0}};
+// Each row is a measurement recorded above; a new chip needs its own.
+static_assert(std::size(GENERATED_ALL_UNITS_FLOORS) == 1, "every floor row is a recorded measurement");
 
 std::string host_chip() {
 #if defined(__APPLE__)
@@ -242,11 +248,44 @@ double generated_min_snr(const std::string & label, const std::string & chip, do
     return min_snr;
 }
 
+// A floor expires once its chip no longer needs it: true when a floor
+// applies (host_min_snr below --min-snr) and every multi-frame case reaches
+// --min-snr, so the row must be removed.
+bool floor_expired(double host_min_snr, double min_snr, const std::vector<double> & multi_frame_snrs) {
+    if (!(host_min_snr < min_snr) || multi_frame_snrs.empty()) return false;
+    return std::all_of(multi_frame_snrs.begin(), multi_frame_snrs.end(),
+                       [min_snr](double snr) { return snr >= min_snr; });
+}
+
+// On a chip with a floor under `all`, --units-sweep holds the cpu_and_ane
+// row to --min-snr, so the run keeps one full-gate check of the
+// all-Neural-Engine program. Every other row is reported only.
+bool sweep_row_gated(const std::string & units, const std::string & chip, double min_snr) {
+    return units == "cpu_and_ane" && generated_min_snr("coreml-all", chip, min_snr) < min_snr;
+}
+
 void parity_floor_gates() {
     check(generated_min_snr("coreml-all", "Apple M4 Max", 54) == 50, "parity floor: M4 Max under all is 50 dB");
     check(generated_min_snr("coreml-all", "Apple M2", 54) == 54, "parity floor: an unlisted chip keeps --min-snr");
     check(generated_min_snr("coreml-ane", "Apple M4 Max", 54) == 54, "parity floor: only under all");
     check(generated_min_snr("coreml-all", "Apple M4 Max", 45) == 45, "parity floor: never raises --min-snr");
+    for (const char * chip : {"Apple M4 Max (Virtual)", "Apple M4 Pro", "Apple M4", ""}) {
+        check(generated_min_snr("coreml-all", chip, 54) == 54,
+              std::string("parity floor: '") + chip + "' keeps --min-snr (exact chip match)");
+    }
+    for (const parity_floor & floor : GENERATED_ALL_UNITS_FLOORS) {
+        check(floor.min_snr < 54, std::string("parity floor: the ") + floor.chip + " row is below 54 dB");
+    }
+    check(floor_expired(50, 54, {54.0, 56.4}), "parity floor: expires when every multi-frame case reaches --min-snr");
+    check(!floor_expired(50, 54, {51.3, 56.4}) && !floor_expired(50, 54, {NAN, 56.4}),
+          "parity floor: still needed while a multi-frame case is below --min-snr");
+    check(!floor_expired(54, 54, {56.2, 56.4}) && !floor_expired(50, 54, {}),
+          "parity floor: nothing expires without a floor or a case");
+    check(sweep_row_gated("cpu_and_ane", "Apple M4 Max", 54) && !sweep_row_gated("all", "Apple M4 Max", 54) &&
+              !sweep_row_gated("cpu_and_gpu", "Apple M4 Max", 54) &&
+              !sweep_row_gated("cpu_and_ane", "Apple M2", 54) &&
+              !sweep_row_gated("cpu_and_ane", "Apple M4 Max", 45),
+          "units sweep: only the cpu_and_ane row on a chip with a floor is gated");
 }
 
 std::vector<int32_t> random_codes(const parler_hparams & hp, int n_frames, uint32_t seed) {
@@ -617,6 +656,7 @@ void pending_parity_gates(parler_model & model, const std::string & ref_dir, dou
     const double host_min_snr = generated_min_snr(label, chip, min_snr);
     fprintf(stderr, "  host %s: parity gate %.1f dB (--min-snr %.1f)\n", chip.empty() ? "unknown" : chip.c_str(),
             host_min_snr, min_snr);
+    std::vector<double> multi_frame_snrs;
     for (const int n_frames : {2 * keep + keep / 2, window / 3, 1}) {
         const std::vector<int32_t> codes = random_codes(hp, n_frames, 100 + n_frames);
         model.dac_pending.reset();
@@ -627,9 +667,15 @@ void pending_parity_gates(parler_model & model, const std::string & ref_dir, dou
         const bool ok = decode(model, codes, n_frames, pcm, nullptr, 0, -1, &backend);
         double max_abs = 0;
         const double snr = ok && pcm.size() == ref.size() ? snr_db(pcm, ref, max_abs) : NAN;
+        if (n_frames > 1) multi_frame_snrs.push_back(snr);
         check(ok && backend == label && snr >= gate_for(n_frames, host_min_snr),
               std::to_string(n_frames) + " frames vs ggml: SNR " + std::to_string(snr) + " dB, max_abs " +
                   std::to_string(max_abs));
+    }
+    if (host_min_snr < min_snr) {
+        check(!floor_expired(host_min_snr, min_snr, multi_frame_snrs),
+              "the " + chip + " floor is still needed (once every multi-frame case reaches --min-snr, remove its row "
+              "from GENERATED_ALL_UNITS_FLOORS)");
     }
     if (!ref_dir.empty() && std::ifstream(ref_dir + "/case0_codes.npy").good() &&
         std::ifstream(ref_dir + "/case0_wav_greedy.npy").good()) {
@@ -650,14 +696,17 @@ void pending_parity_gates(parler_model & model, const std::string & ref_dir, dou
     }
 }
 
-// --units-sweep (report only): the SNR of the generated artifact in the cache
-// against the ggml CPU decode for every compute-unit policy, on the parity
-// cases' codes. It shows which path `all` takes on the host and whether a
-// parity shortfall comes from the Neural Engine, the GPU or the reference.
-// The artifact is opened through the prebuilt-sidecar loader by a symlink.
-void units_sweep(parler_model & model, const std::string & cache_dir) {
+// --units-sweep: the SNR of the generated artifact in the cache against the
+// ggml CPU decode for every compute-unit policy, on the parity cases' codes.
+// It shows which path `all` takes on the host and whether a parity shortfall
+// comes from the Neural Engine, the GPU or the reference. The rows are
+// reported only, except on a chip with a floor under `all`, where the
+// cpu_and_ane row is held to --min-snr (sweep_row_gated). The artifact is
+// opened through the prebuilt-sidecar loader by a symlink.
+void units_sweep(parler_model & model, const std::string & cache_dir, double min_snr) {
     namespace fs = std::filesystem;
-    fprintf(stderr, "compute-unit sweep (report only)\n");
+    const std::string chip = host_chip();
+    fprintf(stderr, "compute-unit sweep\n");
     std::error_code ec;
     std::string artifact;
     for (fs::recursive_directory_iterator it(cache_dir, ec), end; !ec && it != end; it.increment(ec)) {
@@ -688,13 +737,16 @@ void units_sweep(parler_model & model, const std::string & cache_dir) {
         const parler_coreml_policy policy = parler_resolve_coreml_policy(units, false);
         std::string why;
         auto sidecar = parler_open_dac_sidecar(fake_gguf, model, policy, &why);
+        const bool gated = sweep_row_gated(units, chip, min_snr);
         if (!sidecar || !parler_attach_dac_sidecar(model, sidecar, policy, &why)) {
             fprintf(stderr, "  units %-11s: not loaded (%s)\n", units, why.c_str());
+            if (gated) check(false, std::string("units ") + units + " loads on " + chip);
             continue;
         }
         const int window = sidecar->window();
         const int keep = window - 2 * parler_dac_rf_frames(model);
         std::string line;
+        bool row_holds = true;
         for (const int n_frames : {2 * keep + keep / 2, window / 3, 1}) {
             const std::vector<int32_t> codes = random_codes(hp, n_frames, 100 + n_frames);
             model.dac_sidecar.reset();
@@ -705,11 +757,16 @@ void units_sweep(parler_model & model, const std::string & cache_dir) {
             const bool ok = decode(model, codes, n_frames, pcm, nullptr, 0, -1, &backend);
             double max_abs = 0;
             const double snr = ok && pcm.size() == ref.size() ? snr_db(pcm, ref, max_abs) : NAN;
+            if (!(snr >= gate_for(n_frames, min_snr))) row_holds = false;
             char buf[96];
             snprintf(buf, sizeof buf, "  %d frames %.2f dB (max_abs %.2e)", n_frames, snr, max_abs);
             line += buf;
         }
         fprintf(stderr, "  units %-11s:%s\n", units, line.c_str());
+        if (gated) {
+            check(row_holds, std::string("units ") + units + " on " + chip + " holds --min-snr " +
+                                 std::to_string(min_snr) + " dB (the gate `all` has a floor for)");
+        }
         parler_attach_dac_sidecar(model, std::shared_ptr<parler_dac_sidecar>{}, policy);
     }
     model.dac_pending = saved_pending;
@@ -854,9 +911,11 @@ void generated_gates(parler_model & model, const std::string & gguf, const std::
     if (parler_load_gguf(gguf, second, 0, &err)) {
         auto again = parler_dac_coreml::create(second, gguf, opts);
         const std::string st2 = again->status_json();
-        check(again->wait(0) && (contains(st2, "\"route\":\"cached\"") || contains(st2, "\"route\":\"generated\"")),
-              "a second engine adopts the artifact: " + st2.substr(0, std::min<size_t>(st2.size(), 160)));
+        check(again->wait(0) && contains(st2, "\"route\":\"cached\""),
+              "a second engine adopts the artifact (route cached): " + st2.substr(0, std::min<size_t>(st2.size(), 160)));
         parler_free_model(second);
+    } else {
+        check(false, "a second engine loads " + gguf + ": " + err);
     }
 
     tts_cpp::parler::FitOptions fit;
@@ -1074,7 +1133,7 @@ int main(int argc, char ** argv) {
     if (!memory_dir.empty()) memory_schedule(model, gguf, memory_dir);
     if (!cache_dir.empty()) {
         generated_gates(model, gguf, cache_dir, ref_dir, min_snr, min_speech_snr);
-        if (sweep) units_sweep(model, cache_dir);
+        if (sweep) units_sweep(model, cache_dir, min_snr);
     } else if (::tts_cpp::detail::coreml_sidecar_exists(parler_dac_sidecar_path(gguf))) {
         coreml_gates(model, gguf, ref_dir, min_snr, min_speech_snr);
         engine_gates(gguf);
