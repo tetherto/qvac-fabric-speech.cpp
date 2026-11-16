@@ -1939,6 +1939,17 @@ if (PARAKEET_BUILD_TESTS)
         set_tests_properties(test-fit-coreml-generated-diarizers PROPERTIES
             LABELS "fixture;coreml;coreml-generated" TIMEOUT 1800)
     endif()
+    if (PARAKEET_COREML)
+        # The memory validation behind the Nemotron templates'
+        # memory.validated_for (docs/backends.md, generated diarizers): diarizer
+        # passes overlapped with background prepares and loads, footprint and
+        # ANECompilerService sampled. A measurement tool, not a ctest: it needs
+        # a cold ANE and minutes per run.
+        add_executable(nemotron-diarization-coreml-memory test/nemotron_diarization_coreml_memory.cpp)
+        target_link_libraries(nemotron-diarization-coreml-memory PRIVATE qvac-parakeet)
+        target_include_directories(nemotron-diarization-coreml-memory PRIVATE include src ggml/include)
+        parakeet_apply_ccache(nemotron-diarization-coreml-memory)
+    endif()
 
     add_executable(test-sortformer-diarizer-coreml-parity
         test/test_sortformer_diarizer_coreml_parity.cpp

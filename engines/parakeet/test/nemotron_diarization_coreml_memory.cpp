@@ -1,0 +1,419 @@
+// Memory validation of the Nemotron 3 Diarization Core ML diarizers under
+// overlapped schedules: diarizer passes run in a loop while the runtime
+// prepares (generates and compiles), loads and warms the capacities in the
+// background (prewarm = all, wait = none). A sampler thread reads this
+// process's phys_footprint every 2 ms and the slots' states every 10 ms; a
+// second thread reads ANECompilerService's resident size every 100 ms. The
+// report attributes the peaks to phases:
+//   - prepare (digest, generate, compile) of a capacity while passes run,
+//     on ggml or on a capacity that is already ready;
+//   - load and warm of a capacity while passes run;
+// and compares the run's peak footprint with the Core ML bytes fit charges
+// for the same options, as an increment over a ggml-only run of the same
+// passes (--baseline-bytes, from --ggml-only).
+//
+//   nemotron-diarization-coreml-memory --gguf M.gguf --wav A.wav --cache-dir DIR
+//       [--ggml-only] [--baseline-bytes N] [--passes-after-ready N] [--json OUT]
+//
+// The generated schedule needs a GGUF with no adjacent diarizer bundle and
+// an empty DIR; the prebuilt schedule a GGUF beside its bundles. A fresh
+// process identity (scripts/coreml/fresh-host.sh) and fresh paths make every
+// ANE load cold. Exit status: 0 when the peak increment stays within the
+// charged envelope (always 0 with --ggml-only), 1 otherwise, 2 on usage or
+// setup errors.
+
+#include "mel_preprocess.h"
+#include "parakeet/fit.h"
+#include "parakeet_ctc.h"
+#include "parakeet_diarization_v3.h"
+
+#include <mach/mach.h>
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <map>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+namespace {
+
+using Clock = std::chrono::steady_clock;
+
+constexpr int kThreads = 4;
+constexpr int kGpuLayers = 99;
+constexpr int kCapacities[] = {358, 745, 1125};  // the embedded Nemotron templates
+constexpr double kMiB = 1048576.0;
+
+uint64_t footprint_now() {
+    task_vm_info_data_t info{};
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t) &info, &count) != KERN_SUCCESS) return 0;
+    return info.phys_footprint;
+}
+
+uint64_t ane_compiler_rss() {
+    uint64_t total = 0;
+    FILE * f = popen("ps -axo rss=,comm= 2>/dev/null", "r");
+    if (!f) return 0;
+    char line[1024];
+    while (fgets(line, sizeof(line), f)) {
+        if (strstr(line, "ANECompilerService")) total += (uint64_t) std::strtoull(line, nullptr, 10) * 1024;
+    }
+    pclose(f);
+    return total;
+}
+
+// stage -> state, from the status JSON (stage objects start at "artifact_key").
+std::map<std::string, std::string> stage_states(const std::string & status) {
+    std::map<std::string, std::string> out;
+    const std::string start = "{\"artifact_key\"";
+    auto value = [](const std::string & s, const char * key) {
+        const std::string k = std::string("\"") + key + "\":\"";
+        const size_t at = s.find(k);
+        if (at == std::string::npos) return std::string();
+        const size_t from = at + k.size();
+        return s.substr(from, s.find('"', from) - from);
+    };
+    for (size_t at = status.find(start); at != std::string::npos;) {
+        const size_t next = status.find(start, at + 1);
+        const std::string obj = status.substr(at, next == std::string::npos ? std::string::npos : next - at);
+        at = next;
+        const std::string stage = value(obj, "stage");
+        if (stage.rfind("diarizer-", 0) == 0) out[stage] = value(obj, "state");
+    }
+    return out;
+}
+
+const char * phase_of(const std::string & state) {
+    if (state == "digesting" || state == "generating") return "generate";
+    if (state == "compiling") return "compile";
+    if (state == "loading" || state == "warming") return "load";
+    return nullptr;
+}
+
+struct Sample {
+    double t = 0;
+    uint64_t footprint = 0;
+};
+struct StateSample {
+    double t = 0;
+    std::map<std::string, std::string> states;
+};
+struct AneSample {
+    double t = 0;
+    uint64_t rss = 0;
+};
+
+// One phase of one stage: [t0, t1).
+struct Segment {
+    std::string stage, phase;
+    double t0 = 0, t1 = 0;
+};
+
+std::vector<Segment> segments_of(const std::vector<StateSample> & states, double t_end) {
+    std::vector<Segment> out;
+    std::map<std::string, Segment> open;
+    for (size_t i = 0; i < states.size(); ++i) {
+        const double t = states[i].t;
+        for (auto it = open.begin(); it != open.end();) {
+            auto st = states[i].states.find(it->first);
+            const char * p = st == states[i].states.end() ? nullptr : phase_of(st->second);
+            if (p == nullptr || it->second.phase != p) {
+                it->second.t1 = t;
+                out.push_back(it->second);
+                it = open.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        for (const auto & [stage, state] : states[i].states) {
+            const char * p = phase_of(state);
+            if (p != nullptr && open.find(stage) == open.end()) open[stage] = Segment{stage, p, t, 0};
+        }
+    }
+    for (auto & [stage, seg] : open) {
+        seg.t1 = t_end;
+        out.push_back(seg);
+    }
+    std::sort(out.begin(), out.end(), [](const Segment & a, const Segment & b) { return a.t0 < b.t0; });
+    return out;
+}
+
+bool load_model(const std::string & gguf, const parakeet::CoremlOptions & options, bool disable_coreml,
+                parakeet::ParakeetCtcModel & model) {
+    if (disable_coreml) setenv("PARAKEET_COREML_DISABLE", "1", 1);
+    const int status = parakeet::load_from_gguf(gguf, model, kThreads, kGpuLayers, false, "auto", options);
+    if (disable_coreml) unsetenv("PARAKEET_COREML_DISABLE");
+    return status == 0;
+}
+
+}  // namespace
+
+int main(int argc, char ** argv) {
+    std::string gguf, wav, cache_dir, json_out;
+    bool ggml_only = false;
+    uint64_t baseline = 0;
+    int passes_after_ready = 6;
+    int ggml_passes = 30;
+    for (int i = 1; i < argc; ++i) {
+        const std::string a = argv[i];
+        auto next = [&]() { return i + 1 < argc ? std::string(argv[++i]) : std::string(); };
+        if (a == "--gguf") gguf = next();
+        else if (a == "--wav") wav = next();
+        else if (a == "--cache-dir") cache_dir = next();
+        else if (a == "--json") json_out = next();
+        else if (a == "--ggml-only") ggml_only = true;
+        else if (a == "--baseline-bytes") baseline = std::strtoull(next().c_str(), nullptr, 10);
+        else if (a == "--passes-after-ready") passes_after_ready = std::atoi(next().c_str());
+        else if (a == "--ggml-passes") ggml_passes = std::atoi(next().c_str());
+        else {
+            std::fprintf(stderr, "unknown argument %s\n", a.c_str());
+            return 2;
+        }
+    }
+    if (gguf.empty() || wav.empty() || (!ggml_only && cache_dir.empty())) {
+        std::fprintf(stderr, "usage: %s --gguf M.gguf --wav A.wav --cache-dir DIR [--ggml-only] "
+                             "[--baseline-bytes N] [--passes-after-ready N] [--ggml-passes N] [--json OUT]\n",
+                     argv[0]);
+        return 2;
+    }
+
+    parakeet::CoremlOptions options;
+    options.cache_dir = cache_dir;
+    options.prewarm = parakeet::CoremlOptions::Prewarm::all;
+    options.wait = parakeet::CoremlOptions::Wait::none;
+
+    // The charge fit makes for these options (no workload-dependent part
+    // under prewarm = all for generated capacities).
+    parakeet::FitOptions fit;
+    fit.model_gguf_path = gguf;
+    fit.n_gpu_layers = kGpuLayers;
+    fit.coreml = options;
+    const parakeet::FitResult fr = parakeet::fit_params(fit);
+
+    const auto t0 = Clock::now();
+    auto now_s = [&] { return std::chrono::duration<double>(Clock::now() - t0).count(); };
+    std::vector<Sample> samples;
+    std::vector<StateSample> states;
+    std::vector<AneSample> ane;
+    std::mutex mu;
+    std::atomic<bool> stop{false};
+    parakeet::ParakeetCtcModel model;
+    std::atomic<bool> loaded{false};
+
+    std::thread sampler([&] {
+        int tick = 0;
+        while (!stop.load()) {
+            const Sample s{now_s(), footprint_now()};
+            std::map<std::string, std::string> st;
+            const bool poll = !ggml_only && loaded.load() && tick % 5 == 0;
+            if (poll) st = stage_states(parakeet::model_coreml_status_json(model));
+            {
+                std::lock_guard<std::mutex> lock(mu);
+                samples.push_back(s);
+                if (poll) states.push_back(StateSample{s.t, std::move(st)});
+            }
+            ++tick;
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+    });
+    std::thread ane_sampler([&] {
+        while (!stop.load()) {
+            const AneSample a{now_s(), ane_compiler_rss()};
+            {
+                std::lock_guard<std::mutex> lock(mu);
+                ane.push_back(a);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    });
+    auto finish = [&] {
+        stop.store(true);
+        sampler.join();
+        ane_sampler.join();
+    };
+
+    if (!load_model(gguf, options, ggml_only, model)) {
+        finish();
+        std::fprintf(stderr, "cannot load %s\n", gguf.c_str());
+        return 2;
+    }
+    loaded.store(true);
+    const double t_loaded = now_s();
+
+    std::vector<float> samples_pcm;
+    int sample_rate = 0;
+    std::vector<float> mel;
+    int mel_frames = 0;
+    if (parakeet::load_wav_mono_f32(wav, samples_pcm, sample_rate) != 0 ||
+        parakeet::compute_log_mel(samples_pcm.data(), static_cast<int>(samples_pcm.size()), model.mel_cfg, mel,
+                                  mel_frames) != 0) {
+        finish();
+        std::fprintf(stderr, "cannot read %s\n", wav.c_str());
+        return 2;
+    }
+    const int offline = parakeet::nemotron_diarization_encoder_frames(model, mel_frames);
+    const int width = model.nemotron_diarization_cfg.encoder_width;
+    if (offline > kCapacities[0]) {
+        finish();
+        std::fprintf(stderr, "%s is longer than the smallest capacity (%d encoder frames)\n", wav.c_str(), offline);
+        return 2;
+    }
+    // Three pass sizes, one per capacity: the clip alone, and the clip after
+    // cache rows that fill the second and the largest capacity exactly.
+    const std::vector<int> caches = {0, kCapacities[1] - offline, kCapacities[2] - offline};
+    const std::vector<float> cache(static_cast<size_t>(kCapacities[2]) * width, 0.01f);
+
+    int passes = 0, coreml_passes = 0, ggml_after_ready = 0;
+    std::map<int, int> coreml_by_cache;
+    double t_all_ready = -1;
+    const auto deadline = Clock::now() + std::chrono::minutes(10);
+    for (;;) {
+        const int c = caches[passes % caches.size()];
+        parakeet::NemotronDiarizationChunk chunk;
+        if (parakeet::run_nemotron_diarization_chunk(model, mel.data(), mel_frames, c > 0 ? cache.data() : nullptr,
+                                                     c, chunk) != 0) {
+            finish();
+            std::fprintf(stderr, "a diarizer pass failed\n");
+            return 2;
+        }
+        ++passes;
+        if (chunk.used_coreml) {
+            ++coreml_passes;
+            ++coreml_by_cache[c];
+        }
+        if (ggml_only) {
+            if (passes >= ggml_passes) break;
+            continue;
+        }
+        const std::map<std::string, std::string> st = stage_states(parakeet::model_coreml_status_json(model));
+        const bool all_ready = st.size() == 3 && std::all_of(st.begin(), st.end(), [](const auto & kv) {
+            return kv.second == "ready";
+        });
+        if (all_ready && t_all_ready < 0) t_all_ready = now_s();
+        if (all_ready && !chunk.used_coreml) ++ggml_after_ready;
+        const bool enough = all_ready && coreml_by_cache.size() == caches.size() &&
+                            std::all_of(coreml_by_cache.begin(), coreml_by_cache.end(),
+                                        [&](const auto & kv) { return kv.second >= passes_after_ready; });
+        if (enough || Clock::now() > deadline) break;
+    }
+    const double t_end = now_s();
+    const std::string status = ggml_only ? std::string("{}") : parakeet::model_coreml_status_json(model);
+    finish();
+
+    // ---- report
+    uint64_t peak = 0, first_pass = 0;
+    for (const Sample & s : samples) peak = std::max(peak, s.footprint);
+    for (const Sample & s : samples) {
+        if (s.t >= t_loaded) {
+            first_pass = s.footprint;
+            break;
+        }
+    }
+    auto peak_in = [&](double a, double b) {
+        uint64_t p = 0;
+        for (const Sample & s : samples) {
+            if (s.t >= a && s.t < b) p = std::max(p, s.footprint);
+        }
+        return p;
+    };
+    auto at = [&](double t) {
+        uint64_t f = 0;
+        for (const Sample & s : samples) {
+            if (s.t > t) break;
+            f = s.footprint;
+        }
+        return f;
+    };
+    auto ane_in = [&](double a, double b) {
+        uint64_t p = 0;
+        for (const AneSample & s : ane) {
+            if (s.t >= a && s.t < b + 0.1) p = std::max(p, s.rss);
+        }
+        return p;
+    };
+    uint64_t ane_peak = 0, ane_min = UINT64_MAX;
+    for (const AneSample & s : ane) {
+        ane_peak = std::max(ane_peak, s.rss);
+        ane_min = std::min(ane_min, s.rss);
+    }
+    if (ane.empty()) ane_min = 0;
+
+    std::string json = "{";
+    char buf[1024];
+    std::snprintf(buf, sizeof(buf),
+                  "\"mode\":\"%s\",\"passes\":%d,\"coreml_passes\":%d,\"ggml_passes_after_ready\":%d,"
+                  "\"seconds\":%.2f,\"all_ready_s\":%.2f,\"peak_footprint\":%llu,\"footprint_after_load\":%llu,"
+                  "\"baseline_bytes\":%llu,\"fit_coreml_bytes\":%llu,\"fit_coreml_validated\":%d,"
+                  "\"fit_ggml_required\":%llu,\"ane_compiler_peak\":%llu,\"ane_compiler_min\":%llu,"
+                  "\"samples\":%zu,\"state_polls\":%zu,\"segments\":[",
+                  ggml_only ? "ggml-only" : "coreml", passes, coreml_passes, ggml_after_ready, t_end, t_all_ready,
+                  (unsigned long long) peak, (unsigned long long) first_pass, (unsigned long long) baseline,
+                  (unsigned long long) fr.coreml.bytes, fr.coreml.validated ? 1 : 0,
+                  (unsigned long long) fr.ggml_required_bytes, (unsigned long long) ane_peak,
+                  (unsigned long long) ane_min, samples.size(), states.size());
+    json += buf;
+    bool first = true;
+    uint64_t compile_inc = 0, load_inc = 0, generate_inc = 0, ane_load_peak = 0;
+    for (const Segment & seg : segments_of(states, t_end)) {
+        const uint64_t before = at(seg.t0);
+        const uint64_t p = std::max(before, peak_in(seg.t0, seg.t1));
+        const uint64_t a = ane_in(seg.t0, seg.t1);
+        const uint64_t inc = p - before;
+        if (seg.phase == "compile") compile_inc = std::max(compile_inc, inc);
+        if (seg.phase == "load") {
+            load_inc = std::max(load_inc, inc);
+            ane_load_peak = std::max(ane_load_peak, a);
+        }
+        if (seg.phase == "generate") generate_inc = std::max(generate_inc, inc);
+        std::snprintf(buf, sizeof(buf),
+                      "%s{\"stage\":\"%s\",\"phase\":\"%s\",\"t0\":%.3f,\"t1\":%.3f,\"before\":%llu,\"peak\":%llu,"
+                      "\"increment\":%llu,\"ane_compiler_peak\":%llu}",
+                      first ? "" : ",", seg.stage.c_str(), seg.phase.c_str(), seg.t0, seg.t1,
+                      (unsigned long long) before, (unsigned long long) p, (unsigned long long) inc,
+                      (unsigned long long) a);
+        json += buf;
+        first = false;
+    }
+    const uint64_t increment = baseline > 0 && peak > baseline ? peak - baseline : 0;
+    std::snprintf(buf, sizeof(buf),
+                  "],\"max_generate_increment\":%llu,\"max_compile_increment\":%llu,\"max_load_increment\":%llu,"
+                  "\"ane_compiler_peak_during_load\":%llu,\"peak_increment_over_baseline\":%llu,\"status\":",
+                  (unsigned long long) generate_inc, (unsigned long long) compile_inc,
+                  (unsigned long long) load_inc, (unsigned long long) ane_load_peak,
+                  (unsigned long long) increment);
+    json += buf;
+    json += status + "}";
+    if (!json_out.empty()) {
+        if (FILE * f = std::fopen(json_out.c_str(), "w")) {
+            std::fputs(json.c_str(), f);
+            std::fputc('\n', f);
+            std::fclose(f);
+        }
+    }
+    std::printf("%s: %d passes (%d Core ML) in %.1f s, all ready at %.1f s; peak footprint %.1f MiB "
+                "(after load %.1f); fit Core ML %.1f MiB (validated %d)\n",
+                ggml_only ? "ggml-only" : "coreml", passes, coreml_passes, t_end, t_all_ready, peak / kMiB,
+                first_pass / kMiB, fr.coreml.bytes / kMiB, fr.coreml.validated ? 1 : 0);
+    if (!ggml_only) {
+        std::printf("increments: generate %.1f MiB, compile %.1f MiB, load+warm %.1f MiB; "
+                    "ANECompilerService peak %.1f MiB (min %.1f)\n",
+                    generate_inc / kMiB, compile_inc / kMiB, load_inc / kMiB, ane_peak / kMiB, ane_min / kMiB);
+        std::printf("peak increment over the ggml-only baseline %.1f MiB, envelope %.1f MiB: %s\n",
+                    increment / kMiB, fr.coreml.bytes / kMiB,
+                    baseline == 0 ? "no baseline" : (increment <= fr.coreml.bytes ? "WITHIN" : "OVER"));
+        if (baseline > 0 && increment > fr.coreml.bytes) return 1;
+        if (coreml_by_cache.size() != caches.size()) {
+            std::printf("not every pass size ran on Core ML before the deadline\n");
+            return 1;
+        }
+    }
+    return 0;
+}
