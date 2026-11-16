@@ -142,7 +142,11 @@ The Parler-TTS DAC sidecar can also be generated on the device from the GGUF
 itself: with `EngineOptions::coreml.cache_dir` (or `QVAC_COREML_CACHE_DIR`)
 set, macOS 15 or later and no prebuilt sidecar next to the GGUF, the engine
 builds it from an embedded template, compiles it and keeps it in the cache;
-synthesis runs on the ggml DAC until it is ready. See
+synthesis runs on the ggml DAC until it is ready. Its accuracy against the
+ggml DAC depends on how Core ML partitions it on the chip: 56 dB on an M2,
+where `all` runs it on the Neural Engine; 51 dB on an M4 Max, where `all`
+runs most of it on the GPU and the output stage on the Neural Engine. CI
+holds the M2 to 54 dB and the M4 Max to 50 dB. See
 [Parler-TTS generated sidecar](docs/parler.md#generated-sidecar-and-background-loading).
 
 CosyVoice3 HiFT sidecars use FP32 for waveform parity. With enabled Chatterbox,

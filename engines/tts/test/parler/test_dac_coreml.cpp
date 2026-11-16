@@ -38,7 +38,8 @@
 //     loaded (status route generated, ready); a second engine on the same GGUF
 //     adopts it (route cached) without generating again;
 //   * the same --min-snr / --min-speech-snr gates as above on the generated
-//     sidecar, and the Engine reports it per call;
+//     sidecar (lowered under `all` only for the chips with a measured floor,
+//     see GENERATED_ALL_UNITS_FLOORS), and the Engine reports it per call;
 //   * fit charges the generated envelope (route generate, validated); a
 //     budget only the ggml projection fits resolves use = off (fit and Engine);
 //   * --units-sweep (report only): the generated artifact's SNR against ggml
@@ -67,6 +68,7 @@
 
 #if defined(__APPLE__)
 #include <mach/mach.h>
+#include <sys/sysctl.h>
 #endif
 #include <memory>
 #include <cstdio>
@@ -192,6 +194,57 @@ constexpr double SINGLE_FRAME_MIN_SNR = 45.0;
 
 double gate_for(int n_frames, double min_snr) {
     return n_frames > 1 ? min_snr : std::min(min_snr, SINGLE_FRAME_MIN_SNR);
+}
+
+// Measured parity floors of the generated sidecar under the template's
+// default compute units (`all`, label coreml-all), per chip. Core ML
+// partitions the program between the GPU and the Neural Engine with its own
+// per-chip cost model, and the partition sets the accuracy:
+//   * Apple M2 (macOS 15.7.3 and 27.2.1): every op runs on the Neural Engine
+//     (`all` equals `cpu_and_ane`), 56.2 / 56.4 / 53.3 dB at 265 / 42 / 1
+//     frames, so --min-snr 54 holds.
+//   * Apple M4 Max (macOS 26.7.2, the self-hosted CI runner): MLComputePlan
+//     puts 443 of the 493 ops (89.5% of the estimated cost) on the GPU and
+//     leaves eight folded-stage convolutions and the output stage (conv_out,
+//     tanh) on the Neural Engine. In that GPU-fed island the compiler fuses
+//     tanh into conv_out as its activation, which measures 51.7 dB from exact
+//     inputs (62.8 dB for conv_out alone), so `all` measures 51.3 / 51.4 /
+//     51.8 dB (`cpu_and_ane` 54.8 / 55.0 / 54.2, `cpu_and_gpu` 68.3 / 69.2 /
+//     67.7). The spellings that keep the island from fusing (tanh after the
+//     output unfold, or the output stage in fp32) cost the M2's
+//     all-Neural-Engine program 4 dB (52.3 dB), so the template keeps `all`
+//     and the M4 Max is held to 50 dB.
+// A chip that is not listed is held to --min-snr.
+struct parity_floor {
+    const char * chip; // sysctl machdep.cpu.brand_string
+    double min_snr;
+};
+constexpr parity_floor GENERATED_ALL_UNITS_FLOORS[] = {{"Apple M4 Max", 50.0}};
+
+std::string host_chip() {
+#if defined(__APPLE__)
+    char brand[128] = {};
+    size_t size = sizeof brand - 1;
+    if (sysctlbyname("machdep.cpu.brand_string", brand, &size, nullptr, 0) == 0) return brand;
+#endif
+    return {};
+}
+
+// --min-snr, or the lower floor recorded above for `chip` when the sidecar
+// runs under `all`. It never raises --min-snr.
+double generated_min_snr(const std::string & label, const std::string & chip, double min_snr) {
+    if (label != "coreml-all") return min_snr;
+    for (const parity_floor & floor : GENERATED_ALL_UNITS_FLOORS) {
+        if (chip == floor.chip) return std::min(min_snr, floor.min_snr);
+    }
+    return min_snr;
+}
+
+void parity_floor_gates() {
+    check(generated_min_snr("coreml-all", "Apple M4 Max", 54) == 50, "parity floor: M4 Max under all is 50 dB");
+    check(generated_min_snr("coreml-all", "Apple M2", 54) == 54, "parity floor: an unlisted chip keeps --min-snr");
+    check(generated_min_snr("coreml-ane", "Apple M4 Max", 54) == 54, "parity floor: only under all");
+    check(generated_min_snr("coreml-all", "Apple M4 Max", 45) == 45, "parity floor: never raises --min-snr");
 }
 
 std::vector<int32_t> random_codes(const parler_hparams & hp, int n_frames, uint32_t seed) {
@@ -558,6 +611,10 @@ void pending_parity_gates(parler_model & model, const std::string & ref_dir, dou
     check(label.rfind("coreml-", 0) == 0, "label " + label + ", window " + std::to_string(window));
     const parler_hparams & hp = model.hparams;
     const int keep = window - 2 * parler_dac_rf_frames(model);
+    const std::string chip = host_chip();
+    const double host_min_snr = generated_min_snr(label, chip, min_snr);
+    fprintf(stderr, "  host %s: parity gate %.1f dB (--min-snr %.1f)\n", chip.empty() ? "unknown" : chip.c_str(),
+            host_min_snr, min_snr);
     for (const int n_frames : {2 * keep + keep / 2, window / 3, 1}) {
         const std::vector<int32_t> codes = random_codes(hp, n_frames, 100 + n_frames);
         model.dac_pending.reset();
@@ -568,7 +625,7 @@ void pending_parity_gates(parler_model & model, const std::string & ref_dir, dou
         const bool ok = decode(model, codes, n_frames, pcm, nullptr, 0, -1, &backend);
         double max_abs = 0;
         const double snr = ok && pcm.size() == ref.size() ? snr_db(pcm, ref, max_abs) : NAN;
-        check(ok && backend == label && snr >= gate_for(n_frames, min_snr),
+        check(ok && backend == label && snr >= gate_for(n_frames, host_min_snr),
               std::to_string(n_frames) + " frames vs ggml: SNR " + std::to_string(snr) + " dB, max_abs " +
                   std::to_string(max_abs));
     }
@@ -959,6 +1016,7 @@ int main(int argc, char ** argv) {
         return 1;
     }
     waveform_quality_gates();
+    parity_floor_gates();
     fake_sidecar_gates(model);
     pending_seam_gates(model);
 #ifdef TTS_CPP_USE_COREML

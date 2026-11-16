@@ -664,7 +664,11 @@ jobs:
       # - generated from the GGUF alone into an empty cache, compiled and
       #   loaded on the device, then parity against the ggml DAC on random
       #   codes at 54 dB (fp16 on the Neural Engine measures 56.2-56.4 dB),
-      #   the Engine, fit's envelope and near-budget memory-degrade;
+      #   the Engine, fit's envelope and near-budget memory-degrade. On an
+      #   M4 Max, Core ML runs most of the program on the GPU under `all` and
+      #   fuses the output stage's tanh into its convolution on the Neural
+      #   Engine (51.3-51.8 dB); the test holds that chip to its recorded
+      #   50 dB floor (test_dac_coreml.cpp, docs/parler.md);
       # - the same artifact's SNR per compute-unit policy (report only), so
       #   the log records which path `all` takes on this host.
       # The binaries run directly and --require-coreml fails the step if a

@@ -284,9 +284,10 @@ export of the same GGUF):
 
 CI generates the sidecar from a staged `parler-mini-v1-q8_0.gguf` on every
 pull request and holds the multi-frame cases to 54 dB
-(`test-parler-dac-coreml --cache-dir DIR --min-snr 54 --require-coreml`); a
-one-frame decode is held to 45 dB. With `--ref-dir`, the HF reference check
-uses `--min-speech-snr` (default 45 dB).
+(`test-parler-dac-coreml --cache-dir DIR --min-snr 54 --require-coreml`),
+except on chips with a measured floor under `all` (below); a one-frame
+decode is held to 45 dB. With `--ref-dir`, the HF reference check uses
+`--min-speech-snr` (default 45 dB).
 
 `--units-sweep` also prints the same artifact's SNR for every compute-unit
 policy (report only). Random codes, 265 / 42 / 1 frames, vs ggml CPU:
@@ -294,13 +295,41 @@ policy (report only). Random codes, 265 / 42 / 1 frames, vs ggml CPU:
 | Host | `cpu_only` | `cpu_and_gpu` | `cpu_and_ane` | `all` |
 |---|--:|--:|--:|--:|
 | M2, macOS 15.7.3 (24G419) | 44.9 / 45.1 / 44.5 dB | 68.3 / 69.2 / 67.7 dB | 56.2 / 56.4 / 53.3 dB | 56.2 / 56.4 / 53.3 dB |
+| M2, macOS 27.2.1 (26B131) | 45.0 / 45.2 / 44.6 dB | 68.3 / 69.2 / 67.7 dB | 56.2 / 56.4 / 53.3 dB | 56.2 / 56.4 / 53.3 dB |
 | M4 Max, macOS 26.7.2 (25G332) | 45.0 / 45.2 / 44.6 dB | 68.3 / 69.2 / 67.7 dB | 54.8 / 55.0 / 54.2 dB | 51.3 / 51.4 / 51.8 dB |
 
-The ggml reference is the same on both hosts (the `cpu_and_gpu` figures
-match to 0.01 dB). On the M2, `all` runs on the Neural Engine. On the
-M4 Max with macOS 26, `all` measures below both the Neural Engine and the GPU
-alone, so Core ML places the graph differently there; the multi-frame cases
-miss the 54 dB CI gate on that host.
+The ggml reference is the same on every host (the `cpu_and_gpu` figures
+match to 0.01 dB), and the M2 measures the same on macOS 15 and 27, so the
+difference comes from the chip. Core ML partitions the program between the
+GPU and the Neural Engine with its own per-chip cost model (`MLComputePlan`):
+
+- On the M2, `all` runs every op on the Neural Engine, exactly as
+  `cpu_and_ane`.
+- On the M4 Max, `all` runs 443 of the 493 ops (89.5% of the estimated
+  cost) on the GPU. It leaves eight folded-stage convolutions and the output
+  stage (`conv_out`, `tanh`) on the Neural Engine. In that GPU-fed island
+  the Neural Engine compiler fuses `tanh` into `conv_out` as its activation,
+  which measures 51.7 dB from exact inputs (62.8 dB for `conv_out` alone).
+  Up to the output stage, the M4 Max's `all` path is as accurate as the GPU
+  (68 dB).
+
+No single spelling of the program holds 54 dB under `all` on both chips
+(265 / 42 / 1 frames, against the PyTorch fp32 rebuild):
+
+| Program | M2 `all` | M4 Max `all` |
+|---|--:|--:|
+| as exported | 56.6 / 56.7 / 54.9 dB | 51.5 / 51.4 / 50.5 dB |
+| output stage in fp32 (off the Neural Engine) | 52.8 / 52.2 / 51.5 dB | 67.9 / 68.5 / 65.9 dB |
+| `tanh` after the output unfold | 52.3 / 51.8 / 50.5 dB | 51.5 / 51.4 / 50.5 dB |
+
+Within the M2's all-Neural-Engine program, the fused output stage is the
+more accurate one. `specializationStrategy = fastPrediction` does not change
+the M4 Max figures. The template therefore keeps `all`, and the test holds
+the M4 Max to a recorded 50 dB floor under `all`
+(`GENERATED_ALL_UNITS_FLOORS` in `test/parler/test_dac_coreml.cpp`, keyed
+on `sysctl machdep.cpu.brand_string`). Every other chip is held to
+`--min-snr`. On the M4 Max, `cpu_and_ane` holds 54 dB at about twice the
+`all` window time.
 
 | Environment | Effect |
 |---|---|
