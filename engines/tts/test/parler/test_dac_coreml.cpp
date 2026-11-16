@@ -51,9 +51,11 @@
 //     to --min-snr.
 // --memory-schedule DIR (TTS_CPP_COREML, generated route): ggml decodes run
 // while the sidecar is generated, compiled, loaded and warmed into DIR; the
-// footprint increment over the warm ggml baseline must stay within the
-// envelope fit charges (the memory validation behind template.json
-// memory.validated_for). Use a fresh DIR: an existing artifact is adopted.
+// footprint of each phase (prepare, load and warm-up, steady state, the whole
+// run) and ANECompilerService must stay within the template constant that
+// charges it (the memory validation behind template.json memory; see
+// memory_schedule_gates). Use a fresh DIR: an existing artifact is adopted.
+// On its own (no --cache-dir) it satisfies --require-coreml.
 // Exit 77 (skip) without --gguf; --require-coreml fails instead of skipping
 // the Core ML gates (CI).
 
@@ -286,6 +288,150 @@ void parity_floor_gates() {
               !sweep_row_gated("cpu_and_ane", "Apple M2", 54) &&
               !sweep_row_gated("cpu_and_ane", "Apple M4 Max", 45),
           "units sweep: only the cpu_and_ane row on a chip with a floor is gated");
+}
+
+// The memory schedule (--memory-schedule) samples this process's footprint
+// while the generated sidecar is prepared, loaded and warmed in the
+// background, and attributes each sample to the DAC slot's state when it was
+// taken. Each phase is held to the template constant that charges it:
+//   prepare     digesting, generating and compiling: the peak over the
+//               footprint just before generation began, against
+//               generation_peak_bytes + 8 MiB + compile_peak_bytes;
+//   load+warm   loading and the warm-up prediction: the peak over the
+//               footprint just before the load began, against
+//               load_peak_bytes for the resolved compute units;
+//   steady      ready, Core ML decodes running: the peak over the warm ggml
+//               baseline, against the resident charge (weights, 2 x I/O,
+//               workspace_bytes and the host quantizer copy);
+//   whole run   the peak over the baseline, against the envelope fit charges;
+//   compiler    ANECompilerService's resident size while loading and warming,
+//               against ane_compile_reserve_bytes (when the units include
+//               the Neural Engine).
+// generate, compile, load and warm are also reported on their own, each over
+// the footprint just before that state began.
+enum class mem_phase { ggml, generate, compile, load, warm, ready };
+
+mem_phase mem_phase_of(const std::string & state) {
+    if (state == "digesting" || state == "generating") return mem_phase::generate;
+    if (state == "compiling") return mem_phase::compile;
+    if (state == "loading") return mem_phase::load;
+    if (state == "warming") return mem_phase::warm;
+    if (state == "ready") return mem_phase::ready;
+    return mem_phase::ggml;  // idle, queued, deferred(memory): nothing of the sidecar's yet
+}
+
+struct mem_sample {
+    uint64_t footprint = 0;
+    mem_phase phase = mem_phase::ggml;
+};
+
+// Increments in bytes; the flags say which states were sampled.
+struct mem_breakdown {
+    uint64_t prepare = 0, generate = 0, compile = 0, load = 0, warm = 0, load_warm = 0, steady = 0, total = 0;
+    bool generated = false, compiled = false, loaded = false, warmed = false, ready = false;
+};
+
+mem_breakdown mem_breakdown_of(const std::vector<mem_sample> & samples, uint64_t base) {
+    // 1: prepare (generate, compile); 2: load and warm-up; 0: the rest.
+    const auto group = [](mem_phase p) {
+        if (p == mem_phase::generate || p == mem_phase::compile) return 1;
+        if (p == mem_phase::load || p == mem_phase::warm) return 2;
+        return 0;
+    };
+    const auto over = [](uint64_t v, uint64_t from) { return v > from ? v - from : (uint64_t) 0; };
+    mem_breakdown b;
+    uint64_t prev = base, phase_start = base, group_start = base;
+    mem_phase last = mem_phase::ggml;
+    for (const mem_sample & s : samples) {
+        if (s.phase != last) phase_start = prev;
+        if (group(s.phase) != group(last)) group_start = prev;
+        const uint64_t inc = over(s.footprint, phase_start);
+        switch (s.phase) {
+            case mem_phase::generate: b.generated = true; b.generate = std::max(b.generate, inc); break;
+            case mem_phase::compile: b.compiled = true; b.compile = std::max(b.compile, inc); break;
+            case mem_phase::load: b.loaded = true; b.load = std::max(b.load, inc); break;
+            case mem_phase::warm: b.warmed = true; b.warm = std::max(b.warm, inc); break;
+            case mem_phase::ready: b.ready = true; b.steady = std::max(b.steady, over(s.footprint, base)); break;
+            case mem_phase::ggml: break;
+        }
+        if (group(s.phase) == 1) b.prepare = std::max(b.prepare, over(s.footprint, group_start));
+        if (group(s.phase) == 2) b.load_warm = std::max(b.load_warm, over(s.footprint, group_start));
+        b.total = std::max(b.total, over(s.footprint, base));
+        prev = s.footprint;
+        last = s.phase;
+    }
+    return b;
+}
+
+// The template's charges for one run, before the margin, and the envelope.
+struct mem_charges {
+    uint64_t prepare = 0, load = 0, resident = 0, ane_reserve = 0, envelope = 0;
+};
+
+// One line per charge the run exceeds, or per state it never sampled.
+std::vector<std::string> mem_failures(const mem_breakdown & b, uint64_t ane_compiler_peak, const mem_charges & c) {
+    std::vector<std::string> out;
+    const std::pair<bool, const char *> states[] = {{b.generated, "generating"}, {b.compiled, "compiling"},
+                                                    {b.loaded, "loading"},       {b.warmed, "warming"},
+                                                    {b.ready, "ready"}};
+    for (const auto & [seen, state] : states) {
+        if (!seen) out.push_back(std::string("the schedule never sampled the slot ") + state);
+    }
+    const auto over = [&out](const char * what, uint64_t got, uint64_t charged) {
+        if (got <= charged) return;
+        char line[256];
+        std::snprintf(line, sizeof(line), "%s: %llu bytes over the charged %llu", what, (unsigned long long) got,
+                      (unsigned long long) charged);
+        out.push_back(line);
+    };
+    over("prepare", b.prepare, c.prepare);
+    over("load and warm-up", b.load_warm, c.load);
+    over("steady state (resident)", b.steady, c.resident);
+    over("whole run (envelope)", b.total, c.envelope);
+    if (c.ane_reserve > 0) over("ANECompilerService (reserve)", ane_compiler_peak, c.ane_reserve);
+    return out;
+}
+
+void memory_schedule_gates() {
+    check(mem_phase_of("digesting") == mem_phase::generate && mem_phase_of("generating") == mem_phase::generate &&
+              mem_phase_of("compiling") == mem_phase::compile && mem_phase_of("loading") == mem_phase::load &&
+              mem_phase_of("warming") == mem_phase::warm && mem_phase_of("ready") == mem_phase::ready,
+          "memory schedule: slot states map to phases");
+    check(mem_phase_of("idle") == mem_phase::ggml && mem_phase_of("queued") == mem_phase::ggml &&
+              mem_phase_of("deferred(memory)") == mem_phase::ggml && mem_phase_of("") == mem_phase::ggml,
+          "memory schedule: idle, queued and deferred are ggml-only");
+    using P = mem_phase;
+    const std::vector<mem_sample> run = {
+        {100, P::ggml},    {120, P::generate}, {160, P::generate}, {140, P::compile}, {170, P::compile},
+        {102, P::ggml},    {105, P::load},     {180, P::load},     {200, P::warm},    {190, P::ready},
+        {195, P::ready},   {150, P::ready},
+    };
+    const mem_breakdown b = mem_breakdown_of(run, 100);
+    check(b.generate == 60 && b.compile == 10 && b.prepare == 70, "memory schedule: prepare = generate start to compile peak");
+    check(b.load == 78 && b.warm == 20 && b.load_warm == 98, "memory schedule: load+warm = load start to warm-up peak");
+    check(b.steady == 95 && b.total == 100, "memory schedule: steady state and whole run over the baseline");
+    check(b.generated && b.compiled && b.loaded && b.warmed && b.ready, "memory schedule: every state sampled");
+    const mem_charges exact{70, 98, 95, 400, 100};
+    check(mem_failures(b, 400, exact).empty(), "memory schedule: a run at every charge passes");
+    const struct {
+        mem_charges c;
+        uint64_t ane;
+        const char * stage;
+    } over[] = {
+        {{69, 98, 95, 400, 100}, 400, "prepare"},          {{70, 97, 95, 400, 100}, 400, "load and warm-up"},
+        {{70, 98, 94, 400, 100}, 400, "steady state"},     {{70, 98, 95, 400, 99}, 400, "whole run"},
+        {{70, 98, 95, 400, 100}, 401, "ANECompilerService"},
+    };
+    for (const auto & o : over) {
+        const std::vector<std::string> f = mem_failures(b, o.ane, o.c);
+        check(f.size() == 1 && f[0].find(o.stage) != std::string::npos,
+              std::string("memory schedule: one byte over the ") + o.stage + " charge fails");
+    }
+    check(mem_failures(b, 999, {70, 98, 95, 0, 100}).empty(), "memory schedule: no compiler check without the Neural Engine");
+    const std::vector<mem_sample> no_warm = {{100, P::ggml}, {120, P::generate}, {130, P::compile}, {150, P::load},
+                                             {160, P::ready}};
+    const std::vector<std::string> f = mem_failures(mem_breakdown_of(no_warm, 100), 0, {1000, 1000, 1000, 0, 1000});
+    check(f.size() == 1 && f[0].find("warming") != std::string::npos, "memory schedule: a state never sampled fails");
 }
 
 std::vector<int32_t> random_codes(const parler_hparams & hp, int n_frames, uint32_t seed) {
@@ -985,11 +1131,8 @@ void generated_gates(parler_model & model, const std::string & gguf, const std::
     model.dac_pending.reset();
 }
 
-// Footprint of this process (phys_footprint), sampled while the DAC sidecar
-// is generated, compiled, loaded and warmed in the background and ggml decodes
-// run in a loop on this thread: the increment over the warm ggml baseline
-// must stay within the envelope fit charges. ANECompilerService's resident
-// size is sampled too (it sets the runtime's cold-load memory reserve).
+// This process's footprint (phys_footprint) and ANECompilerService's
+// resident size, for the memory schedule (see memory_schedule_gates).
 uint64_t footprint_now() {
     task_vm_info_data_t info{};
     mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
@@ -1009,8 +1152,16 @@ uint64_t ane_compiler_rss() {
     return total;
 }
 
+double mib(uint64_t bytes) { return bytes / 1048576.0; }
+
+// ggml decodes run in a loop on this thread while the DAC sidecar is
+// generated, compiled, loaded and warmed into `cache_dir` in the background,
+// until five calls have run on Core ML. One sampler thread reads the
+// footprint every 2 ms and the slot's state every 10 ms; another reads
+// ANECompilerService every 20 ms. Every phase must stay within the template
+// constant that charges it (memory_schedule_gates).
 void memory_schedule(parler_model & model, const std::string & gguf, const std::string & cache_dir) {
-    fprintf(stderr, "memory schedule (cache %s)\n", cache_dir.c_str());
+    fprintf(stderr, "memory schedule (cache %s, host %s)\n", cache_dir.c_str(), host_chip().c_str());
     tts_cpp::CoremlOptions opts;
     opts.cache_dir = cache_dir;
     const parler_dac_route route = parler_dac_plan_route(gguf, opts, parler_dac_rvq_bytes(model));
@@ -1027,21 +1178,31 @@ void memory_schedule(parler_model & model, const std::string & gguf, const std::
     for (int i = 0; i < 2; ++i) decode(model, codes, n_frames, pcm);  // warm the ggml arena
     const uint64_t base = footprint_now();
     std::atomic<bool> stop{false};
-    std::atomic<uint64_t> peak{base}, ane_peak{0};
+    std::atomic<int> phase{(int) mem_phase::ggml};
+    std::atomic<const parler_dac_coreml *> watched{nullptr};
+    std::atomic<uint64_t> ane_peak{0}, ane_load_peak{0};
+    std::vector<mem_sample> samples;
+    samples.reserve(1 << 16);
     std::thread sampler([&] {
-        int tick = 0;
-        while (!stop.load()) {
-            const uint64_t f = footprint_now();
-            if (f > peak.load()) peak.store(f);
-            if (tick++ % 25 == 0) {
-                const uint64_t a = ane_compiler_rss();
-                if (a > ane_peak.load()) ane_peak.store(a);
-            }
+        for (int tick = 0; !stop.load(); ++tick) {
+            const parler_dac_coreml * d = watched.load();
+            if (d != nullptr && tick % 5 == 0) phase.store((int) mem_phase_of(status_state(d->status_json())));
+            samples.push_back({footprint_now(), (mem_phase) phase.load()});
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+    });
+    std::thread ane_sampler([&] {
+        while (!stop.load()) {
+            const uint64_t a = ane_compiler_rss();
+            const auto p = (mem_phase) phase.load();
+            if (a > ane_peak.load()) ane_peak.store(a);
+            if ((p == mem_phase::load || p == mem_phase::warm) && a > ane_load_peak.load()) ane_load_peak.store(a);
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
     });
     const auto t0 = std::chrono::steady_clock::now();
     auto dac = parler_dac_coreml::create(model, gguf, opts);
+    watched.store(dac.get());
     int ggml_calls = 0, coreml_calls = 0;
     std::string backend;
     while (std::chrono::steady_clock::now() - t0 < std::chrono::minutes(5)) {
@@ -1055,15 +1216,45 @@ void memory_schedule(parler_model & model, const std::string & gguf, const std::
     const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     stop.store(true);
     sampler.join();
-    const uint64_t inc = peak.load() > base ? peak.load() - base : 0;
+    ane_sampler.join();
     fprintf(stderr, "  status: %s\n", dac->status_json().c_str());
+
+    const mem_breakdown b = mem_breakdown_of(samples, base);
+    const mem_charges c{route.prepare_peak_bytes, route.load_peak_bytes, route.resident_bytes,
+                        route.ane_compile_reserve_bytes, route.envelope_bytes};
+    // The prediction workspace this run implies: the steady state above the
+    // template's other resident charges.
+    const uint64_t other_resident = route.resident_bytes - route.workspace_bytes;
+    const uint64_t workspace = b.steady > other_resident ? b.steady - other_resident : 0;
+    fprintf(stderr,
+            "  memory (MiB; each phase over the footprint just before it began, steady and whole run over the "
+            "warm ggml baseline %.1f):\n"
+            "    prepare    %7.1f  charged %7.1f  (generate %.1f, compile %.1f)\n"
+            "    load+warm  %7.1f  charged %7.1f  (load %.1f, warm-up %.1f)\n"
+            "    steady     %7.1f  charged %7.1f  (workspace %.1f, charged %.1f)\n"
+            "    whole run  %7.1f  charged %7.1f  (envelope, margin included)\n"
+            "    ANECompilerService while loading and warming %.1f, reserve %.1f (whole run %.1f)\n",
+            mib(base), mib(b.prepare), mib(c.prepare), mib(b.generate), mib(b.compile), mib(b.load_warm),
+            mib(c.load), mib(b.load), mib(b.warm), mib(b.steady), mib(c.resident), mib(workspace),
+            mib(route.workspace_bytes), mib(b.total), mib(c.envelope), mib(ane_load_peak.load()),
+            mib(c.ane_reserve), mib(ane_peak.load()));
+    fprintf(stderr,
+            "  memory report: {\"chip\":\"%s\",\"units\":\"%s\",\"base\":%llu,\"prepare\":%llu,\"generate\":%llu,"
+            "\"compile\":%llu,\"load_warm\":%llu,\"load\":%llu,\"warm\":%llu,\"steady\":%llu,\"workspace\":%llu,"
+            "\"total\":%llu,\"ane_compiler_load_peak\":%llu,\"ane_compiler_peak\":%llu,\"samples\":%zu}\n",
+            host_chip().c_str(), route.compute_units.c_str(), (unsigned long long) base,
+            (unsigned long long) b.prepare, (unsigned long long) b.generate, (unsigned long long) b.compile,
+            (unsigned long long) b.load_warm, (unsigned long long) b.load, (unsigned long long) b.warm,
+            (unsigned long long) b.steady, (unsigned long long) workspace, (unsigned long long) b.total,
+            (unsigned long long) ane_load_peak.load(), (unsigned long long) ane_peak.load(), samples.size());
+    for (const std::string & f : mem_failures(b, ane_load_peak.load(), c)) check(false, "memory schedule: " + f);
     char line[512];
     std::snprintf(line, sizeof(line),
                   "overlapped schedule: %d ggml + %d Core ML calls in %.1f s; footprint base %.1f MiB, peak +%.1f MiB "
                   "(envelope %.1f MiB, units %s); ANECompilerService peak %.1f MiB",
-                  ggml_calls, coreml_calls, secs, base / 1048576.0, inc / 1048576.0, route.envelope_bytes / 1048576.0,
-                  route.compute_units.c_str(), ane_peak.load() / 1048576.0);
-    check(coreml_calls >= 5 && ggml_calls >= 1 && inc <= route.envelope_bytes, line);
+                  ggml_calls, coreml_calls, secs, mib(base), mib(b.total), mib(route.envelope_bytes),
+                  route.compute_units.c_str(), mib(ane_peak.load()));
+    check(coreml_calls >= 5 && ggml_calls >= 1 && mem_failures(b, ane_load_peak.load(), c).empty(), line);
     model.dac_pending.reset();
 }
 #endif
@@ -1126,6 +1317,7 @@ int main(int argc, char ** argv) {
     }
     waveform_quality_gates();
     parity_floor_gates();
+    memory_schedule_gates();
     fake_sidecar_gates(model);
     pending_seam_gates(model);
 #ifdef TTS_CPP_USE_COREML
@@ -1137,7 +1329,7 @@ int main(int argc, char ** argv) {
     } else if (::tts_cpp::detail::coreml_sidecar_exists(parler_dac_sidecar_path(gguf))) {
         coreml_gates(model, gguf, ref_dir, min_snr, min_speech_snr);
         engine_gates(gguf);
-    } else {
+    } else if (memory_dir.empty()) {
         fprintf(stderr, "no sidecar next to %s: Core ML gates skipped\n", gguf.c_str());
         check(!require_coreml, "--require-coreml: sidecar present");
     }

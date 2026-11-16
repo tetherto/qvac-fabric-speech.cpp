@@ -52,6 +52,8 @@ struct TemplateMemory {
 //                              1.0 x for the other unit classes
 // Each part is returned unmargined; envelope_bytes() applies the margin.
 uint64_t resident_bytes(const TemplateMemory & m);
+uint64_t prepare_peak_bytes(const TemplateMemory & m);
+uint64_t load_peak_bytes(const TemplateMemory & m, ComputeUnits units);
 uint64_t transient_bytes(const TemplateMemory & m, ComputeUnits units);
 uint64_t envelope_bytes(const TemplateMemory & m, ComputeUnits units);
 // The memory admission reserve of a cold ANE load (default 1.6 x weight_bin_size).

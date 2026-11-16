@@ -158,6 +158,14 @@ struct parler_dac_route {
     bool strict = false;
     bool validated = false;      // generate: the envelope is validated for compute_units
     uint64_t envelope_bytes = 0; // generate: (resident + one transient) x margin
+    // generate: the envelope's parts before the margin, from the template.
+    uint64_t resident_bytes = 0;      // weights, 2 x I/O, state, workspace and the adapter copies
+    uint64_t workspace_bytes = 0;     // the prediction workspace (included in resident_bytes)
+    uint64_t prepare_peak_bytes = 0;  // generation and compile transient
+    uint64_t load_peak_bytes = 0;     // load and warm-up transient for compute_units
+    // generate: the free memory a cold Neural Engine load waits for (runtime
+    // admission; fit does not charge it). 0 when compute_units has no ANE.
+    uint64_t ane_compile_reserve_bytes = 0;
 };
 
 // `adapter_bytes`: engine-side copies the stage keeps (parler_dac_rvq_bytes).

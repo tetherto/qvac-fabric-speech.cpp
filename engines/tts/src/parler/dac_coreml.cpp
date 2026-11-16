@@ -496,6 +496,11 @@ planned plan_route(const std::string & gguf_path, const pcm::Resolved & r, uint6
         const double margin = m.margin > 0 ? m.margin : 1.25;
         out.route.envelope_bytes = pcm::generation::envelope_bytes(m, out.units) +
                                    (uint64_t) std::ceil((double) adapter_bytes * margin);
+        out.route.resident_bytes = pcm::generation::resident_bytes(m) + adapter_bytes;
+        out.route.workspace_bytes = m.workspace_bytes;
+        out.route.prepare_peak_bytes = pcm::generation::prepare_peak_bytes(m);
+        out.route.load_peak_bytes = pcm::generation::load_peak_bytes(m, out.units);
+        out.route.ane_compile_reserve_bytes = pcm::generation::ane_compile_reserve_bytes(m, out.units);
         out.route.validated = std::find(m.validated_units.begin(), m.validated_units.end(), out.units) !=
                               m.validated_units.end();
     }

@@ -52,9 +52,12 @@ uint64_t resident_bytes(const TemplateMemory & m) {
     return sat_add(r, m.workspace_bytes);
 }
 
-uint64_t transient_bytes(const TemplateMemory & m, ComputeUnits units) {
+uint64_t prepare_peak_bytes(const TemplateMemory & m) {
     const uint64_t compile = m.compile_peak_bytes ? *m.compile_peak_bytes : m.weight_bin_size / 2;
-    const uint64_t prepare_peak = sat_add(sat_add(m.generation_peak_bytes, 8 * MIB), compile);
+    return sat_add(sat_add(m.generation_peak_bytes, 8 * MIB), compile);
+}
+
+uint64_t load_peak_bytes(const TemplateMemory & m, ComputeUnits units) {
     std::optional<uint64_t> load;
     switch (units) {
         case ComputeUnits::cpu_and_ane: load = m.load_peak_cpu_and_ane; break;
@@ -62,9 +65,11 @@ uint64_t transient_bytes(const TemplateMemory & m, ComputeUnits units) {
         case ComputeUnits::cpu_and_gpu: load = m.load_peak_cpu_and_gpu; break;
         case ComputeUnits::cpu_only: load = m.load_peak_cpu_only; break;
     }
-    const uint64_t load_peak =
-        load ? *load : (units == ComputeUnits::cpu_and_ane ? m.weight_bin_size / 4 : m.weight_bin_size);
-    return std::max(prepare_peak, load_peak);
+    return load ? *load : (units == ComputeUnits::cpu_and_ane ? m.weight_bin_size / 4 : m.weight_bin_size);
+}
+
+uint64_t transient_bytes(const TemplateMemory & m, ComputeUnits units) {
+    return std::max(prepare_peak_bytes(m), load_peak_bytes(m, units));
 }
 
 uint64_t envelope_bytes(const TemplateMemory & m, ComputeUnits units) {
