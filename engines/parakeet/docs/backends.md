@@ -848,18 +848,60 @@ real q8_0 GGUF (`coreml_template.py real`), and runs
 `test-nemotron-diarization-coreml-generated-parity` on diarizers generated
 from that GGUF.
 
-| Capacity | Generated `weight.bin` | Compile |
+| Capacity | Generated `weight.bin` | Compile (M2, macOS 27.2.1) |
 |---:|---:|---:|
-| 358 | 199.3 MB | 0.56-0.62 s on an M2 |
-| 745 | 200.1 MB | |
-| 1125 | 200.8 MB | |
+| 358 | 199.3 MB | 0.34 s |
+| 745 | 200.1 MB | 0.33 s |
+| 1125 | 200.8 MB | 0.34 s |
 
-`parakeet-fit-params` charges each generated capacity a call can load at its
-template's Core ML envelope (runtime weights, input and output buffers, and
-one generation or load transient, with a 1.25 margin) in the Core
-ML-inclusive verdict only. The route comes from the options and the GGUF,
-never from the cache, so the projection is the same before and after the first
-generation.
+`MLModel.compileModelAtURL` took 0.33-0.35 s per capacity over two runs on
+macOS 27.2.1 (0.69-0.93 s on macOS 15.7.3). The cold Neural Engine load that
+follows took 11.4-14.2 s per capacity on macOS 27.2.1.
+
+`parakeet-fit-params` charges each generated capacity a call can load (every
+generated capacity under `prewarm = all`, which loads them all at
+construction) at its template's Core ML envelope (runtime weights, input and
+output buffers, and one generation or load transient, with a 1.25 margin) in
+the Core ML-inclusive verdict only. The fit and the engine choose the
+generated capacities with the same code, so they cannot disagree. The route
+comes from the options and the GGUF, never from the cache, so the projection
+is the same before and after the first generation. `coreml.validated` is true
+only when every charged byte is a generated envelope; an adjacent bundle's
+charge is today's unvalidated estimate.
+
+The templates' memory envelope is validated for `cpu_and_ane` on an M2 with
+macOS 27.2.1 (`memory.validated_for`). The validation runs diarizer passes
+in a loop, on ggml until a capacity is ready and on Core ML after, while the
+runtime prepares (generates and compiles), loads and warms all three
+capacities in the background (`prewarm = all`, `wait = none`), and, for
+adjacent bundles, while they load. `nemotron-diarization-coreml-memory`
+(built with the Core ML tests) samples the process's `phys_footprint` every
+2 ms and `ANECompilerService` every 100 ms, from fresh process identities and
+paths so every Neural Engine load is cold. Against a ggml-only run of the same
+passes (peak 233.0 MiB):
+
+| Schedule | Runs | Peak increment | Charged by fit |
+|---|---:|---:|---:|
+| generated (prepare and load overlapped with passes) | 3 | 86.9-135.5 MiB | 2216.8 MiB (`prewarm = all`) |
+| adjacent bundles (background load overlapped with passes) | 2 | 88.0-91.6 MiB | 921.7 MiB |
+
+The largest in-process increments, over every run and capacity: 74.5 MiB from
+the start of a prepare to the end of its compile (the first prepare of a
+process), 75.5 MiB during a load and warm. `ANECompilerService` peaked at
+663.3 MiB during the loads. The templates record `compile_peak_bytes` 64 MiB
+(so `generation_peak_bytes` + 8 MiB + `compile_peak_bytes` covers the
+measured prepare), `load_peak_bytes.cpu_and_ane` 80 MiB and
+`ane_compile_reserve_bytes` 704 MiB. The resident part stays at its
+conservative default (twice the weights plus 160 MiB per capacity): the
+Neural Engine holds the weights outside the process.
+
+On the pinned diarization set (`abcba`, `abcdba`, 250 ms collar) the
+generated diarizers produce the same segments as the exporter's bundles. Both
+match ggml on `abcdba` (DER 3.60 %), but on `abcba` the Neural Engine
+(`cpu_and_ane`, also `all`) gives 7.31 % against ggml's 2.97 %, all of it
+speaker confusion in the long-form chunks around 90 s. The same bundles on
+`cpu_only` (2.99 %) and `cpu_and_gpu` (2.97 %) match ggml, so the difference
+comes from the Neural Engine's arithmetic, not from generation.
 
 Each capacity is a separate bundle of Float16 weights, about 190 MB for
 Nemotron 3 Diarization and 220 MB for Sortformer v2.1. A multifunction package

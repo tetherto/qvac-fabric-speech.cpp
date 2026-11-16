@@ -184,7 +184,7 @@ everything.
 
 | Field | Values (default first) | Meaning |
 |---|---|---|
-| `use` | `automatic`, `off`, `require` | `require` (also `PARAKEET_COREML_STRICT`) waits like `wait = call`, and throws an exception derived from `std::runtime_error` instead of running on ggml when a sidecar cannot serve the call: it failed to load or timed out, the input is longer than a fixed-capacity encoder (for example with long-form windowing disabled, or a standard TDT input or push-stream window past the sidecar's capacity, which is never split into Core ML windows), the sidecar rejects the shape, or a prediction fails. `stream_start` refuses a push stream whose windows (left context, chunk and lookahead) are longer than a fixed-capacity encoder, before any audio; with a 15 s standard TDT sidecar that is every offline TDT push stream, since those use 30 s chunks. A diarization pass throws when every diarizer capacity that covers it failed; a pass longer than every capacity runs on ggml. Calls that never use a sidecar, such as model families or shapes without one, still run on ggml. |
+| `use` | `automatic`, `off`, `require` | `require` (also `PARAKEET_COREML_STRICT`) waits like `wait = call`, and throws an exception derived from `std::runtime_error` instead of running on ggml when a sidecar cannot serve the call: it failed to load or timed out, the input is longer than a fixed-capacity encoder (for example with long-form windowing disabled, or a standard TDT input or push-stream window past the sidecar's capacity, which is never split into Core ML windows), the sidecar rejects the shape, or a prediction fails. `stream_start` refuses a push stream whose windows (left context, chunk and lookahead) are longer than a fixed-capacity encoder, before any audio; with a 15 s standard TDT sidecar that is every offline TDT push stream, since those use 30 s chunks. A diarization pass throws when no diarizer capacity that covers it can serve it: each one failed, or is a template capacity that is not generated (`no_template`, `unsupported(...)`, or `disabled` with `generate = never`); a pass longer than every capacity runs on ggml. Calls that never use a sidecar, such as model families or shapes without one, still run on ggml. |
 | `wait` | `none` on macOS and `call` on iOS; `construct` | `none` never blocks a call. `construct` makes the constructor wait for the construction group. `call` makes each call wait until its sidecar is ready or has failed. |
 | `prewarm` | `predicted`, `none`, `minimal`, `all` | Sidecars requested at construction. `minimal` is the encoder (and bypass encoder), or the smallest diarizer capacity for a diarization model. `predicted` requests the same at construction, and each call also requests what it needs. `all` requests every diarizer capacity. |
 | `compute_units` | the stage's own; `all`, `cpu_and_ane`, `cpu_and_gpu`, `cpu_only` | Also `PARAKEET_COREML_COMPUTE_UNITS`. Applies to the encoder, bypass-encoder, diarizer and TDT decoder sidecars. Unless the field is set, `PARAKEET_COREML_DECODER_COMPUTE_UNITS` overrides it for the TDT decoder. |
@@ -266,12 +266,17 @@ adjacent bundle always wins. `Engine::coreml_status_json()` reports
 found in the cache, and `generation.supported` with the reason when generation
 is off. A capacity that is not generated keeps an entry with `route: none`,
 which the construction group lists under `skipped_route_none`: state
-`no_template` when the GGUF does not match the template, and
-`unsupported(unvalidated_units)` when the compute units are not validated.
-When every capacity is suppressed for its units, `generation.reason` is
-`unvalidated_units`. Each generated
-capacity takes about 200 MB in the cache. `parakeet-fit-params` charges the
-generated capacities' Core ML memory in the Core ML-inclusive verdict; see
+`no_template` when the GGUF does not match the template,
+`unsupported(unvalidated_units)` when the compute units are not validated, and
+the reason generation is off for the whole instance otherwise (for example
+`unsupported(no_cache_dir)`, or `disabled` with `generate = never`); every such
+capacity is listed. When every capacity is suppressed for its units,
+`generation.reason` is `unvalidated_units`. Such a capacity never serves a
+pass; under `use = require` a pass it covers throws instead of running on ggml.
+Each generated capacity takes about 200 MB in the cache. `parakeet-fit-params`
+charges the generated capacities' Core ML memory in the Core ML-inclusive
+verdict (every generated capacity under `prewarm = all`, otherwise those the
+workload's calls can load); see
 [docs/backends.md](docs/backends.md#generated-diarizers).
 
 ## Backend selection
