@@ -127,17 +127,22 @@ Parler DAC's. Its constants follow this convention:
   - `load_peak_bytes.<units>`: the load and warm-up, over the footprint just
     before the load;
   - the resident part (`runtime_weight_bytes` + 2 x I/O + `state_bytes` +
-    `workspace_bytes`): the steady state once ready, over the footprint just
-    before the load. `runtime_weight_bytes` stays the weights' size and
-    `workspace_bytes` takes the rest;
+    `workspace_bytes`) must cover 1.25 times the steady state once ready,
+    over the footprint just before the load. `runtime_weight_bytes` stays
+    the weights' size. `workspace_bytes` is what that figure needs beyond
+    the weights, I/O and state, as on a GPU placement that holds its own
+    copy of the weights and working memory, or 0 when the charged weights
+    already cover it, as on the Neural Engine, which keeps the weights
+    outside the process;
   - `ane_compile_reserve_bytes`: below.
 - Each constant carries its own 1.25, so the envelope adds none: `margin` 1.0
   and `coreml_bound: "measured"`. The runtime reads `margin`; `coreml_bound`
   and `measured` are records.
 - `memory.measured` records the derivation: `margin` (the 1.25 each constant
   carries), `runs` (how many runs the maxima cover), `resident_bytes` (the
-  measured resident part) and `basis` (what each constant covers and which
-  host set its maximum).
+  resident part the template charges, the sum above: at least 1.25 times the
+  largest measured steady state, not the raw measurement) and `basis` (what
+  each constant covers and which host set its maximum).
 - `validated_for` lists every measured host as `{units, os, chip}`. `plan()`
   matches the units only, so every chip is charged the largest placement's
   values.
@@ -150,7 +155,9 @@ schedule measures it in two ways:
 
 - its **growth** during the load: its peak while loading, less its size just
   before the first load. The schedule holds the growth to the reserve, since
-  on a shared host the absolute size includes what other processes compiled;
+  on a shared host the absolute size includes what other processes compiled.
+  The size is summed over every instance of the service, so another process
+  that compiles for the Neural Engine during the load counts as growth;
 - its **absolute** size while loading.
 
 A service that already holds memory from earlier compiles reuses it, so on
@@ -160,7 +167,8 @@ largest growth measured from a clean start (at most 32 MiB before the load,
 `ANE_COMPILER_CLEAN_BYTES` in `test/memory_probe.h`). Without clean starts,
 it is 1.25 times the largest absolute size on a host whose placement compiles
 the stage for the Neural Engine. Each run report prints the size before the
-load and whether that baseline was clean.
+load and labels that baseline clean, dirty or unknown (no sample before the
+load, in which case the growth is the whole size while loading).
 
 ## Building the tests and the tool
 

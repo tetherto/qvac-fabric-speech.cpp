@@ -285,11 +285,17 @@ The test reads the process footprint every 2 ms and the slot's state every
 - the whole run (over the warm ggml baseline) to the envelope;
 - `ANECompilerService`'s growth during the load (its peak less its size just
   before the load) to `ane_compile_reserve_bytes`. The service is a
-  long-lived system process, so its absolute size includes whatever earlier
-  processes compiled: a shared CI runner read 322-821 MiB. Each run prints
-  the service's size before the load and whether it was clean (at most
-  32 MiB): a service that already holds memory reuses it, so on such a
-  dirty baseline the growth understates a cold compile on a clean host.
+  long-lived system process shared by every process on the Mac, so its
+  absolute size includes whatever other processes compiled, before this
+  load or during it: a shared CI runner read 322-821 MiB. Each run prints
+  the service's size before the load and labels that baseline clean (at
+  most 32 MiB), dirty or unknown (no sample before the load): a service
+  that already holds memory reuses it, so on a dirty baseline the growth
+  understates a cold compile on a clean host. The growth sums every
+  instance of the service, so another job on the same Mac that compiles
+  for the Neural Engine during the load counts as growth; in CI, where a
+  pull request starts several macOS jobs at once, that can turn the memory
+  step red, and shows as one run growing far more than the others.
 
 Each run prints a per-phase table and a one-line JSON report. Each constant
 is 1.25 times the largest value measured over every run on every validated
@@ -325,13 +331,19 @@ the latest, on another runner of the same model, 322.4-323.5 (steady state
   no per-phase breakdown and move no constant, but stay in `validated_for`.
 - **M4 Max.** `all` runs most of the program on the GPU (below), and only
   the output stage on the Neural Engine, so `ANECompilerService` barely
-  grows (at most 2.8 MiB in every run that recorded its baseline); its size
-  there is what other jobs on the shared runner left, and sets no constant.
-  The first prediction adds 134-304 MiB (about 300 MiB in most jobs),
-  which stays resident: the prediction workspace. The whole schedule takes 3.5 s there, so the process
-  still holds the generation's memory when the load starts (the M2 has
-  returned it by the time the sidecar is ready). Its whole run is therefore
-  the prepare plus the resident, which is the sum the envelope charges.
+  grows (at most 2.8 MiB in every run that recorded its baseline). Its
+  size there comes from other jobs' compiles on the runner's Mac, earlier
+  or concurrent, and sets no constant. The largest reading, 821.2 MiB,
+  came from a run that recorded no baseline; the next two runs of the same
+  job read 494 MiB, so at least 320 MiB the service held during that load
+  was gone by the next run. An audiogen job running its Core ML benchmark
+  on another runner overlapped that load, the likely source if the two
+  share a Mac. The first prediction adds 134-304 MiB (about 300 MiB in
+  most jobs), which stays resident: the prediction workspace. The whole
+  schedule takes 3.5 s there, so the process still holds the generation's
+  memory when the load starts (the M2 has returned it by the time the
+  sidecar is ready). Its whole run is therefore the prepare plus the
+  resident, which is the sum the envelope charges.
 
 The envelope is 1,004,113,920 bytes (957.6 MiB), up from 475.4 MiB. With the
 M2's values alone (the template's weights and I/O as the resident part) it

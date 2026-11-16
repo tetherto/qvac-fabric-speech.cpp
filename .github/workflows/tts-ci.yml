@@ -713,13 +713,19 @@ jobs:
       # empty cache, so every Neural Engine load is cold. Each run prints its
       # per-phase table and fails when the prepare, the load and warm-up, the
       # steady state, the whole run or ANECompilerService's growth during the
-      # load (not its absolute size, which includes what earlier jobs on this
-      # runner compiled) exceeds the template constant that charges it. Each
-      # run also prints the service's size before the load and whether it was
-      # clean: on a dirty baseline the growth understates a cold compile on a
-      # clean host, so the reserve comes from the largest absolute size on the
-      # M2 (docs/parler.md). Runs whenever the generated-sidecar step ran, so a
-      # parity failure does not hide it.
+      # load (not its absolute size, which includes what other jobs on this
+      # runner's Mac compiled) exceeds the template constant that charges it.
+      # Each run also prints the service's size before the load and labels
+      # that baseline clean, dirty or unknown: on a dirty baseline the growth
+      # understates a cold compile on a clean host, so the reserve comes from
+      # the largest absolute size on the M2 (docs/parler.md). Runs whenever the
+      # generated-sidecar step ran, so a parity failure does not hide it.
+      # Known failure mode: the growth sums every ANECompilerService instance
+      # on the Mac, and a pull request starts several build-test-macos jobs at
+      # once (tts, audiogen), so a job on a co-hosted runner that compiles for
+      # the Neural Engine during this load counts as growth and can turn the
+      # step red. It shows as one run growing far more than the others (about
+      # 2 MiB each on the M4 Max); rerun the job.
       - name: Memory schedule (generated Parler DAC, overlapped, this runner)
         if: >-
           !cancelled() && runner.os == 'macOS' &&
