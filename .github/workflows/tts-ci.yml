@@ -679,11 +679,7 @@ jobs:
       #   fails once the floor is no longer needed;
       # - the same artifact's SNR per compute-unit policy, so the log records
       #   which path `all` takes on this host; on a chip with a floor the
-      #   `cpu_and_ane` row is held to --min-snr (54 dB);
-      # - the memory schedule: ggml decodes while the sidecar is generated,
-      #   compiled, loaded and warmed into a second empty cache; the footprint
-      #   increment must stay within the envelope fit charges, measured here
-      #   for this runner's placement of `all`.
+      #   `cpu_and_ane` row is held to --min-snr (54 dB).
       # The binaries run directly and --require-coreml fails the step if a
       # Core ML gate would skip. The cache stays for the fit step below.
       - name: Test (Core ML Parler DAC generated sidecar, staged mini q8_0)
@@ -705,10 +701,42 @@ jobs:
           gguf=parler-mini/parler-mini-v1-q8_0.gguf
           "$py" engines/coreml/python/coreml_template.py --tool build/qvac-coreml-tool real \
             --template-dir engines/tts/coreml-templates/parler-dac-w128 --gguf "$gguf"
-          rm -rf parler-dac-cache parler-dac-memory
+          rm -rf parler-dac-cache
           ./build/test-parler-dac-coreml --gguf "$gguf" --cache-dir "$PWD/parler-dac-cache" \
-            --memory-schedule "$PWD/parler-dac-memory" --min-snr 54 --require-coreml --units-sweep
+            --min-snr 54 --require-coreml --units-sweep
+
+      # The memory validation behind the Parler DAC template's memory
+      # constants, on this runner's chip, where `all` runs most of the program
+      # on the GPU (on an M2 it runs on the Neural Engine): ggml decodes run
+      # while the sidecar is generated, compiled, loaded and warmed in the
+      # background, three times, each from a re-signed copy of the test and an
+      # empty cache, so every Neural Engine load is cold. Each run prints its
+      # per-phase table and fails when the prepare, the load and warm-up, the
+      # steady state, the whole run or ANECompilerService exceeds the template
+      # constant that charges it. Runs whenever the generated-sidecar step
+      # ran, so a parity failure does not hide it.
+      - name: Memory schedule (generated Parler DAC, overlapped, this runner)
+        if: >-
+          !cancelled() && runner.os == 'macOS' &&
+          (steps.parler-dac-generated.outcome == 'success' || steps.parler-dac-generated.outcome == 'failure')
+        run: |
+          set -euo pipefail
+          sw_vers
+          sysctl -n machdep.cpu.brand_string hw.memsize
+          gguf=parler-mini/parler-mini-v1-q8_0.gguf
           rm -rf parler-dac-memory
+          mkdir -p parler-dac-memory
+          status=0
+          for i in 1 2 3; do
+            id="qvac-memory-$(uuidgen)"
+            cp build/test-parler-dac-coreml "parler-dac-memory/$id"
+            codesign -s - -f -i "$id" "parler-dac-memory/$id"
+            "parler-dac-memory/$id" --gguf "$gguf" --memory-schedule "$PWD/parler-dac-memory/cache-$i" \
+              --require-coreml || status=1
+            rm -rf "parler-dac-memory/cache-$i" "parler-dac-memory/$id" "$HOME/Library/Caches/$id"
+          done
+          rm -rf parler-dac-memory
+          exit "$status"
 
       # fit is the same with an empty cache and with the cache the step above
       # populated, whose hints are also rewritten stale and non-stale. It runs
