@@ -39,6 +39,13 @@ python engines/parakeet/scripts/convert-nemo-to-gguf.py \
   --long-form-window-sec 60 --long-form-overlap 0.25
 ```
 
+For full-EU Core ML export, run the same conversion with `--quant f16` and
+`--out engines/parakeet/models/transcribepsy-250m-eu.f16.gguf` instead. The Q8_0
+command above does not produce that F16 file. The
+[Core ML guide](transcribepsy-eu-coreml.md#export-and-deployment) includes the
+complete F16 conversion and macOS/Xcode prerequisites, and recommends FP16
+encoders/decoder as the baseline, with six-bit encoders as a size-saving option.
+
 Use `--language en` for known English, `--language other` for known non-English,
 or `--language auto` (also the default) to run the gate on the first 20 seconds
 before transcription. `EngineOptions::language` accepts the same values for
