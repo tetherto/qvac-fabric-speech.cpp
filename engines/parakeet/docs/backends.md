@@ -877,8 +877,13 @@ capacities in the background (`prewarm = all`, `wait = none`), and, for
 adjacent bundles, while they load. `nemotron-diarization-coreml-memory`
 (built with the Core ML tests) samples the process's `phys_footprint` every
 2 ms and `ANECompilerService` every 100 ms, from fresh process identities and
-paths so every Neural Engine load is cold. Against a ggml-only run of the same
-passes (peak 233.0 MiB):
+paths so every Neural Engine load is cold.
+`scripts/check-coreml-memory-schedule.py` checks its reports against the
+templates: the peak increment against what fit charges, and each prepare, load
+and `ANECompilerService` peak against the constant the templates record. The
+Core ML lane of `parakeet-ci.yml` runs the generated schedule and the check on
+its macOS runner, so every change is measured on a second chip. On the M2,
+against a ggml-only run of the same passes (peak 233.0 MiB):
 
 | Schedule | Runs | Peak increment | Charged by fit |
 |---|---:|---:|---:|
