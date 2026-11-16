@@ -324,6 +324,13 @@ class PatchDraftTest(unittest.TestCase):
         self.assertEqual(ctpl.add_patch_drafts(out, drafts)[1], [])
 
 
+class PatchDraftEndTest(unittest.TestCase):
+    def test_recipe_without_end_is_a_template_error(self):
+        drafts = [(10, 'patch 10 fp16 1 f16(t("b"))', "p1")]
+        with self.assertRaisesRegex(ctpl.TemplateError, "no `end` line"):
+            ctpl.add_patch_drafts('mlrecipe 1\nblob 64 fp16 2 f16(t("a"))\n', drafts)
+
+
 class LiteralTest(unittest.TestCase):
     def test_extract_literals(self):
         rope = np.cos(np.arange(12, dtype=np.float64)).astype(np.float16)
@@ -429,6 +436,24 @@ if mode == "spec":
     w1 = export_toy.read_weights(gguf, "stateless")["toy.w1"]
     spec.description.metadata.userDefined["qvac.toy.w1_sum"] = repr(float(w1.sum()))
     (data / "model.mlmodel").write_bytes(spec.SerializeToString(deterministic=True))
+elif mode == "patch":
+    # An inline fp16 constant that depends on the weights (minus toy.b1): a
+    # patch site that `extract` can explain and draft a patch line for.
+    import numpy as np
+    from coremltools.proto import Model_pb2
+
+    spec = Model_pb2.Model()
+    spec.ParseFromString((data / "model.mlmodel").read_bytes())
+    b1 = export_toy.read_weights(gguf, "stateless")["toy.b1"]
+    block = next(iter(spec.mlProgram.functions["main"].block_specializations.values()))
+    op = block.operations.add()
+    op.type = "const"
+    op.outputs.add().name = "qvac_toy_neg_b1"
+    val = op.attributes["val"]
+    val.type.tensorType.dataType = 10  # fp16
+    val.immediateValue.tensor.bytes.values = (-np.asarray(b1, dtype=np.float32)).astype("<f2").tobytes()
+    op.attributes["name"].immediateValue.tensor.strings.values.append("qvac_toy_neg_b1")
+    (data / "model.mlmodel").write_bytes(spec.SerializeToString(deterministic=True))
 elif mode == "layout":
     n = int(Path(state).read_text()) if Path(state).is_file() else 0
     Path(state).write_text(str(n + 1))
@@ -512,6 +537,70 @@ class ToyExtractTest(unittest.TestCase):
         p = run_ctpl("extract", "--template-dir", self.tdir)
         self.assertEqual(p.returncode, 2, p.stderr)
         self.assertIn("depends on the weights", p.stderr)
+        self.assertEqual(snapshot(self.tdir), before)
+
+    def make_spec_stale(self):
+        # A model.mlmodel the exporter no longer writes, so a passing
+        # extraction would replace it: a rejection must leave it in place.
+        from coremltools.proto import Model_pb2
+
+        spec = Model_pb2.Model()
+        spec.ParseFromString((self.tdir / "model.mlmodel").read_bytes())
+        spec.description.metadata.userDefined["qvac.toy.stale"] = "1"
+        (self.tdir / "model.mlmodel").write_bytes(spec.SerializeToString(deterministic=True))
+
+    def edit_recipe(self, edit):
+        recipe = self.tdir / "recipe.txt"
+        recipe.write_text(edit(recipe.read_text()))
+
+    @NEEDS_TOY
+    def test_recipe_header_without_blobs_writes_nothing(self):
+        self.make_spec_stale()
+        self.edit_recipe(lambda t: "".join(l for l in t.splitlines(True) if not l.startswith("blobs ")))
+        before = snapshot(self.tdir)
+        p = run_ctpl("extract", "--template-dir", self.tdir)
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertIn("header lacks blobs", p.stderr)
+        self.assertEqual(snapshot(self.tdir), before)
+
+    @NEEDS_TOY
+    def test_recipe_that_fails_to_generate_writes_nothing(self):
+        # The recipe body names a tensor the GGUF lacks, so the twin-A
+        # generate fails after every twin check passed.
+        self.make_spec_stale()
+        self.edit_recipe(lambda t: t.replace("toy.w1", "toy.nope", 1))
+        before = snapshot(self.tdir)
+        p = run_ctpl("extract", "--template-dir", self.tdir)
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertIn("generate (twin A) failed", p.stderr)
+        self.assertEqual(snapshot(self.tdir), before)
+
+    @NEEDS_TOY
+    def test_manifest_elsewhere_with_a_rejected_extraction_writes_nothing(self):
+        # --manifest outside the template directory would be copied in as
+        # reference-gguf.json, but only by an extraction that passes.
+        other = json.loads((self.tdir / "reference-gguf.json").read_text())
+        other["review_probe"] = True
+        (self.tmp / "other.json").write_text(json.dumps(other))
+        tj = json.loads((self.tdir / "template.json").read_text())
+        tj["literals"] = [{"id": "w1", "dtype": "fp16", "shape": [32, 8], "exporter_blob": 64}]
+        (self.tdir / "template.json").write_text(json.dumps(tj, indent=2) + "\n")
+        before = snapshot(self.tdir)
+        p = run_ctpl("extract", "--template-dir", self.tdir, "--manifest", self.tmp / "other.json")
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertIn("depends on the weights", p.stderr)
+        self.assertEqual(snapshot(self.tdir), before)
+
+    @NEEDS_TOY
+    def test_recipe_without_end_writes_nothing(self):
+        # A weight-dependent inline constant gives a patch line to draft into
+        # the recipe; with no `end` line there is nowhere to put it.
+        self.edit_recipe(lambda t: "".join(l for l in t.splitlines(True) if l.strip() != "end"))
+        before = snapshot(self.tdir)
+        p = self.extract_variant("patch")
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertIn("patch sites", p.stderr)
+        self.assertIn("no `end` line", p.stderr)
         self.assertEqual(snapshot(self.tdir), before)
 
     @NEEDS_TOY
