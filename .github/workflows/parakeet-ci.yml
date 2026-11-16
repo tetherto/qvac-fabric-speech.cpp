@@ -101,6 +101,9 @@ jobs:
       - name: Test converter arguments
         run: python3 -m unittest engines/parakeet/test/test_converter_args.py
 
+      - name: Test the Core ML memory schedule checker
+        run: python3 -B -m unittest engines/parakeet/test/test_check_coreml_memory_schedule.py
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -389,9 +392,11 @@ jobs:
       # all), from a re-signed copy of the tool and an empty cache each run, so
       # every Neural Engine load is cold. The checker prints the per-run table
       # and fails when the peak footprint increment over a ggml-only run of the
-      # same passes exceeds what fit charges, or when a prepare, a load or
-      # ANECompilerService exceeds the constant the templates record. Runs
-      # whenever the build succeeded, so an earlier test failure does not hide it.
+      # same passes exceeds what fit charges, when a prepare, a load, a
+      # capacity's resident step or ANECompilerService's growth during the
+      # loads exceeds the constant the templates record, or when a capacity
+      # shows no generate or load phase. Runs whenever the build succeeded, so
+      # an earlier test failure does not hide it.
       - name: Memory schedule (generated Nemotron diarizers, overlapped, this runner)
         id: nemotron-memory
         if: ${{ !cancelled() && steps.coreml-build.outcome == 'success' }}
