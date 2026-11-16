@@ -259,28 +259,65 @@ like the engine's) adds the template's Core ML envelope to the projection
 and reports it in `FitResult::coreml` (`route`, `bytes`, `validated`,
 `disabled_reason`, `ggml_only_fits`). The ggml DAC stays resident, since it
 serves every call until the sidecar is ready. The envelope is the sidecar's
-resident weights, I/O buffers and the host quantizer copy, plus the larger
-of the generation and the load transients, with a 1.25 margin; it was
-validated on an M2 for the `all` compute units (see below), and other
-compute-unit policies are not generated until validated. The route never
-reads the cache, so fit is the same before and after the first generation.
+resident weights, I/O buffers, prediction workspace and the host quantizer
+copy, plus the larger of the generation and the load transients, with a
+1.25 margin. Its constants are measured (below) for the `all` compute units;
+other compute-unit policies are not generated until validated. The route
+never reads the cache, so fit is the same before and after the first
+generation.
 
-Memory validation (M2, 24 GB, macOS 15.7.3, compute units `all`,
-`test-parler-dac-coreml --memory-schedule`): ggml DAC decodes ran on the
-calling thread while the sidecar was generated, compiled, loaded and warmed
-in the background from an empty cache. Over four runs the process footprint
-rose at most 229 MiB above the warm ggml baseline, against a charged envelope
-of 475 MiB. `ANECompilerService` peaked at 360-497 MiB across those four cold
-Neural Engine compiles, up to 4.8 times the 103 MiB `weight.bin` (well above
-the runtime's 1.6 times default), so the template sets
-`ane_compile_reserve_bytes` to 512 MiB: the runtime starts a cold Neural
-Engine load only while that much memory is available, and the DAC stays on
-ggml (state `deferred(memory)`) until it is. On macOS 27.2.1 (26B131) the
-same M2 measures a larger increment, 459-462 MiB over three runs
-(`ANECompilerService` 383-472 MiB): still inside the envelope, but by only
-14-16 MiB. CI runs the same schedule on its M4 Max, where `all` puts most of
-the program on the GPU (below), against the same envelope; `validated_for`
-still records only the M2 on macOS 15.7.3.
+Memory validation (`test-parler-dac-coreml --memory-schedule DIR`, compute
+units `all`): ggml DAC decodes run on the calling thread while the sidecar is
+generated, compiled, loaded and warmed into an empty cache in the background.
+The test reads the process footprint every 2 ms and the slot's state every
+10 ms, and holds each phase to the template constant that charges it:
+
+- the prepare (generation and compile, over the footprint just before
+  generation) to `generation_peak_bytes` + 8 MiB + `compile_peak_bytes`;
+- the load and warm-up (over the footprint just before the load) to
+  `load_peak_bytes.all`;
+- the steady state (ready, Core ML decodes running, over the footprint just
+  before the load) to the resident charge;
+- the whole run (over the warm ggml baseline) to the envelope;
+- `ANECompilerService` during the load to `ane_compile_reserve_bytes`.
+
+Each run prints a per-phase table and a one-line JSON report. Each constant
+is 1.25 times the largest value measured over every run on every validated
+host, rounded up to 1 MiB (`memory.measured` in `template.json`). Figures in
+MiB:
+
+| Phase | M2, macOS 27.2.1 (10 runs) | M4 Max, macOS 26.7.2 (CI, 6 runs) | Charged |
+|---|--:|--:|--:|
+| prepare: generation and compile | 436.1-440.4 | 276.1-438.5 | 551: `compile_peak_bytes` 327 on top of `generation_peak_bytes` 216 + 8 |
+| load and warm-up | 16.7-23.0 | 309.6-317.8 (warm-up 294.8-303.5) | 398: `load_peak_bytes.all` |
+| steady state, over the footprint before the load | 0 (5 runs) | 312.7-316.3 (3 runs) | 369.6: weights 103.3, I/O 0.8, quantizer copy 0.6, `workspace_bytes` 265 (1.25 x 211.6) |
+| whole run, over the warm ggml baseline | 453.0-462.7 | 589.1-751.3 | 1,150.8: the envelope |
+| `ANECompilerService` during the load | 397.9-505.7 | 487.4-501.8 | 633: `ane_compile_reserve_bytes` |
+
+- **M2.** `all` runs the program on the Neural Engine. Its weights do not
+  show in the process footprint, and the generation is the peak. The same M2
+  on macOS 15.7.3 peaked at 224-229 MiB over four runs (`ANECompilerService`
+  360-497 MiB). Those runs recorded no per-phase breakdown and move no
+  constant, but stay in `validated_for`.
+- **M4 Max.** `all` runs most of the program on the GPU (below). The first
+  prediction adds about 300 MiB, which stays resident: the prediction
+  workspace. The whole schedule takes 3.5 s there, so the process still
+  holds the generation's memory when the load starts (the M2 has returned it
+  by the time the sidecar is ready). Its whole run is therefore the prepare
+  plus the resident, which is the sum the envelope charges.
+
+The envelope is 1,206,709,600 bytes (1,150.8 MiB), up from 475.4 MiB. With
+the M2's values alone it would be 819.6 MiB: the macOS 27 generation peak
+(440 MiB, against the 216 MiB of the template's generation estimate) causes
+most of the rise, and the M4 Max's GPU working memory adds the remaining
+331 MiB. `validated_for` is matched on the compute units only, so every chip
+is charged the larger figure. A cold Neural Engine load starts only while
+633 MiB are available; until then the DAC stays on ggml (state
+`deferred(memory)`). Phones are not affected today: the runtime generates
+sidecars on macOS only, so on iOS the route is none and fit charges no Core
+ML envelope. Matching validation on the chip class, as well as the compute
+units, is planned before generation is enabled on iOS, whose chips run the
+program on the Neural Engine like the M2.
 
 Generated-sidecar accuracy (mini `q8_0`, compute units `all`, fp16, on an
 empty cache; the generated `weight.bin` is byte-identical to the exporter's
@@ -294,8 +331,11 @@ export of the same GGUF):
 | HF reference `case0` (greedy codes, 4.9 s), vs the PyTorch fp32 wav (macOS 27.2.1) | 49.7 dB | 1.4e-3 |
 
 CI generates the sidecar from a staged `parler-mini-v1-q8_0.gguf` on every
-pull request (`test-parler-dac-coreml --cache-dir DIR --memory-schedule DIR2
---min-snr 54 --require-coreml --units-sweep`). Its runner is an Apple M4 Max,
+pull request (`test-parler-dac-coreml --cache-dir DIR --min-snr 54
+--require-coreml --units-sweep`), and runs the memory schedule above three
+times in its own step, each from a re-signed copy of the test (a fresh
+identity, so every Neural Engine load is cold) and an empty cache. Its
+runner is an Apple M4 Max,
 a chip with a recorded floor under `all` (below), so CI holds `all` to 50 dB
 and the same artifact under `cpu_and_ane` to 54 dB. The 54 dB gate under
 `all` on the M2 comes from the device run of the same command, not from CI.
