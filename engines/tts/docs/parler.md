@@ -326,7 +326,9 @@ the latest, on another runner of the same model, 322.4-323.5 (steady state
   held, so its growth (104-303 MiB) is only what its leftovers did not
   cover. On a clean host the growth is the whole size, so the reserve is
   1.25 times the largest size measured while loading (505.7 MiB), not the
-  largest growth. The same M2 on macOS 15.7.3 peaked at 224-229 MiB over
+  largest growth. One later verification run found the same service process
+  at 2.9 MiB resident before the load (its pages compressed or purged
+  meanwhile, not a new process) and it grew 330.0 MiB, within that 505.7. The same M2 on macOS 15.7.3 peaked at 224-229 MiB over
   four runs (`ANECompilerService` 360-497 MiB absolute). Those runs recorded
   no per-phase breakdown and move no constant, but stay in `validated_for`.
 - **M4 Max.** `all` runs most of the program on the GPU (below), and only
