@@ -199,7 +199,8 @@ public:
     // passes (< 0: no limit), or cancel() is called from another thread.
     // True when it is ready. Returns false at once while nothing has
     // requested the sidecar (prewarm none before the first synthesis) or it
-    // waits for memory (deferred).
+    // waits for memory (deferred). A wait never clears a cancel() meant for
+    // a synthesis on another thread; coreml_wait(0) only polls.
     bool coreml_wait(int64_t timeout_ms = -1) const;
 
 private:

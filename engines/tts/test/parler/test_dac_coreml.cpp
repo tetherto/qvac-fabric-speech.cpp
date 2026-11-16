@@ -37,8 +37,10 @@
 //   * an Engine with the default wait (none) generates the DAC sidecar from
 //     the GGUF into the (empty) cache in the background; Engine::cancel()
 //     ends a coreml_wait(-1) early, and the next coreml_wait(-1) waits until
-//     it is compiled and loaded (route generated, ready); later owners of the
-//     same GGUF adopt it (route cached) without generating again;
+//     it is compiled and loaded (route generated, ready); a cancel() during
+//     a synthesis survives a coreml_wait(0) and a coreml_wait(10) on another
+//     thread; later owners of the same GGUF adopt it (route cached) without
+//     generating again;
 //   * the same --min-snr / --min-speech-snr gates as above on the generated
 //     sidecar (lowered under `all` only for the chips with a measured floor,
 //     see GENERATED_ALL_UNITS_FLOORS; a floor that is no longer needed
@@ -71,8 +73,10 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <fstream>
 #include <iterator>
+#include <mutex>
 #include <thread>
 
 #if defined(__APPLE__)
@@ -1053,6 +1057,67 @@ void engine_wait_cancel_gate(const std::string & gguf, const std::string & cache
               st.substr(0, std::min<size_t>(st.size(), 200)));
 }
 
+// A wait on one thread never swallows a cancel meant for a synthesis on
+// another: the synthesis is held inside its first streamed chunk (not the
+// last, so it has decoder steps left), Engine::cancel() is called, then a
+// readiness poll coreml_wait(0) and a short coreml_wait(10); once the chunk
+// returns, the synthesis must end cancelled, and both waits report the
+// ready sidecar.
+void engine_wait_keeps_cancel_gate(const std::string & gguf, const tts_cpp::CoremlOptions & coreml) {
+    fprintf(stderr, "Engine cancel with waits on another thread\n");
+    tts_cpp::parler::EngineOptions eo;
+    eo.model_gguf_path = gguf;
+    eo.default_description = "A calm voice.";
+    eo.max_frames = 160;
+    eo.min_new_tokens = 150;
+    eo.stream_chunk_frames = 24;
+    eo.coreml = coreml;
+    tts_cpp::parler::Engine engine(eo);
+    std::mutex mu;
+    std::condition_variable cv;
+    bool entered = false, finished = false, released = false, first_chunk_final = false;
+    std::string outcome = "completed";
+    std::thread synth([&] {
+        try {
+            engine.synthesize("a b c", eo.default_description, [&](const float *, std::size_t, int, bool final_chunk) {
+                std::unique_lock<std::mutex> lk(mu);
+                if (entered) return;  // only the first chunk is held
+                entered = true;
+                first_chunk_final = final_chunk;
+                cv.notify_all();
+                cv.wait_for(lk, std::chrono::seconds(60), [&] { return released; });
+            });
+        } catch (const std::exception & e) {
+            outcome = e.what();
+        }
+        std::lock_guard<std::mutex> lk(mu);
+        finished = true;
+        cv.notify_all();
+    });
+    bool held = false;
+    {
+        std::unique_lock<std::mutex> lk(mu);
+        cv.wait_for(lk, std::chrono::minutes(3), [&] { return entered || finished; });
+        held = entered && !finished;
+    }
+    bool poll = false, short_wait = false;
+    if (held) {
+        engine.cancel();
+        poll = engine.coreml_wait(0);
+        short_wait = engine.coreml_wait(10);
+    }
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        released = true;
+        cv.notify_all();
+    }
+    synth.join();
+    check(held && !first_chunk_final && contains(outcome, "cancelled") && poll && short_wait,
+          std::string("cancel(), then coreml_wait(0) and coreml_wait(10) on another thread: the synthesis ends '") +
+              outcome + "'" + (held ? "" : " (no chunk was held)") + (first_chunk_final ? " (the first chunk was the last)" : "") +
+              ", the waits report " + (poll ? "ready" : "not ready") + " / " + (short_wait ? "ready" : "not ready"));
+}
+
 void generated_gates(parler_model & model, const std::string & gguf, const std::string & cache_dir,
                      const std::string & ref_dir, double min_snr, double min_speech_snr) {
     fprintf(stderr, "generated sidecar gates (cache %s)\n", cache_dir.c_str());
@@ -1069,6 +1134,7 @@ void generated_gates(parler_model & model, const std::string & gguf, const std::
           "route generate (" + route.route + " " + route.state + " " + route.reason + "), envelope " +
               std::to_string(route.envelope_bytes) + " bytes" + (route.validated ? ", validated" : ""));
     engine_wait_cancel_gate(gguf, cache_dir);
+    engine_wait_keeps_cancel_gate(gguf, opts);
     model.dac_sidecar.reset();
     model.dac_pending.reset();
     std::shared_ptr<parler_dac_coreml> dac;

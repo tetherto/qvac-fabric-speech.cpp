@@ -51,6 +51,10 @@ struct Engine::Impl {
     std::string        cached_description;
     bool               has_cached_description = false;
     std::atomic<bool>  cancel_requested{false};
+    // Set by Engine::cancel() together with cancel_requested; a blocking
+    // coreml_wait() clears and watches only this one, so a wait on another
+    // thread never clears a cancel meant for a synthesis.
+    std::atomic<bool>  wait_cancel_requested{false};
 
     ~Impl() {
         if (allocr) ggml_gallocr_free(allocr);
@@ -339,6 +343,7 @@ SynthesisResult Engine::synthesize(const std::string & prompt,
 
 void Engine::cancel() {
     pimpl_->cancel_requested.store(true, std::memory_order_relaxed);
+    pimpl_->wait_cancel_requested.store(true, std::memory_order_relaxed);
 }
 
 const EngineOptions & Engine::options() const { return pimpl_->opts; }
@@ -358,10 +363,13 @@ std::string Engine::coreml_status() const {
 
 bool Engine::coreml_wait(int64_t timeout_ms) const {
     if (!pimpl_->dac_coreml) return false;
-    // Like a synthesis, the wait starts with a clear flag and ends early on
-    // Engine::cancel().
-    pimpl_->cancel_requested.store(false, std::memory_order_relaxed);
-    return pimpl_->dac_coreml->wait(timeout_ms, &pimpl_->cancel_requested);
+    // A readiness poll has nothing to cancel and touches no flag.
+    if (timeout_ms == 0) return pimpl_->dac_coreml->wait(0);
+    // A blocking wait starts with its own flag clear and ends early on
+    // Engine::cancel(). It leaves the synthesis's flag alone, so a wait on
+    // another thread cannot swallow a cancel meant for a synthesis.
+    pimpl_->wait_cancel_requested.store(false, std::memory_order_relaxed);
+    return pimpl_->dac_coreml->wait(timeout_ms, &pimpl_->wait_cancel_requested);
 }
 
 bool Engine::decoder_on_coreml() const { return pimpl_->decoder.active(); }
