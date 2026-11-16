@@ -69,7 +69,10 @@ struct AneGrowth {
 // runner reads hundreds of MiB more than a clean host. What this process's
 // cold loads add is its growth: the largest size sampled while loading, less
 // its last size sampled before the first load. On a clean host the growth
-// equals the absolute peak.
+// equals the absolute peak. A service that already holds memory reuses it
+// for the next compile, so on such a dirty baseline the growth understates
+// what the same compile needs on a clean service; a reserve derived from
+// growth must come from clean starts (or from the absolute peak).
 inline AneGrowth ane_compiler_growth(const std::vector<AneSample> & samples) {
     AneGrowth g;
     bool loaded = false;
@@ -84,5 +87,15 @@ inline AneGrowth ane_compiler_growth(const std::vector<AneSample> & samples) {
     g.growth = g.peak > g.before ? g.peak - g.before : 0;
     return g;
 }
+
+// Up to this size before the first load the service counts as clean: an
+// idle instance holds about 1 MiB, one that has compiled a model for anyone
+// hundreds of MiB.
+constexpr uint64_t ANE_COMPILER_CLEAN_BYTES = 32ull << 20;
+
+// Whether a run's growth was measured from a clean service, so it stands for
+// a cold compile on a clean host. Reports print it next to the size before
+// the load, so a dirty baseline is visible.
+inline bool ane_compiler_clean_start(const AneGrowth & g) { return g.before <= ANE_COMPILER_CLEAN_BYTES; }
 
 }  // namespace qvac_coreml_memory
