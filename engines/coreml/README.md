@@ -264,9 +264,15 @@ script).
    in place), `Manifest.json` and the computed `template.json` fields
    (`functions`, `stateful`, `weight_bin_size`, `generation_peak_bytes`,
    `patches`, the literals' offsets, the exporter's sha256, the toolchain
-   versions), and refreshes the header of `recipe.txt`. A rejected
-   extraction leaves the template's files untouched. A `model.mlmodel` that
-   equals the new spec (the coremltools conversion date aside) and a
+   versions), and refreshes the header of `recipe.txt`. Every output is
+   staged in a temporary copy of the template first, and the twin-A
+   `generate` runs on that copy; the template directory is written only after
+   every check has passed. A rejected extraction (a twin check, a recipe
+   header or body, a recipe with no `end` line for drafted patch lines, the
+   twin-A `generate`) therefore leaves the template's files untouched,
+   including `reference-gguf.json` when `--manifest` names another file. A
+   `model.mlmodel` that equals the
+   new spec (the coremltools conversion date aside, sentinels in place) and a
    `Manifest.json` that differs only in its random item identifiers are kept
    byte for byte, so extracting an unchanged template again leaves its files,
    and so its `template_sha256`, as they were.
