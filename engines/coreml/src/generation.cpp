@@ -153,10 +153,10 @@ TemplateMemory memory_of(const recipe::Template & t) {
 // embedded template's.
 std::shared_ptr<const recipe::Template> find_kept(const std::string & id, const std::string & template_dir) {
     if (template_dir.empty() || !template_dir_override_compiled()) return templates::embedded(id);
-    static std::mutex mu;
+    static auto * mu = new std::mutex();  // leaked with the map: used after static destructors
     static auto * kept = new std::map<std::string, std::shared_ptr<const recipe::Template>>();
     const std::string key = template_dir + "/" + id;
-    std::lock_guard<std::mutex> lk(mu);
+    std::lock_guard<std::mutex> lk(*mu);
     if (auto it = kept->find(key); it != kept->end()) return it->second;
     std::shared_ptr<const recipe::Template> t = templates::find(id, template_dir);
     if (t) kept->emplace(key, t);
