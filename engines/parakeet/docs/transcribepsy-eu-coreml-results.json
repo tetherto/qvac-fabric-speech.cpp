@@ -454,5 +454,864 @@
     },
     "sixbit_weight_storage": "Eligible grouped-channel weights use uint6 LUT indices; some constants remain FP16; compute is FP16",
     "q8_gguf_note": "Q8_0 GGUF plus FP16 Core ML sidecars is a hybrid, not a Q8 Core ML encoder"
+  },
+  "route_sharing_experiments": {
+    "date": "2026-11-16",
+    "experimental_only": true,
+    "integrated_into_engine": false,
+    "hardware": {
+      "mac": "Apple M4 MacBook Air, 16 GB, macOS 27.0.1",
+      "iphone": "iPhone 16e, A18, iOS 18.6.2"
+    },
+    "export_environment": "coremltools 9.0, torch 2.7.0, Xcode 26.5; source F16 GGUF",
+    "window_mel_frames": 2001,
+    "fixtures": [
+      "en-15s",
+      "en-60s (first 2001 mel frames)",
+      "en-partial (800 ms)",
+      "fr-multipiece-16k",
+      "hi-16k",
+      "silence800"
+    ],
+    "compiled_sizes": {
+      "fp16": {
+        "separate_compiled_bytes": 1191921536,
+        "shared_compiled_bytes": 477510394,
+        "unified_compiled_bytes": 476269593,
+        "shared_reduction_percent": 59.938,
+        "unified_reduction_percent": 60.042
+      },
+      "sixbit": {
+        "separate_compiled_bytes": 479747170,
+        "shared_compiled_bytes": 193054579,
+        "unified_compiled_bytes": 191739826,
+        "shared_reduction_percent": 59.759,
+        "unified_reduction_percent": 60.033
+      }
+    },
+    "devices": {
+      "mac": {
+        "fp16": {
+          "variants": {
+            "separate": {
+              "completed_finite_predictions": 18,
+              "identical_to_separate": 18,
+              "max_absolute_to_separate": 0.0,
+              "max_relative_l2_to_fp32": 0.13263638143858486,
+              "gate_decisions_matching_fp32": 6,
+              "gate_probabilities": {
+                "en-15s": 0.0480989,
+                "en-60s": 0.0543655,
+                "en-partial": 0.2009736,
+                "fr-multipiece-16k": 0.939177,
+                "hi-16k": 0.9600492,
+                "silence800": 0.5346584
+              },
+              "preferred_devices": {
+                "en": {
+                  "None": 3542,
+                  "MLNeuralEngineComputeDevice": 1537
+                },
+                "other": {
+                  "None": 3632,
+                  "MLNeuralEngineComputeDevice": 1561
+                },
+                "gate": {
+                  "None": 1802,
+                  "MLNeuralEngineComputeDevice": 781
+                }
+              },
+              "all_compute_operations_prefer_ane": true,
+              "observed_load_ms": {
+                "en": 392.3,
+                "other": 326.909,
+                "gate": 166.233
+              },
+              "warm_median_ms_full_window": {
+                "en": 20.185,
+                "other": 20.228,
+                "gate": 11.331
+              },
+              "thermal_state_after_route": {
+                "en": 0,
+                "other": 0,
+                "gate": 0
+              }
+            },
+            "shared": {
+              "completed_finite_predictions": 18,
+              "identical_to_separate": 18,
+              "max_absolute_to_separate": 0.0,
+              "max_relative_l2_to_fp32": 0.13263638143858486,
+              "gate_decisions_matching_fp32": 6,
+              "gate_probabilities": {
+                "en-15s": 0.0480989,
+                "en-60s": 0.0543655,
+                "en-partial": 0.2009736,
+                "fr-multipiece-16k": 0.939177,
+                "hi-16k": 0.9600492,
+                "silence800": 0.5346584
+              },
+              "preferred_devices": {
+                "en": {
+                  "None": 3542,
+                  "MLNeuralEngineComputeDevice": 1537
+                },
+                "other": {
+                  "None": 3632,
+                  "MLNeuralEngineComputeDevice": 1561
+                },
+                "gate": {
+                  "None": 1802,
+                  "MLNeuralEngineComputeDevice": 781
+                }
+              },
+              "all_compute_operations_prefer_ane": true,
+              "observed_load_ms": {
+                "en": 364.365,
+                "other": 356.12,
+                "gate": 251.497
+              },
+              "warm_median_ms_full_window": {
+                "en": 19.986,
+                "other": 19.884,
+                "gate": 11.186
+              },
+              "thermal_state_after_route": {
+                "en": 0,
+                "other": 0,
+                "gate": 0
+              }
+            },
+            "unified": {
+              "completed_finite_predictions": 18,
+              "identical_to_separate": 18,
+              "max_absolute_to_separate": 0.0,
+              "max_relative_l2_to_fp32": 0.13263638143858486,
+              "gate_decisions_matching_fp32": 6,
+              "gate_probabilities": {
+                "en-15s": 0.0480989,
+                "en-60s": 0.0543655,
+                "en-partial": 0.2009736,
+                "fr-multipiece-16k": 0.939177,
+                "hi-16k": 0.9600492,
+                "silence800": 0.5346584
+              },
+              "preferred_devices": {
+                "en": {
+                  "None": 3632,
+                  "MLNeuralEngineComputeDevice": 1567
+                },
+                "other": {
+                  "None": 3632,
+                  "MLNeuralEngineComputeDevice": 1567
+                },
+                "gate": {
+                  "None": 3632,
+                  "MLNeuralEngineComputeDevice": 1567
+                }
+              },
+              "all_compute_operations_prefer_ane": true,
+              "observed_load_ms": {
+                "en": 289.45,
+                "other": 71.386,
+                "gate": 68.366
+              },
+              "warm_median_ms_full_window": {
+                "en": 20.086,
+                "other": 20.053,
+                "gate": 20.187
+              },
+              "thermal_state_after_route": {
+                "en": 0,
+                "other": 0,
+                "gate": 0
+              }
+            }
+          },
+          "loading_only": {
+            "load-eager": {
+              "processes": 3,
+              "median_load_ms": 186.807,
+              "load_range_ms": [
+                174.524,
+                206.896
+              ],
+              "median_current_footprint_bytes": 28099184,
+              "thermal_states": [
+                0
+              ]
+            },
+            "load-en": {
+              "processes": 3,
+              "median_load_ms": 73.407,
+              "load_range_ms": [
+                70.805,
+                73.563
+              ],
+              "median_current_footprint_bytes": 26854000,
+              "thermal_states": [
+                0
+              ]
+            },
+            "load-other": {
+              "processes": 3,
+              "median_load_ms": 73.546,
+              "load_range_ms": [
+                73.041,
+                74.51
+              ],
+              "median_current_footprint_bytes": 27394672,
+              "thermal_states": [
+                0
+              ]
+            },
+            "load-auto-en": {
+              "processes": 3,
+              "median_load_ms": 110.755,
+              "load_range_ms": [
+                108.208,
+                126.515
+              ],
+              "median_current_footprint_bytes": 27427464,
+              "thermal_states": [
+                0
+              ]
+            },
+            "load-auto-other": {
+              "processes": 3,
+              "median_load_ms": 112.651,
+              "load_range_ms": [
+                111.517,
+                112.744
+              ],
+              "median_current_footprint_bytes": 27787888,
+              "thermal_states": [
+                0
+              ]
+            }
+          }
+        },
+        "sixbit": {
+          "variants": {
+            "separate": {
+              "completed_finite_predictions": 18,
+              "identical_to_separate": 18,
+              "max_absolute_to_separate": 0.0,
+              "max_relative_l2_to_fp32": 0.13783479383561187,
+              "gate_decisions_matching_fp32": 6,
+              "gate_probabilities": {
+                "en-15s": 0.0487875,
+                "en-60s": 0.0548328,
+                "en-partial": 0.2124136,
+                "fr-multipiece-16k": 0.9380075,
+                "hi-16k": 0.961548,
+                "silence800": 0.5581152
+              },
+              "preferred_devices": {
+                "en": {
+                  "None": 3542,
+                  "MLNeuralEngineComputeDevice": 1537
+                },
+                "other": {
+                  "None": 3632,
+                  "MLNeuralEngineComputeDevice": 1561
+                },
+                "gate": {
+                  "None": 1802,
+                  "MLNeuralEngineComputeDevice": 781
+                }
+              },
+              "all_compute_operations_prefer_ane": true,
+              "observed_load_ms": {
+                "en": 11397.376,
+                "other": 11557.244,
+                "gate": 5705.29
+              },
+              "warm_median_ms_full_window": {
+                "en": 20.3,
+                "other": 20.628,
+                "gate": 11.531
+              },
+              "thermal_state_after_route": {
+                "en": 0,
+                "other": 0,
+                "gate": 0
+              }
+            },
+            "shared": {
+              "completed_finite_predictions": 18,
+              "identical_to_separate": 18,
+              "max_absolute_to_separate": 0.0,
+              "max_relative_l2_to_fp32": 0.13783479383561187,
+              "gate_decisions_matching_fp32": 6,
+              "gate_probabilities": {
+                "en-15s": 0.0487875,
+                "en-60s": 0.0548328,
+                "en-partial": 0.2124136,
+                "fr-multipiece-16k": 0.9380075,
+                "hi-16k": 0.961548,
+                "silence800": 0.5581152
+              },
+              "preferred_devices": {
+                "en": {
+                  "None": 3542,
+                  "MLNeuralEngineComputeDevice": 1537
+                },
+                "other": {
+                  "None": 3632,
+                  "MLNeuralEngineComputeDevice": 1561
+                },
+                "gate": {
+                  "None": 1802,
+                  "MLNeuralEngineComputeDevice": 781
+                }
+              },
+              "all_compute_operations_prefer_ane": true,
+              "observed_load_ms": {
+                "en": 11872.712,
+                "other": 11694.751,
+                "gate": 5952.402
+              },
+              "warm_median_ms_full_window": {
+                "en": 20.348,
+                "other": 20.277,
+                "gate": 11.505
+              },
+              "thermal_state_after_route": {
+                "en": 0,
+                "other": 1,
+                "gate": 1
+              }
+            },
+            "unified": {
+              "completed_finite_predictions": 18,
+              "identical_to_separate": 18,
+              "max_absolute_to_separate": 0.0,
+              "max_relative_l2_to_fp32": 0.13783479383561187,
+              "gate_decisions_matching_fp32": 6,
+              "gate_probabilities": {
+                "en-15s": 0.0487875,
+                "en-60s": 0.0548328,
+                "en-partial": 0.2124136,
+                "fr-multipiece-16k": 0.9380075,
+                "hi-16k": 0.961548,
+                "silence800": 0.5581152
+              },
+              "preferred_devices": {
+                "en": {
+                  "None": 3632,
+                  "MLNeuralEngineComputeDevice": 1567
+                },
+                "other": {
+                  "None": 3632,
+                  "MLNeuralEngineComputeDevice": 1567
+                },
+                "gate": {
+                  "None": 3632,
+                  "MLNeuralEngineComputeDevice": 1567
+                }
+              },
+              "all_compute_operations_prefer_ane": true,
+              "observed_load_ms": {
+                "en": 11483.478,
+                "other": 75.861,
+                "gate": 72.274
+              },
+              "warm_median_ms_full_window": {
+                "en": 20.284,
+                "other": 20.292,
+                "gate": 20.152
+              },
+              "thermal_state_after_route": {
+                "en": 1,
+                "other": 1,
+                "gate": 1
+              }
+            }
+          },
+          "loading_only": {
+            "load-eager": {
+              "processes": 3,
+              "median_load_ms": 193.549,
+              "load_range_ms": [
+                193.005,
+                200.141
+              ],
+              "median_current_footprint_bytes": 28836440,
+              "thermal_states": [
+                0,
+                1
+              ]
+            },
+            "load-en": {
+              "processes": 3,
+              "median_load_ms": 78.867,
+              "load_range_ms": [
+                78.163,
+                80.872
+              ],
+              "median_current_footprint_bytes": 27738712,
+              "thermal_states": [
+                0,
+                1
+              ]
+            },
+            "load-other": {
+              "processes": 3,
+              "median_load_ms": 81.196,
+              "load_range_ms": [
+                78.944,
+                81.827
+              ],
+              "median_current_footprint_bytes": 28164696,
+              "thermal_states": [
+                0,
+                1
+              ]
+            },
+            "load-auto-en": {
+              "processes": 3,
+              "median_load_ms": 118.626,
+              "load_range_ms": [
+                118.25,
+                119.193
+              ],
+              "median_current_footprint_bytes": 28181080,
+              "thermal_states": [
+                0,
+                1
+              ]
+            },
+            "load-auto-other": {
+              "processes": 3,
+              "median_load_ms": 120.429,
+              "load_range_ms": [
+                119.609,
+                120.863
+              ],
+              "median_current_footprint_bytes": 28607064,
+              "thermal_states": [
+                0,
+                1
+              ]
+            }
+          }
+        }
+      },
+      "iphone": {
+        "fp16": {
+          "variants": {
+            "separate": {
+              "completed_finite_predictions": 18,
+              "identical_to_separate": 18,
+              "max_absolute_to_separate": 0.0,
+              "max_relative_l2_to_fp32": 0.13263638143858486,
+              "gate_decisions_matching_fp32": 6,
+              "gate_probabilities": {
+                "en-15s": 0.0480989,
+                "en-60s": 0.0543655,
+                "en-partial": 0.2009736,
+                "fr-multipiece-16k": 0.939177,
+                "hi-16k": 0.9600492,
+                "silence800": 0.5346584
+              },
+              "preferred_devices": {
+                "en": {
+                  "None": 3542,
+                  "MLNeuralEngineComputeDevice": 1537
+                },
+                "other": {
+                  "None": 3632,
+                  "MLNeuralEngineComputeDevice": 1561
+                },
+                "gate": {
+                  "None": 1802,
+                  "MLNeuralEngineComputeDevice": 781
+                }
+              },
+              "all_compute_operations_prefer_ane": true,
+              "observed_load_ms": {
+                "en": 10467.973,
+                "other": 11286.274,
+                "gate": 5800.667
+              },
+              "warm_median_ms_full_window": {
+                "en": 21.835,
+                "other": 22.014,
+                "gate": 12.097
+              },
+              "thermal_state_after_route": {
+                "en": 0,
+                "other": 0,
+                "gate": 0
+              }
+            },
+            "shared": {
+              "completed_finite_predictions": 18,
+              "identical_to_separate": 18,
+              "max_absolute_to_separate": 0.0,
+              "max_relative_l2_to_fp32": 0.13263638143858486,
+              "gate_decisions_matching_fp32": 6,
+              "gate_probabilities": {
+                "en-15s": 0.0480989,
+                "en-60s": 0.0543655,
+                "en-partial": 0.2009736,
+                "fr-multipiece-16k": 0.939177,
+                "hi-16k": 0.9600492,
+                "silence800": 0.5346584
+              },
+              "preferred_devices": {
+                "en": {
+                  "None": 3542,
+                  "MLNeuralEngineComputeDevice": 1537
+                },
+                "other": {
+                  "None": 3632,
+                  "MLNeuralEngineComputeDevice": 1561
+                },
+                "gate": {
+                  "None": 1802,
+                  "MLNeuralEngineComputeDevice": 781
+                }
+              },
+              "all_compute_operations_prefer_ane": true,
+              "observed_load_ms": {
+                "en": 12168.129,
+                "other": 11648.455,
+                "gate": 6328.855
+              },
+              "warm_median_ms_full_window": {
+                "en": 22.165,
+                "other": 22.837,
+                "gate": 12.651
+              },
+              "thermal_state_after_route": {
+                "en": 0,
+                "other": 0,
+                "gate": 0
+              }
+            },
+            "unified": {
+              "completed_finite_predictions": 18,
+              "identical_to_separate": 18,
+              "max_absolute_to_separate": 0.0,
+              "max_relative_l2_to_fp32": 0.13263638143858486,
+              "gate_decisions_matching_fp32": 6,
+              "gate_probabilities": {
+                "en-15s": 0.0480989,
+                "en-60s": 0.0543655,
+                "en-partial": 0.2009736,
+                "fr-multipiece-16k": 0.939177,
+                "hi-16k": 0.9600492,
+                "silence800": 0.5346584
+              },
+              "preferred_devices": {
+                "en": {
+                  "None": 3632,
+                  "MLNeuralEngineComputeDevice": 1567
+                },
+                "other": {
+                  "None": 3632,
+                  "MLNeuralEngineComputeDevice": 1567
+                },
+                "gate": {
+                  "None": 3632,
+                  "MLNeuralEngineComputeDevice": 1567
+                }
+              },
+              "all_compute_operations_prefer_ane": true,
+              "observed_load_ms": {
+                "en": 12656.843,
+                "other": 254.98,
+                "gate": 248.447
+              },
+              "warm_median_ms_full_window": {
+                "en": 23.742,
+                "other": 25.366,
+                "gate": 21.85
+              },
+              "thermal_state_after_route": {
+                "en": 1,
+                "other": 1,
+                "gate": 1
+              }
+            }
+          },
+          "loading_only": {
+            "load-eager": {
+              "processes": 3,
+              "median_load_ms": 616.211,
+              "load_range_ms": [
+                273.704,
+                647.497
+              ],
+              "median_current_footprint_bytes": 9290064,
+              "thermal_states": [
+                1
+              ]
+            },
+            "load-en": {
+              "processes": 3,
+              "median_load_ms": 135.149,
+              "load_range_ms": [
+                133.222,
+                139.007
+              ],
+              "median_current_footprint_bytes": 8929592,
+              "thermal_states": [
+                1
+              ]
+            },
+            "load-other": {
+              "processes": 3,
+              "median_load_ms": 138.515,
+              "load_range_ms": [
+                135.447,
+                143.304
+              ],
+              "median_current_footprint_bytes": 8716600,
+              "thermal_states": [
+                1
+              ]
+            },
+            "load-auto-en": {
+              "processes": 3,
+              "median_load_ms": 188.699,
+              "load_range_ms": [
+                184.406,
+                193.163
+              ],
+              "median_current_footprint_bytes": 9142584,
+              "thermal_states": [
+                1
+              ]
+            },
+            "load-auto-other": {
+              "processes": 3,
+              "median_load_ms": 185.17,
+              "load_range_ms": [
+                184.378,
+                192.601
+              ],
+              "median_current_footprint_bytes": 8913232,
+              "thermal_states": [
+                1
+              ]
+            }
+          }
+        },
+        "sixbit": {
+          "variants": {
+            "separate": {
+              "completed_finite_predictions": 18,
+              "identical_to_separate": 18,
+              "max_absolute_to_separate": 0.0,
+              "max_relative_l2_to_fp32": 0.13783479383561187,
+              "gate_decisions_matching_fp32": 6,
+              "gate_probabilities": {
+                "en-15s": 0.0487875,
+                "en-60s": 0.0548328,
+                "en-partial": 0.2124136,
+                "fr-multipiece-16k": 0.9380075,
+                "hi-16k": 0.961548,
+                "silence800": 0.5581152
+              },
+              "preferred_devices": {
+                "en": {
+                  "None": 3542,
+                  "MLNeuralEngineComputeDevice": 1537
+                },
+                "other": {
+                  "None": 3632,
+                  "MLNeuralEngineComputeDevice": 1561
+                },
+                "gate": {
+                  "None": 1802,
+                  "MLNeuralEngineComputeDevice": 781
+                }
+              },
+              "all_compute_operations_prefer_ane": true,
+              "observed_load_ms": {
+                "en": 13946.671,
+                "other": 14531.145,
+                "gate": 7267.919
+              },
+              "warm_median_ms_full_window": {
+                "en": 24.814,
+                "other": 25.829,
+                "gate": 14.772
+              },
+              "thermal_state_after_route": {
+                "en": 1,
+                "other": 1,
+                "gate": 1
+              }
+            },
+            "shared": {
+              "completed_finite_predictions": 18,
+              "identical_to_separate": 18,
+              "max_absolute_to_separate": 0.0,
+              "max_relative_l2_to_fp32": 0.13783479383561187,
+              "gate_decisions_matching_fp32": 6,
+              "gate_probabilities": {
+                "en-15s": 0.0487875,
+                "en-60s": 0.0548328,
+                "en-partial": 0.2124136,
+                "fr-multipiece-16k": 0.9380075,
+                "hi-16k": 0.961548,
+                "silence800": 0.5581152
+              },
+              "preferred_devices": {
+                "en": {
+                  "None": 3542,
+                  "MLNeuralEngineComputeDevice": 1537
+                },
+                "other": {
+                  "None": 3632,
+                  "MLNeuralEngineComputeDevice": 1561
+                },
+                "gate": {
+                  "None": 1802,
+                  "MLNeuralEngineComputeDevice": 781
+                }
+              },
+              "all_compute_operations_prefer_ane": true,
+              "observed_load_ms": {
+                "en": 14861.611,
+                "other": 14903.058,
+                "gate": 7750.633
+              },
+              "warm_median_ms_full_window": {
+                "en": 25.795,
+                "other": 26.111,
+                "gate": 14.773
+              },
+              "thermal_state_after_route": {
+                "en": 1,
+                "other": 1,
+                "gate": 1
+              }
+            },
+            "unified": {
+              "completed_finite_predictions": 18,
+              "identical_to_separate": 18,
+              "max_absolute_to_separate": 0.0,
+              "max_relative_l2_to_fp32": 0.13783479383561187,
+              "gate_decisions_matching_fp32": 6,
+              "gate_probabilities": {
+                "en-15s": 0.0487875,
+                "en-60s": 0.0548328,
+                "en-partial": 0.2124136,
+                "fr-multipiece-16k": 0.9380075,
+                "hi-16k": 0.961548,
+                "silence800": 0.5581152
+              },
+              "preferred_devices": {
+                "en": {
+                  "None": 3632,
+                  "MLNeuralEngineComputeDevice": 1567
+                },
+                "other": {
+                  "None": 3632,
+                  "MLNeuralEngineComputeDevice": 1567
+                },
+                "gate": {
+                  "None": 3632,
+                  "MLNeuralEngineComputeDevice": 1567
+                }
+              },
+              "all_compute_operations_prefer_ane": true,
+              "observed_load_ms": {
+                "en": 14358.409,
+                "other": 252.456,
+                "gate": 244.738
+              },
+              "warm_median_ms_full_window": {
+                "en": 24.93,
+                "other": 25.897,
+                "gate": 22.676
+              },
+              "thermal_state_after_route": {
+                "en": 1,
+                "other": 1,
+                "gate": 1
+              }
+            }
+          },
+          "loading_only": {
+            "load-eager": {
+              "processes": 3,
+              "median_load_ms": 312.677,
+              "load_range_ms": [
+                298.046,
+                473.02
+              ],
+              "median_current_footprint_bytes": 9322856,
+              "thermal_states": [
+                1
+              ]
+            },
+            "load-en": {
+              "processes": 3,
+              "median_load_ms": 144.198,
+              "load_range_ms": [
+                143.382,
+                145.033
+              ],
+              "median_current_footprint_bytes": 9044352,
+              "thermal_states": [
+                1
+              ]
+            },
+            "load-other": {
+              "processes": 3,
+              "median_load_ms": 146.729,
+              "load_range_ms": [
+                145.601,
+                147.919
+              ],
+              "median_current_footprint_bytes": 8749440,
+              "thermal_states": [
+                1
+              ]
+            },
+            "load-auto-en": {
+              "processes": 3,
+              "median_load_ms": 196.992,
+              "load_range_ms": [
+                194.972,
+                202.94
+              ],
+              "median_current_footprint_bytes": 9372008,
+              "thermal_states": [
+                1
+              ]
+            },
+            "load-auto-other": {
+              "processes": 3,
+              "median_load_ms": 203.306,
+              "load_range_ms": [
+                198.847,
+                206.751
+              ],
+              "median_current_footprint_bytes": 8995128,
+              "thermal_states": [
+                1
+              ]
+            }
+          }
+        }
+      }
+    },
+    "measurement_scope": [
+      "Encoder-only prototypes; excludes GGUF, decoder and precise FP32 programs.",
+      "Feature equality and sample gate decisions; no integrated transcription/corpus validation.",
+      "OS specialization caches retained; observed first-seen loads are not fresh-install bounds.",
+      "Loading-only footprint excludes inference allocations and Core ML service processes.",
+      "Native function-specific compute plans; placement is not an Instruments hardware trace.",
+      "Automatic non-English unified execution requires two full predictions."
+    ],
+    "artifact_directory": "artifacts/transcribepsy-eu-coreml-experiments-20261116"
   }
 }

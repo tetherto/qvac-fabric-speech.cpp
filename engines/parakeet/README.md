@@ -104,6 +104,17 @@ and true unwindowed inference use additional FP32 programs that preserve native
 context: static GPU on macOS where fitting, flexible Core ML CPU on iOS or larger
 contexts. See the [full-EU guide](docs/transcribepsy-eu-coreml.md)
 for export commands, actual dispatch reporting, startup cost and CPU/Metal/Core ML measurements.
+Export from an F16 GGUF on macOS with Xcode; the guide includes its conversion
+command. The recommended full-EU baseline uses explicit FP16 encoders and decoder;
+six-bit encoders reduce deployment size with the documented quality trade-off.
+Fixed ANE routes currently load eagerly and duplicate trunk weights; the guide
+also describes possible size and startup optimizations.
+An [experimental export harness](docs/transcribepsy-eu-coreml.md#trying-route-sharing-exports)
+compares loading subsets, shared-weight multifunction packages and a route-input
+encoder; these prototypes are separate from runtime sidecar support.
+The [harness regression tests](examples/ios-coreml-bench/README.md#route-harness-regression-tests)
+cover reporting fixtures and native prediction/loading without ASR checkpoints,
+including malformed manifests and duplicate WAV stems.
 
 
 Optional Apple sidecars support eligible CTC, IndicConformer, Unified RNN-T,

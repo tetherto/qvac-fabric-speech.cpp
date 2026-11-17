@@ -10,13 +10,52 @@ on CPU. `auto` uses that classifier's original threshold and cropped input.
 
 ## Export and deployment
 
-Convert the checkpoint, adapters and gate to one GGUF as described in
-[models.md](models.md#transcribepsy). Use an isolated environment with
-`scripts/requirements-coreml.txt` and `safetensors`, then export each route:
+Run the commands below from the repository root on **macOS with Xcode installed**
+and its command-line tools selected. `--compile-dir` invokes `xcrun coremlc`;
+these compilation commands cannot run on Linux or on the target iPhone.
+Check the compiler and create an isolated Python environment:
+
+```bash
+xcrun --find coremlc
+python3 -m venv .venv-coreml
+.venv-coreml/bin/python -m pip install -r engines/parakeet/scripts/requirements-coreml.txt
+.venv-coreml/bin/python -m pip install safetensors sentencepiece huggingface_hub
+```
+
+Download the checkpoint, adapters and gate, then convert them to an **F16 GGUF**.
+See [models.md](models.md#transcribepsy) for the native inference conversion.
+The Q8_0 conversion in that guide produces a different file; it does not create
+the `.f16.gguf` used here. Convert from the original checkpoint, rather than
+re-expanding Q8_0 weights:
 
 ```bash
 MODEL_DIR=engines/parakeet/models
 PYTHON=.venv-coreml/bin/python
+.venv-coreml/bin/hf download qvac/TranscribePsy-250M-EU \
+  TranscribePsy-250M-EU.nemo adapters.safetensors language_gate.safetensors \
+  --local-dir "$MODEL_DIR"
+$PYTHON engines/parakeet/scripts/convert-nemo-to-gguf.py \
+  --ckpt "$MODEL_DIR/TranscribePsy-250M-EU.nemo" \
+  --hf-repo qvac/TranscribePsy-250M-EU \
+  --eu-adapters "$MODEL_DIR/adapters.safetensors" \
+  --eu-gate "$MODEL_DIR/language_gate.safetensors" \
+  --out "$MODEL_DIR/transcribepsy-250m-eu.f16.gguf" --quant f16 \
+  --description "TranscribePsy-250M-EU, FastConformer-TDT speech recognition (Apache-2.0)" \
+  --long-form-window-sec 60 --long-form-overlap 0.25
+```
+
+**Recommended baseline deployment:** FP16 fixed encoders/gate and an FP16 decoder,
+as exported below. This configuration has the broadest full-EU validation on
+Mac and iPhone. For size-constrained deployments, change `--nbits 0` to
+`--nbits 6` on the three fixed encoder commands, keeping the decoder FP16.
+Six-bit encoders/gate were also validated on both devices, with a small measured
+long-English quality cost; see [quantization coverage](#quantization-coverage-and-refreshed-six-bit-results).
+Both exporters default to `--nbits 6`, following the EU-sub deployment recipe,
+so keep the explicit precision flags when reproducing this full-EU baseline.
+In particular, omitting `--nbits 0` from the decoder command compresses its
+eligible weights even though the output projection defaults to FP16.
+
+```bash
 $PYTHON engines/parakeet/scripts/export-encoder-coreml-ane.py \
   --gguf "$MODEL_DIR/transcribepsy-250m-eu.f16.gguf" \
   --eu-route en --nbits 0 --check \
@@ -30,11 +69,17 @@ $PYTHON engines/parakeet/scripts/export-encoder-coreml-ane.py \
   --eu-route gate --nbits 0 --check \
   --out "$MODEL_DIR/transcribepsy-250m-eu-encoder-gate.mlpackage" --compile-dir "$MODEL_DIR"
 $PYTHON engines/parakeet/scripts/export-decoder-coreml-ane.py \
-  --gguf "$MODEL_DIR/transcribepsy-250m-eu.f16.gguf" --nbits 0 \
+  --gguf "$MODEL_DIR/transcribepsy-250m-eu.f16.gguf" --nbits 0 --nbits-out 0 --check \
   --out "$MODEL_DIR/transcribepsy-250m-eu-decoder.mlpackage" --compile-dir "$MODEL_DIR"
 ```
 
-Run these commands from the repository root. Main encoders default to 1,500 mel frames
+`--check` checks the export graph against its reference before conversion; it
+does not validate compiled low-precision predictions or deployment-corpus accuracy.
+The compressed decoder has only the focused Mac checks described
+[below](#conversion-and-decoder-regression-checks-2026-11-13), rather than the
+FP16 decoder's broader Mac/iPhone coverage.
+
+Main encoders default to 1,500 mel frames
 (15 s). The gate export uses at least 2,001 frames, covering the model's first
 20 seconds including preprocessing padding. `--nbits 0` retains FP16 weights;
 `--nbits 6` uses grouped-channel palettization. `--palettize-workers` can speed up
@@ -141,6 +186,167 @@ fixed programs before omitting native encoder weights.
 `PARAKEET_COREML_DISABLE=1` disables both sidecar families. Core ML may perform
 unsupported operations on CPU, so inspect the exporter's compute-plan report
 before claiming ANE placement.
+
+### Deployment size and possible optimizations
+
+The three fixed programs embed separate weights: English contains the full
+trunk, `other` contains the same trunk plus the CAFE adapters, and `gate`
+contains its first 12 layers. Together they store roughly 2.5 trunk copies.
+The [measured compiled sizes](#quantization-coverage-and-refreshed-six-bit-results)
+sum to 1,129.35 MiB for FP16 or 450.18 MiB for six-bit encoders/gate, excluding
+the decoder, GGUF and optional FP32 programs. EU-sub has one encoder and no
+separate adapted/gate programs, so its package size is not a full-EU size target
+with the current export layout. Compression reduces disk size without a measured
+inference-speed advantage.
+
+Fixed programs load eagerly under the default ANE policy, including for known
+language requests; selecting `en` or `other` currently skips gate inference,
+but does not skip loading the other fixed programs. Precise FP32 main programs
+already load lazily with one route/capacity resident per Engine. First-install
+specialization costs for the fixed programs are reported
+[below](#startup-memory-and-validation-receipts).
+
+Potential follow-up work, in increasing implementation scope:
+
+- Load fixed routes on demand: known-language requests would load just their
+  route, while `auto` would load the gate then the selected route. This could
+  reduce startup work and resident memory, but would not reduce shipped size.
+  It must preserve sidecar compatibility checks, Core ML-only ownership and
+  fallback behavior, including when an Engine changes routes.
+- Evaluate a multifunction package with shared trunk weights to reduce disk
+  duplication. Weight sharing, ANE placement and specialization/cache reuse
+  need measurement before claiming startup or memory savings.
+- Evaluate one program with a route input scaling the adapter contribution,
+  also returning layer-11 features for the gate. Automatic routing still needs
+  a gate decision before the adapted route can be selected; returning gate
+  features alone does not establish single-pass automatic routing. Validate
+  route semantics, ANE placement, 20-second windows and FP16 edge cases.
+
+These are optimization candidates, not implemented deployment options. The
+current separate static graphs retain the measured route and precision behavior.
+
+### Trying route-sharing exports
+
+[`export-transcribepsy-eu-coreml-experiment.py`](../scripts/export-transcribepsy-eu-coreml-experiment.py)
+provides isolated prototypes for the two export alternatives. These packages
+are **not runtime sidecars**: do not replace a deployed encoder with them.
+All experimental routes use the same 2,001-frame capacity, including the main
+encoders, so the gate covers its first 20 seconds and shared positional constants
+have matching shapes. Float32 graph checks run before every export.
+
+```bash
+EXPERIMENTS=/path/to/route-experiments
+for BITS in 0 6; do
+  DIR="$EXPERIMENTS/bits$BITS"
+  for ROUTE in en other gate unified; do
+    $PYTHON engines/parakeet/scripts/export-transcribepsy-eu-coreml-experiment.py export \
+      --gguf "$MODEL_DIR/transcribepsy-250m-eu.f16.gguf" \
+      --route "$ROUTE" --nbits "$BITS" --palettize-workers 4 \
+      --out "$DIR/$ROUTE.mlpackage"
+  done
+  $PYTHON engines/parakeet/scripts/export-transcribepsy-eu-coreml-experiment.py merge \
+    --source-dir "$DIR" --out "$DIR/shared.mlpackage"
+done
+```
+
+The `shared` package exposes `en`, `other` and `gate` functions; select the
+function when loading it. Core ML Tools deduplicates equal constants across
+functions ([Apple's multifunction guide](https://apple.github.io/coremltools/docs-guides/source/multifunction-models.html)).
+Core ML Tools 9 does not support post-training palettization of an already
+merged multifunction model, so the six-bit recipe compresses each source first.
+Multifunction programs require iOS 18/macOS 15, matching these exporters' existing
+deployment target. Shared disk weights do not establish shared specialization
+or shared resident allocations.
+
+The `unified` package takes the four ordinary mask/mel inputs plus an FP16
+`adapter_scale` tensor of shape `[1, 1, 1, 1]`: supply exactly 0 for English or
+1 for the adapted route. It returns `encoder_out` and `gate_features`.
+Only classify `gate_features` from scale 0; scale 1 includes earlier adapters
+and does not reproduce the unadapted gate. Automatic routing can reuse the
+scale-0 main output when the gate chooses English, but needs a second full
+prediction when it chooses `other`. Both adapter branches still compute at
+scale 0, and collecting gate features computes the entire trunk.
+
+[`route_experiments.py`](../examples/ios-coreml-bench/route_experiments.py) prepares
+native mel fixtures and independent FP32 references, compares actual compiled
+predictions, reports gate probabilities/decisions and compute plans, and measures
+loading subsets in separate processes:
+
+```bash
+PROBE=engines/parakeet/examples/ios-coreml-bench/route_experiments.py
+$PYTHON "$PROBE" prepare --gguf "$MODEL_DIR/transcribepsy-250m-eu.f16.gguf" \
+  --binary /path/to/parakeet --wav /path/to/english.wav --wav /path/to/french.wav \
+  --output "$EXPERIMENTS/fixtures"
+$PYTHON "$PROBE" compare --models "$EXPERIMENTS/bits0" \
+  --fixtures "$EXPERIMENTS/fixtures" --output "$EXPERIMENTS/fp16-results"
+$PYTHON "$PROBE" load --models "$EXPERIMENTS/bits0" --model-layout experiment \
+  --routes en other gate --output "$EXPERIMENTS/eager"
+$PYTHON "$PROBE" load --models "$EXPERIMENTS/bits0" --model-layout experiment \
+  --routes en --output "$EXPERIMENTS/known-en"
+$PYTHON "$PROBE" load --models "$EXPERIMENTS/bits0" --model-layout experiment \
+  --routes gate other --output "$EXPERIMENTS/auto-other"
+```
+
+Repeat the comparison for `bits6`. Subset loading measures the cost of deferring
+unused handles; it does not implement lazy selection in the current Engine or
+its Core ML-only ownership checks. Timings retain OS specialization caches and
+must not be presented as fresh-install cold-start measurements. Compiled
+numerics and sample gate decisions do not replace transcription/corpus tests.
+See the [iPhone harness](../examples/ios-coreml-bench/README.md#experimental-route-probe)
+for running the same fixture comparisons on a physical device.
+
+### Prototype measurements, 2026-11-16
+
+The Apple M4 Mac and physical iPhone 16e checks use the same F16 GGUF for all
+exports, Core ML Tools 9, and a common 2,001-frame capacity. Compiled encoder sizes below sum file lengths
+in MiB, excluding the GGUF, decoder and precise FP32 programs. They differ from
+the earlier `du` table, whose main encoders use 1,500 frames.
+
+| Encoder layout | FP16 MiB | Six-bit MiB |
+|---|---:|---:|
+| Separate English + adapted + gate | 1,136.70 | 457.52 |
+| Multifunction shared-weight package | 455.39 | 184.11 |
+| Single route-input program | 454.21 | 182.86 |
+
+Both alternatives reduce encoder storage by about 60%. Across six fixtures
+(15-second English, a full 2,001-frame English crop, 800-millisecond English,
+French, Hindi and silence), both prototypes reproduce the separate compiled
+outputs **exactly** at each precision on both devices: 72 route/fixture
+comparisons per device, 144 total. All 24 baseline gate decisions match the
+independent FP32 reference. Native compute
+plans assign every compute operation to ANE: 1,537/1,561/781 operations for the
+separate and multifunction English/adapted/gate functions, or 1,567 for the
+single route-input graph. Non-compute operations are reported separately.
+
+In three cache-warm Mac loading-only processes per configuration, loading all
+three fixed handles takes a median 186.8 ms (FP16) or 193.6 ms (six-bit).
+Loading only a known route takes 73.4–73.6 ms or 78.9–81.2 ms; gate plus selected
+route takes 110.8–112.7 ms or 118.6–120.4 ms. Current process physical footprint
+decreases by only about 1 MiB when loading one route instead of all three.
+This probe excludes the GGUF, decoder, inference allocations and Core ML service
+processes; it supports a cached handle-load saving, not a large production RAM
+claim or a fresh-install specialization bound.
+
+The corresponding iPhone loading-only medians are 616.2 ms / 312.7 ms for all
+three FP16/six-bit handles, 135.1–138.5 ms / 144.2–146.7 ms for one known route,
+and 185.2–188.7 ms / 197.0–203.3 ms for gate plus selected route. The phone's
+private physical-footprint difference is under 1 MiB. Mac runs include nominal
+and fair thermal states; all repeated phone loading runs are fair. These are
+indicative cached initialization measurements, not controlled performance
+comparisons or inference-speed claims. We still observed substantial first-seen
+load work for each multifunction entry point; shared weights alone did not
+establish shared ANE specialization. The single graph's subsequent route loads
+used the already specialized program.
+
+Multifunction sharing preserves the existing per-route graphs and is the least
+invasive disk-size candidate. The single program additionally shares one loaded
+graph across route inputs, but automatic non-English selection needs two full
+predictions. Neither prototype is integrated into Engine routing, fallback or
+Core ML-only ownership. Raw receipts are retained under
+`artifacts/transcribepsy-eu-coreml-experiments-20261116/` outside the source tree.
+The durable [results JSON](transcribepsy-eu-coreml-results.json) includes sizes,
+per-device/per-precision equality and gate checks, function-specific placement,
+load measurements, thermal states and the scope limits under `route_sharing_experiments`.
 
 ## API, CLI, and streaming behavior
 

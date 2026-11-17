@@ -470,8 +470,9 @@ void set_meta(gguf_context * g, const json & e) {
             std::vector<uint8_t> raw;
             for (const json & x : v) {
                 auto put = [&](auto val) {
-                    const auto * b = reinterpret_cast<const uint8_t *>(&val);
-                    raw.insert(raw.end(), b, b + sizeof(val));
+                    const size_t at = raw.size();
+                    raw.resize(at + sizeof(val));
+                    std::memcpy(raw.data() + at, &val, sizeof(val));
                 };
                 switch (et) {
                     case GGUF_TYPE_UINT8: put(x.get<uint8_t>()); break;
