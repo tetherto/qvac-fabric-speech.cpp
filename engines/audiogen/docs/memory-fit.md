@@ -70,18 +70,23 @@ The template's constants (`coreml-templates/acestep-vae-t64/template.json`,
 schedule (`test-acestep-vae-coreml --memory-schedule`, early and late
 completion) on every host in `validated_for` (an M2 on macOS 27.2.1 and the
 CI runner's M4 Max on macOS 26.7.2), so the envelope adds no margin of its own.
-The largest values, each over the footprint just before it began, came from
-the M2: the generation and compile 242.6 MiB, the load and warm-up 854.9 MiB
-(the warm-up prediction allocates the program's GPU and CPU segments), the
-steady state while loaded 854.0 MiB (the M4 Max: 242.4, 555.3 and 555.3 MiB).
-The charges are a transient of 1069 MiB (the load; the generation charge is
-408 MiB) and a resident decoder of 1068 MiB, 2137 MiB together, while a whole
+The largest values came from the M2: the generation and compile 242.6 MiB
+and the steady state while loaded 854.1 MiB, each over the footprint just
+before it began, and, after a late run's eviction, 1097.4 MiB over the warmed
+ggml-only baseline (preparation leftovers included, since that is what the
+transient covers outside the VAE decode phase; the load and warm-up alone
+peaked at 854.4 MiB over the footprint just before the load). The M4 Max
+stayed below each (242.4 and 555.3 MiB; at most 797.0 MiB over the baseline).
+The charges are a transient of 1372 MiB (the load; the generation charge is
+408 MiB) and a resident decoder of 1068 MiB, 2440 MiB together, while a whole
 run peaked at 1097.4 MiB over the ggml baseline: the load's plateau is the
 resident decoder's memory, which the envelope's resident + transient form
-counts twice. A cold Neural Engine compile is admitted only while 411 MiB are
+counts twice. A cold Neural Engine compile is admitted only while 915 MiB are
 free (`ane_compile_reserve_bytes`, 1.25 times `ANECompilerService`'s largest
-growth during a load, 328.7 MiB on the M4 Max; on the M2 it grew at most
-97.6 MiB and never exceeded 187.0 MiB in all).
+absolute size while a load ran, 731.4 MiB on the M4 Max, whose service always
+held 373-406 MiB of other jobs' compiles before the load; growth over a
+service that already holds memory understates a cold compile, so the absolute
+size bounds it. On the M2 it never exceeded 466.6 MiB).
 
 With `coreml.memory_budget_bytes`, a budget that only the ggml projection
 fits resolves `use = off` instead (memory-degrade): `coreml.disabled_reason`

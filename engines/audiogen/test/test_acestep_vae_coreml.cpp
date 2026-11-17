@@ -237,6 +237,8 @@ struct completion_barrier {
 
 // ---- model-free checks -------------------------------------------------------
 
+float eligible_duration(int64_t warm_load_ms, float at_least);
+
 void self_test() {
     std::fprintf(stderr, "self-test\n");
     using detail::vae_ggml_decode_estimate_ms;
@@ -259,6 +261,8 @@ void self_test() {
                   !coreml_cache_dir(nullptr, nullptr, "/Users/u", false) && !coreml_cache_dir(nullptr, nullptr, "", true),
               "music-cli cache directory: the flag, then QVAC_COREML_CACHE_DIR, then the macOS default " + def);
     }
+    check(eligible_duration(1000, 20.0f) == 40.0f && eligible_duration(100, 20.0f) == 20.0f,
+          "a fresh process's eligible decode: 3 ms per frame covers twice the 1.5 x warm-load budget");
     check(has_case("lowmem,prewarm-async", "prewarm-async") && !has_case("lowmem,prewarm-async", "prewarm") &&
               has_case("prewarm", "prewarm") && !has_case("", "prewarm"),
           "device case names match exactly");
@@ -523,7 +527,7 @@ void fit_stable(const std::string & vae, const std::string & models, const std::
     if (ra.route == "generate") {
         // The template's measured charges (template.json memory), pinned so a
         // change to them is deliberate.
-        constexpr uint64_t RESIDENT = 1119879168, TRANSIENT = 1120927744, RESERVE = 430964736;
+        constexpr uint64_t RESIDENT = 1119879168, TRANSIENT = 1438646272, RESERVE = 959447040;
         check(ra.validated && ra.resident_bytes == RESIDENT && ra.transient_bytes == TRANSIENT &&
                   ra.envelope_bytes == RESIDENT + TRANSIENT && ra.ane_compile_reserve_bytes == RESERVE,
               "template charges: resident " + std::to_string(ra.resident_bytes) + ", transient " +
@@ -779,10 +783,33 @@ int run_child(const std::vector<std::string> & args) {
 #endif
 }
 
+// The first decode the bounded wait serves: its deadline (3 ms per latent
+// frame, 25 frames per second) must cover the wait's budget (1.5 x the hinted
+// warm load) twice over, because a new process's first load also starts Core
+// ML and its Neural Engine client (on the M2 about 1.7 s against 0.9-1.0 s
+// for the in-process reloads that trained the hint).
+float eligible_duration(int64_t warm_load_ms, float at_least) {
+    const double frames = 2.0 * 1.5 * (double) warm_load_ms / detail::VAE_GGML_DECODE_MS_PER_FRAME;
+    return std::max(at_least, (float) std::ceil(frames / 25.0));
+}
+
 void case_cached(const std::string & self, const std::string & models, const std::string & cache, float duration) {
     std::fprintf(stderr, "cached: a second process's first decode on a primed cache\n");
-    const int rc = run_child({self, "--models", models, "--first-decode", cache, "--duration",
-                              std::to_string(duration)});
+    int64_t w = 0;
+#ifdef AUDIOGEN_USE_COREML
+    CoremlOptions o;
+    o.cache_dir = cache;
+    const std::string units = detail::vae_coreml_plan_route(models + "/vae-BF16.gguf", o).compute_units;
+    for (const fs::path & art : artifact_dirs(cache)) {
+        if (auto h = rt::detail::read_hint(runtime_hint_path(cache, art, units)); h && h->warm_load_ms) {
+            w = std::max(w, *h->warm_load_ms);
+        }
+    }
+#endif
+    check(w > 0, "the primed cache holds a warm hint (" + std::to_string(w) + " ms)");
+    const float d = eligible_duration(w, duration);
+    std::fprintf(stderr, "  hinted warm load %lld ms: the child generates %.0f s\n", (long long) w, d);
+    const int rc = run_child({self, "--models", models, "--first-decode", cache, "--duration", std::to_string(d)});
     check(rc == 0, "the child process's first decode ran on Core ML (exit " + std::to_string(rc) + ")");
 }
 

@@ -356,11 +356,15 @@ jobs:
 
       # The low-memory semantics on the staged generation models, each case
       # on an empty cache: an encoding starts no decoder job; three
-      # generate() calls (the first decodes on ggml while the cold load
-      # completes after its eviction, writing its hint without repopulating
-      # the slot; the second and third reload warm and decode on Core ML);
-      # {prewarm all, wait construct} succeeds with no decoder retained; an
-      # eviction cancels an unstarted job. Fit (route and whole projection) is
+      # generate() calls (the first decodes on ggml while the cold load is
+      # held at its completion until after its eviction, then writes its hint
+      # without repopulating the slot; the second and third reload warm and
+      # decode on Core ML); a second process's first decode on that primed
+      # cache runs on Core ML; cancelled decodes (pending, ready, waiting,
+      # strict) leave the slot idle and start no ggml decode; a warm repaint
+      # releases the decoder before its encode; {prewarm all} with and without
+      # wait construct succeeds with no decoder retained; an eviction cancels
+      # an unstarted job; memory-degrade follows the caller's decision. Fit (route and whole projection) is
       # the same on an empty cache, on one holding a simulated generation in
       # the runtime's layout with a non-stale and then a stale hint, and on the
       # cache the three generations really populated (its compiled artifact
@@ -388,12 +392,15 @@ jobs:
       # the eviction, writes its hint and releases its model), each from a
       # re-signed copy of the test and an empty cache, so every Neural Engine
       # load is cold. Each run prints its per-phase table and a one-line JSON
-      # report and fails when a phase exceeds the constant that charges it;
-      # ANECompilerService is held by its growth during the load (its absolute
-      # size includes what other jobs on this runner's Mac compiled). Known
-      # failure mode: a co-hosted job compiling for the Neural Engine during
-      # the load counts as growth; it shows as one run growing far more than
-      # the others; rerun the job.
+      # report and fails when a phase exceeds the constant that charges it
+      # (a late run's samples after the eviction are held, over the warmed
+      # ggml-only baseline, to the transient charge). ANECompilerService is
+      # held by its absolute size while loading, which includes what other
+      # jobs on this runner's Mac compiled: the reserve is set from that
+      # absolute size, since growth over a service that already holds memory
+      # understates a cold compile. Known failure mode: a co-hosted job
+      # compiling for the Neural Engine during the load raises that size; it
+      # shows as one run far above the others; rerun the job.
       - name: Memory schedule (generated ACE-Step VAE decoder, overlapped, this runner)
         if: >-
           !cancelled() &&

@@ -31,10 +31,10 @@
     "runtime_weight_bytes": 170113920,
     "workspace_bytes": 948765824,
     "compile_peak_bytes": 0,
-    "ane_compile_reserve_bytes": 430964736,
+    "ane_compile_reserve_bytes": 959447040,
     "load_peak_bytes": {
       "cpu_and_ane": null,
-      "all": 1120927744,
+      "all": 1438646272,
       "cpu_and_gpu": null,
       "cpu_only": null
     },
@@ -54,9 +54,9 @@
     ],
     "measured": {
       "margin": 1.25,
-      "runs": 10,
+      "runs": 20,
       "resident_bytes": 1119879168,
-      "basis": "Each constant is 1.25 x the largest value measured over every overlapped generated-schedule run on the validated_for hosts (on each host three early-completion and two late-completion runs), rounded up to 1 MiB, so the envelope's own margin is 1.0: the prepare charge (generation_peak_bytes + 8 MiB + compile_peak_bytes, compile_peak_bytes 0) covers the prepare from the start of generation to the end of the compile (at most 242.6 MiB, M2); load_peak_bytes.all covers the load and warm-up, early (over the footprint just before the load) or late (from the eviction until the load that finished after it released its model), at most 854.9 MiB (M2); the resident part (runtime_weight_bytes + 2 x I/O + workspace_bytes, runtime_weight_bytes being weight.bin's size) covers the steady state over the footprint just before the load, at most 854.0 MiB (M2), which holds the memory the warm-up prediction allocates for the program's GPU and CPU segments; the M4 Max stayed below each of these (prepare 242.4, load 555.3, steady 555.3 MiB). ane_compile_reserve_bytes covers ANECompilerService's largest growth during a load, 328.7 MiB on the M4 Max (234.3-328.7 MiB in four runs; the fifth found the service already at its load size), which also exceeds the service's largest absolute size while the M2 loaded (187.0 MiB; it grew at most 97.6 MiB there). No run found the service clean: it held 67-101 MiB before every M2 load and 386-406 MiB, left by other jobs' compiles on the runner's Mac, before every M4 Max load, so the M4 Max's absolute sizes (up to 731.4 MiB) are not this load's. A service that already holds memory may reuse some of it, but on the M2 a load from a clean service (20 MiB) grew 104.0 MiB against at most 97.6 MiB from a dirty one, inside the margin"
+      "basis": "Each constant is 1.25 x the largest value measured over every overlapped generated-schedule run on the validated_for hosts (20 runs: on each host five or six early-completion and four or five late-completion runs; the two latest M2 late runs evict while the load is held at its completion and release it after), rounded up to 1 MiB, so the envelope's own margin is 1.0. The prepare charge (generation_peak_bytes + 8 MiB + compile_peak_bytes, compile_peak_bytes 0) covers the prepare from the start of generation to the end of the compile (at most 242.6 MiB, M2). load_peak_bytes.all is the transient charged outside the VAE decode phase, so it covers every sample after a late run's eviction taken over the warmed ggml-only baseline, preparation leftovers included: at most 1097.4 MiB (M2; earlier late runs are bounded by their whole-run peak over that baseline, the M4 Max at most 797.0 MiB), which also covers the load and warm-up over the footprint just before the load (at most 854.4 MiB, M2). The resident part (runtime_weight_bytes + 2 x I/O + workspace_bytes, runtime_weight_bytes being weight.bin's size) covers the steady state over the footprint just before the load, at most 854.1 MiB (M2), which holds the memory the warm-up prediction allocates for the program's GPU and CPU segments; the M4 Max stayed below each of these (prepare 242.4, load 555.3, steady 555.3 MiB). ane_compile_reserve_bytes covers ANECompilerService's absolute size while a load runs, 731.4 MiB on the M4 Max (its largest; the M2 466.6 MiB). No M4 Max run found the service clean (it held 373-406 MiB of other jobs' compiles before every load, and grew 0-329 MiB over that), and a service that already holds memory may reuse it, so its growth understates a cold compile on a clean service; the absolute size bounds it. On the M2 a load from a clean service (20 MiB) grew 104.0 MiB against at most 97.6 MiB from a dirty one."
     }
   },
   "patches": [],
