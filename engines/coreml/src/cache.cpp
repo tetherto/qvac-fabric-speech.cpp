@@ -802,6 +802,13 @@ PrepareOutcome prepare(const PrepareInputs & in, PrepareContext * ctx) {
     if (Error e = l.ensure(); !e.ok()) return failed_outcome(out, e);
 
     // Step 1: open the source once; it must be the file the engine loaded.
+    if (in.expected.changed) {
+        return failed_outcome(out,
+                              Error::transient("source_changed: " + in.expected.path +
+                                                   " is not certainly the file the engine loaded its weights from",
+                                               failed::ERROR_DOMAIN, failed::SOURCE_CHANGED),
+                              "source_changed");
+    }
     Error err;
     std::unique_ptr<OpenSource> src = in.open(in.expected.path, err);
     if (!src) return failed_outcome(out, err.ok() ? Error::transient("cannot open " + in.expected.path) : err);

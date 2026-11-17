@@ -91,6 +91,11 @@ struct SourceStat {
     int64_t mtime_ns = 0;
     uint64_t ino = 0;
     uint64_t dev = 0;
+    // The file at `path` is not certainly the one the engine loaded its
+    // weights from (it was replaced during the load, or the engine generates
+    // for another path): prepare fails with source_changed and generates
+    // nothing. See generation::loaded_source.
+    bool changed = false;
 };
 
 struct PrepareRequest {
