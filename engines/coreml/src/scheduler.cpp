@@ -889,13 +889,14 @@ void Runtime::set_phase(const std::shared_ptr<Job> & j, SlotState st) {
     state_cv.notify_all();
 }
 
-void Runtime::fail(const std::shared_ptr<Job> & j, const Error & e, SlotState st) {
+void Runtime::fail(const std::shared_ptr<Job> & j, const Error & e, SlotState st, const std::string & reason) {
     Graveyard gy;
     std::lock_guard<std::mutex> lk(mu);
-    fail_locked(j, e, st, gy);
+    fail_locked(j, e, st, gy, reason);
 }
 
-void Runtime::fail_locked(const std::shared_ptr<Job> & j, const Error & e, SlotState st, Graveyard & gy) {
+void Runtime::fail_locked(const std::shared_ptr<Job> & j, const Error & e, SlotState st, Graveyard & gy,
+                          const std::string & reason) {
     j->done = true;
     gy.keep(j->adopt);  // released outside mu
     j->adopt.reset();
@@ -907,7 +908,7 @@ void Runtime::fail_locked(const std::shared_ptr<Job> & j, const Error & e, SlotS
         c->job.reset();
         c->state = st;
         c->error = e;
-        c->reason = e.message;
+        c->reason = reason.empty() ? e.message : reason;
     }
     if (j->kind == JobKind::load) ++stats_.load_failures;
     event_locked("fail:" + j->load.stage + "/" + j->load.function + ":" + e.message);
@@ -1111,6 +1112,14 @@ void Runtime::run_prepare(const std::shared_ptr<Job> & j) {
     }
     if (r.would_block) {
         requeue(j);
+        return;
+    }
+    if (!r.unsupported.empty()) {
+        // Not a failure: generation cannot run here (status unsupported(<reason>)).
+        Error e = r.error;
+        e.cls = ErrorClass::none;
+        if (e.message.empty()) e.message = "generation is unsupported: " + r.unsupported;
+        fail(j, e, SlotState::unsupported, r.unsupported);
         return;
     }
     if (!r.error.ok() || r.artifact_path.empty()) {

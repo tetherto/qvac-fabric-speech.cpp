@@ -105,6 +105,7 @@ struct Behaviour {
     bool warm_block = false;  // WarmFn waits for release("warm:<fn>")
     bool warm_fail = false;
     int gone = 0;              // first N load calls find their generated artifact gone
+    std::string unsupported;   // prepare: generation is unsupported here, for this reason
 };
 
 struct World {
@@ -278,6 +279,11 @@ PrepareResult fake_prepare(const PrepareRequest & req, PrepareContext & ctx) {
     if (b.block) block_on(key);
     ctx.phase(PreparePhase::compiling);
     leave(key);
+    if (!b.unsupported.empty()) {
+        out.unsupported = b.unsupported;
+        out.error = Error{ErrorClass::none, "test", 3, "fake volume without flock"};
+        return out;
+    }
     if (b.fail) {
         out.error = Error::deterministic("fake prepare failure");
         return out;
@@ -2069,6 +2075,26 @@ void case_artifact_gone_regenerates() {
     CHECK(calls("prepare:ak") == 3);
 }
 
+// An unsupported cache volume leaves the slot unsupported(<reason>), terminal
+// and without an error class, never failed.
+void case_prepare_unsupported() {
+    Env e;
+    Behaviour b;
+    b.unsupported = "cache_fs";
+    set_beh("prepare:uk", b);
+    auto gen = e.generated("ufn", "uk");
+    gen->request(Priority::now);
+    CHECK(wait_for([&] { return gen->state() == SlotState::unsupported; }));
+    const SlotStatus st = gen->status();
+    CHECK(st.reason == "cache_fs");
+    CHECK(st.error_class == ErrorClass::none);
+    const auto j = nlohmann::json::parse(to_json(st));
+    CHECK(j["state"] == "unsupported(cache_fs)" && j["error_class"].is_null());
+    gen->request(Priority::now);
+    std::this_thread::sleep_for(50ms);
+    CHECK(calls("prepare:uk") == 1 && calls("ufn") == 0);
+}
+
 void case_memory_admission() {
     Env e;
     g_mem = 1 << 20;  // 1 MiB available
@@ -2964,6 +2990,7 @@ const Case kCases[] = {
     {"call-wait-pins-nothing", case_call_wait_pins_nothing},
     {"key-lock-requeue", case_key_lock_requeue},
     {"artifact-gone-regenerates", case_artifact_gone_regenerates},
+    {"prepare-unsupported", case_prepare_unsupported},
     {"memory-admission", case_memory_admission},
     {"memory-behind-gate", case_memory_behind_gate},
     {"evicted-after-ready-group", case_evicted_after_ready_group},

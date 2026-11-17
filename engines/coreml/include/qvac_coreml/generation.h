@@ -83,7 +83,8 @@ PrepareRequest prepare_request(const Candidate & c, const SourceStat & source, c
 
 // PrepareFn of route `generate`: the cache pipeline (memo, digest, generate,
 // compile, publish, adopt) with the on-device compile. The artifact's lease
-// is released when it returns; the LoadFn takes its own (begin_load).
+// is released when it returns; the LoadFn takes its own (begin_load). An
+// unsupported cache volume returns PrepareResult::unsupported ("cache_fs").
 PrepareResult prepare(const PrepareRequest & req, PrepareContext & ctx);
 
 // For LoadFns. A generated artifact (LoadRequest::tmpl set) loads under the

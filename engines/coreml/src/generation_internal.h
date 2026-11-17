@@ -10,7 +10,8 @@ namespace QVAC_COREML_NS {
 namespace generation {
 namespace internal {
 
-// The PrepareResult of route `generate` for one run of the cache pipeline.
+// The PrepareResult of route `generate` for one run of the cache pipeline. An
+// unsupported cache volume becomes PrepareResult::unsupported, not an error.
 PrepareResult result_of(cache::PrepareOutcome & o);
 
 }  // namespace internal

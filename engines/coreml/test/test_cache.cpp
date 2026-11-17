@@ -1784,6 +1784,27 @@ void case_generated_artifact_pruned_before_load() {
     CHECK(!generation::begin_load(req, r));
     CHECK(r.artifact_gone && r.lease_fd < 0 && !r.error.ok());
 }
+
+// An unsupported cache volume: the slot is unsupported(cache_fs), not failed.
+void case_generated_unsupported_cache_fs() {
+    Env env;
+    const std::string a = env.source("a.gguf");
+    g_sched_inputs = env.inputs(a);
+    g_sched_inputs.fs_probe = [](const std::string &, cache::FsFacts & f) {
+        f.local = false;
+        f.fstype = "nfs";
+        f.free_bytes = 1ull << 40;
+        return true;
+    };
+    auto mgr = glue_manager();
+    auto s = glue_slot(mgr, env, a);
+    s->request(Priority::now);
+    CHECK(wait_state(s, SlotState::unsupported));
+    const SlotStatus st = s->status();
+    CHECK(st.reason == "cache_fs" && st.error_class == ErrorClass::none);
+    CHECK(state_label(st.state, st.reason) == "unsupported(cache_fs)");
+    CHECK(g_compiles == 0);
+}
 #endif
 
 }  // namespace
@@ -1831,6 +1852,7 @@ int main(int argc, char ** argv) {
                          {"scheduler-hint-pruned", case_scheduler_hint_pruned},
 #if defined(QVAC_COREML_HAVE_GGML)
                          {"generated-artifact-pruned-before-load", case_generated_artifact_pruned_before_load},
+                         {"generated-unsupported-cache-fs", case_generated_unsupported_cache_fs},
 #endif
                      },
                      "test-coreml-cache");

@@ -119,6 +119,9 @@ struct PrepareResult {
     bool cache_hit = false;     // status route: cached vs generated
     Error error;
     bool would_block = false;   // a key lock was busy: re-queue with backoff
+    // Non-empty: generation cannot run here, for this status reason (e.g.
+    // "cache_fs"). The slot reports unsupported(<reason>), not failed.
+    std::string unsupported;
 };
 
 using PrepareFn = PrepareResult (*)(const PrepareRequest & req, PrepareContext & ctx);

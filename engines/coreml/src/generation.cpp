@@ -310,7 +310,9 @@ PrepareResult result_of(cache::PrepareOutcome & o) {
             break;
         case cache::PrepareOutcome::Kind::would_block: r.would_block = true; break;
         case cache::PrepareOutcome::Kind::unsupported:
-            r.error = Error::deterministic("unsupported: " + (o.reason.empty() ? o.error.message : o.reason));
+            r.unsupported = o.reason.empty() ? "cache_fs" : o.reason;
+            r.error = o.error;
+            r.error.cls = ErrorClass::none;
             break;
         case cache::PrepareOutcome::Kind::failed:
             r.error = o.error.ok() ? Error::transient(o.reason.empty() ? "prepare failed" : o.reason) : o.error;

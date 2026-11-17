@@ -272,9 +272,12 @@ private:
     void run_prepare(const std::shared_ptr<Job> & j);
     void publish(const std::shared_ptr<Job> & j, const std::shared_ptr<SharedModel> & m, bool loaded,
                  const std::optional<HintView> & hint);
-    void fail(const std::shared_ptr<Job> & j, const Error & e, SlotState st = SlotState::failed);
-    // Ends job `j`, started or still queued: every live subscriber takes `st`.
-    void fail_locked(const std::shared_ptr<Job> & j, const Error & e, SlotState st, Graveyard & gy);
+    void fail(const std::shared_ptr<Job> & j, const Error & e, SlotState st = SlotState::failed,
+              const std::string & reason = {});
+    // Ends job `j`, started or still queued: every live subscriber takes `st`,
+    // with `reason` (default: the error's message).
+    void fail_locked(const std::shared_ptr<Job> & j, const Error & e, SlotState st, Graveyard & gy,
+                     const std::string & reason = {});
     void requeue(const std::shared_ptr<Job> & j);
     // Ends load job `j`, whose generated artifact was gone: each live
     // generate-route subscriber returns to preparation (at most
