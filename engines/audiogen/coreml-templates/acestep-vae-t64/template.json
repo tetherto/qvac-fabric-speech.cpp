@@ -25,22 +25,34 @@
   "pad_safe": false,
   "state_bytes": 0,
   "expected_warm_load_ms": {
-    "main": 0
+    "main": 525
   },
   "memory": {
-    "runtime_weight_bytes": 0,
-    "workspace_bytes": 0,
-    "compile_peak_bytes": null,
-    "ane_compile_reserve_bytes": null,
+    "runtime_weight_bytes": 170113920,
+    "workspace_bytes": 948765824,
+    "compile_peak_bytes": 0,
+    "ane_compile_reserve_bytes": 245366784,
     "load_peak_bytes": {
       "cpu_and_ane": null,
-      "all": null,
+      "all": 1120927744,
       "cpu_and_gpu": null,
       "cpu_only": null
     },
-    "margin": 1.25,
-    "coreml_bound": "conservative",
-    "validated_for": []
+    "margin": 1.0,
+    "coreml_bound": "measured",
+    "validated_for": [
+      {
+        "units": "all",
+        "os": "27.2.1",
+        "chip": "M2"
+      }
+    ],
+    "measured": {
+      "margin": 1.25,
+      "runs": 5,
+      "resident_bytes": 1119879168,
+      "basis": "Each constant is 1.25 x the largest value measured over every overlapped generated-schedule run on the validated_for hosts (three early-completion and two late-completion runs), rounded up to 1 MiB, so the envelope's own margin is 1.0: the prepare charge (generation_peak_bytes + 8 MiB + compile_peak_bytes, compile_peak_bytes 0) covers the prepare from the start of generation to the end of the compile (at most 242.6 MiB); load_peak_bytes.all covers the load and warm-up, early (over the footprint just before the load) or late (from the eviction until the load that finished after it released its model), at most 854.9 MiB; the resident part (runtime_weight_bytes + 2 x I/O + workspace_bytes, runtime_weight_bytes being weight.bin's size) covers the steady state over the footprint just before the load, at most 854.0 MiB, which holds the memory the warm-up prediction allocates for the program's GPU and CPU segments; ane_compile_reserve_bytes covers ANECompilerService's largest absolute size while loading (190.8 MiB), since no run found the service clean (it held 67-106 MiB before every load) and a service that already holds memory reuses it, so its growth (at most 97.6 MiB) understates a cold compile on a clean host"
+    }
   },
   "patches": [],
   "prefer_ggml_on": [],

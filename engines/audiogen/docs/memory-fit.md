@@ -65,6 +65,21 @@ has two parts with their own residency:
   phase and is kept until the next VAE stage boundary), it is charged in every
   phase.
 
+The template's constants (`coreml-templates/acestep-vae-t64/template.json`,
+`memory`) are 1.25 times the largest value measured by the overlapped memory
+schedule (`test-acestep-vae-coreml --memory-schedule`, early and late
+completion) on every host in `validated_for`, so the envelope adds no margin of
+its own. Measured on an M2 (macOS 27.2.1), each over the footprint just before
+it began: the generation and compile 242.6 MiB, the load and warm-up 854.9 MiB
+(the warm-up prediction allocates the program's GPU and CPU segments), the
+steady state while loaded 854.0 MiB. The charges are a transient of 1069 MiB
+(the load; the generation charge is 408 MiB) and a resident decoder of 1068 MiB,
+2137 MiB together, while a whole run peaked at 1097.4 MiB over the ggml
+baseline: the load's plateau is the resident decoder's memory, which the
+envelope's resident + transient form counts twice. A cold Neural Engine
+compile is admitted only while 234 MiB are free (`ane_compile_reserve_bytes`,
+1.25 times `ANECompilerService`'s largest size while loading).
+
 With `coreml.memory_budget_bytes`, a budget that only the ggml projection
 fits resolves `use = off` instead (memory-degrade): `coreml.disabled_reason`
 is `memory`, the verdict is the ggml one, and an `Engine` created with the

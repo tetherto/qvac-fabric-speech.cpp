@@ -252,6 +252,16 @@ void fit_stable(const std::string & vae, const std::string & models, const std::
     (void) require;
 #endif
     check(route_line(ra) == route_line(rb), "route and envelope: empty cache == populated cache with hints");
+    if (ra.route == "generate") {
+        // The template's measured charges (template.json memory), pinned so a
+        // change to them is deliberate.
+        constexpr uint64_t RESIDENT = 1119879168, TRANSIENT = 1120927744, RESERVE = 245366784;
+        check(ra.validated && ra.resident_bytes == RESIDENT && ra.transient_bytes == TRANSIENT &&
+                  ra.envelope_bytes == RESIDENT + TRANSIENT && ra.ane_compile_reserve_bytes == RESERVE,
+              "template charges: resident " + std::to_string(ra.resident_bytes) + ", transient " +
+                  std::to_string(ra.transient_bytes) + ", envelope " + std::to_string(ra.envelope_bytes) +
+                  ", compiler reserve " + std::to_string(ra.ane_compile_reserve_bytes));
+    }
     // A second plan of the empty cache after the first one: nothing was written.
     check(route_line(detail::vae_coreml_plan_route(vae, a)) == route_line(ra) && bundles_under(empty) == 0,
           "planning writes nothing to the cache");
