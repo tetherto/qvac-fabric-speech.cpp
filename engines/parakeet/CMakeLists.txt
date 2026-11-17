@@ -3109,8 +3109,9 @@ if (PARAKEET_BUILD_TESTS)
     # use = off fails as today. No skip path.
     if (PARAKEET_COREML AND TARGET qvac-parakeet)
         add_executable(test-parakeet-coreml-runtime test/test_parakeet_coreml_runtime.cpp)
+        # Public API only: it must link against a shared qvac-parakeet.
         target_link_libraries(test-parakeet-coreml-runtime PRIVATE qvac-parakeet)
-        target_include_directories(test-parakeet-coreml-runtime PRIVATE include src ggml/include)
+        target_include_directories(test-parakeet-coreml-runtime PRIVATE include test)
         parakeet_apply_ccache(test-parakeet-coreml-runtime)
         set(_qvp_nd_q8_gguf "${PARAKEET_TEST_MODEL_DIR}/Nemotron-3-Diarization.q8_0.gguf")
         set(_qvp_nd_diarizer "${PARAKEET_TEST_MODEL_DIR}/Nemotron-3-Diarization-diarizer-1125.mlmodelc")

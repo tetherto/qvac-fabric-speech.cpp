@@ -21,16 +21,19 @@
 //   diarizer-pending      a diarizer capacity that is not ready -> kNoSidecar
 //                         -> ggml; ready after prewarm all -> Core ML
 //   coreml-only-full      PARAKEET_COREML_ONLY with a full GGUF keeps the ggml
-//                         encoder when Core ML is off or the takeover fails
-//   encoderless-use-off   an encoder-less GGUF with use = off fails with
-//                         kGgufLoadNoEncoderWeights, as today
+//                         encoder when Core ML is off or the takeover fails:
+//                         the engine is not on Core ML and transcribes as
+//                         use = off
+//   encoderless-use-off   an encoder-less GGUF with use = off fails to load
+//                         with kGgufLoadNoEncoderWeights (rc=17), as today
 //
-// Every case runs or fails: there is no skip path (exit 0 = pass, 1 = fail,
-// 2 = bad arguments).
+// Public Engine API only, so it links against a shared qvac-parakeet too; the
+// loader-level ownership checks live in test-coreml-encoder-owner. Every case
+// runs or fails: there is no skip path (exit 0 = pass, 1 = fail, 2 = bad
+// arguments).
 
 #include "coreml_test_options.h"
 #include "parakeet/engine.h"
-#include "parakeet_ctc.h"
 #include "test_utils.h"
 
 #include <algorithm>
@@ -153,9 +156,9 @@ void case_coreml_only_full(const std::string & gguf, const std::string & wav,
                            const parakeet::EngineResult & reference) {
     ::setenv(kCoremlOnlyEnv, "1", 1);
     {
-        parakeet::ParakeetCtcModel model;
-        const int rc = parakeet::load_from_gguf(gguf, model, 0, 99, false, "auto", off());
-        expect(rc == 0 && !parakeet::model_encoder_owned_by_coreml(model),
+        parakeet::Engine engine(engine_options(gguf, off()));
+        const parakeet::EngineResult r = engine.transcribe(wav);
+        expect(!engine.encoder_on_coreml() && r.encoder_backend == "ggml" && r.text == reference.text,
                "coreml-only-full: use = off keeps the GGUF's ggml encoder");
     }
     {
@@ -164,14 +167,10 @@ void case_coreml_only_full(const std::string & gguf, const std::string & wav,
         const fs::path dir = fresh_dir("no-sidecar");
         const fs::path staged = dir / fs::path(gguf).filename();
         fs::create_symlink(fs::absolute(gguf), staged);
-        parakeet::ParakeetCtcModel model;
-        const int rc = parakeet::load_from_gguf(staged.string(), model, 0, 99, false, "auto", CoremlOptions{});
-        expect(rc == 0 && !parakeet::model_encoder_owned_by_coreml(model),
-               "coreml-only-full: a failed takeover keeps the ggml encoder");
-        parakeet::Engine engine(engine_options(staged.string(), CoremlOptions{}));
+        parakeet::Engine engine(engine_options(staged.string(), coreml_ready_options()));
         const parakeet::EngineResult r = engine.transcribe(wav);
-        expect(r.text == reference.text && r.encoder_backend == "ggml",
-               "coreml-only-full: the kept ggml encoder transcribes as use = off");
+        expect(!engine.encoder_on_coreml() && r.text == reference.text && r.encoder_backend == "ggml",
+               "coreml-only-full: a failed takeover keeps the ggml encoder, which transcribes as use = off");
         std::error_code ec;
         fs::remove_all(dir, ec);
     }
@@ -179,11 +178,14 @@ void case_coreml_only_full(const std::string & gguf, const std::string & wav,
 }
 
 void case_encoderless(const std::string & gguf) {
-    parakeet::ParakeetCtcModel model;
-    const int rc = parakeet::load_from_gguf(gguf, model, 0, 0, false, "auto", off());
-    std::printf("       encoder-less load rc=%d\n", rc);
-    expect(rc == parakeet::kGgufLoadNoEncoderWeights,
-           "encoderless-use-off: kGgufLoadNoEncoderWeights, as today");
+    std::string error;
+    try {
+        parakeet::Engine engine(engine_options(gguf, off()));
+    } catch (const std::runtime_error & e) {
+        error = e.what();
+    }
+    std::printf("       encoder-less load: %s\n", error.empty() ? "(loaded)" : error.c_str());
+    expect(has(error, "(rc=17)"), "encoderless-use-off: kGgufLoadNoEncoderWeights (rc=17), as today");
 }
 
 }  // namespace

@@ -21,7 +21,9 @@
 // GGUF without the switch loads them. Without the sidecar that part exits 3
 // (skipped).
 // Standard TDT sidecars without validated seams must retain native weights
-// under PARAKEET_COREML_ONLY and reject encoder-less GGUFs even with a sidecar.
+// under PARAKEET_COREML_ONLY and reject encoder-less GGUFs even with a sidecar;
+// with use = off or no sidecar next to it, a full GGUF under
+// PARAKEET_COREML_ONLY keeps its ggml encoder too.
 // `--stub-tdt-skip-load` needs no fixture: with a tensor-less TDT GGUF and a
 // stub bundle that holds only metadata.json, the loader skips the synchronous
 // sidecar load when the metadata shows an export that cannot own a TDT
@@ -99,6 +101,13 @@ void check_rejected_without_sidecar(const std::string & coreml_gguf) {
                kGgufLoadNoEncoderWeights,
            "the memory-fit loader must reject an encoder-less GGUF");
     unset_env(kDisableEnv);
+
+    // use = off: the same rejection, whether or not a sidecar is present.
+    CoremlOptions off;
+    off.use = CoremlOptions::Use::off;
+    ParakeetCtcModel off_model;
+    expect(load_from_gguf(coreml_gguf, off_model, 0, 0, false, "auto", off) == kGgufLoadNoEncoderWeights,
+           "an encoder-less GGUF with use = off must be rejected with kGgufLoadNoEncoderWeights");
 }
 
 #ifdef PARAKEET_USE_COREML
@@ -202,6 +211,33 @@ void check_standard_tdt_rejects_encoderless(const std::string & gguf) {
     std::filesystem::remove_all(dir);
 }
 
+// PARAKEET_COREML_ONLY with a full GGUF keeps its ggml encoder whenever the
+// takeover does not happen: Core ML is off (use = off), or no sidecar sits
+// next to the GGUF, so the takeover attempt fails.
+void check_coreml_only_full_keeps_encoder(const std::string & gguf) {
+    set_env(kOnlyEnv, "1");
+    {
+        CoremlOptions off;
+        off.use = CoremlOptions::Use::off;
+        ParakeetCtcModel model;
+        expect(load_from_gguf(gguf, model, 0, 0, false, "auto", off) == 0 &&
+                   !model_encoder_owned_by_coreml(model),
+               "PARAKEET_COREML_ONLY with use = off keeps the GGUF's ggml encoder");
+    }
+    {
+        const auto dir = std::filesystem::temp_directory_path() / "parakeet-coreml-only-no-sidecar";
+        std::filesystem::remove_all(dir);
+        std::filesystem::create_directories(dir);
+        const auto staged = dir / std::filesystem::path(gguf).filename();
+        std::filesystem::create_symlink(std::filesystem::absolute(gguf), staged);
+        ParakeetCtcModel model;
+        expect(load(staged.string(), model) == 0 && !model_encoder_owned_by_coreml(model),
+               "PARAKEET_COREML_ONLY with a failed takeover keeps the ggml encoder");
+        std::filesystem::remove_all(dir);
+    }
+    unset_env(kOnlyEnv);
+}
+
 void check_standard_tdt_keeps_encoder_weights(const std::string & gguf,
                                               const std::string & wav) {
     unset_env(kOnlyEnv);
@@ -232,6 +268,7 @@ void check_standard_tdt_keeps_encoder_weights(const std::string & gguf,
                out.n_enc_frames > 0 && !out.used_coreml,
            "oversized TDT input must execute the retained native encoder");
     check_standard_tdt_rejects_encoderless(gguf);
+    check_coreml_only_full_keeps_encoder(gguf);
 }
 
 void capture_log(ggml_log_level, const char * text, void * user) {
