@@ -3134,6 +3134,12 @@ if (PARAKEET_BUILD_TESTS)
             REQUIRES "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}"
                      "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder.mlmodelc"
                      "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-flexible.mlmodelc")
+        parakeet_register_test(test-parakeet-coreml-runtime-fit-layouts
+            LABEL    "fixture;coreml"
+            EXE      test-parakeet-coreml-runtime
+            ARGS     "--case" "fit-layouts" "--eu-gguf" "${_qvp_transcribepsy_eu_gguf}"
+                     "--sortformer-gguf" "${_qvp_sfsv21_q8_gguf}"
+            REQUIRES "${_qvp_transcribepsy_eu_gguf}" "${_qvp_sfsv21_q8_gguf}")
         parakeet_register_test(test-parakeet-coreml-runtime-encoderless
             LABEL    "fixture;coreml"
             EXE      test-parakeet-coreml-runtime

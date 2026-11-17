@@ -23,6 +23,7 @@
 #ifdef PARAKEET_USE_COREML
 #include "coreml/coreml_diarizers.h"
 #include "coreml/parakeet-encoder.h"
+#include "coreml/parakeet_coreml_shape.h"
 #include "coreml/parakeet_coreml_sidecars.h"
 #endif
 
@@ -34,7 +35,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <limits>
+#include <system_error>
 #include <string>
 #include <vector>
 
@@ -184,6 +187,48 @@ uint64_t nemotron_diarization_host_bytes(const ParakeetCtcModel & model,
     return sat_add(host, sched_input_bytes);
 }
 
+#ifdef PARAKEET_USE_COREML
+CoremlFitUnits fit_units(pcm::ComputeUnits units) {
+    switch (units) {
+        case pcm::ComputeUnits::all: return CoremlFitUnits::all;
+        case pcm::ComputeUnits::cpu_and_ane: return CoremlFitUnits::cpu_and_ane;
+        case pcm::ComputeUnits::cpu_and_gpu: return CoremlFitUnits::cpu_and_gpu;
+        case pcm::ComputeUnits::cpu_only: return CoremlFitUnits::cpu_only;
+    }
+    return CoremlFitUnits::all;
+}
+
+uint64_t bundle_weight_bytes(const std::string & bundle) {
+    std::error_code ec;
+    const uintmax_t size = std::filesystem::file_size(std::filesystem::path(bundle) / "weights" / "weight.bin", ec);
+    return ec ? 0 : static_cast<uint64_t>(size);
+}
+
+bool bundle_present(const std::string & bundle) {
+    std::error_code ec;
+    return std::filesystem::is_directory(bundle, ec);
+}
+
+// The largest TranscribePsy EU fp32 precise program next to the GGUF
+// (`-encoder-fp32-<frames>` / `-encoder-other-fp32-<frames>`): one of them
+// is loaded on demand, replacing the flexible programs.
+uint64_t largest_eu_precise_bytes(const std::string & gguf_path) {
+    const std::string probe = coreml_eu_precise_sidecar_path(gguf_path, false, 0);
+    const std::filesystem::path dir = std::filesystem::path(probe).parent_path();
+    const std::string base = std::filesystem::path(probe).filename().string();
+    const std::string stem = base.substr(0, base.rfind("-encoder-fp32-"));
+    uint64_t largest = 0;
+    std::error_code ec;
+    for (const auto & entry : std::filesystem::directory_iterator(dir.empty() ? "." : dir, ec)) {
+        const std::string name = entry.path().filename().string();
+        if (name.rfind(stem + "-encoder-fp32-", 0) != 0 && name.rfind(stem + "-encoder-other-fp32-", 0) != 0) continue;
+        if (entry.path().extension() != ".mlmodelc") continue;
+        largest = std::max(largest, bundle_weight_bytes(entry.path().string()));
+    }
+    return largest;
+}
+#endif
+
 uint64_t coreml_diarizer_bytes(const std::string & gguf_path,
                                const std::vector<CoremlFrameRange> & ranges) {
 #ifdef PARAKEET_USE_COREML
@@ -220,41 +265,118 @@ uint64_t gguf_encoder_parameters(const ParakeetCtcModel & model) {
     return n;
 }
 
+
+// The Core ML encoder programs a load of this model keeps resident, found
+// with the loader's own sidecar discovery and compute-unit placement: the
+// adjacent encoder sidecar (and Sortformer v2.1's bypass encoder); for
+// TranscribePsy EU the shared multifunction bundle or the separate route
+// programs, plus the on-demand flexible or precise programs. Empty with no
+// route.
+std::vector<CoremlFitProgram> coreml_encoder_fit_programs(const ParakeetCtcModel & model,
+                                                          const FitOptions & opts, bool enabled,
+                                                          long long window_mel, int window_enc) {
+    std::vector<CoremlFitProgram> programs;
+#ifdef PARAKEET_USE_COREML
+    if (!enabled) return programs;
+    const bool sortformer_v21 = model.model_type == ParakeetModelType::SORTFORMER &&
+                                model.model_variant == "sortformer-streaming-v2.1-aosc";
+    const bool supported =
+        model.model_type == ParakeetModelType::CTC || model.model_type == ParakeetModelType::RNNT ||
+        model.model_type == ParakeetModelType::TDT || model.model_type == ParakeetModelType::EOU ||
+        model.model_type == ParakeetModelType::NEMOTRON || sortformer_v21;
+    if (!supported) return programs;
+    const auto resolved = resolve_parakeet_coreml(opts.coreml);
+    const uint64_t floor = sat_mul(gguf_encoder_parameters(model), (uint64_t) 2);
+    const uint64_t io = f32_bytes(sat_add(sat_mul((uint64_t) std::max<long long>(window_mel, 0),
+                                                  (uint64_t) model.mel_cfg.n_mels),
+                                          sat_mul((uint64_t) std::max(window_enc, 0),
+                                                  (uint64_t) model.encoder_cfg.d_model)));
+    auto add = [&](const std::string & bundle, uint64_t runtime_floor, int functions, CoremlFitUnits units) {
+        if (!bundle_present(bundle)) return false;
+        CoremlFitProgram p;
+        p.weight_file_bytes = bundle_weight_bytes(bundle);
+        p.runtime_floor_bytes = runtime_floor;
+        p.io_bytes = io;
+        p.functions = functions;
+        p.units = units;
+        programs.push_back(p);
+        return true;
+    };
+    // The slot loader's placement: the resolved units, else the export's own default.
+    auto slot_units = [&](const std::string & bundle) {
+        return fit_units(resolved.units_or(parakeet_coreml_encoder_prefers_ane(bundle.c_str())
+                                               ? pcm::ComputeUnits::cpu_and_ane
+                                               : pcm::ComputeUnits::all));
+    };
+    const std::string & gguf = opts.model_gguf_path;
+    if (model.model_variant == "transcribepsy-250m-eu") {
+        // The fixed programs load at construction: on the Neural Engine, or on
+        // the CPU when the units exclude it (then only the English one).
+        const bool auxiliaries = coreml_eu_loads_fixed_auxiliaries(loader_units(resolved));
+        const CoremlFitUnits fixed = auxiliaries ? CoremlFitUnits::cpu_and_ane : CoremlFitUnits::cpu_only;
+        bool gate_loaded = false;
+        if (add(coreml_eu_shared_sidecar_path(gguf), floor, auxiliaries ? 3 : 1, fixed)) {
+            gate_loaded = auxiliaries;
+        } else {
+            add(coreml_encoder_sidecar_path(gguf), floor, 1, fixed);
+            if (auxiliaries) {
+                add(coreml_eu_other_sidecar_path(gguf), floor, 1, fixed);
+                gate_loaded = add(coreml_eu_gate_sidecar_path(gguf), 0, 1, fixed);
+            }
+        }
+        // On demand, kept until replaced: the flexible CPU pair or one precise
+        // GPU program, whichever is larger; the flexible gate when no fixed
+        // gate loaded.
+        std::vector<CoremlFitProgram> flexible;
+        std::swap(flexible, programs);
+        add(coreml_eu_flexible_sidecar_path(gguf, false), floor, 1, CoremlFitUnits::cpu_only);
+        add(coreml_eu_flexible_sidecar_path(gguf, true), floor, 1, CoremlFitUnits::cpu_only);
+        std::swap(flexible, programs);
+        uint64_t flexible_bytes = 0;
+        for (const CoremlFitProgram & p : flexible) flexible_bytes = sat_add(flexible_bytes, std::max(p.weight_file_bytes, p.runtime_floor_bytes));
+        const uint64_t precise = largest_eu_precise_bytes(gguf);
+        if (precise > 0 && precise > flexible_bytes) {
+            CoremlFitProgram p;
+            p.weight_file_bytes = precise;
+            p.runtime_floor_bytes = floor;
+            p.io_bytes = io;
+            p.units = CoremlFitUnits::cpu_and_gpu;
+            programs.push_back(p);
+        } else {
+            programs.insert(programs.end(), flexible.begin(), flexible.end());
+        }
+        if (!gate_loaded) {
+            std::string gate_flexible = coreml_eu_gate_sidecar_path(gguf);
+            gate_flexible.insert(gate_flexible.size() - std::string(".mlmodelc").size(), "-flexible");
+            add(gate_flexible, 0, 1, CoremlFitUnits::cpu_only);
+        }
+        return programs;
+    }
+    const std::string encoder = coreml_encoder_sidecar_path(gguf);
+    add(encoder, floor, 1, slot_units(encoder));
+    if (sortformer_v21) {
+        // The bypass bundle holds only the block stack, beside the encoder slot.
+        const std::string bypass = coreml_bypass_encoder_sidecar_path(gguf);
+        add(bypass, 0, 1, slot_units(bypass));
+    }
+#else
+    (void) model;
+    (void) opts;
+    (void) enabled;
+    (void) window_mel;
+    (void) window_enc;
+#endif
+    return programs;
+}
+
 // Encoder sidecar envelope for the worst window (0 with no encoder route).
 uint64_t coreml_encoder_fit_bytes(const ParakeetCtcModel & model, const FitOptions & opts,
                                   bool enabled, long long window_mel, int window_enc,
                                   bool & prebuilt) {
-    prebuilt = false;
-    const bool supported =
-        model.model_type == ParakeetModelType::CTC || model.model_type == ParakeetModelType::RNNT ||
-        model.model_type == ParakeetModelType::TDT || model.model_type == ParakeetModelType::EOU ||
-        model.model_type == ParakeetModelType::NEMOTRON ||
-        (model.model_type == ParakeetModelType::SORTFORMER &&
-         model.model_variant == "sortformer-streaming-v2.1-aosc");
-    if (!supported) return 0;
-    const std::string sidecar = coreml_encoder_sidecar_path(opts.model_gguf_path);
-    const CoremlEncoderFitRoute route = coreml_encoder_fit_route(sidecar, enabled);
-    if (!route.prebuilt) return 0;
-    prebuilt = true;
-    CoremlEncoderEnvelopeInputs in;
-    in.weight_file_bytes = route.weight_file_bytes;
-    in.encoder_parameters = gguf_encoder_parameters(model);
-    in.io_bytes = f32_bytes(sat_add(sat_mul((uint64_t) std::max<long long>(window_mel, 0),
-                                            (uint64_t) model.mel_cfg.n_mels),
-                                    sat_mul((uint64_t) std::max(window_enc, 0),
-                                            (uint64_t) model.encoder_cfg.d_model)));
-#ifdef PARAKEET_USE_COREML
-    const auto resolved = resolve_parakeet_coreml(opts.coreml);
-    switch (resolved.units_or(parakeet_coreml_encoder_prefers_ane(sidecar.c_str())
-                                  ? pcm::ComputeUnits::cpu_and_ane
-                                  : pcm::ComputeUnits::all)) {
-        case pcm::ComputeUnits::all: in.units = CoremlFitUnits::all; break;
-        case pcm::ComputeUnits::cpu_and_ane: in.units = CoremlFitUnits::cpu_and_ane; break;
-        case pcm::ComputeUnits::cpu_and_gpu: in.units = CoremlFitUnits::cpu_and_gpu; break;
-        case pcm::ComputeUnits::cpu_only: in.units = CoremlFitUnits::cpu_only; break;
-    }
-#endif
-    return coreml_encoder_envelope_bytes(in);
+    const std::vector<CoremlFitProgram> programs =
+        coreml_encoder_fit_programs(model, opts, enabled, window_mel, window_enc);
+    prebuilt = !programs.empty();
+    return prebuilt ? coreml_programs_envelope_bytes(programs) : 0;
 }
 
 std::string coreml_fit_report(const FitResult & r) {

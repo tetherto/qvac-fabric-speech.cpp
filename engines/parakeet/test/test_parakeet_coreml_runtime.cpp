@@ -10,6 +10,7 @@
 //                  owner-push-stream
 //   eu-labels      --eu-gguf EU.gguf (with its Core ML programs) --wav W.wav
 //                  (longer than the 20 s language gate): eu-labels
+//   fit-layouts    --eu-gguf EU.gguf --sortformer-gguf S.gguf (v2.1): fit-layouts
 //
 //   ggml-unchanged        a call whose sidecar is still loading runs on ggml
 //                         (coreml_pending) and its transcript equals use = off
@@ -45,6 +46,13 @@
 //                         "mixed" and not encoder_used_coreml; with only the
 //                         flexible programs the label names that program, not
 //                         the held route's
+//   fit-layouts           fit charges the programs the loader opens: a
+//                         TranscribePsy EU deployment with only the shared
+//                         multifunction bundle and a Sortformer v2.1 one with
+//                         only the bypass bundle both get a Core ML charge, so
+//                         a budget between the ggml-only and the inclusive
+//                         totals separates the two verdicts (the bundles are
+//                         staged: fit reads their size, never loads them)
 //   owner-push-stream     on that GGUF with its fixed-capacity sidecar owning
 //                         the encoder, stream_start refuses windows longer
 //                         than the capacity under use = require and under
@@ -57,6 +65,7 @@
 
 #include "coreml_test_options.h"
 #include "parakeet/engine.h"
+#include "parakeet/fit.h"
 #include "test_utils.h"
 
 #include <algorithm>
@@ -303,6 +312,53 @@ void case_eu_labels(const std::string & gguf, const std::string & wav) {
     }
 }
 
+// A bundle fit can size: weights/weight.bin of `bytes` (sparse), no model.
+void write_sized_bundle(const fs::path & bundle, uint64_t bytes) {
+    fs::create_directories(bundle / "weights");
+    std::ofstream(bundle / "weights" / "weight.bin").close();
+    fs::resize_file(bundle / "weights" / "weight.bin", bytes);
+}
+
+void check_layout(const char * name, const fs::path & staged, uint64_t bundle_bytes) {
+    parakeet::FitOptions fo;
+    fo.model_gguf_path = staged.string();
+    fo.n_gpu_layers = 99;
+    fo.audio_seconds = 60.0f;
+    const parakeet::FitResult r = parakeet::fit_params(fo);
+    std::printf("       %s: status=%s route=%s ggml=%llu coreml=%llu\n", name, parakeet::fit_status_name(r.status),
+                r.coreml.encoder_route.c_str(), (unsigned long long) r.ggml_required_bytes,
+                (unsigned long long) r.coreml.bytes);
+    expect(r.status != parakeet::FitStatus::Error && r.coreml.encoder_route == "prebuilt" &&
+               r.coreml.bytes >= bundle_bytes,
+           (std::string("fit-layouts: ") + name + " charges the Core ML programs its loader opens").c_str());
+    // A budget between the ggml-only and the inclusive totals: ggml fits, Core ML does not.
+    const uint64_t budget = r.ggml_required_bytes + r.coreml.bytes / 2;
+    expect(r.ggml_required_bytes <= budget && r.ggml_required_bytes + r.coreml.bytes > budget,
+           (std::string("fit-layouts: ") + name + " separates the two verdicts at a budget between them").c_str());
+}
+
+void case_fit_layouts(const std::string & eu_gguf, const std::string & sortformer_gguf) {
+    constexpr uint64_t kBundle = 64ull << 20;
+    {
+        const fs::path dir = fresh_dir("fit-eu-shared");
+        const fs::path staged = dir / "transcribepsy-250m-eu.gguf";
+        fs::create_symlink(fs::canonical(eu_gguf), staged);
+        write_sized_bundle(dir / "transcribepsy-250m-eu-encoder-shared.mlmodelc", kBundle);
+        check_layout("EU shared bundle only", staged, kBundle);
+        std::error_code ec;
+        fs::remove_all(dir, ec);
+    }
+    {
+        const fs::path dir = fresh_dir("fit-sortformer-bypass");
+        const fs::path staged = dir / "sortformer.gguf";
+        fs::create_symlink(fs::canonical(sortformer_gguf), staged);
+        write_sized_bundle(dir / "sortformer-encoder-bypass-pre-encode.mlmodelc", kBundle);
+        check_layout("Sortformer v2.1 bypass bundle only", staged, kBundle);
+        std::error_code ec;
+        fs::remove_all(dir, ec);
+    }
+}
+
 void case_diarizer(const std::string & gguf, const std::string & wav) {
     const fs::path cache = fresh_dir("diar-cache");
     parakeet::Engine engine(engine_options(gguf, lazy(cache)));
@@ -474,7 +530,7 @@ void case_capacity_miss(const std::string & gguf, const std::string & wav) {
 }
 
 int main(int argc, char ** argv) {
-    std::string which = "transcription", gguf, wav, diar_gguf, encoderless, eu_gguf;
+    std::string which = "transcription", gguf, wav, diar_gguf, encoderless, eu_gguf, sortformer_gguf;
     for (int i = 1; i + 1 < argc; i += 2) {
         const std::string a = argv[i];
         if (a == "--case") which = argv[i + 1];
@@ -483,6 +539,7 @@ int main(int argc, char ** argv) {
         else if (a == "--diar-gguf") diar_gguf = argv[i + 1];
         else if (a == "--encoderless-gguf") encoderless = argv[i + 1];
         else if (a == "--eu-gguf") eu_gguf = argv[i + 1];
+        else if (a == "--sortformer-gguf") sortformer_gguf = argv[i + 1];
         else {
             std::fprintf(stderr, "unknown argument %s\n", a.c_str());
             return 2;
@@ -491,13 +548,15 @@ int main(int argc, char ** argv) {
     const bool ok_args = (which == "transcription" && !gguf.empty() && !wav.empty()) ||
                          (which == "diarizer" && !diar_gguf.empty() && !wav.empty()) ||
                          (which == "encoderless" && !encoderless.empty()) ||
-                         (which == "eu-labels" && !eu_gguf.empty() && !wav.empty());
+                         (which == "eu-labels" && !eu_gguf.empty() && !wav.empty()) ||
+                         (which == "fit-layouts" && !eu_gguf.empty() && !sortformer_gguf.empty());
     if (!ok_args) {
         std::fprintf(stderr, "usage: %s [--case transcription] --gguf TDT.gguf --wav W.wav\n"
                              "       %s --case diarizer --diar-gguf D.gguf --wav W.wav\n"
                              "       %s --case encoderless --encoderless-gguf E.gguf\n"
-                             "       %s --case eu-labels --eu-gguf EU.gguf --wav W.wav\n",
-                     argv[0], argv[0], argv[0], argv[0]);
+                             "       %s --case eu-labels --eu-gguf EU.gguf --wav W.wav\n"
+                             "       %s --case fit-layouts --eu-gguf EU.gguf --sortformer-gguf S.gguf\n",
+                     argv[0], argv[0], argv[0], argv[0], argv[0]);
         return 2;
     }
     try {
@@ -512,6 +571,8 @@ int main(int argc, char ** argv) {
             case_diarizer_load_errors(diar_gguf);
         } else if (which == "eu-labels") {
             case_eu_labels(eu_gguf, wav);
+        } else if (which == "fit-layouts") {
+            case_fit_layouts(eu_gguf, sortformer_gguf);
         } else {
             case_encoderless(encoderless);
         }

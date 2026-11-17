@@ -329,7 +329,8 @@ jobs:
             build-coreml/coreml-device-results.xml --require test-parakeet-coreml-runtime \
             --require test-parakeet-coreml-runtime-diarizer \
             --require test-parakeet-coreml-runtime-encoderless \
-            --require test-parakeet-coreml-runtime-eu-labels
+            --require test-parakeet-coreml-runtime-eu-labels \
+            --require test-parakeet-coreml-runtime-fit-layouts
 
   mosaic_authorize:
     if: github.event_name == 'workflow_dispatch' && inputs.run_mosaic

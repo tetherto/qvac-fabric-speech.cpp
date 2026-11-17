@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <string>
 #include <system_error>
+#include <vector>
 
 namespace parakeet {
 
@@ -53,15 +54,43 @@ inline uint64_t coreml_encoder_load_transient_bytes(uint64_t weight_file_bytes, 
 //  - I/O backing, input and output: 2 x io_bytes;
 //  - one load transient by unit class (above);
 //  - margin x1.25 on resident + transient.
-inline uint64_t coreml_encoder_envelope_bytes(const CoremlEncoderEnvelopeInputs & in) {
+// One Core ML program the encoder stage keeps resident. Programs a model
+// keeps loaded together (TranscribePsy EU's route programs, Sortformer's
+// encoder and bypass bundles) are charged together.
+struct CoremlFitProgram {
+    uint64_t       weight_file_bytes = 0;    // <bundle>/weights/weight.bin
+    uint64_t       runtime_floor_bytes = 0;  // expanded fp16 floor of a full-encoder program, else 0
+    uint64_t       io_bytes = 0;             // worst-window input + output, f32
+    int            functions = 1;            // functions loaded from the bundle, each charged its weights
+    CoremlFitUnits units = CoremlFitUnits::all;
+};
+
+// Every resident program (runtime weights per loaded function, since loaded
+// functions are not assumed to share weight memory until measured, plus
+// 2 x I/O backing), one load transient (the largest: the runtime runs one
+// Core ML load at a time), and the 1.25 margin on the sum.
+inline uint64_t coreml_programs_envelope_bytes(const std::vector<CoremlFitProgram> & programs) {
     using fitutil::sat_add;
     using fitutil::sat_mul;
-    const uint64_t runtime_weights =
-        std::max(in.weight_file_bytes, sat_mul(in.encoder_parameters, (uint64_t) 2));
-    const uint64_t resident = sat_add(runtime_weights, sat_mul(in.io_bytes, (uint64_t) 2));
-    const uint64_t transient = coreml_encoder_load_transient_bytes(in.weight_file_bytes, in.units);
+    uint64_t resident = 0;
+    uint64_t transient = 0;
+    for (const CoremlFitProgram & p : programs) {
+        const uint64_t weights = std::max(p.weight_file_bytes, p.runtime_floor_bytes);
+        resident = sat_add(resident, sat_mul(weights, (uint64_t) std::max(1, p.functions)));
+        resident = sat_add(resident, sat_mul(p.io_bytes, (uint64_t) 2));
+        transient = std::max(transient, coreml_encoder_load_transient_bytes(p.weight_file_bytes, p.units));
+    }
     const uint64_t total = sat_add(resident, transient);
     return sat_add(total, total / 4);
+}
+
+inline uint64_t coreml_encoder_envelope_bytes(const CoremlEncoderEnvelopeInputs & in) {
+    CoremlFitProgram p;
+    p.weight_file_bytes = in.weight_file_bytes;
+    p.runtime_floor_bytes = fitutil::sat_mul(in.encoder_parameters, (uint64_t) 2);
+    p.io_bytes = in.io_bytes;
+    p.units = in.units;
+    return coreml_programs_envelope_bytes({p});
 }
 
 // The encoder route fit charges: prebuilt when Core ML is enabled and the
