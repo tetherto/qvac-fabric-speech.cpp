@@ -330,10 +330,16 @@ bool coreml_valid_units(const std::string & units) {
 
 CoremlOptions merge_legacy_coreml(CoremlOptions options, const std::string & units, int strict, bool disabled) {
     if (!options.compute_units && !units.empty()) options.compute_units = units;
-    if (options.use == CoremlOptions::Use::unset && strict >= 0) {
-        options.use = strict > 0 ? CoremlOptions::Use::require : CoremlOptions::Use::automatic;
+    // An explicit use wins; among the aliases, disabled wins over strict.
+    // The CHATTERBOX_COREML_DISABLE kill switch still overrides everything
+    // when the options are resolved.
+    if (options.use == CoremlOptions::Use::unset) {
+        if (disabled) {
+            options.use = CoremlOptions::Use::off;
+        } else if (strict >= 0) {
+            options.use = strict > 0 ? CoremlOptions::Use::require : CoremlOptions::Use::automatic;
+        }
     }
-    if (disabled) options.use = CoremlOptions::Use::off;
     return options;
 }
 

@@ -141,7 +141,19 @@ void check_options() {
     merged = cb::merge_legacy_coreml(set, "cpu_only", 1, false);
     require(merged.compute_units == std::string("all") && merged.use == CoremlOptions::Use::automatic,
             "explicit CoremlOptions fields win over the aliases");
-    require(cb::merge_legacy_coreml(set, "", 1, true).use == CoremlOptions::Use::off, "coreml_disabled is use = off");
+    require(cb::merge_legacy_coreml(set, "", 1, true).use == CoremlOptions::Use::automatic,
+            "an explicit use wins over coreml_disabled");
+    CoremlOptions required;
+    required.use = CoremlOptions::Use::require;
+    require(cb::merge_legacy_coreml(required, "", -1, true).use == CoremlOptions::Use::require,
+            "an explicit use = require is never turned off by coreml_disabled");
+    require(cb::merge_legacy_coreml(none, "", 1, true).use == CoremlOptions::Use::off,
+            "coreml_disabled is use = off when use is unset, and wins over coreml_strict");
+    s3gen_synthesize_opts explicit_require;
+    explicit_require.coreml.use = CoremlOptions::Use::require;
+    explicit_require.coreml_disabled = true;
+    require(cb::call_coreml_options(explicit_require).use == CoremlOptions::Use::require,
+            "a call's explicit use = require survives its coreml_disabled alias");
 
     s3gen_synthesize_opts sopts;
     sopts.coreml_compute_units = "cpu_and_gpu";

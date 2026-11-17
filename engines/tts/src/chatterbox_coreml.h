@@ -78,8 +78,10 @@ bool coreml_valid_units(const std::string & units);
 
 // The legacy s3gen_synthesize_opts / EngineOptions fields as aliases of
 // CoremlOptions: each fills the matching field only when it is unset.
-// `units` non-empty -> compute_units; `strict` > 0 -> use = require, == 0 ->
-// automatic, < 0 nothing; `disabled` -> use = off (overrides use).
+// `units` non-empty -> compute_units; `disabled` -> use = off; otherwise
+// `strict` > 0 -> use = require, == 0 -> automatic, < 0 nothing. An explicit
+// options.use is never overridden (the CHATTERBOX_COREML_DISABLE environment
+// variable still is, when the options are resolved).
 CoremlOptions merge_legacy_coreml(CoremlOptions options, const std::string & units, int strict, bool disabled);
 
 // The options of one s3gen_synthesize_to_wav call (opts.coreml plus the
