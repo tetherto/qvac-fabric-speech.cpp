@@ -160,8 +160,9 @@ quantization tags such as `.f16` or `.q8_0` when deriving names. English and ada
 exports must have matching capacities. Model variant, route and layer-count
 metadata prevent EU-sub, exchanged-route, and wrong-depth sidecars from loading.
 Missing/incompatible sidecars use native CPU/Metal fallback with a full GGUF.
-`PARAKEET_COREML_ONLY=1` skips native encoder allocation only when all three
-compatible fixed sidecars are available. Once ownership succeeds, a failed or
+`PARAKEET_COREML_ONLY=1` skips native encoder allocation when compatible fixed
+routes are available, either in the shared bundle below or as three separate
+sidecars. Once ownership succeeds, a failed or
 missing required flexible encoder returns an error instead of reading unallocated
 native weights. Leave `PARAKEET_COREML_ONLY` unset when CPU/Metal recovery is
 required. Benchmark JSON exposes `encoder_owned_by_coreml` separately from
@@ -213,17 +214,106 @@ Potential follow-up work, in increasing implementation scope:
   reduce startup work and resident memory, but would not reduce shipped size.
   It must preserve sidecar compatibility checks, Core ML-only ownership and
   fallback behavior, including when an Engine changes routes.
-- Evaluate a multifunction package with shared trunk weights to reduce disk
-  duplication. Weight sharing, ANE placement and specialization/cache reuse
-  need measurement before claiming startup or memory savings.
+- The multifunction deployment below shares trunk weights on disk. Routes still
+  load eagerly; specialization/cache reuse and resident memory savings are not promised.
 - Evaluate one program with a route input scaling the adapter contribution,
   also returning layer-11 features for the gate. Automatic routing still needs
   a gate decision before the adapted route can be selected; returning gate
   features alone does not establish single-pass automatic routing. Validate
   route semantics, ANE placement, 20-second windows and FP16 edge cases.
 
-These are optimization candidates, not implemented deployment options. The
-current separate static graphs retain the measured route and precision behavior.
+Lazy loading and the single-program route input remain optimization candidates.
+The runtime supports separate static graphs and shared-weight multifunction graphs.
+
+### Shared-weight runtime deployment
+
+The Engine discovers `transcribepsy-250m-eu-encoder-shared.mlmodelc` beside the
+GGUF and selects its named `en`, `other`, and `gate` functions. This works through
+the existing C/C++ APIs and `PARAKEET_COREML=ON`; consumers need no new flags or
+dependencies. It requires macOS 15 or iOS 18. Older systems or incompatible shared
+bundles try the separate sidecars, then the existing native fallback when the
+GGUF contains encoder weights. Fixed ANE inference and Core ML-only ownership
+validate all three shared routes before selecting them. Policies excluding ANE
+retain only the English handle for shape metadata and use the precise programs.
+
+Create the three source packages with the production encoder exporter. Use the
+same capacity (at least 2,001 mel frames), precision, checkpoint and quantization
+for all routes. The normal English export's smaller default capacity cannot be
+merged with the 20-second gate. For example:
+
+```bash
+for ROUTE in en other gate; do
+  $PYTHON engines/parakeet/scripts/export-encoder-coreml-ane.py \
+    --gguf "$MODEL_DIR/transcribepsy-250m-eu.f16.gguf" \
+    --eu-route "$ROUTE" --window-mel-frames 2001 --nbits 0 --check \
+    --out "$MODEL_DIR/$ROUTE.mlpackage"
+done
+$PYTHON engines/parakeet/scripts/merge-transcribepsy-eu-coreml.py \
+  --en "$MODEL_DIR/en.mlpackage" --other "$MODEL_DIR/other.mlpackage" \
+  --gate "$MODEL_DIR/gate.mlpackage" \
+  --out "$MODEL_DIR/transcribepsy-250m-eu-encoder-shared.mlpackage" \
+  --compile-dir "$MODEL_DIR"
+```
+
+For six-bit deployment use `--nbits 6` on **each source export**; compression
+after merging is unsupported. The merger validates route identity, depth and
+matching interfaces and writes versioned runtime metadata. Existing experimental
+packages lack that identity and must be regenerated using these commands.
+
+Ship the shared `.mlmodelc` instead of the three fixed encoder directories.
+Keep the decoder and the FP32 flexible/static sidecars needed by your supported
+inference modes: their precision and streaming policies are unchanged. In
+particular, sharing the fixed ANE weights does not remove the precise encoders
+needed for streaming and unwindowed inference. The roughly 60% reduction measured
+below applies to the fixed encoder packages, not the entire deployment.
+
+An encoder-less GGUF can retain the same basename so the shared bundle is found:
+
+```bash
+$PYTHON engines/parakeet/scripts/strip-encoder-gguf.py \
+  --gguf "$MODEL_DIR/transcribepsy-250m-eu.f16.gguf" \
+  --out "$RELEASE_DIR/transcribepsy-250m-eu.gguf"
+```
+
+Create `$RELEASE_DIR` first, then place the compiled sidecars beside that GGUF.
+A missing valid encoder is a
+load error for an encoder-less file. With a full GGUF, `PARAKEET_COREML_ONLY=1`
+opts into skipping native encoder allocation after all shared routes validate.
+
+For downstream packaging, `speech-cpp[coreml]` uses the same compiled engine and
+public API. Publish the source revision and update its registry archive hash/tree
+through the normal registry release process, then update the QVAC dependency.
+Model sidecars are deployment assets, not files embedded in the vcpkg library.
+
+Runtime regression coverage includes generated Core ML models exercising the
+actual native wrapper (`test_eu_shared_coreml`), portable sidecar naming tests,
+and a checkpoint-backed Engine test (`test-eu-shared-engine`). The Engine test
+compares separate/shared transcripts for `en`, `other` and `auto`, checks native
+encoder ownership with full and stripped GGUFs, tests compute policies excluding
+ANE, and verifies corrupt-shared-bundle fallback. It requires the source separate
+sidecars, shared sidecar and audio fixtures; absent fixtures skip it.
+
+```bash
+ctest --test-dir "$BUILD_DIR" \
+  -R '^(test-coreml-paths|test_eu_shared_coreml|test-eu-shared-engine)$' \
+  --output-on-failure
+```
+
+The 2026-11-17 runtime validation used the production exporter and merger with
+the full-EU checkpoint. FP16 source packages totaled 1,191,797,800 bytes; the
+shared package was 477,384,369 bytes (59.94% smaller). macOS passed separate/shared
+transcript parity, encoder ownership/fallback and compute-policy checks. Both
+macOS and a physical iPhone 16e passed the existing API suite for all three routes:
+batch, precomputed mel, callbacks, fragmented push feeds, reset, cancellation,
+empty/finalized streams and automatic language gating. The iPhone used an
+encoder-less GGUF with no separate fixed encoder bundles. An installed static
+library also linked and ran through the standalone `find_package` consumer.
+Six-bit source packages totaled 479,603,954 bytes; the merged package was
+192,909,223 bytes (59.78% smaller). Six-bit passed the same macOS Engine matrix
+and four physical-iPhone offline checks (`en`, `other`, automatic English and
+automatic French), with actual Core ML execution and encoder ownership confirmed
+in benchmark JSON. These sizes cover fixed encoder packages; they exclude the
+GGUF, decoder and precise streaming programs.
 
 ### Trying route-sharing exports
 
@@ -341,7 +431,9 @@ used the already specialized program.
 Multifunction sharing preserves the existing per-route graphs and is the least
 invasive disk-size candidate. The single program additionally shares one loaded
 graph across route inputs, but automatic non-English selection needs two full
-predictions. Neither prototype is integrated into Engine routing, fallback or
+predictions. These historical prototype measurements predate the shared-weight
+Engine integration above; the single-program prototype is not integrated into
+Engine routing, fallback or
 Core ML-only ownership. Raw receipts are retained under
 `artifacts/transcribepsy-eu-coreml-experiments-20261116/` outside the source tree.
 The durable [results JSON](transcribepsy-eu-coreml-results.json) includes sizes,
