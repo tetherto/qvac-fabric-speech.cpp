@@ -3,10 +3,10 @@
 #include "coreml_windows.h"
 #include "fit_price.h"
 #include "ggml-alloc.h"
+#include "supertonic_vocoder_coreml.h"
 
 #ifdef TTS_CPP_USE_COREML
 #include "supertonic_coreml_vocoder.h"
-#include "supertonic_vocoder_coreml.h"
 #endif
 
 #if defined(TTS_CPP_USE_ACCELERATE)
