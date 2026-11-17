@@ -7,6 +7,15 @@ Measured with `scripts/coreml/bench-load-time.py` on the workloads pinned in `sc
 - Commit `42ebde209e7f`, manifest sha256 `051eaea968c57763…`, compute units `cpu_and_ane`.
 - Sidecars exported locally with `engines/tts/scripts/export-chatterbox-coreml.py` from the pinned f32 GGUFs; tree digests are in `results.jsonl` (`env.sidecars`).
 
+<!-- report:power -->
+## Power source per row
+
+`run` reads the power source (`pmset -g batt`) and Low Power Mode (`pmset -g`) at the start and again as it records each row (`power` in `results.jsonl`). A row is flagged (`power_changed`) when its reading or the one before it differs from the start's, that is when the power changed while it was measured.
+
+None of the 443 rows carries a power reading: they were recorded before `run` read the power source per row. The header says how the run was powered.
+
+<!-- /report:power -->
+
 ## Reading the numbers
 
 Written by hand from the tables below (`report` regenerates only the sections between `<!-- report:NAME -->` markers and keeps this text). Spreads are MAD; N is in each table. Synthesis rows are N=3 warm runs, so treat differences under about 5 % as noise.
@@ -42,7 +51,7 @@ Limits of this run: the generate route is a stand-in (copy and compile), not tem
 
 Requirements:
 
-- Apple silicon, macOS 15 or later, Xcode command-line tools (`xcrun clang++`) and Python 3.9 or later. The published numbers come from an otherwise idle M2 on macOS 15.7.3; `run` refuses battery power unless `--allow-battery` is given.
+- Apple silicon, macOS 15 or later, Xcode command-line tools (`xcrun clang++`) and Python 3.9 or later. The published numbers come from an otherwise idle M2 on macOS 15.7.3; `run` refuses to start on battery power unless `--allow-battery` is given. When the power source or Low Power Mode changes mid-run, `run` keeps going, flags every row measured while the power differed from the start (`power_changed`) and warns at the end; the report counts them under "Power source per row".
 - The Chatterbox GGUFs pinned in `bench-manifest.json` (`variants`, with SHA-256 and Hugging Face revisions) under the models root: `--models-root DIR`, or `QVAC_BENCH_MODELS`.
 - The Core ML sidecars for each width set in `sidecar_sets`, exported from the pinned f32 GGUFs with `engines/tts/scripts/export-chatterbox-coreml.py` as `exporter` in the manifest describes (`--frames` selects the widths, `--compile` writes the `.mlmodelc` next to the `.mlpackage`).
 - A `tts-cli` built with `-DTTS_CPP_COREML=ON` (see `engines/tts/docs/chatterbox.md`).

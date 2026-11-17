@@ -443,6 +443,26 @@ class TtrSummaryTest(unittest.TestCase):
         self.assertFalse(blt.Runner._ttr_summary(self.run_record(-1, 3))["all_ready"])
 
 
+AC = {"source": "ac", "low_power": False}
+BATTERY = {"source": "battery", "low_power": False}
+AC_LOW_POWER = {"source": "ac", "low_power": True}
+
+PMSET_BATT_AC = """Now drawing from 'AC Power'
+ -InternalBattery-0 (id=36438115)\t100%; charged; 0:00 remaining present: true
+"""
+PMSET_BATT_BATTERY = """Now drawing from 'Battery Power'
+ -InternalBattery-0 (id=36438115)\t88%; discharging; 10:21 remaining present: true
+"""
+PMSET_SETTINGS = """System-wide power settings:
+Currently in use:
+ standby              1
+ sleep                1 (sleep prevented by powerd, caffeinate, sharingd)
+ hibernatemode        3
+ lowpowermode         {lpm}
+ womp                 0
+"""
+
+
 @contextlib.contextmanager
 def chdir(path: Path):
     old = os.getcwd()
@@ -479,6 +499,14 @@ class RunnerFixture:
         self.identities = []  # [{"id", "binary", "open"}]
         self.calls = []       # driver calls: {"cmd", "identity", "artifacts"}
         self.ready = lambda call: True
+        # pmset readings, consumed one per read; the last one repeats.
+        self.power = [AC]
+        self.power_reads = 0
+
+    def read_power(self):
+        p = self.power[min(self.power_reads, len(self.power) - 1)]
+        self.power_reads += 1
+        return dict(p)
 
     @contextlib.contextmanager
     def fresh_identity(self, binary, hosts_dir):
@@ -491,6 +519,8 @@ class RunnerFixture:
 
     def run_json(self, cmd, env=None, timeout=3600, ok_codes=(0,)):
         cmd = [str(c) for c in cmd]
+        if cmd[1:] == ["identity"]:
+            return {"os_build": "24G419", "os_version": "15.7.3", "host_id": "host"}
         arts = [cmd[i + 1] for i, c in enumerate(cmd) if c == "--artifact"]
         parsed = []
         for a in arts:
@@ -510,7 +540,7 @@ class RunnerFixture:
 
     def runner(self):
         with chdir(self.root):
-            return blt.Runner(self.args, MANIFEST)
+            return blt.Runner(self.args, MANIFEST, power_reader=self.read_power)
 
     def records(self, runner, kind=None):
         recs = blt.read_results(self.root / runner.results)
@@ -646,6 +676,148 @@ class SynthesisRunnerTest(unittest.TestCase):
             want = {"name": "chatterbox-s3gen-q8_0.gguf", "coreml": True, "readable": True, "beside_sidecars": True}
             self.assertEqual(seen, [want, want])
             self.assertEqual(len(fx.records(r, "synthesis")), 1)
+
+
+class PowerParseTest(unittest.TestCase):
+    def test_power_source(self):
+        self.assertEqual(blt.parse_power_source(PMSET_BATT_AC), "ac")
+        self.assertEqual(blt.parse_power_source(PMSET_BATT_BATTERY), "battery")
+        self.assertEqual(blt.parse_power_source("Now drawing from 'UPS Power'\n"), "ups")
+        self.assertEqual(blt.parse_power_source(""), "unknown")
+
+    def test_low_power_mode(self):
+        self.assertIs(blt.parse_low_power(PMSET_SETTINGS.format(lpm=0)), False)
+        self.assertIs(blt.parse_low_power(PMSET_SETTINGS.format(lpm=1)), True)
+        # Macs with High Power Mode: 0 automatic, 1 low, 2 high.
+        self.assertIs(blt.parse_low_power(" powermode           1\n"), True)
+        self.assertIs(blt.parse_low_power(" powermode           2\n"), False)
+        self.assertIsNone(blt.parse_low_power(" standby 1\n"))
+
+    def test_read_power_through_a_fake_pmset(self):
+        calls = []
+
+        def pmset(*args):
+            calls.append(args)
+            return PMSET_BATT_BATTERY if args == ("-g", "batt") else PMSET_SETTINGS.format(lpm=1)
+
+        self.assertEqual(blt.read_power(pmset), {"source": "battery", "low_power": True})
+        self.assertEqual(sorted(calls), [("-g",), ("-g", "batt")])
+        self.assertEqual(blt.read_power(lambda *a: ""), {"source": "unknown", "low_power": None})
+
+    def test_pmset_missing_reads_empty(self):
+        with mock.patch.object(blt.subprocess, "run", side_effect=FileNotFoundError("pmset")):
+            self.assertEqual(blt.pmset("-g", "batt"), "")
+
+    def test_labels(self):
+        self.assertEqual(blt.power_label(AC), "AC")
+        self.assertEqual(blt.power_label(AC_LOW_POWER), "AC, Low Power Mode")
+        self.assertEqual(blt.power_label({"source": "unknown", "low_power": None}),
+                         "unknown, Low Power Mode unknown")
+        self.assertEqual(blt.power_label(None), "not recorded")
+
+
+class PowerRunnerTest(unittest.TestCase):
+    """Power read per row through a fake pmset reader: start, then one reading
+    per recorded row. The time-to-ready config records 7 rows: ttr run 0, two
+    cached startups, ttr run 1, two cached startups, the generate run."""
+
+    def run_ttr(self, readings, allow_battery=False):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        fx = RunnerFixture(Path(d.name))
+        fx.power = readings
+        fx.args.allow_battery = allow_battery
+        r = fx.runner()
+        real_run = subprocess.run
+
+        def run(cmd, *a, **k):  # no host sysctl readings in a hermetic test
+            if cmd[0] == "sysctl":
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            return real_run(cmd, *a, **k)
+
+        err = io.StringIO()
+        with fx.patched(), contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            with mock.patch.object(blt.subprocess, "run", run):
+                r.environment()
+            r.ttr(TtrRunnerTest.CFG)
+        return fx, r, err.getvalue()
+
+    @staticmethod
+    def rows(fx, r):
+        return [x for x in fx.records(r) if x["kind"] != "env"]
+
+    def test_every_row_records_the_power(self):
+        fx, r, err = self.run_ttr([AC])
+        env = fx.records(r, "env")[0]
+        self.assertEqual(env["power"], AC)
+        self.assertTrue(env["ac_power"])
+        rows = self.rows(fx, r)
+        self.assertEqual([x["kind"] for x in rows], ["ttr", "ttr_cached", "ttr_cached", "ttr", "ttr_cached",
+                                                     "ttr_cached", "ttr"])
+        self.assertTrue(all(x["power"] == AC and x["power_changed"] is False for x in rows), rows)
+        self.assertEqual(fx.power_reads, 1 + len(rows))
+        self.assertIsNone(r.power_warning())
+        self.assertEqual(err, "")
+        doc = blt.render(blt.summarize(fx.records(r)))
+        self.assertIn("power at the start: AC.", doc)
+        self.assertIn("| ttr | 3 | 3 | 0 | 0 | 0 | 0 | 0 |", doc)
+        self.assertNotIn("Warning", doc)
+
+    def test_a_change_mid_run_flags_the_rows_and_continues(self):
+        # Battery for rows 1 and 2, back on AC from row 3: rows 1-2 read
+        # battery and row 3 was measured while the power came back.
+        fx, r, err = self.run_ttr([AC, AC, BATTERY, BATTERY, AC])
+        rows = self.rows(fx, r)
+        self.assertEqual(len(rows), 7, "the run continues after the change")
+        self.assertEqual([x["power"]["source"] for x in rows], ["ac", "battery", "battery", "ac", "ac", "ac", "ac"])
+        self.assertEqual([x["power_changed"] for x in rows], [False, True, True, True, False, False, False])
+        self.assertEqual(err.count("power changed from AC to battery"), 1, err)
+        warning = r.power_warning()
+        self.assertIn("3 rows are flagged power_changed (ttr_cached 2, ttr 1)", warning)
+        self.assertIn("started on AC", warning)
+        doc = blt.render(blt.summarize(fx.records(r)))
+        self.assertIn("**Warning: the power source or Low Power Mode changed during the run.** 3 of 7 rows are "
+                      "flagged (ttr, ttr_cached)", doc)
+        self.assertIn("| ttr | 3 | 3 | 0 | 0 | 0 | 0 | 1 |", doc)
+        self.assertIn("| ttr_cached | 4 | 2 | 2 | 0 | 0 | 0 | 2 |", doc)
+        self.assertIsNone(TASK_ID.search(doc), TASK_ID.search(doc))
+
+    def test_a_change_before_the_first_row_flags_every_row(self):
+        fx, r, _ = self.run_ttr([AC, BATTERY])
+        rows = self.rows(fx, r)
+        self.assertTrue(all(x["power"] == BATTERY and x["power_changed"] for x in rows), rows)
+        self.assertIn("7 rows are flagged", r.power_warning())
+
+    def test_low_power_mode_counts_as_a_change(self):
+        fx, r, _ = self.run_ttr([AC, AC, AC_LOW_POWER, AC])
+        rows = self.rows(fx, r)
+        self.assertEqual([x["power"]["low_power"] for x in rows], [False, True, False, False, False, False, False])
+        self.assertEqual([x["power_changed"] for x in rows], [False, True, True, False, False, False, False])
+        self.assertIn("| ttr_cached | 4 | 4 | 0 | 0 | 0 | 1 | 2 |", blt.render(blt.summarize(fx.records(r))))
+
+    def test_steady_battery_run_is_labelled_not_flagged(self):
+        fx, r, _ = self.run_ttr([BATTERY], allow_battery=True)
+        self.assertFalse(fx.records(r, "env")[0]["ac_power"])
+        rows = self.rows(fx, r)
+        self.assertTrue(all(x["power"] == BATTERY and not x["power_changed"] for x in rows))
+        self.assertIsNone(r.power_warning())
+        doc = blt.render(blt.summarize(fx.records(r)))
+        self.assertIn("power at the start: battery.", doc)
+        self.assertIn("| ttr | 3 | 0 | 3 | 0 | 0 | 0 | 0 |", doc)
+
+    def test_battery_at_the_start_still_refuses(self):
+        with self.assertRaises(SystemExit) as cm:
+            self.run_ttr([BATTERY])
+        self.assertIn("need AC power (pmset reports battery)", str(cm.exception))
+
+    def test_report_on_rows_without_a_power_reading(self):
+        recs = [{"kind": "env", "ac_power": True},
+                {"kind": "load_cold", "variant": "turbo", "set": "w7", "stage": "cfm", "function": "frames_512",
+                 "load_ms": 1.0, "identity": "id-a"}]
+        doc = blt.render(blt.summarize(recs))
+        self.assertIn("None of the 1 rows carries a power reading", doc)
+        self.assertIn("AC power: True.", doc)
+        self.assertIn("Not measured yet.", blt.render(blt.summarize([])).split("<!-- /report:power -->")[0])
 
 
 class NativeTest(unittest.TestCase):

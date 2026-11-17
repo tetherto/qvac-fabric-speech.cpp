@@ -495,6 +495,50 @@ def wait_quiet(proto: dict, enabled: bool) -> float:
     return time.monotonic() - t0
 
 
+def pmset(*args) -> str:
+    """`pmset` output, or "" where there is no pmset (not macOS) or it fails."""
+    try:
+        p = subprocess.run(["pmset", *args], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return p.stdout if p.returncode == 0 else ""
+
+
+def parse_power_source(batt: str) -> str:
+    """'ac', 'battery', another source in lower case (e.g. 'ups'), or 'unknown',
+    from `pmset -g batt` ("Now drawing from 'AC Power'")."""
+    mt = re.search(r"drawing from '([^']+)'", batt)
+    if not mt:
+        return "unknown"
+    name = mt.group(1).strip()
+    return {"AC Power": "ac", "Battery Power": "battery"}.get(name, re.sub(r"\s*power$", "", name, flags=re.I).lower())
+
+
+def parse_low_power(settings: str):
+    """Low Power Mode from `pmset -g`: True, False, or None when not reported.
+    Most Macs print `lowpowermode 0|1`; Macs with High Power Mode print
+    `powermode 0|1|2`, where 1 is Low Power Mode."""
+    mt = re.search(r"^\s*lowpowermode\s+(\d+)", settings, re.M)
+    if mt:
+        return mt.group(1) != "0"
+    mt = re.search(r"^\s*powermode\s+(\d+)", settings, re.M)
+    return mt.group(1) == "1" if mt else None
+
+
+def read_power(reader=pmset) -> dict:
+    """The power source and Low Power Mode now; `reader` runs pmset."""
+    return {"source": parse_power_source(reader("-g", "batt")), "low_power": parse_low_power(reader("-g"))}
+
+
+def power_label(p) -> str:
+    """'AC', 'battery', 'AC, Low Power Mode', ... for messages and the report."""
+    if not p:
+        return "not recorded"
+    src = {"ac": "AC", "battery": "battery"}.get(p.get("source"), p.get("source") or "unknown")
+    lpm = p.get("low_power")
+    return src + (", Low Power Mode" if lpm else "" if lpm is False else ", Low Power Mode unknown")
+
+
 def run_json(cmd, env=None, timeout=3600, ok_codes=(0,)) -> dict:
     p = subprocess.run([str(c) for c in cmd], capture_output=True, text=True, env=env, timeout=timeout)
     lines = [ln for ln in p.stdout.splitlines() if ln.startswith("{")]
@@ -616,8 +660,13 @@ def sharing_verdict(increments, weight_bytes: int) -> str:
 
 
 class Runner:
-    def __init__(self, args, m: dict):
+    def __init__(self, args, m: dict, power_reader=None):
         self.args = args
+        # Power is read at the start and again as each row is recorded.
+        self.power_reader = power_reader or read_power
+        self.power_start = None
+        self.power_last = None
+        self.power_flagged: dict = {}  # kind -> rows recorded while the power differed from the start
         self.m = m
         self.proto = m["protocol"]
         self.models = models_root(args.models_root)
@@ -641,11 +690,40 @@ class Runner:
         return [v for v in cfg.get("variants", self.m["variants"]) if not self.args.variant or v in self.args.variant]
 
     def record(self, kind: str, **fields):
+        if kind != "env":
+            fields.update(self._power_row(kind))
         rec = {"kind": kind, "t": datetime.datetime.now(datetime.timezone.utc).isoformat(), **fields}
         with open(self.results, "a") as f:
             f.write(json.dumps(rec) + "\n")
         print(f"[{kind}] " + json.dumps({k: v for k, v in fields.items() if not isinstance(v, (list, dict))})[:300],
               flush=True)
+
+    def _power_row(self, kind: str) -> dict:
+        """The power reading for a row being recorded. The row is flagged when
+        this reading or the previous one differs from the start: the power
+        changed while it was measured. A change that reverts between two
+        readings goes unseen."""
+        now = self.power_reader()
+        if self.power_start is None:
+            self.power_start = self.power_last = now
+        changed = now != self.power_start or self.power_last != self.power_start
+        self.power_last = now
+        if changed:
+            if not self.power_flagged:
+                print(f"bench-load-time: warning: power changed from {power_label(self.power_start)} to "
+                      f"{power_label(now)}; flagging rows (power_changed) and continuing", file=sys.stderr, flush=True)
+            self.power_flagged[kind] = self.power_flagged.get(kind, 0) + 1
+        return {"power": now, "power_changed": changed}
+
+    def power_warning(self) -> str | None:
+        """The end-of-run warning when any row was flagged, else None."""
+        if not self.power_flagged:
+            return None
+        n = sum(self.power_flagged.values())
+        kinds = ", ".join(f"{k} {c}" for k, c in self.power_flagged.items())
+        return (f"bench-load-time: warning: the power source or Low Power Mode changed during the run "
+                f"(started on {power_label(self.power_start)}); {n} rows are flagged power_changed ({kinds}). "
+                f"Their numbers may not compare with the rest; re-run those measurements on steady power.")
 
     def need(self, what: Path, label: str):
         if what is None or not Path(what).exists():
@@ -654,7 +732,7 @@ class Runner:
     # ---- environment ----
     def environment(self):
         sysctl = lambda k: subprocess.run(["sysctl", "-n", k], capture_output=True, text=True).stdout.strip()
-        power = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True).stdout
+        power = self.power_start = self.power_last = self.power_reader()
         ident = run_json([self.driver, "identity"]) if self.driver.exists() else {}
         digests = {}
         for v in self.m["variants"]:
@@ -666,10 +744,10 @@ class Runner:
         self.record("env", git=self.git, manifest_sha256=sha256_file(self.args.manifest),
                     chip=sysctl("machdep.cpu.brand_string"), memsize=int(sysctl("hw.memsize") or 0),
                     os_build=ident.get("os_build"), os_version=ident.get("os_version"),
-                    ac_power="AC Power" in power, units=self.units, sidecars=digests,
+                    ac_power=power["source"] == "ac", power=power, units=self.units, sidecars=digests,
                     models_root=str(self.models))
-        if "AC Power" not in power and not self.args.allow_battery:
-            raise SystemExit("bench-load-time: benchmark runs need AC power (pmset reports battery); "
+        if power["source"] != "ac" and not self.args.allow_battery:
+            raise SystemExit(f"bench-load-time: benchmark runs need AC power (pmset reports {power['source']}); "
                              "pass --allow-battery only for a smoke run")
 
     # ---- sizes ----
@@ -1012,6 +1090,25 @@ def summarize(recs: list) -> dict:
     for r in by.get("synthesis", []):
         syn.setdefault((r["variant"], r["config"]), []).append(r)
     s["synthesis"] = syn
+
+    # Per measurement kind, in the order rows were first recorded: how many
+    # rows ran on each power source, with Low Power Mode, and flagged.
+    power: dict = {}
+    for r in recs:
+        if r["kind"] == "env":
+            continue
+        e = power.setdefault(r["kind"], {"rows": 0, "ac": 0, "battery": 0, "other": 0, "not_recorded": 0,
+                                         "low_power": 0, "changed": 0})
+        e["rows"] += 1
+        p = r.get("power")
+        if not p:
+            e["not_recorded"] += 1
+            continue
+        src = p.get("source")
+        e[src if src in ("ac", "battery") else "other"] += 1
+        e["low_power"] += bool(p.get("low_power"))
+        e["changed"] += bool(r.get("power_changed"))
+    s["power"] = power
     return s
 
 
@@ -1036,8 +1133,10 @@ def render(s: dict) -> str:
       "(Metal cost model, warm-load hints, width set, weight-sharing accounting); the last section says where each one goes.")
     w("")
     if env:
+        power = (f"power at the start: {power_label(env['power'])}" if env.get("power")
+                 else f"AC power: {env.get('ac_power')}")
         w(f"- Host: {env.get('chip', '—')}, {(env.get('memsize') or 0) / 2**30:.0f} GB, macOS "
-          f"{env.get('os_version', '—')} ({env.get('os_build', '—')}), AC power: {env.get('ac_power')}.")
+          f"{env.get('os_version', '—')} ({env.get('os_build', '—')}), {power}.")
         w(f"- Commit `{(env.get('git') or '—')[:12]}`, manifest sha256 `{(env.get('manifest_sha256') or '—')[:16]}…`, "
           f"compute units `{env.get('units', '—')}`.")
         w("- Sidecars exported locally with `engines/tts/scripts/export-chatterbox-coreml.py` from the pinned f32 "
@@ -1047,14 +1146,46 @@ def render(s: dict) -> str:
           "with `bench-load-time.py report`.")
     w("")
 
+    begin("power")
+    w("## Power source per row")
+    w("")
+    w("`run` reads the power source (`pmset -g batt`) and Low Power Mode (`pmset -g`) at the start and again as it "
+      "records each row (`power` in `results.jsonl`). A row is flagged (`power_changed`) when its reading or the "
+      "one before it differs from the start's, that is when the power changed while it was measured.")
+    w("")
+    pw = s["power"]
+    recorded = sum(e["rows"] - e["not_recorded"] for e in pw.values())
+    if not pw:
+        w("Not measured yet.")
+    elif not recorded:
+        w(f"None of the {sum(e['rows'] for e in pw.values())} rows carries a power reading: they were recorded "
+          "before `run` read the power source per row. The header says how the run was powered.")
+    else:
+        changed = sum(e["changed"] for e in pw.values())
+        if changed:
+            kinds = ", ".join(k for k, e in pw.items() if e["changed"])
+            w(f"**Warning: the power source or Low Power Mode changed during the run.** {changed} of "
+              f"{sum(e['rows'] for e in pw.values())} rows are flagged ({kinds}); their numbers may not compare with "
+              "the rest. Re-run those measurements on steady power.")
+            w("")
+        w("| Measurement | Rows | AC | Battery | Other | Not recorded | Low Power Mode | Flagged |")
+        w("|---|--:|--:|--:|--:|--:|--:|--:|")
+        for k, e in pw.items():
+            w(f"| {k} | {e['rows']} | {e['ac']} | {e['battery']} | {e['other']} | {e['not_recorded']} | "
+              f"{e['low_power']} | {e['changed']} |")
+    w("")
+    end("power")
+
     begin("setup")
     w("## Setup and usage")
     w("")
     w("Requirements:")
     w("")
     w("- Apple silicon, macOS 15 or later, Xcode command-line tools (`xcrun clang++`) and Python 3.9 or later. "
-      "The published numbers come from an otherwise idle M2 on macOS 15.7.3; `run` refuses battery power unless "
-      "`--allow-battery` is given.")
+      "The published numbers come from an otherwise idle M2 on macOS 15.7.3; `run` refuses to start on battery "
+      "power unless `--allow-battery` is given. When the power source or Low Power Mode changes mid-run, `run` "
+      "keeps going, flags every row measured while the power differed from the start (`power_changed`) and warns at "
+      "the end; the report counts them under \"Power source per row\".")
     w("- The Chatterbox GGUFs pinned in `bench-manifest.json` (`variants`, with SHA-256 and Hugging Face "
       "revisions) under the models root: `--models-root DIR`, or `QVAC_BENCH_MODELS`.")
     w("- The Core ML sidecars for each width set in `sidecar_sets`, exported from the pinned f32 GGUFs with "
@@ -1323,6 +1454,9 @@ def cmd_run(args, m) -> int:
         subprocess.run(["bash", str(FRESH_HOST), "cleanup-all"], capture_output=True,
                        env=dict(os.environ, QVAC_BENCH_HOSTS=str(r.hosts)))
         shutil.rmtree(r.work, ignore_errors=True)
+        warning = r.power_warning()
+        if warning:
+            print(warning, file=sys.stderr)
     print(f"results: {r.results}")
     return 0
 
