@@ -33,8 +33,9 @@ struct CoremlOptions {
     // automatic: a stage runs on its Core ML sidecar once the sidecar is
     // loaded, on ggml until then. off: ggml only. require: like wait = call,
     // but a sidecar that cannot serve a call (failed to load, failed a
-    // prediction, an input wider than its widest function) throws instead of
-    // falling back to ggml.
+    // prediction, an input wider than its widest function, no usable
+    // function) throws instead of falling back to ggml. An explicit value
+    // wins over the legacy coreml_strict / coreml_disabled aliases.
     Use use = Use::unset;
     // Sidecar generation from the GGUF. Chatterbox loads only the prebuilt
     // sidecars next to its S3Gen GGUF today, so this has no effect yet.
@@ -44,7 +45,7 @@ struct CoremlOptions {
     //       time the stage would take on ggml.
     // construct: the constructor waits until its construction group finished.
     // call: each call waits until the sidecar functions it needs are ready or
-    //       have failed.
+    //       have failed, unless an already loaded function covers it.
     Wait wait = Wait::unset;
     // Which sidecar functions load at construction: none; minimal (Chatterbox:
     // HiFT plus the encoder and CFM widths this host loaded most recently);

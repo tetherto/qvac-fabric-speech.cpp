@@ -117,7 +117,10 @@ Neither construction nor synthesis waits for a load by default.
   chunk) acquires its models once, before it starts: the narrowest *loaded*
   encoder and CFM functions that cover its exact token and frame counts (a
   wider loaded function serves it with the padding masked) and HiFT. The
-  exact function is requested at once if it is not loaded. A stage without a
+  exact function is requested at once if it is not loaded; a call waits for
+  it (as `wait` allows) only when no loaded function covers the call. Each
+  `Engine` owns its slots and requests; Engines and `tts-cli` on the same
+  sidecars still share loads and models. A stage without a
   model runs that whole call on ggml, so readiness never changes a backend
   mid-call. `SynthesisResult::coreml_pending` reports a call that ran on ggml
   only because a function was still loading. The first call of a cold process
@@ -140,8 +143,11 @@ Neither construction nor synthesis waits for a load by default.
   hours, so a cold compile is never waited on twice. `construct` makes the
   constructor wait for its construction group (`{prewarm: all, wait:
   construct}` loads all 15 functions first); `call` makes every call wait for
-  its functions. `Engine::coreml_wait()`, `coreml_prewarm()` and
-  `coreml_status()` (`--coreml-status-json PATH`) expose the same.
+  its functions when none loaded covers it. `Engine::coreml_wait()`,
+  `coreml_prewarm()` and `coreml_status()` (`--coreml-status-json PATH`; `-`
+  is stdout, refused with `--out -`) expose the same. Without a sidecar in use
+  (Core ML off, absent or not built) a group is empty and succeeds with
+  `nothing_to_prepare`: `coreml_wait()` returns true at once.
 - **Cache directory** (`CoremlOptions::cache_dir`, `QVAC_COREML_CACHE_DIR`,
   `--coreml-cache-dir`): where warm hints live. Without one there are no hints,
   hence no bounded wait and no hinted widths at construction; `tts-cli`
@@ -153,10 +159,12 @@ Neither construction nor synthesis waits for a load by default.
 - **Off and strict** (`CoremlOptions::use`, `--coreml-use`): `off` (or
   `CHATTERBOX_COREML_DISABLE`) keeps every stage on ggml; `require` (or
   `CHATTERBOX_COREML_STRICT`) waits like `call` and makes a sidecar that cannot
-  serve a call (failed load or prediction, an input past the widest function)
-  an error instead of a fallback. The older `EngineOptions::coreml_compute_units`
-  / `coreml_strict` and `s3gen_synthesize_opts::coreml_compute_units` /
-  `coreml_strict` / `coreml_disabled` remain as aliases that fill unset fields.
+  serve a call (failed load or prediction, an input past the widest function,
+  a sidecar that lists no usable function) an error instead of a fallback. The
+  older `EngineOptions::coreml_compute_units` / `coreml_strict` and
+  `s3gen_synthesize_opts::coreml_compute_units` / `coreml_strict` /
+  `coreml_disabled` remain as aliases that fill unset fields: an explicit
+  `use` always wins over them (only `CHATTERBOX_COREML_DISABLE` overrides it).
 - **Failures.** Before each prediction every input and output shape the
   sidecar declares is checked against what the call packs. A function that
   declares another shape (an incompatible export, or the other variant's
@@ -179,9 +187,12 @@ thread while T3 decodes sentence *i + 1* (`Engine` with `max_sentence_chars`;
 `tts-cli`, whose default 180 splits, prefetches the next sentence's T3 instead).
 The decision is made per sentence from the models it acquired: a sentence
 whose CFM or HiFT runs on ggml (or on units that may use the GPU) renders
-inline, as the two would only contend. A Core ML failure on the worker does not
-run ggml there: the segment is handed back and rendered again on the
-dispatching thread. With the encoder alone on Metal, overlapped T3 measured
+inline, as the two would only contend. A Core ML failure during the overlap
+does not run ggml while T3 may hold the GPU: the sentence is handed back and
+rendered again on the dispatching thread once the next sentence's T3 has
+finished (`tts-cli` waits for its prefetched T3 first), on the same plan with
+the failed stage on ggml (CFM from the sentence's own initial noise, never on
+another width) and the other stages on their models. With the encoder alone on Metal, overlapped T3 measured
 about 9 % slower on Turbo.
 
 #### First use and the plan cache
@@ -271,17 +282,25 @@ blocking, a ready short width and a pending long one, a call longer than
 predicted, a ready wider function serving a narrower call, the call's own
 width loading right after the one in flight, a stale hint never holding a call
 past its deadline, retirement, the resident cap keeping held and predicted
-widths, and destruction mid-load returning in under 100 ms.
+widths, a ready covering function serving `wait = call` and `use = require`
+without waiting, a lone unusable sidecar refused under `require`, `prewarm`
+`none` and `minimal` loading nothing ahead of a call, and destruction
+mid-load returning in under 100 ms.
 `test-chatterbox-coreml-stages` reads `CHATTERBOX_COREML_TEST_S3GEN` (an S3Gen
 GGUF with its exported sidecars); `test-chatterbox-coreml-engine` also reads
 `CHATTERBOX_COREML_TEST_T3` and checks the `Engine` sentence overlap (PCM
 identical to the segments synthesized one call at a time and crossfaded in
 order, the aggregated backend, cancellation mid-request, strict mode, a
-failure on the worker rendered again), and the real CFM rollback equal to a
-ggml run. `test-chatterbox-coreml-engine-slow-load` (`--slow-load`, also
+failure on the worker handed back and rendered again after the next T3 with
+CFM on ggml), the real CFM rollback and a handed-back call's replay equal to a
+ggml run, two Engines owning separate slots, and fit on the real GGUFs
+(`use = off` projecting exactly the sidecar-free bytes; the enabled verdict
+unchanged by loads). `test-chatterbox-coreml-engine-slow-load` (`--slow-load`, also
 `CHATTERBOX_COREML_TEST_CLI`, a `tts-cli`) delays every load and checks that the
 first synthesis, through the `Engine` and through `tts-cli`, equals a `use =
-off` run sample for sample, and that later calls run on Core ML. Each reports a
+off` run sample for sample, that later calls run on Core ML, and that
+`tts-cli` renders a sentence handed back by a failing CFM prediction again
+only after the next sentence's T3. Each reports a
 skip without its inputs. The macOS CI lane runs the exporter, shape and pending
 checks, and the engine fixtures on staged Turbo GGUFs.
 
