@@ -33,7 +33,24 @@
 //   Error   -- no projection could be made (unreadable model, no backend
 //              device registered, measurement failure). An empty device
 //              registry is always Error, never Success.
+//
+// Core ML (FitResult::coreml): the VAE decoder's route, from `coreml` and the
+// ACESTEP_COREML_* environment, decided without reading the cache, so a
+// projection is the same before and after the first generation.
+//   - A generated decoder (coreml.cache_dir set, template match, macOS 15)
+//     adds the template's Core ML envelope, in host memory, to the projection,
+//     and the verdict is the Core ML-inclusive one. The envelope's transient
+//     (generation or load) is charged in every phase, since a load started in
+//     the VAE phase can outlive it; the resident decoder only in the VAE
+//     decode phase, or in every phase with keep_stages or with prewarm all
+//     without wait construct (a construction load then completes in whatever
+//     phase is running). The ggml VAE stays charged as well.
+//   - With coreml.memory_budget_bytes, a budget only the ggml projection fits
+//     resolves use = off instead (memory-degrade: coreml.disabled_reason
+//     "memory", the ggml verdict).
+//   - A prebuilt sidecar keeps today's projection (it is not charged).
 
+#include "audiogen-cpp/coreml_options.h"
 #include "audiogen-cpp/export.h"
 
 #include <cstdint>
@@ -118,6 +135,24 @@ struct FitOptions {
     // Free-memory headroom that must remain on every pool for the projection
     // to count as fitting.
     uint64_t margin_bytes = 256ull * 1024 * 1024;
+
+    // Mirrors EngineOptions::coreml: the VAE decoder's route and its Core ML
+    // envelope.
+    CoremlOptions coreml;
+};
+
+// The Core ML part of a projection.
+struct FitCoreml {
+    std::string route = "none";  // "prebuilt" | "generate" | "none"
+    // The Core ML-inclusive verdict: the ggml projection (its residency kept)
+    // plus the decoder's envelope.
+    bool        fits      = true;
+    uint64_t    bytes     = 0;      // the envelope: resident + one transient, with its margin
+    bool        validated = false;  // the envelope was measured for the resolved compute units
+    // "memory" when memory-degrade (a budget only the ggml projection fits)
+    // makes the engine resolve use = off.
+    std::string disabled_reason;
+    bool        ggml_only_fits = true;  // today's verdict
 };
 
 // One pipeline stage's projected footprint.
@@ -184,6 +219,9 @@ struct FitResult {
 
     // Human-readable projection table (multi-line, suitable for logging).
     std::string report;
+
+    // The VAE decoder's Core ML route and verdict; route "none" without one.
+    FitCoreml coreml;
 };
 
 // Project the models + workload in `opts` against the memory available right

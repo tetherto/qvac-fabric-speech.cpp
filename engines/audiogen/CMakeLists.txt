@@ -109,6 +109,7 @@ set(AUDIOGEN_LIB_SOURCES
     src/acestep/vae_ggml.cpp
     src/acestep/vae_encode_windows.cpp
     src/acestep/vae_coreml_path.cpp
+    src/acestep/vae_coreml.cpp
     src/acestep/vae_api.cpp
     src/acestep/wav_reader.cpp
     src/acestep/dit_gguf.cpp
@@ -214,10 +215,21 @@ if (AUDIOGEN_BUILD_LIBRARY)
         )
     endif()
     # Shared Core ML runtime (engines/coreml): compiled into libaudiogen-cpp
-    # under its own namespace when AUDIOGEN_COREML is on. No engine source uses
-    # it yet.
+    # under its own namespace when AUDIOGEN_COREML is on. The ACE-Step VAE
+    # decoder loads through its slots and, with AUDIOGEN_COREML_GENERATE (macOS
+    # default), is generated from the VAE GGUF with the embedded template below.
     include(${CMAKE_CURRENT_SOURCE_DIR}/../coreml/qvac_coreml.cmake)
-    qvac_coreml_add_to(audiogen-cpp NAMESPACE audiogen_coreml PREFIX AUDIOGEN ENABLE ${AUDIOGEN_COREML})
+    qvac_coreml_add_to(audiogen-cpp NAMESPACE audiogen_coreml PREFIX AUDIOGEN ENABLE ${AUDIOGEN_COREML}
+        TEMPLATES "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/acestep-vae-t64")
+    if (AUDIOGEN_COREML)
+        # The engine sources compile in audiogen-cpp-objects, so the adoption
+        # (src/acestep/vae_coreml.cpp) needs the runtime's namespace and headers
+        # there; in-tree binaries that link the objects link the runtime's
+        # objects too (audiogen_link_in_tree_binary).
+        get_target_property(_ag_coreml_ns audiogen-cpp QVAC_COREML_NS)
+        target_compile_definitions(audiogen-cpp-objects PRIVATE QVAC_COREML_NS=${_ag_coreml_ns})
+        target_include_directories(audiogen-cpp-objects PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/include)
+    endif()
 
     set_target_properties(audiogen-cpp PROPERTIES
         POSITION_INDEPENDENT_CODE ON
@@ -248,6 +260,14 @@ endif()
 
 function(audiogen_link_in_tree_binary target)
     target_link_libraries(${target} PRIVATE audiogen-cpp-objects)
+    if (TARGET audiogen-cpp.qvac-coreml)
+        # The shared Core ML runtime's objects (folded into libaudiogen-cpp by
+        # qvac_coreml_add_to) and the frameworks it needs.
+        _qvac_coreml_apple_frameworks(_ag_coreml_fws ON)
+        find_package(Threads REQUIRED)
+        target_sources(${target} PRIVATE $<TARGET_OBJECTS:audiogen-cpp.qvac-coreml>)
+        target_link_libraries(${target} PRIVATE ${_ag_coreml_fws} Threads::Threads)
+    endif()
     target_include_directories(${target} PRIVATE
         include
         src

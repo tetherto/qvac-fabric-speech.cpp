@@ -9,7 +9,6 @@
 
 #include "vae_encode_windows.h"
 
-#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -34,30 +33,30 @@ uint16_t encode_float16(float f) {
     return out;
 }
 
-MLComputeUnits requested_compute_units(std::string * label) {
-    const char * env = std::getenv("ACESTEP_COREML_COMPUTE_UNITS");
-    const std::string requested = env != nullptr ? env : "";
-    if (requested == "cpu_only") {
+bool compute_units_of(const std::string & units, MLComputeUnits * out, std::string * label) {
+    if (units == "cpu_only") {
+        *out   = MLComputeUnitsCPUOnly;
         *label = "coreml-cpu";
-        return MLComputeUnitsCPUOnly;
-    }
-    if (requested == "cpu_and_gpu") {
+    } else if (units == "cpu_and_gpu") {
+        *out   = MLComputeUnitsCPUAndGPU;
         *label = "coreml-gpu";
-        return MLComputeUnitsCPUAndGPU;
-    }
-    if (requested == "cpu_and_ane") {
+    } else if (units == "cpu_and_ane") {
+        *out   = MLComputeUnitsCPUAndNeuralEngine;
         *label = "coreml-ane";
-        return MLComputeUnitsCPUAndNeuralEngine;
+    } else if (units == "all") {
+        *out   = MLComputeUnitsAll;
+        *label = "coreml-all";
+    } else {
+        return false;
     }
-    *label = "coreml-all";
-    return MLComputeUnitsAll;
+    return true;
 }
 
-MLModel * load_model(const char * path_mlmodelc, std::string * label) {
+MLModel * load_model(const char * path_mlmodelc, MLComputeUnits units) {
     NSString * path = [[NSString alloc] initWithUTF8String:path_mlmodelc];
     if (path == nil) return nil;
     MLModelConfiguration * config = [[MLModelConfiguration alloc] init];
-    config.computeUnits = requested_compute_units(label);
+    config.computeUnits = units;
     NSError * err   = nil;
     MLModel * model = [MLModel modelWithContentsOfURL:[NSURL fileURLWithPath:path]
                                         configuration:config
@@ -222,12 +221,15 @@ acestep_coreml_vae_context * create_context(MLModel * model, const CachedIo & io
 
 }  // namespace
 
-struct acestep_coreml_vae_context * acestep_coreml_vae_init(const char * path_mlmodelc) {
-    if (path_mlmodelc == nullptr) return nullptr;
+struct acestep_coreml_vae_context * acestep_coreml_vae_init(const char * path_mlmodelc,
+                                                            const char * compute_units) {
+    if (path_mlmodelc == nullptr || compute_units == nullptr) return nullptr;
 
     @autoreleasepool {
-        std::string label;
-        MLModel * model = load_model(path_mlmodelc, &label);
+        std::string    label;
+        MLComputeUnits units = MLComputeUnitsAll;
+        if (!compute_units_of(compute_units, &units, &label)) return nullptr;
+        MLModel * model = load_model(path_mlmodelc, units);
         if (model == nil) return nullptr;
 
         NSString * in_name  = nil;

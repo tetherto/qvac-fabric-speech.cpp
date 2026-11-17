@@ -28,12 +28,14 @@
 #include "acestep/dit_gguf.h"
 #include "acestep/engine_backends.h"
 #include "acestep/engine_paths.h"
+#include "acestep/fit_coreml.h"
 #include "acestep/fit_measure.h"
 #include "acestep/fit_pools.h"
 #include "acestep/fit_util.h"
 #include "acestep/lm_ggml.h"
 #include "acestep/stage_placement.h"
 #include "acestep/textenc_ggml.h"
+#include "acestep/vae_coreml.h"
 #include "acestep/vae_encode_windows.h"
 #include "acestep/vae_ggml.h"
 
@@ -46,6 +48,7 @@
 #include <exception>
 #include <initializer_list>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -183,6 +186,21 @@ static FitResult fit_params_unguarded(const FitOptions & opts) {
         paths.dit_model_path.empty() || paths.vae_model_path.empty()) {
         r.reason = "invalid-arguments";  // a stage GGUF is missing from the request
         return r;
+    }
+
+    // The VAE decoder's Core ML route, never from the cache.
+    detail::vae_coreml_route vae_route;
+    try {
+        vae_route = detail::vae_coreml_plan_route(paths.vae_model_path, opts.coreml);
+    } catch (const std::invalid_argument &) {
+        r.reason = "invalid-arguments";
+        return r;
+    }
+    r.coreml.route = vae_route.route;
+    const bool coreml_generate = vae_route.route == "generate";
+    if (coreml_generate) {
+        r.coreml.bytes     = vae_route.envelope_bytes;
+        r.coreml.validated = vae_route.validated;
     }
 
     // ── Backends: same resolution + placement as Engine::create ────────────
@@ -554,50 +572,74 @@ static FitResult fit_params_unguarded(const FitOptions & opts) {
     PoolCharge vae_enc_compute = charge_backend(pools, vae_backend, vae_enc_backend);
     vae_enc_compute.add_host(vae_enc_host_in);
 
-    PoolCharge peak(pools.size());
-    if (keep_stages) {
-        // Everything resident: all stage buffers, the two persistent graph
-        // caches (DiT forward, LM decode), plus the largest ephemeral graph.
-        PoolCharge resident(pools.size());
-        resident.add(textenc_static).add(cond_static).add(detok_static)
-                .add(lm_static).add(dit_static).add(vae_static)
-                .add(dit_compute).add(lm_compute);
-        PoolCharge ephemeral(pools.size());  // per-call graphs: encoders, detok, VAE windows
-        ephemeral.max_with(enc_compute).max_with(detok_compute)
-                 .max_with(vae_dec_compute).max_with(vae_enc_compute);
-        PoolCharge host_only(pools.size());
-        host_only.add_host(std::max({ lm_host, detok_host, enc_host,
-                                      dit_host, vae_host, vae_enc_host }));
-        peak = resident;
-        peak.add(ephemeral).add(host_only);
-    } else {
-        // Lazy (default): one phase at a time; the text and cond encoders
-        // overlap inside the conditioning phase (ensure_cond before
-        // encode_prompt -- engine.cpp prepare_encoder_conditioning).
-        auto phase = [](PoolCharge stat, PoolCharge comp, uint64_t host) {
-            PoolCharge p = stat;
-            p.add(comp).add_host(host);
-            return p;
-        };
-        PoolCharge enc_static = textenc_static;  // both encoders resident together
-        enc_static.add(cond_static);
+    // One projection: the ggml stages plus what a generated Core ML decoder
+    // adds to host memory (none for the ggml-only verdict).
+    auto project = [&](const CoremlPhaseCharge & cm) {
+        PoolCharge peak(pools.size());
+        if (keep_stages) {
+            // Everything resident: all stage buffers, the two persistent graph
+            // caches (DiT forward, LM decode), plus the largest ephemeral graph.
+            PoolCharge resident(pools.size());
+            resident.add(textenc_static).add(cond_static).add(detok_static)
+                    .add(lm_static).add(dit_static).add(vae_static)
+                    .add(dit_compute).add(lm_compute);
+            PoolCharge ephemeral(pools.size());  // per-call graphs: encoders, detok, VAE windows
+            ephemeral.max_with(enc_compute).max_with(detok_compute)
+                     .max_with(vae_dec_compute).max_with(vae_enc_compute);
+            PoolCharge host_only(pools.size());
+            host_only.add_host(std::max({ lm_host, detok_host, enc_host,
+                                          dit_host, vae_host, vae_enc_host }));
+            peak = resident;
+            peak.add(ephemeral).add(host_only);
+            peak.add_host(sat_add(cm.every_phase, cm.vae_decode));
+        } else {
+            // Lazy (default): one phase at a time; the text and cond encoders
+            // overlap inside the conditioning phase (ensure_cond before
+            // encode_prompt -- engine.cpp prepare_encoder_conditioning).
+            auto phase = [&cm](PoolCharge stat, PoolCharge comp, uint64_t host) {
+                PoolCharge p = stat;
+                p.add(comp).add_host(host).add_host(cm.every_phase);
+                return p;
+            };
+            PoolCharge enc_static = textenc_static;  // both encoders resident together
+            enc_static.add(cond_static);
 
-        peak.max_with(phase(lm_static, lm_compute, lm_host));
-        peak.max_with(phase(detok_static, detok_compute, detok_host));
-        peak.max_with(phase(enc_static, enc_compute, enc_host));
-        peak.max_with(phase(dit_static, dit_compute, dit_host));
-        peak.max_with(phase(vae_static, vae_dec_compute, vae_host));
-        if (opts.with_source_audio) {
-            peak.max_with(phase(vae_static, vae_enc_compute, vae_enc_host));
+            peak.max_with(phase(lm_static, lm_compute, lm_host));
+            peak.max_with(phase(detok_static, detok_compute, detok_host));
+            peak.max_with(phase(enc_static, enc_compute, enc_host));
+            peak.max_with(phase(dit_static, dit_compute, dit_host));
+            peak.max_with(phase(vae_static, vae_dec_compute, sat_add(vae_host, cm.vae_decode)));
+            if (opts.with_source_audio) {
+                peak.max_with(phase(vae_static, vae_enc_compute, vae_enc_host));
+            }
         }
-    }
+        return peak;
+    };
+    const PoolCharge ggml_peak = project({});
+    // A construction load nobody waits for (prewarm all, wait not construct)
+    // may complete in any phase and stays until the next VAE stage boundary.
+    const bool unwaited_prewarm = opts.coreml.prewarm == CoremlOptions::Prewarm::all &&
+                                  opts.coreml.wait != CoremlOptions::Wait::construct;
+    const PoolCharge coreml_peak =
+        coreml_generate ? project(acestep_coreml_phase_charge(true, vae_route.resident_bytes,
+                                                              vae_route.transient_bytes,
+                                                              keep_stages || unwaited_prewarm))
+                        : ggml_peak;
+    const CoremlFitVerdict cv = acestep_decide_coreml_fit(
+        fit_budget_checks(pools, ggml_peak, primary, opts.margin_bytes),
+        fit_budget_checks(pools, coreml_peak, primary, opts.margin_bytes), coreml_generate,
+        opts.coreml.memory_budget_bytes);
+    r.coreml.ggml_only_fits = cv.ggml_only_fits;
+    r.coreml.fits           = cv.coreml_fits;
+    if (cv.degraded) r.coreml.disabled_reason = "memory";
+    const PoolCharge & peak = coreml_generate && !cv.degraded ? coreml_peak : ggml_peak;
     r.peak_device_bytes = peak.bytes[primary];
     r.peak_host_bytes   = peak.bytes[FIT_HOST_POOL];
     r.extra_devices     = extra_device_pools(pools, peak, primary);
 
     // ── Verdict ─────────────────────────────────────────────────────────────
     const std::vector<FitBudgetCheck> checks = fit_budget_checks(pools, peak, primary, opts.margin_bytes);
-    const bool                        fits   = fit_checks_hold(checks);
+    const bool                        fits   = cv.fits;
     r.fits   = fits;
     r.status = fits ? FitStatus::Success : FitStatus::Failure;
     r.reason = fits ? "fits" : "does-not-fit";
@@ -646,6 +688,16 @@ static FitResult fit_params_unguarded(const FitOptions & opts) {
                       fmt_mib(r.peak_device_bytes).c_str(), fmt_mib(r.peak_host_bytes).c_str(),
                       format_extra_device_peaks(r.extra_devices).c_str(), fmt_mib(opts.margin_bytes).c_str());
         s += line;
+        if (coreml_generate) {
+            std::snprintf(line, sizeof(line),
+                          "core ml:  VAE decoder %s (generated, %s%s): transient %s every phase, resident %s %s%s\n",
+                          fmt_mib(r.coreml.bytes).c_str(), vae_route.compute_units.c_str(),
+                          r.coreml.validated ? ", validated" : ", not validated",
+                          fmt_mib(vae_route.transient_bytes).c_str(), fmt_mib(vae_route.resident_bytes).c_str(),
+                          keep_stages || unwaited_prewarm ? "every phase" : "in the VAE phase",
+                          cv.degraded ? "; memory-degrade: ggml only" : "");
+            s += line;
+        }
         if (r.fits) {
             const uint64_t headroom = fit_checks_headroom(checks);
             std::snprintf(line, sizeof(line), "verdict: FITS (headroom %s)\n", fmt_mib(headroom).c_str());

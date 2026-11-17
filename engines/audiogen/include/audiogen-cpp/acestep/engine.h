@@ -22,10 +22,23 @@
 // stage on the NPU. Explicit XDNA placement uses the NPU for DiT and CPU for
 // the remaining stages. Unmeasured backends keep the LM and detokenizer on CPU.
 // See docs/backends.md for placement overrides and backend requirements.
+//
+// Core ML (Apple, AUDIOGEN_COREML builds): the VAE decode runs on a Core ML
+// sidecar of the decoder once it is loaded. The sidecar is prebuilt next to
+// the VAE GGUF (`vae-decoder.mlmodelc`) or, with EngineOptions::coreml.cache_dir
+// set and macOS 15 or later, generated from the VAE GGUF into that cache. It
+// loads in the background: create() never waits for it (unless coreml.prewarm
+// is all and coreml.wait is construct), the first decode requests it, and until
+// it is ready the decode runs on ggml (GenerateResult::coreml_pending). In the
+// default low-memory mode the decoder is released after every decode like the
+// ggml stages, while the generated sidecar and the warm hint stay, so the next
+// generate() reloads it quickly and decodes on Core ML.
 
+#include "audiogen-cpp/coreml_options.h"
 #include "audiogen-cpp/export.h"
 #include "audiogen-cpp/gpu_fallback.h"
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -75,6 +88,11 @@ struct EngineOptions {
     // localise a backend divergence to the stage that introduces it; the
     // directory must already exist. Empty = no dumping and no overhead.
     std::string dump_stages_dir;
+    // The VAE decoder's Core ML sidecar (audiogen-cpp/coreml_options.h):
+    // cache_dir enables generation from the VAE GGUF, wait / prewarm choose
+    // when it loads, use = require makes a sidecar that cannot serve a decode
+    // an error. Unset fields fall back to the ACESTEP_COREML_* environment.
+    CoremlOptions coreml;
     // NOTE: VAE windowed decode probes the active backend's allocation cap and
     // adapts its window for bounded memory on long tracks. It is intentionally
     // not exposed as an API option; ACESTEP_VAE_WIN_CORE is diagnostic only.
@@ -255,6 +273,13 @@ struct GenerateResult {
     int                sample_rate = 48000;
     int                channels    = 2;
     GenerateMetadata   metadata;
+    // What the VAE decode(s) of this call ran on: "ggml", a Core ML label
+    // ("coreml-all", "coreml-ane", "coreml-gpu", "coreml-cpu"), or "mixed" when
+    // the decodes of one call (an edit plan) ran on different backends.
+    std::string        vae_backend = "ggml";
+    // True when a VAE decode of this call ran on ggml only because the Core ML
+    // sidecar was not ready yet (still generating, compiling or loading).
+    bool               coreml_pending = false;
 };
 
 // Reverse pipeline (audio understanding): audio in, musical description out.
@@ -312,9 +337,27 @@ public:
     // std::runtime_error on invalid input or a failed stage.
     UnderstandResult understand(const UnderstandParams & params, const ProgressFn & progress = {}) const;
 
-    // Cooperative cancel for an in-flight generate() or understand() on
-    // another thread.
+    // Cooperative cancel for an in-flight generate(), understand() or
+    // coreml_wait() on another thread.
     void cancel() const;
+
+    // Core ML status of the VAE decoder as JSON (schema 1: engine, cache_dir,
+    // generation, stages with state, route, compute units, label, artifact
+    // key, warm hint, timings and error); "{}" in builds without
+    // AUDIOGEN_COREML.
+    std::string coreml_status() const;
+    // The construction group's result as JSON: success, nothing_to_prepare
+    // and every slot's final state ("{}" without Core ML). With prewarm all
+    // and wait construct, success means the decoder was generated, loaded
+    // and warmed (its hint written), even though low-memory mode released it
+    // again before create() returned.
+    std::string coreml_construction() const;
+    // Waits until the VAE decoder is ready or has failed, `timeout_ms` passes
+    // (< 0: no limit), or cancel() is called from another thread. True when
+    // it is ready. Returns false at once while nothing has requested it
+    // (before the first decode, or released after one in low-memory mode) or
+    // it waits for memory. coreml_wait(0) only polls.
+    bool coreml_wait(int64_t timeout_ms = -1) const;
 
     int         sample_rate() const;  // 48000
     std::string backend_name() const;
@@ -325,6 +368,7 @@ public:
 
 private:
     Engine();
+    GenerateResult generate_unlabelled(const GenerateParams & params, const ProgressFn & progress) const;
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

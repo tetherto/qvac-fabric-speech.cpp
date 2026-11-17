@@ -6,7 +6,9 @@
 // compilation. The two decodes must also agree at cosine 0.999, so a run
 // that produces fast but wrong audio fails instead of reporting a win.
 //
-// Skips (exit 77) under the same conditions as test-vae-coreml-parity.
+// Skips (exit 77) under the same conditions as test-vae-coreml-parity. With
+// --cache-dir DIR the Core ML leg is the sidecar generated from the GGUF into
+// DIR (the first decode waits for the generation and the cold load).
 
 #include <algorithm>
 #include <chrono>
@@ -78,11 +80,16 @@ double cosine(const std::vector<float> & a, const std::vector<float> & b) {
     return dot / (std::sqrt(na) * std::sqrt(nb) + 1e-12);
 }
 
+// --cache-dir: the Core ML leg generates (or reuses) the sidecar there from
+// the GGUF, which must then have no prebuilt sidecar next to it.
+std::string g_cache_dir;
+
 std::unique_ptr<tts_cpp::acestep::Vae> load_vae(const std::string & gguf) {
     tts_cpp::acestep::VaeOptions opts;
-    opts.verbose      = true;  // logs the sidecar window and compute-unit label
+    opts.verbose      = true;  // logs the sidecar route
     opts.with_encoder = false;
     opts.n_gpu_layers = 1;
+    if (!g_cache_dir.empty()) opts.coreml.cache_dir = g_cache_dir;
     return tts_cpp::acestep::Vae::load(gguf, opts);
 }
 
@@ -137,6 +144,13 @@ bool bench_one(const std::string & gguf, int audio_seconds, BenchRow * row, bool
                      T_latent);
         return false;
     }
+    const std::string coreml_label = vae_coreml->last_decode_backend();
+    if (coreml_label.rfind("coreml-", 0) != 0) {
+        unsetenv("ACESTEP_COREML_STRICT");
+        std::fprintf(stderr, "[bench-vae-coreml] FAIL: the Core ML leg decoded on %s at T=%d\n",
+                     coreml_label.c_str(), T_latent);
+        return false;
+    }
     std::vector<float> pcm_coreml;
     const double coreml_ms = time_decode(*vae_coreml, latent, T_latent, &pcm_coreml);
     unsetenv("ACESTEP_COREML_STRICT");
@@ -167,7 +181,16 @@ void print_markdown(const std::vector<BenchRow> & rows) {
 
 }  // namespace
 
-int main() {
+int main(int argc, char ** argv) {
+    for (int i = 1; i < argc; ++i) {
+        const std::string a = argv[i];
+        if (a == "--cache-dir" && i + 1 < argc) {
+            g_cache_dir = argv[++i];
+        } else {
+            std::fprintf(stderr, "usage: bench-vae-coreml [--cache-dir DIR]\n");
+            return 2;
+        }
+    }
     const char * models_dir = std::getenv("AUDIOGEN_TEST_MODELS_DIR");
     if (models_dir == nullptr || *models_dir == '\0') {
         std::fprintf(stderr, "[bench-vae-coreml] AUDIOGEN_TEST_MODELS_DIR not set; skipping\n");
@@ -179,7 +202,13 @@ int main() {
         return SKIP_EXIT_CODE;
     }
     const std::string sidecar = tts_cpp::acestep::coreml_vae_sidecar_path(gguf);
-    if (!path_exists(sidecar)) {
+    if (!g_cache_dir.empty()) {
+        if (path_exists(sidecar)) {
+            std::fprintf(stderr, "[bench-vae-coreml] FAIL: --cache-dir times the generated sidecar, but a "
+                                 "prebuilt one sits at %s\n", sidecar.c_str());
+            return 1;
+        }
+    } else if (!path_exists(sidecar)) {
         std::fprintf(stderr, "[bench-vae-coreml] no sidecar at %s; skipping\n", sidecar.c_str());
         return SKIP_EXIT_CODE;
     }
