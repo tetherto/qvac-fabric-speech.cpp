@@ -301,7 +301,8 @@ pass; under `use = require` a pass it covers throws instead of running on ggml.
 Each generated capacity takes about 200 MB in the cache. `parakeet-fit-params`
 charges the generated capacities' Core ML memory in the Core ML-inclusive
 verdict (every generated capacity under `prewarm = all`, otherwise those the
-workload's calls can load); see
+workload's calls, and any shorter single pass, can load, or fall back to when
+a capacity fails); see
 [docs/backends.md](docs/backends.md#generated-diarizers).
 
 ## Backend selection
