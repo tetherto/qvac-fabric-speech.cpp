@@ -36,6 +36,10 @@
 //                         use = off
 //   encoderless-use-off   an encoder-less GGUF with use = off fails to load
 //                         with kGgufLoadNoEncoderWeights (rc=17), as today
+//   owner-push-stream     on that GGUF with its fixed-capacity sidecar owning
+//                         the encoder, stream_start refuses windows longer
+//                         than the capacity under use = require and under
+//                         automatic (no ggml weights), before any audio
 //
 // Public Engine API only, so it links against a shared qvac-parakeet too; the
 // loader-level ownership checks live in test-coreml-encoder-owner. Every case
@@ -292,6 +296,28 @@ void case_encoderless(const std::string & gguf) {
     }
     std::printf("       encoder-less load: %s\n", error.empty() ? "(loaded)" : error.c_str());
     expect(has(error, "(rc=17)"), "encoderless-use-off: kGgufLoadNoEncoderWeights (rc=17), as today");
+
+    // A 30 s chunk plus the default context is longer than the sidecar's
+    // fixed window: no full window could run on Core ML or ggml.
+    parakeet::StreamingOptions stream;
+    stream.chunk_ms = 30000;
+    for (const bool require : {true, false}) {
+        CoremlOptions options = coreml_ready_options();
+        if (require) options.use = CoremlOptions::Use::require;
+        parakeet::Engine engine(engine_options(gguf, options));
+        std::string refused;
+        try {
+            (void) engine.stream_start(stream, [](const parakeet::StreamingSegment &) {});
+        } catch (const std::runtime_error & e) {
+            refused = e.what();
+        }
+        std::printf("       owner stream_start (%s): %s\n", require ? "require" : "automatic",
+                    refused.empty() ? "(started)" : refused.c_str());
+        expect(engine.encoder_on_coreml() && has(refused, "push-stream windows") &&
+                   has(refused, "fixed capacity"),
+               require ? "owner-push-stream: use = require refuses windows over the owner's capacity"
+                       : "owner-push-stream: automatic refuses them too (no ggml encoder weights)");
+    }
 }
 
 }  // namespace

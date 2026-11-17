@@ -3367,6 +3367,8 @@ const EncoderModelOps & encoder_ops() {
 
 // The synchronous context as a route. The owner never retires, and a
 // failure is an error (there are no ggml encoder weights to fall back to).
+// Under use = require it is strict like a slot's route: a dispatch it cannot
+// serve throws.
 // TranscribePsy EU's English program gives the route its geometry (the
 // long-form plan and the segment cap); its dispatches pick their program in
 // run_encoder.
@@ -3376,7 +3378,8 @@ EncoderRoute synchronous_route(const ParakeetCtcModel & m) {
     return EncoderRoute::coreml(m.impl->ctx_coreml, describe_encoder(m.impl->ctx_coreml, m.mel_cfg.n_mels),
                                 parakeet_coreml_backend_label(m.impl->ctx_coreml),
                                 std::static_pointer_cast<void>(m.impl), ops,
-                                /*owner=*/m.impl->coreml_owns_encoder);
+                                /*owner=*/m.impl->coreml_owns_encoder,
+                                /*strict=*/m.impl->coreml && m.impl->coreml->resolved().strict());
 }
 
 // The encoder route if it is ready now, without requesting anything.
@@ -5417,7 +5420,11 @@ static EncoderEligibility coreml_encoder_eligibility(const ParakeetCtcModel & mo
 void model_coreml_check_stream_window(ParakeetCtcModel & m, int window_mel_frames,
                                       const std::atomic<bool> * cancel) {
 #ifdef PARAKEET_USE_COREML
-    if (!m.impl || !m.impl->coreml || !m.impl->coreml->resolved().strict()) return;
+    // Strict streams, and streams on an encoder Core ML owns (no ggml
+    // weights to run a window the sidecar cannot take), are checked.
+    if (!m.impl || !m.impl->coreml) return;
+    const bool owned = m.impl->ctx_coreml != nullptr && m.impl->coreml_owns_encoder;
+    if (!owned && !m.impl->coreml->resolved().strict()) return;
     const EncoderRoute route = acquire_encoder_route(m, cancel);
     // The same eligibility the window's run_encoder computes (every frame
     // valid, no capture, no padding).

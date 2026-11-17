@@ -732,12 +732,13 @@ EncoderRoute acquire_encoder_route(ParakeetCtcModel & m,
 // The route only if the sidecar is ready now; requests nothing, never waits
 // (the ggml prewarm pass).
 EncoderRoute encoder_route_if_ready(ParakeetCtcModel & m);
-// Under use = require, refuses a push stream whose full windows
-// (`window_mel_frames` each) the encoder sidecar cannot serve: throws the
-// Core ML error each of those windows would throw, before any audio is fed.
+// Refuses a push stream whose full windows (`window_mel_frames` each) the
+// encoder sidecar cannot serve, before any audio is fed: under use = require
+// (the Core ML error each of those windows would throw), and on an encoder
+// Core ML owns under any policy (there are no ggml weights to run them on).
 // Acquires the encoder route like a call does, so under require it waits for
-// the sidecar and throws when it failed. No-op with other use modes and on
-// builds without Core ML.
+// the sidecar and throws when it failed. No-op otherwise and on builds
+// without Core ML.
 void model_coreml_check_stream_window(ParakeetCtcModel & m, int window_mel_frames,
                                       const std::atomic<bool> * cancel = nullptr);
 

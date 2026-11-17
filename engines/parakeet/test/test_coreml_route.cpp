@@ -435,6 +435,26 @@ void case_owner_route() {
     ggml_runs = 0;
     dispatch_on_route(held, EncoderEligibility::ggml, [&] { return 0; }, [&] { ++ggml_runs; return 0; }, used);
     CHECK(ggml_runs == 1 && !used && held.usable(), "an ineligible dispatch runs on ggml, route intact");
+
+    FakeEncoder owned;
+    const EncoderRoute strict_owner = EncoderRoute::coreml(
+        reinterpret_cast<parakeet_coreml_context *>(&owned), fake_describe(nullptr, 128), kFakeLabel,
+        nullptr, ok_ops, /*owner=*/true, /*strict=*/true);
+
+    // Push streams on an owner route: a window over the fixed capacity can
+    // run nowhere, so the stream is refused under every policy.
+    const EncoderRoute lax_owner = EncoderRoute::coreml(
+        reinterpret_cast<parakeet_coreml_context *>(&owned), fake_describe(nullptr, 128), kFakeLabel,
+        nullptr, ok_ops, /*owner=*/true, /*strict=*/false);
+    const std::string lax = strict_stream_window_refusal(lax_owner, EncoderEligibility::cannot_serve, 4201);
+    CHECK(lax.find("no ggml encoder weights") != std::string::npos,
+          "an owner route refuses a push stream whose windows exceed its capacity, without require");
+    CHECK(!strict_stream_window_refusal(strict_owner, EncoderEligibility::cannot_serve, 4201).empty(),
+          "a strict owner route refuses that push stream too");
+    CHECK(strict_stream_window_refusal(lax_owner, EncoderEligibility::coreml, 1000).empty(),
+          "an owner push stream whose windows fit starts");
+    CHECK(strict_stream_window_refusal(held, EncoderEligibility::cannot_serve, 4201).empty(),
+          "a non-owner route without require still starts (its windows run on ggml)");
 }
 
 // One dispatch of `n_mel` frames as run_encoder drives it: the capacity check
@@ -459,6 +479,8 @@ StrictOutcome dispatch_strict(const EncoderRoute & route, int n_mel) {
         out.threw = true;
         out.error_state = err.state;
         out.error_class = err.cls;
+    } catch (const std::runtime_error &) {
+        out.threw = true;  // a route without the runtime's refusal (the synchronous owner)
     }
     return out;
 }
@@ -513,7 +535,8 @@ void case_strict_route() {
           "strict: the error reports the retirement");
     CHECK(slot->state() == pcm::SlotState::retired, "strict: a failed prediction retires the slot");
 
-    // The owner route keeps its own contract: it returns the error.
+    // A strict owner route has no ggml weights to fall back to either, so
+    // it refuses the over-capacity input like any strict route.
     FakeEncoder owned;
     EncoderRoute::Ops ops;
     ops.encode = &fake_encode;
@@ -521,8 +544,8 @@ void case_strict_route() {
                                                     fake_describe(nullptr, 128), kFakeLabel, nullptr, ops,
                                                     /*owner=*/true, /*strict=*/true);
     const StrictOutcome owner_over = dispatch_strict(owner, (int) kLongMel);
-    CHECK(!owner_over.threw && owner_over.ggml_runs == 1,
-          "an owner route hands an over-capacity input to the ggml path, which reports the error");
+    CHECK(owner_over.threw && owner_over.ggml_runs == 0,
+          "a strict owner route throws for an over-capacity input instead of running the weightless ggml path");
     fs::remove_all(dir);
 }
 
