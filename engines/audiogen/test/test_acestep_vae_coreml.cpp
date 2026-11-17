@@ -57,6 +57,7 @@
 #include "audiogen-cpp/acestep/vae.h"
 
 #include "fit_coreml.h"
+#include "music_cli_coreml.h"
 #include "vae_coreml.h"
 #include "vae_coreml_path.h"
 #include "memory_probe.h"
@@ -248,6 +249,16 @@ void self_test() {
               detail::vae_merge_backend("ggml", "coreml-all") == "mixed" &&
               detail::vae_merge_backend("mixed", "ggml") == "mixed",
           "label merge: equal labels stay, anything else is mixed");
+    {
+        using music_cli::coreml_cache_dir;
+        const std::string def = std::string("/Users/u") + music_cli::COREML_CLI_CACHE_SUBDIR;
+        check(coreml_cache_dir("/x", "/env", "/Users/u", true) == std::optional<std::string>("/x") &&
+                  !coreml_cache_dir(nullptr, "/env", "/Users/u", true) &&
+                  coreml_cache_dir(nullptr, nullptr, "/Users/u", true) == std::optional<std::string>(def) &&
+                  coreml_cache_dir(nullptr, "", "/Users/u", true) == std::optional<std::string>(def) &&
+                  !coreml_cache_dir(nullptr, nullptr, "/Users/u", false) && !coreml_cache_dir(nullptr, nullptr, "", true),
+              "music-cli cache directory: the flag, then QVAC_COREML_CACHE_DIR, then the macOS default " + def);
+    }
     check(has_case("lowmem,prewarm-async", "prewarm-async") && !has_case("lowmem,prewarm-async", "prewarm") &&
               has_case("prewarm", "prewarm") && !has_case("", "prewarm"),
           "device case names match exactly");

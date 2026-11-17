@@ -14,6 +14,7 @@
 
 #include "audiogen-cpp/acestep/engine.h"
 #include "mini_json.h"
+#include "music_cli_coreml.h"
 #include "music_cli_edit.h"
 #include "wav_reader.h"
 
@@ -23,9 +24,19 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
+
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+#if defined(__APPLE__) && TARGET_OS_OSX
+static constexpr bool MUSIC_CLI_MACOS = true;
+#else
+static constexpr bool MUSIC_CLI_MACOS = false;
+#endif
 
 static const char * arg_val(int argc, char ** argv, const char * key) {
     for (int i = 1; i < argc - 1; i++) if (!strcmp(argv[i], key)) return argv[i + 1];
@@ -130,7 +141,11 @@ int main(int argc, char ** argv) {
     // to the stage that introduces it rather than inferred from the final WAV.
     if (arg_val(argc, argv, "--dump-stages")) o.dump_stages_dir = arg_val(argc, argv, "--dump-stages");
     // The VAE decoder's Core ML sidecar (Apple builds with AUDIOGEN_COREML).
-    if (const char * v = arg_val(argc, argv, "--coreml-cache-dir")) o.coreml.cache_dir = v;
+    if (std::optional<std::string> dir = music_cli::coreml_cache_dir(
+            arg_val(argc, argv, "--coreml-cache-dir"), std::getenv("QVAC_COREML_CACHE_DIR"), std::getenv("HOME"),
+            MUSIC_CLI_MACOS)) {
+        o.coreml.cache_dir = std::move(*dir);
+    }
     if (const char * v = arg_val(argc, argv, "--coreml-units")) o.coreml.compute_units = v;
     if (const char * v = arg_val(argc, argv, "--coreml-wait")) {
         const std::string w = v;
@@ -186,7 +201,8 @@ int main(int argc, char ** argv) {
                 "  backend: [--gpu] [--backend auto|cpu|opencl|webgpu|hexagon|xdna|<device>] [--lm-backend <same names>]\n"
                 "           [--threads N] [--backends-dir <dir>]\n"
                 "           [--dump-stages <existing dir>]\n"
-                "  core ml: [--coreml-cache-dir <dir>]  (generate the VAE decoder sidecar there)\n"
+                "  core ml: [--coreml-cache-dir <dir>]  (generate the VAE decoder sidecar there; default\n"
+                "           $QVAC_COREML_CACHE_DIR, then on macOS ~/Library/Application Support/qvac-speech/coreml)\n"
                 "           [--coreml-wait none|construct|call] [--coreml-prewarm none|predicted|all]\n"
                 "           [--coreml-units all|cpu_and_ane|cpu_and_gpu|cpu_only] [--coreml-require]\n"
                 "           [--coreml-status]  (print the decoder's status and construction JSON)\n"
