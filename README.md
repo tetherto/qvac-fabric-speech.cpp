@@ -144,6 +144,16 @@ and records its Apache-2.0 provenance. For EU-sub Core ML deployment, the
 repository provides an encoder-stripping tool and decoder output-projection
 palettization with `--nbits-out`; see the
 [conversion guide](engines/parakeet/docs/models.md#transcribepsy).
+Full-EU Core ML export requires an F16 GGUF and macOS with Xcode for compilation.
+The [full-EU guide](engines/parakeet/docs/transcribepsy-eu-coreml.md#export-and-deployment)
+provides the conversion command and recommends explicit FP16 encoders/decoder
+as the baseline, with six-bit encoders for smaller deployments. It also documents
+the current eager route loading and duplicated weights, plus possible optimizations.
+An [experimental route-sharing harness](engines/parakeet/docs/transcribepsy-eu-coreml.md#trying-route-sharing-exports)
+can measure those alternatives separately from the deployed runtime.
+Its [automated regression tests](engines/parakeet/examples/ios-coreml-bench/README.md#route-harness-regression-tests)
+cover fixture/report serialization and native prediction/loading with generated models,
+including rejection of malformed manifests and duplicate WAV stems.
 
 Chatterbox loads its sidecar functions in the background through the shared
 Core ML runtime (`engines/coreml`): construction and synthesis never wait for a
