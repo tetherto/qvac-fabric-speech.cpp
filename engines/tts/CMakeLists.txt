@@ -509,7 +509,10 @@ if (TTS_CPP_BUILD_LIBRARY)
     # with the embedded template below.
     include(${CMAKE_CURRENT_SOURCE_DIR}/../coreml/qvac_coreml.cmake)
     qvac_coreml_add_to(tts-cpp NAMESPACE tts_cpp_coreml PREFIX TTS_CPP ENABLE ${TTS_CPP_COREML}
-        TEMPLATES "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/parler-dac-w128")
+        TEMPLATES "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/parler-dac-w128"
+                  "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/pocket-step-c1024"
+                  "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/pocket-mimi"
+        PROVIDED "${CMAKE_CURRENT_SOURCE_DIR}/coreml-provided/pocket.cpp")
     target_link_libraries(tts-cpp PUBLIC ggml)
     find_package(Threads REQUIRED)
     target_link_libraries(tts-cpp PRIVATE Threads::Threads)
@@ -2032,7 +2035,7 @@ if (TTS_CPP_BUILD_TESTS)
         # parity against ggml and Engine routing on a real bundle with
         # POCKET_COREML_TEST_BUNDLE (both sidecars exported next to their GGUFs).
         add_executable(test-pocket-coreml test/pocket/test_coreml.cpp src/pocket/frontend.cpp)
-        target_include_directories(test-pocket-coreml PRIVATE src include)
+        target_include_directories(test-pocket-coreml PRIVATE src include ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/test)
         target_link_libraries(test-pocket-coreml PRIVATE tts-cpp ggml)
         if (TTS_CPP_COREML)
             target_compile_definitions(test-pocket-coreml PRIVATE TTS_CPP_USE_COREML)
