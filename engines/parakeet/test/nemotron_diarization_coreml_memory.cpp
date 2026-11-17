@@ -17,6 +17,9 @@
 // the first load starts), and compares the run's peak footprint with the
 // Core ML bytes fit charges for the same options, as an increment over a
 // ggml-only run of the same passes (--baseline-bytes, from --ggml-only).
+// A sample that could not be read (task_info, or ps failing) is dropped and
+// counted in the report's sampler_errors, so a report with missing
+// measurements is never taken for a quiet one.
 //
 //   nemotron-diarization-coreml-memory --gguf M.gguf --wav A.wav --cache-dir DIR
 //       [--ggml-only] [--baseline-bytes N] [--passes-after-ready N] [--json OUT]
@@ -66,16 +69,19 @@ uint64_t footprint_now() {
     return info.phys_footprint;
 }
 
-uint64_t ane_compiler_rss() {
-    uint64_t total = 0;
+// ANECompilerService's resident size (0 when it is not running); false when
+// ps could not be run or failed.
+bool ane_compiler_rss(uint64_t & total) {
+    total = 0;
     FILE * f = popen("ps -axo rss=,comm= 2>/dev/null", "r");
-    if (!f) return 0;
+    if (!f) return false;
     char line[1024];
+    bool any = false;
     while (fgets(line, sizeof(line), f)) {
+        any = true;
         if (strstr(line, "ANECompilerService")) total += (uint64_t) std::strtoull(line, nullptr, 10) * 1024;
     }
-    pclose(f);
-    return total;
+    return pclose(f) == 0 && any;
 }
 
 // stage -> state, from the status JSON (stage objects start at "artifact_key").
@@ -213,6 +219,7 @@ int main(int argc, char ** argv) {
     std::vector<AneSample> ane;
     std::mutex mu;
     std::atomic<bool> stop{false};
+    std::atomic<uint64_t> sampler_errors{0};
     parakeet::ParakeetCtcModel model;
     std::atomic<bool> loaded{false};
 
@@ -220,6 +227,11 @@ int main(int argc, char ** argv) {
         int tick = 0;
         while (!stop.load()) {
             const Sample s{now_s(), footprint_now()};
+            if (s.footprint == 0) {
+                ++sampler_errors;
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                continue;
+            }
             std::map<std::string, std::string> st;
             const bool poll = !ggml_only && loaded.load() && tick % 5 == 0;
             if (poll) st = stage_states(parakeet::model_coreml_status_json(model));
@@ -234,7 +246,12 @@ int main(int argc, char ** argv) {
     });
     std::thread ane_sampler([&] {
         while (!stop.load()) {
-            const AneSample a{now_s(), ane_compiler_rss()};
+            AneSample a{now_s(), 0};
+            if (!ane_compiler_rss(a.rss)) {
+                ++sampler_errors;
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
+            }
             {
                 std::lock_guard<std::mutex> lock(mu);
                 ane.push_back(a);
@@ -402,12 +419,13 @@ int main(int argc, char ** argv) {
                   "\"seconds\":%.2f,\"all_ready_s\":%.2f,\"peak_footprint\":%llu,\"footprint_after_load\":%llu,"
                   "\"baseline_bytes\":%llu,\"fit_coreml_bytes\":%llu,\"fit_coreml_validated\":%d,"
                   "\"fit_ggml_required\":%llu,\"ane_compiler_peak\":%llu,\"ane_compiler_min\":%llu,"
-                  "\"samples\":%zu,\"state_polls\":%zu,\"segments\":[",
+                  "\"samples\":%zu,\"state_polls\":%zu,\"sampler_errors\":%llu,\"segments\":[",
                   ggml_only ? "ggml-only" : "coreml", passes, coreml_passes, ggml_after_ready, t_end, t_all_ready,
                   (unsigned long long) peak, (unsigned long long) first_pass, (unsigned long long) baseline,
                   (unsigned long long) fr.coreml.bytes, fr.coreml.validated ? 1 : 0,
                   (unsigned long long) fr.ggml_required_bytes, (unsigned long long) ane_peak,
-                  (unsigned long long) ane_min, samples.size(), states.size());
+                  (unsigned long long) ane_min, samples.size(), states.size(),
+                  (unsigned long long) sampler_errors.load());
     json += buf;
     bool first = true;
     uint64_t compile_inc = 0, load_inc = 0, generate_inc = 0, ane_load_peak = 0;

@@ -888,10 +888,13 @@ the first. The steps add up to the run's steady growth over ggml. It also
 reports `ANECompilerService`'s growth during the loads: its peak less its size
 when the first load started. `scripts/check-coreml-memory-schedule.py` checks
 the reports against the templates: the peak increment against what fit
-charges; each prepare, load, resident step and the compiler's growth against
-the template's constant; and the steady growth against the three capacities'
-resident parts. A run in which a capacity shows no generate or load phase
-fails. The Core ML lane of `parakeet-ci.yml` runs the generated schedule and
+charges; each prepare, load, resident step and the compiler's growth, times
+1.25 and rounded up to 1 MiB, against the template's constant (the rule the
+constants were set by, so a constant that lost its margin fails); and the
+steady growth against the three capacities' resident parts. A run fails when a
+capacity shows no generate, compile or load phase, a phase has no footprint
+sample, a load has no `ANECompilerService` sample, or the tool reports sampler
+errors (a footprint or `ps` read that failed). The Core ML lane of `parakeet-ci.yml` runs the generated schedule and
 the check on its macOS runner. Increments are over a ggml-only run of the same
 passes on the same host:
 
