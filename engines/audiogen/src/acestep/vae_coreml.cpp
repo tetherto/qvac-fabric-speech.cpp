@@ -261,6 +261,21 @@ struct vae_coreml_stage::impl {
     rt::SlotStatus none_status;
     std::shared_ptr<rt::Group> construction;
     const std::atomic<bool> * cancel = nullptr;
+    // Decode demand: bumped by every acquire() under demand_mu, so the
+    // release of an asynchronous construction load never evicts a decoder a
+    // decode has asked for since the group was issued.
+    std::mutex demand_mu;
+    uint64_t demand = 0;
+    // Low-memory mode, prewarm all without wait construct: waits for the
+    // construction group off the constructing thread and releases the model
+    // once the group recorded its result.
+    std::thread releaser;
+    std::atomic<bool> stop{false};
+
+    ~impl() {
+        stop.store(true);
+        if (releaser.joinable()) releaser.join();
+    }
 };
 
 vae_coreml_route vae_coreml_plan_route(const std::string & gguf_path, const CoremlOptions & options) {
@@ -341,6 +356,24 @@ std::shared_ptr<vae_coreml_stage> vae_coreml_stage::create(const std::string & g
     const bool waited = p->resolved.wait == rt::Wait::construct;
     p->construction   = p->manager->issue_group(rt::GroupKind::construction, requests, waited);
     auto out = std::shared_ptr<vae_coreml_stage>(new vae_coreml_stage(std::move(p)));
+    if (!waited && !requests.empty() && release_after_construction) {
+        // Asynchronous install-time preparation in low-memory mode: once the
+        // group has recorded the decoder's ready (or terminal) state, the
+        // model is released, unless a decode has asked for it meanwhile (the
+        // decode's VAE stage boundary releases it then).
+        impl * ip = out->p_.get();
+        uint64_t issued_demand = 0;
+        {
+            std::lock_guard<std::mutex> lk(ip->demand_mu);
+            issued_demand = ip->demand;
+        }
+        ip->releaser = std::thread([ip, issued_demand] {
+            ip->construction->wait(std::nullopt, &ip->stop);
+            if (ip->stop.load()) return;
+            std::lock_guard<std::mutex> lk(ip->demand_mu);
+            if (ip->demand == issued_demand) ip->slot->evict();
+        });
+    }
     if (waited && !requests.empty()) {
         const rt::PrewarmResult result = out->p_->construction->wait(std::nullopt, cancel);
         if (out->p_->resolved.strict() && !result.success) {
@@ -361,6 +394,10 @@ vae_coreml_stage::~vae_coreml_stage() = default;
 vae_coreml_call vae_coreml_stage::acquire(int T_latent) {
     vae_coreml_call call;
     if (!p_->slot) return call;
+    {
+        std::lock_guard<std::mutex> lk(p_->demand_mu);
+        ++p_->demand;
+    }
     const auto deadline = rt::Clock::now() + std::chrono::milliseconds(vae_ggml_decode_estimate_ms(T_latent));
     rt::Acquired got;
     try {

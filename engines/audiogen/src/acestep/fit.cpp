@@ -616,14 +616,13 @@ static FitResult fit_params_unguarded(const FitOptions & opts) {
         return peak;
     };
     const PoolCharge ggml_peak = project({});
-    // A construction load nobody waits for (prewarm all, wait not construct)
-    // may complete in any phase and stays until the next VAE stage boundary.
-    const bool unwaited_prewarm = opts.coreml.prewarm == CoremlOptions::Prewarm::all &&
-                                  opts.coreml.wait != CoremlOptions::Wait::construct;
+    // In low-memory mode a construction load (prewarm all) is released as
+    // soon as its group finishes, waited or not; while it completes, the
+    // transient charged in every phase covers it (the load's plateau is the
+    // resident decoder).
     const PoolCharge coreml_peak =
         coreml_generate ? project(acestep_coreml_phase_charge(true, vae_route.resident_bytes,
-                                                              vae_route.transient_bytes,
-                                                              keep_stages || unwaited_prewarm))
+                                                              vae_route.transient_bytes, keep_stages))
                         : ggml_peak;
     const CoremlFitVerdict cv = acestep_decide_coreml_fit(
         fit_budget_checks(pools, ggml_peak, primary, opts.margin_bytes),
@@ -694,7 +693,7 @@ static FitResult fit_params_unguarded(const FitOptions & opts) {
                           fmt_mib(r.coreml.bytes).c_str(), vae_route.compute_units.c_str(),
                           r.coreml.validated ? ", validated" : ", not validated",
                           fmt_mib(vae_route.transient_bytes).c_str(), fmt_mib(vae_route.resident_bytes).c_str(),
-                          keep_stages || unwaited_prewarm ? "every phase" : "in the VAE phase",
+                          keep_stages ? "every phase" : "in the VAE phase",
                           cv.degraded ? "; memory-degrade: ggml only" : "");
             s += line;
         }

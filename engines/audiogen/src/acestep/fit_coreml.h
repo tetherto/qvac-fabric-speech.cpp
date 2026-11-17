@@ -20,9 +20,8 @@ struct CoremlPhaseCharge {
 };
 
 // The transient (a generation or load can outlive the VAE phase) in every
-// phase; the resident decoder in the VAE decode phase only, unless it can be
-// held in any phase: with every stage resident, or when a construction load
-// that nobody waits for may complete during whatever phase is running.
+// phase; the resident decoder in the VAE decode phase only, unless it is held
+// in every phase (every stage resident).
 inline CoremlPhaseCharge acestep_coreml_phase_charge(bool generate, uint64_t resident, uint64_t transient,
                                                      bool resident_in_every_phase) {
     CoremlPhaseCharge c;

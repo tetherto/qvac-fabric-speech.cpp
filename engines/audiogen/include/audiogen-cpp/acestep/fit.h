@@ -42,9 +42,9 @@
 //     and the verdict is the Core ML-inclusive one. The envelope's transient
 //     (generation or load) is charged in every phase, since a load started in
 //     the VAE phase can outlive it; the resident decoder only in the VAE
-//     decode phase, or in every phase with keep_stages or with prewarm all
-//     without wait construct (a construction load then completes in whatever
-//     phase is running). The ggml VAE stays charged as well.
+//     decode phase, or in every phase with keep_stages. (A construction load
+//     with prewarm all is released as soon as it is ready in low-memory
+//     mode.) The ggml VAE stays charged as well.
 //   - With coreml.memory_budget_bytes, a budget only the ggml projection fits
 //     resolves use = off instead (memory-degrade: coreml.disabled_reason
 //     "memory", the ggml verdict).

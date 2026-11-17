@@ -301,7 +301,10 @@ Either way the sidecar loads in the background and nothing waits for it:
   background, records its warm hint and releases its model.
 - `coreml.prewarm = all` with `coreml.wait = construct` is install-time
   preparation: `create()` generates, loads and warms the decoder, then (in
-  low-memory mode) releases it again. `Engine::coreml_construction()` reports
+  low-memory mode) releases it again. Without `coreml.wait = construct` the
+  same happens in the background: in low-memory mode the decoder is released
+  as soon as the construction group has finished, unless a decode has asked
+  for it by then. `Engine::coreml_construction()` reports
   the group's success; `Engine::coreml_status()` and `Engine::coreml_wait()`
   report and wait for the decoder.
 - `coreml.use = require` (or `ACESTEP_COREML_STRICT`) makes a decoder that

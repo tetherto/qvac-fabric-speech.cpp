@@ -16,8 +16,8 @@
 //   test-acestep-vae-coreml --models DIR --cache-root DIR [--cases LIST]
 //       [--duration S] [--require-coreml]
 //       Device cases (AUDIOGEN_COREML, macOS 15), each on a fresh cache under
-//       --cache-root (LIST: encode,lowmem,cached,cancel,repaint,prewarm,evict,
-//       degrade; default all):
+//       --cache-root (LIST: encode,lowmem,cached,cancel,repaint,prewarm,
+//       prewarm-async,evict,degrade; default all):
 //       encode   an encoding (ensure_vae(true)) starts no decoder job;
 //       lowmem   three generate() calls in low-memory mode: the first decodes
 //                on ggml while the cold load completes after its eviction (no
@@ -34,6 +34,8 @@
 //                evicts the decoder before the materialisation's encode;
 //       prewarm  {prewarm all, wait construct} succeeds with no decoder
 //                retained, and the next generate() decodes on Core ML;
+//       prewarm-async  {prewarm all, wait none} succeeds in the background
+//                and the decoder is released without any generate();
 //       evict    an eviction while a job is unstarted cancels it;
 //       degrade  memory-degrade near the budget, in fit and in the Engine.
 //   test-acestep-vae-coreml --vae GGUF --memory-schedule DIR [--late]
@@ -105,6 +107,17 @@ void check(bool ok, const std::string & what) {
 }
 
 bool contains(const std::string & s, const std::string & needle) { return s.find(needle) != std::string::npos; }
+
+// Whether the comma-separated `list` names `name` exactly.
+bool has_case(const std::string & list, const std::string & name) {
+    size_t at = 0;
+    while (at <= list.size()) {
+        const size_t end = std::min(list.find(',', at), list.size());
+        if (list.compare(at, end - at, name) == 0) return true;
+        at = end + 1;
+    }
+    return false;
+}
 
 std::string head(const std::string & s, size_t n = 240) { return s.substr(0, std::min(s.size(), n)); }
 
@@ -231,6 +244,9 @@ void self_test() {
               detail::vae_merge_backend("ggml", "coreml-all") == "mixed" &&
               detail::vae_merge_backend("mixed", "ggml") == "mixed",
           "label merge: equal labels stay, anything else is mixed");
+    check(has_case("lowmem,prewarm-async", "prewarm-async") && !has_case("lowmem,prewarm-async", "prewarm") &&
+              has_case("prewarm", "prewarm") && !has_case("", "prewarm"),
+          "device case names match exactly");
 
     auto throws = [](const CoremlOptions & o) {
         try {
@@ -884,6 +900,30 @@ void case_prewarm(const std::string & models, const std::string & root, float du
           "the next generate() decodes on " + r.vae_backend);
 }
 
+// Asynchronous install-time preparation: {prewarm all, wait none} in
+// low-memory mode on a fresh cache. create() returns at once; the group
+// generates, loads and warms the decoder in the background, reports success,
+// and the decoder is released without any generate().
+void case_prewarm_async(const std::string & models, const std::string & root) {
+    std::fprintf(stderr, "prewarm-async: {prewarm all, wait none}\n");
+    const std::string cache = fresh_dir(root, "prewarm-async");
+    EngineOptions o = engine_options(models, cache);
+    o.coreml.prewarm = CoremlOptions::Prewarm::all;
+    o.coreml.wait = CoremlOptions::Wait::none;
+    std::unique_ptr<Engine> engine = Engine::create(o);
+    std::string group;
+    const bool finished = poll_until([&] { return engine->coreml_construction(); },
+                                     [](const std::string & g) { return contains(g, "\"success\":true"); },
+                                     std::chrono::seconds(600), &group);
+    std::string last;
+    const bool idle = poll_until([&] { return engine->coreml_status(); },
+                                 [](const std::string & st) { return state_of(st) == "idle" && has_hint(st); },
+                                 std::chrono::seconds(30), &last);
+    std::fprintf(stderr, "  group: %s\n  status: %s\n", head(group, 300).c_str(), head(last, 300).c_str());
+    check(finished && contains(group, "\"nothing_to_prepare\":false"), "the asynchronous construction group succeeds");
+    check(idle, "the decoder is released after the group finished, without generate() (" + state_of(last) + ")");
+}
+
 // An eviction while a job is unstarted cancels it: two stages on two caches;
 // the first one's preparation holds the queue while the second's waits; the
 // second is evicted and never prepares anything.
@@ -1227,7 +1267,7 @@ void memory_schedule(const std::string & vae, const std::string & cache, bool la
 
 int main(int argc, char ** argv) {
     bool self = false, fit = false, require = false, late = false;
-    std::string models, vae, cache_root, memory_dir, first_decode, cases = "encode,lowmem,cached,cancel,repaint,prewarm,evict,degrade";
+    std::string models, vae, cache_root, memory_dir, first_decode, cases = "encode,lowmem,cached,cancel,repaint,prewarm,prewarm-async,evict,degrade";
     float duration = 20.0f;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -1283,18 +1323,19 @@ int main(int argc, char ** argv) {
             check(false, "route generate");
         } else {
             std::fprintf(stderr, "device cases on %s (host %s)\n", models.c_str(), host_chip().c_str());
-            if (contains(cases, "encode")) case_encode(models, cache_root);
+            if (has_case(cases, "encode")) case_encode(models, cache_root);
             std::string lowmem_cache;
-            if (contains(cases, "lowmem")) lowmem_cache = case_lowmem(models, cache_root, duration);
-            if (contains(cases, "cached") && !lowmem_cache.empty()) case_cached(argv[0], models, lowmem_cache, duration);
-            if (contains(cases, "cancel")) case_cancel(models, cache_root, lowmem_cache, duration);
-            if (contains(cases, "repaint")) {
+            if (has_case(cases, "lowmem")) lowmem_cache = case_lowmem(models, cache_root, duration);
+            if (has_case(cases, "cached") && !lowmem_cache.empty()) case_cached(argv[0], models, lowmem_cache, duration);
+            if (has_case(cases, "cancel")) case_cancel(models, cache_root, lowmem_cache, duration);
+            if (has_case(cases, "repaint")) {
                 if (lowmem_cache.empty()) check(false, "the repaint case needs the lowmem case's primed cache");
                 else case_repaint(models, lowmem_cache);
             }
-            if (contains(cases, "prewarm")) case_prewarm(models, cache_root, duration);
-            if (contains(cases, "evict")) case_evict(vae, cache_root);
-            if (contains(cases, "degrade")) case_degrade(models, cache_root);
+            if (has_case(cases, "prewarm")) case_prewarm(models, cache_root, duration);
+            if (has_case(cases, "prewarm-async")) case_prewarm_async(models, cache_root);
+            if (has_case(cases, "evict")) case_evict(vae, cache_root);
+            if (has_case(cases, "degrade")) case_degrade(models, cache_root);
             // The cache the low-memory generations left (a compiled artifact
             // and the hint its load wrote) against an empty one.
             if (fit && !lowmem_cache.empty()) fit_stable_on(vae, models, cache_root, lowmem_cache);

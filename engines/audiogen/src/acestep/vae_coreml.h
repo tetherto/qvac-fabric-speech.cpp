@@ -113,7 +113,10 @@ public:
     // all. With wait = construct it waits for that group and then, when
     // `release_after_construction` (the Engine's low-memory mode), evicts the
     // decoder again: the group recorded `ready` first, so it still reports
-    // success. `memory_degrade` resolves use = off (fit's memory-degrade).
+    // success. Without wait = construct, in that mode, a background thread
+    // waits for the group and evicts once it has finished, unless a decode
+    // has asked for the decoder since. `memory_degrade` resolves use = off
+    // (fit's memory-degrade).
     // `cancel` (optional, must outlive the stage) interrupts waits.
     // Returns null in builds without AUDIOGEN_COREML. Throws
     // std::invalid_argument for invalid options and std::runtime_error when

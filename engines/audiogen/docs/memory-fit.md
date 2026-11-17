@@ -60,10 +60,10 @@ has two parts with their own residency:
   `generate()`;
 - the **resident** decoder (weights, input and output buffers, prediction
   workspace) only in the VAE decode phase, which is the only phase that holds
-  it in low-memory mode. With `keep_stages`, or with `coreml.prewarm = all`
-  and no `coreml.wait = construct` (a construction load may finish in any
-  phase and is kept until the next VAE stage boundary), it is charged in every
-  phase.
+  it in low-memory mode. With `keep_stages` it is charged in every phase. A
+  construction load (`coreml.prewarm = all`) is released as soon as its group
+  has finished in low-memory mode, whether or not `create()` waits for it; the
+  transient covers it while it completes.
 
 The template's constants (`coreml-templates/acestep-vae-t64/template.json`,
 `memory`) are 1.25 times the largest value measured by the overlapped memory
