@@ -118,6 +118,7 @@ std::optional<HintRecord> read_hint(const std::string & path) {
     if (auto it = j.find("stale_until"); it != j.end() && it->is_string()) {
         r.stale_until_s = parse_iso8601_utc(it->get<std::string>());
     }
+    if (auto it = j.find("artifact"); it != j.end() && it->is_string()) r.artifact = it->get<std::string>();
     struct stat st{};
     if (::stat(path.c_str(), &st) == 0) r.mtime_ns = stat_mtime_ns(st);
     return r;
@@ -134,6 +135,7 @@ bool write_hint(const std::string & path, const HintRecord & rec) {
     j["cold_load_ms"] = rec.cold_load_ms ? nlohmann::json(*rec.cold_load_ms) : nlohmann::json(nullptr);
     j["last_ok"] = rec.last_ok;
     j["stale_until"] = rec.stale_until_s ? nlohmann::json(iso8601_utc(*rec.stale_until_s)) : nlohmann::json(nullptr);
+    if (!rec.artifact.empty()) j["artifact"] = real_path(rec.artifact);
     const std::string body = j.dump();
 
     std::random_device rd;

@@ -584,7 +584,7 @@ if (PARAKEET_BUILD_TESTS)
 
     # Portable tests of the shared Core ML runtime (engines/coreml), Linux and macOS.
     include(${CMAKE_CURRENT_SOURCE_DIR}/../coreml/qvac_coreml.cmake)
-    qvac_coreml_add_tests()
+    qvac_coreml_add_tests(REQUIRE_GGML)
 
     # Test harnesses that compile the engine sources themselves with
     # PARAKEET_USE_COREML (instead of linking libqvac-parakeet) need their own
