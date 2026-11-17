@@ -10,7 +10,7 @@ Measured with `scripts/coreml/bench-load-time.py` on the workloads pinned in `sc
 <!-- report:power -->
 ## Power source per row
 
-`run` reads the power source (`pmset -g batt`) and Low Power Mode (`pmset -g`) at the start and again as it records each row (`power` in `results.jsonl`). A row is flagged (`power_changed`) when its reading or the one before it differs from the start's, that is when the power changed while it was measured.
+`run` reads the power source (`pmset -g batt`) and Low Power Mode (`pmset -g`) at the start and again after each measurement (`power` in `results.jsonl`); the rows one process produces, such as every function of a cold load, share that reading. A row is flagged (`power_changed`) when its reading or the one before it differs from the start's, that is when the power was not the start's at some point while it was measured.
 
 None of the 443 rows carries a power reading: they were recorded before `run` read the power source per row. The header says how the run was powered.
 

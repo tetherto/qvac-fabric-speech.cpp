@@ -662,11 +662,12 @@ def sharing_verdict(increments, weight_bytes: int) -> str:
 class Runner:
     def __init__(self, args, m: dict, power_reader=None):
         self.args = args
-        # Power is read at the start and again as each row is recorded.
+        # Power is read at the start and again after each measurement.
         self.power_reader = power_reader or read_power
         self.power_start = None
         self.power_last = None
         self.power_flagged: dict = {}  # kind -> rows recorded while the power differed from the start
+        self.power_warned = False
         self.m = m
         self.proto = m["protocol"]
         self.models = models_root(args.models_root)
@@ -689,30 +690,35 @@ class Runner:
     def variants(self, cfg: dict):
         return [v for v in cfg.get("variants", self.m["variants"]) if not self.args.variant or v in self.args.variant]
 
-    def record(self, kind: str, **fields):
+    def record(self, kind: str, reading: dict | None = None, **fields):
+        """Appends a row. Every row but env carries a power reading: `reading`
+        when one driver process produced several rows (they share the reading
+        taken after it), else a new one."""
         if kind != "env":
-            fields.update(self._power_row(kind))
+            reading = reading or self._power_reading()
+            fields.update(reading)
+            if reading["power_changed"]:
+                self.power_flagged[kind] = self.power_flagged.get(kind, 0) + 1
         rec = {"kind": kind, "t": datetime.datetime.now(datetime.timezone.utc).isoformat(), **fields}
         with open(self.results, "a") as f:
             f.write(json.dumps(rec) + "\n")
         print(f"[{kind}] " + json.dumps({k: v for k, v in fields.items() if not isinstance(v, (list, dict))})[:300],
               flush=True)
 
-    def _power_row(self, kind: str) -> dict:
-        """The power reading for a row being recorded. The row is flagged when
-        this reading or the previous one differs from the start: the power
-        changed while it was measured. A change that reverts between two
-        readings goes unseen."""
+    def _power_reading(self) -> dict:
+        """Reads the power once, after a measurement. The reading is flagged
+        when it or the previous one differs from the start: the power changed
+        while the measurement ran. A change that reverts between two readings
+        goes unseen."""
         now = self.power_reader()
         if self.power_start is None:
             self.power_start = self.power_last = now
         changed = now != self.power_start or self.power_last != self.power_start
         self.power_last = now
-        if changed:
-            if not self.power_flagged:
-                print(f"bench-load-time: warning: power changed from {power_label(self.power_start)} to "
-                      f"{power_label(now)}; flagging rows (power_changed) and continuing", file=sys.stderr, flush=True)
-            self.power_flagged[kind] = self.power_flagged.get(kind, 0) + 1
+        if changed and not self.power_warned:
+            self.power_warned = True
+            print(f"bench-load-time: warning: power changed from {power_label(self.power_start)} to "
+                  f"{power_label(now)}; flagging rows (power_changed) and continuing", file=sys.stderr, flush=True)
         return {"power": now, "power_changed": changed}
 
     def power_warning(self) -> str | None:
@@ -815,8 +821,9 @@ class Runner:
                         model = d / sidecar(self.m, self.models, v, s, st).name
                         r = run_json([host, "load", "--model", model, "--units", self.units, "--predict", "1",
                                       *sum((["--function", n] for n in names), [])])
+                        pw = self._power_reading()  # one process loaded every function
                         for fr in r["functions"]:
-                            self.record("load_cold", **common, stage=st, function=fr["function"],
+                            self.record("load_cold", reading=pw, **common, stage=st, function=fr["function"],
                                         load_ms=fr["load_ms"], predict_ms=fr.get("predict_ms"),
                                         error=fr.get("error"), quiet_wait_s=waited)
                     for i in range(self.runs(cfg["warm_runs"])):
@@ -1149,9 +1156,10 @@ def render(s: dict) -> str:
     begin("power")
     w("## Power source per row")
     w("")
-    w("`run` reads the power source (`pmset -g batt`) and Low Power Mode (`pmset -g`) at the start and again as it "
-      "records each row (`power` in `results.jsonl`). A row is flagged (`power_changed`) when its reading or the "
-      "one before it differs from the start's, that is when the power changed while it was measured.")
+    w("`run` reads the power source (`pmset -g batt`) and Low Power Mode (`pmset -g`) at the start and again after "
+      "each measurement (`power` in `results.jsonl`); the rows one process produces, such as every function of a "
+      "cold load, share that reading. A row is flagged (`power_changed`) when its reading or the one before it "
+      "differs from the start's, that is when the power was not the start's at some point while it was measured.")
     w("")
     pw = s["power"]
     recorded = sum(e["rows"] - e["not_recorded"] for e in pw.values())

@@ -521,6 +521,11 @@ class RunnerFixture:
         cmd = [str(c) for c in cmd]
         if cmd[1:] == ["identity"]:
             return {"os_build": "24G419", "os_version": "15.7.3", "host_id": "host"}
+        if cmd[1] == "load":  # one process loads every --function and predicts once
+            self.calls.append({"cmd": cmd, "identity": self.identities[-1]["id"], "power_reads": self.power_reads})
+            fns = [cmd[i + 1] for i, c in enumerate(cmd) if c == "--function"]
+            return {"functions": [{"function": f, "load_ms": 1.0, "predict_ms": 1.0} for f in fns],
+                    "footprint_max": 1}
         arts = [cmd[i + 1] for i, c in enumerate(cmd) if c == "--artifact"]
         parsed = []
         for a in arts:
@@ -781,6 +786,29 @@ class PowerRunnerTest(unittest.TestCase):
         self.assertIn("| ttr | 3 | 3 | 0 | 0 | 0 | 0 | 1 |", doc)
         self.assertIn("| ttr_cached | 4 | 2 | 2 | 0 | 0 | 0 | 2 |", doc)
         self.assertIsNone(TASK_ID.search(doc), TASK_ID.search(doc))
+
+    def test_cold_load_rows_of_one_process_share_its_reading(self):
+        # A cold load runs one process per stage and records a row per
+        # function. The power went to battery during the encoder process and
+        # came back during the cfm one: every row of both is flagged, hift's
+        # are not, and each process is read once.
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        fx = RunnerFixture(Path(d.name))
+        fx.power = [AC, BATTERY, AC]
+        r = fx.runner()
+        r.power_start = r.power_last = fx.read_power()  # what environment() reads
+        with fx.patched(), contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            r.load({"sets": ["w3"], "warm_runs": 0, "predictions": 1, "sharing_runs": 0})
+        rows = self.rows(fx, r)
+        self.assertEqual([(x["stage"], x["function"]) for x in rows],
+                         [("encoder", "tokens_256"), ("encoder", "tokens_512"), ("encoder", "tokens_768"),
+                          ("cfm", "frames_512"), ("cfm", "frames_1024"), ("cfm", "frames_1536"), ("hift", "main")])
+        self.assertEqual([x["power"]["source"] for x in rows], ["battery"] * 3 + ["ac"] * 4)
+        self.assertEqual([x["power_changed"] for x in rows], [True] * 6 + [False])
+        self.assertEqual(len(fx.calls), 3)
+        self.assertEqual(fx.power_reads, 1 + len(fx.calls))
+        self.assertIn("6 rows are flagged power_changed (load_cold 6)", r.power_warning())
 
     def test_a_change_before_the_first_row_flags_every_row(self):
         fx, r, _ = self.run_ttr([AC, BATTERY])
