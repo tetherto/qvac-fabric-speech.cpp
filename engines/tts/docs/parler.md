@@ -318,17 +318,17 @@ it.
 Each run prints a per-phase table and a one-line JSON report. Each constant
 is 1.25 times the largest value measured over every run on every validated
 host, rounded up to 1 MiB (`memory.measured` in `template.json`), and the
-envelope applies no further margin. Figures in MiB, over 76 run reports:
+envelope applies no further margin. Figures in MiB, over 82 run reports:
 
-| Phase | M2, macOS 27.2.1 (34 runs) | M4 Max, macOS 26.7.2 (CI, 42 runs) | Charged |
+| Phase | M2, macOS 27.2.1 (37 runs) | M4 Max, macOS 26.7.2 (CI, 45 runs) | Charged |
 |---|--:|--:|--:|
-| prepare: generation and compile | 435.6-441.6 | 268.6-438.5 | 552 (1.25 x 441.6): `compile_peak_bytes` 328 on top of `generation_peak_bytes` 216 + 8 |
+| prepare: generation and compile | 435.6-442.0 | 268.6-438.5 | 553 (1.25 x 442.0): `compile_peak_bytes` 329 on top of `generation_peak_bytes` 216 + 8 |
 | load and warm-up | 16.3-25.2 | 148.5-326.4 (warm-up 134.4-308.2) | 409 (1.25 x 326.4): `load_peak_bytes.all` |
-| steady state, over the footprint before the load | 0 (29 runs) | 150.1-326.7 (39 runs) | 409 (1.25 x 326.7): the weights 103.3, I/O 0.8 and `workspace_bytes` 305.0 |
-| whole run, over the warm ggml baseline | 453.0-466.3 | 577.7-759.2 | 961.6: the envelope, with the quantizer copy 0.6 |
-| `ANECompilerService` before the load | 2.9-345.3 (21 runs, one clean) | 123.3-485.8 (33 runs, none clean) | |
-| `ANECompilerService` growth during the load | 104.3-330.0 (21 runs) | 0.8-3.1 (33 runs) | reported |
-| `ANECompilerService` size while loading | 332.9-505.7 | 124.7-821.2 | 1,027 (1.25 x 821.2): `ane_compile_reserve_bytes` |
+| steady state, over the footprint before the load | 0 (32 runs) | 150.1-326.7 (42 runs) | 409 (1.25 x 326.7): the weights 103.3, I/O 0.8 and `workspace_bytes` 305.0 |
+| whole run, over the warm ggml baseline | 453.0-466.3 | 577.7-759.2 | 962.6: the envelope, with the quantizer copy 0.6 |
+| `ANECompilerService` before the load | 2.9-393.8 (24 runs, one clean) | 123.3-485.8 (36 runs, none clean) | |
+| `ANECompilerService` growth during the load | 104.3-330.0 (24 runs) | 0.8-3.1 (36 runs) | reported |
+| `ANECompilerService` size while loading | 332.9-518.7 | 124.7-821.2 | 1,027 (1.25 x 821.2): `ane_compile_reserve_bytes` |
 
 The runs without a figure in a row predate its measurement. The M4 Max
 figures come from four CI runners of the same model, whose load and warm-up
@@ -336,8 +336,8 @@ ranged from about 150 MiB in some jobs to 326 MiB in others.
 
 - **M2.** `all` runs the program on the Neural Engine. Its weights do not
   show in the process footprint, and the generation is the peak.
-  `ANECompilerService` held 124-345 MiB before most loads and stayed at
-  333-506 MiB while loading. One run found the service process at 2.9 MiB
+  `ANECompilerService` held 124-394 MiB before most loads and stayed at
+  333-519 MiB while loading. One run found the service process at 2.9 MiB
   resident before the load (its pages compressed or purged meanwhile, not a
   new process); it grew 330.0 MiB. The same M2 on macOS 15.7.3 peaked at
   224-229 MiB over four runs (`ANECompilerService` 360-497 MiB absolute).
@@ -357,9 +357,9 @@ ranged from about 150 MiB in some jobs to 326 MiB in others.
   ready). Its whole run is therefore the prepare plus the resident, which
   is the sum the envelope charges.
 
-The envelope is 1,008,308,224 bytes (961.6 MiB), up from 475.4 MiB. With the
+The envelope is 1,009,356,800 bytes (962.6 MiB), up from 475.4 MiB. With the
 M2's values alone (the template's weights and I/O as the resident part) it
-would be 656.6 MiB: the macOS 27 generation peak (442 MiB, against the
+would be 657.6 MiB: the macOS 27 generation peak (442 MiB, against the
 216 MiB of the template's generation estimate) causes most of the rise, and
 the M4 Max's GPU resident adds the remaining 305.0 MiB, its
 `workspace_bytes`. `validated_for` is matched on the compute units only, so every
