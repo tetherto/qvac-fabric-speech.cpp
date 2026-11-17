@@ -118,6 +118,16 @@ struct EngineOptions {
     // fall back to coreml_compute_units / coreml_strict above, then to the
     // PARLER_COREML_* environment. Parler's minimal set is the DAC.
     CoremlOptions coreml;
+
+    // The workload and headroom of the fit_params call that assessed this
+    // engine (the FitOptions fields of the same names; the defaults are
+    // FitOptions'). With coreml.memory_budget_bytes set, the constructor
+    // repeats that fit to decide memory-degrade (Core ML off when only the
+    // ggml projection fits the budget), so these must match the assessment,
+    // or the engine can keep Core ML where that fit dropped it.
+    int fit_description_tokens = 50;
+    int fit_prompt_tokens = 128;
+    uint64_t fit_margin_bytes = 256ull * 1024 * 1024;
 };
 
 struct SynthesisResult {

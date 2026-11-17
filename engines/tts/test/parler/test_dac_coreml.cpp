@@ -1424,6 +1424,32 @@ void generated_gates(parler_model & model, const std::string & gguf, const std::
               "Engine under a near budget: DAC on ggml (" + whole.dac_backend + "), " +
                   st.substr(0, std::min<size_t>(st.size(), 200)));
     }
+    {
+        // A fit assessed with a larger headroom than the default: the budget
+        // holds ggml + Core ML with the default 256 MiB margin, but only ggml
+        // with this one. The Engine, given the same workload and margin, must
+        // reach the same verdict (memory-degrade) as that fit.
+        tts_cpp::parler::FitOptions wide = fit;
+        wide.margin_bytes = fit.margin_bytes + fr.coreml.bytes;
+        wide.coreml.memory_budget_bytes = (int64_t) (ggml_need + fr.coreml.bytes + (64ull << 20));
+        const tts_cpp::FitResult assessed = tts_cpp::parler::fit_params(wide);
+        tts_cpp::parler::FitOptions as_default = wide;
+        as_default.margin_bytes = fit.margin_bytes;
+        const tts_cpp::FitResult by_default = tts_cpp::parler::fit_params(as_default);
+        check(assessed.coreml.disabled_reason == "memory" && by_default.coreml.disabled_reason.empty(),
+              "a budget only the larger margin degrades: '" + assessed.coreml.disabled_reason + "' with it, '" +
+                  by_default.coreml.disabled_reason + "' with the default");
+        tts_cpp::parler::EngineOptions low = eo;
+        low.coreml.use = tts_cpp::CoremlOptions::Use::automatic;
+        low.coreml.memory_budget_bytes = wide.coreml.memory_budget_bytes;
+        low.fit_margin_bytes = wide.margin_bytes;
+        tts_cpp::parler::Engine engine(low);
+        const std::string st = engine.coreml_status();
+        const auto whole = engine.synthesize("a b");
+        check(contains(st, "\"state\":\"disabled\"") && whole.dac_backend == "ggml",
+              "Engine with the fit's nondefault margin: memory-degrade as that fit (DAC on " + whole.dac_backend +
+                  "), " + st.substr(0, std::min<size_t>(st.size(), 200)));
+    }
     model.dac_pending.reset();
 }
 

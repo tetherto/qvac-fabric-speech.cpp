@@ -229,6 +229,13 @@ adopt the cached artifact, and a warm load takes about 0.1 s.
 | `strict_wait_ms` | longest wait of a `use = require` call; unset waits without limit |
 | `memory_budget_bytes` | the budget fit was assessed against; when only the ggml projection fits within the budget or the free memory, whichever is smaller, the DAC stays on ggml (memory-degrade) instead of fit refusing the model |
 
+With `memory_budget_bytes` set, the constructor repeats the fit to decide
+memory-degrade. It uses `EngineOptions::fit_description_tokens`,
+`fit_prompt_tokens` and `fit_margin_bytes` (defaults 50, 128 and 256 MiB,
+as in `FitOptions`): set them to the workload and headroom of the
+`fit_params` call that assessed the engine, so the engine reaches the same
+decision.
+
 `coreml_strict` maps to `use` (`true` -> `require`, `false` -> `automatic`)
 when `use` is unset. `PARLER_COREML_DISABLE` still overrides everything.
 `Engine::coreml_status()` returns the stage's state as JSON (`route`

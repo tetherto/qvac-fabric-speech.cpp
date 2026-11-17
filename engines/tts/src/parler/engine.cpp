@@ -245,7 +245,8 @@ Engine::Engine(const EngineOptions & opts) : pimpl_(new Impl()) {
 #ifdef TTS_CPP_USE_COREML
     // Fit's memory-degrade: with a budget, Core ML is dropped when only the
     // ggml verdict fits. Decided before the weights load, so it reads the
-    // same free memory fit_params reports.
+    // same free memory fit_params reports, for the workload and headroom the
+    // caller's fit assessed.
     const CoremlOptions dac_options = parler_merge_legacy_coreml(opts);
     bool degrade = false;
     if (dac_options.memory_budget_bytes) {
@@ -255,6 +256,9 @@ Engine::Engine(const EngineOptions & opts) : pimpl_(new Impl()) {
         fit.backend = opts.backend;
         fit.backends_dir = opts.backends_dir;
         fit.max_frames = opts.max_frames;
+        fit.description_tokens = opts.fit_description_tokens;
+        fit.prompt_tokens = opts.fit_prompt_tokens;
+        fit.margin_bytes = opts.fit_margin_bytes;
         fit.coreml = dac_options;
         degrade = fit_params(fit).coreml.disabled_reason == "memory";
     }
