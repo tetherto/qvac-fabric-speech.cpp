@@ -410,9 +410,14 @@ if (AUDIOGEN_BUILD_TESTS)
                          --manifest "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/acestep-vae-t64/reference-gguf.json"
                          --seed 1 --types bf16 -o "${_acestep_vae_twin}")
         set_tests_properties(test-acestep-vae-fit-stable-twin PROPERTIES LABELS "unit" FIXTURES_SETUP acestep-vae-twin)
+        # A macOS Core ML build plans the generated route for the twin, so the
+        # template charges it pins are always checked there.
+        set(_acestep_vae_require "")
+        if (AUDIOGEN_COREML AND CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+            set(_acestep_vae_require --require-coreml)
+        endif()
         add_test(NAME test-acestep-vae-fit-stable
-                 COMMAND test-acestep-vae-coreml --fit-stable --vae "${_acestep_vae_twin}"
-                         $<$<AND:$<BOOL:${AUDIOGEN_COREML}>,$<PLATFORM_ID:Darwin>>:--require-coreml>)
+                 COMMAND test-acestep-vae-coreml --fit-stable --vae "${_acestep_vae_twin}" ${_acestep_vae_require})
         set_tests_properties(test-acestep-vae-fit-stable PROPERTIES LABELS "unit" FIXTURES_REQUIRED acestep-vae-twin)
     endif()
 
