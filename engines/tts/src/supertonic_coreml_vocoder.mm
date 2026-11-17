@@ -28,9 +28,8 @@ uint16_t encode_float16(float f) {
     return out;
 }
 
-MLComputeUnits requested_compute_units(std::string * label) {
-    const char * env = std::getenv("SUPERTONIC_COREML_COMPUTE_UNITS");
-    const std::string requested = env != nullptr ? env : "";
+MLComputeUnits requested_compute_units(const char * units, std::string * label) {
+    const std::string requested = units != nullptr ? units : "";
     if (requested == "cpu_only") {
         *label = "coreml-cpu";
         return MLComputeUnitsCPUOnly;
@@ -47,11 +46,11 @@ MLComputeUnits requested_compute_units(std::string * label) {
     return MLComputeUnitsAll;
 }
 
-MLModel * load_model(const char * path_mlmodelc, std::string * label) {
+MLModel * load_model(const char * path_mlmodelc, const char * units, std::string * label) {
     NSString * path = [[NSString alloc] initWithUTF8String:path_mlmodelc];
     if (path == nil) return nil;
     MLModelConfiguration * config = [[MLModelConfiguration alloc] init];
-    config.computeUnits = requested_compute_units(label);
+    config.computeUnits = requested_compute_units(units, label);
     NSError * err   = nil;
     MLModel * model = [MLModel modelWithContentsOfURL:[NSURL fileURLWithPath:path]
                                         configuration:config
@@ -237,13 +236,21 @@ supertonic_coreml_vocoder_context * create_context(MLModel * model, const Cached
 struct supertonic_coreml_vocoder_context * supertonic_coreml_vocoder_init(
     const char * path_mlmodelc,
     int64_t      latent_channels,
-    int64_t      samples_per_frame) {
+    int64_t      samples_per_frame,
+    const char * compute_units,
+    int        * failure) {
+    int ignored = 0;
+    int & why = failure != nullptr ? *failure : ignored;
+    why = SUPERTONIC_COREML_VOCODER_BAD_INTERFACE;
     if (path_mlmodelc == nullptr || latent_channels <= 0 || samples_per_frame <= 0) return nullptr;
 
     @autoreleasepool {
         std::string label;
-        MLModel * model = load_model(path_mlmodelc, &label);
-        if (model == nil) return nullptr;
+        MLModel * model = load_model(path_mlmodelc, compute_units, &label);
+        if (model == nil) {
+            why = SUPERTONIC_COREML_VOCODER_LOAD_FAILED;
+            return nullptr;
+        }
 
         NSString * in_name  = nil;
         NSString * out_name = nil;
@@ -252,7 +259,11 @@ struct supertonic_coreml_vocoder_context * supertonic_coreml_vocoder_init(
         if (window <= 0) return nullptr;
 
         CachedIo io;
-        if (!create_cached_io(model, in_name, out_name, &io)) return nullptr;
+        if (!create_cached_io(model, in_name, out_name, &io)) {
+            why = SUPERTONIC_COREML_VOCODER_LOAD_FAILED;
+            return nullptr;
+        }
+        why = SUPERTONIC_COREML_VOCODER_OK;
         return create_context(model, io, out_name, std::move(label), latent_channels,
                               samples_per_frame, window);
     }

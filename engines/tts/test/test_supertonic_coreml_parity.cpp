@@ -1,9 +1,25 @@
 // Supertonic Core ML vocoder sidecar: parity against the ggml vocoder graph
 // through the production dispatch, the load-status and per-call backend
 // reports, and the fallbacks (disabled, strict without a sidecar, invalid
-// sidecar). Skips (77) without TTS_CPP_COREML or a staged
-// SUPERTONIC_COREML_TEST_MODELS_DIR holding a Supertonic GGUF with a compiled
-// `<model>-vocoder.mlmodelc` next to it.
+// sidecar).
+//
+// Prebuilt sidecar (no arguments): skips (77) without TTS_CPP_COREML or a
+// staged SUPERTONIC_COREML_TEST_MODELS_DIR holding a Supertonic GGUF with a
+// compiled `<model>-vocoder.mlmodelc` next to it.
+//
+// Generated sidecar:
+//   test-supertonic-coreml-parity --gguf MODEL.gguf --cache-dir DIR
+//       [--min-cosine 0.999] [--require-coreml] [--memory-schedule DIR2]
+// generates the vocoder sidecar from MODEL.gguf into DIR (no sidecar may sit
+// next to it) and holds it to the ggml vocoder of the same GGUF at
+// --min-cosine on a padded, an exact-window and a stitched multi-window
+// latent; then a second owner adopts the artifact (route cached), an Engine
+// synthesizes on it, fit charges the template's envelope (and degrades to
+// ggml near a budget), and a Max or Ultra brand string keeps a generated
+// sidecar off unless use = require. --require-coreml fails (instead of
+// skipping, 77) when the route is not generate. --memory-schedule runs the
+// overlapped memory schedule into the fresh cache DIR2 and holds each phase
+// to the template constant that charges it.
 
 #include <algorithm>
 #include <cmath>
@@ -25,13 +41,21 @@ int main() {
 
 #else
 
+#include "memory_probe.h"
+#include "memory_schedule.h"
 #include "supertonic_coreml_path.h"
 #include "supertonic_coreml_vocoder.h"
 #include "supertonic_internal.h"
+#include "supertonic_vocoder_coreml.h"
 #include "tts-cpp/supertonic/engine.h"
+#include "tts-cpp/supertonic/fit.h"
 
+#include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <memory>
+#include <thread>
 
 using namespace tts_cpp::supertonic::detail;
 namespace fs = std::filesystem;
@@ -39,6 +63,10 @@ namespace fs = std::filesystem;
 namespace {
 
 constexpr double MIN_COSINE = 0.999;
+// A brand whose device class the template does not prefer ggml on: the memory
+// schedule measures the generated route on every host, Max and Ultra included,
+// with the default (automatic) policy.
+constexpr const char * UNGATED_BRAND = "Apple M2";
 constexpr int    N_THREADS  = 4;
 
 int g_failures = 0;
@@ -151,6 +179,8 @@ void check_engine_report(const std::string & gguf) {
         EngineOptions opts;
         opts.model_gguf_path = gguf;
         opts.n_threads = N_THREADS;
+        // The prebuilt sidecar loads in the background; wait for it.
+        opts.coreml.wait = tts_cpp::CoremlOptions::Wait::construct;
         Engine engine(opts);
         expect(engine.vocoder_on_coreml(), "engine: vocoder_on_coreml() is false");
         SynthesisResult result = engine.synthesize("Core ML parity check.");
@@ -193,6 +223,7 @@ void check_cpu_warm_up_reaches_sidecar(const std::string & gguf) {
         opts.model_gguf_path = gguf;
         opts.n_threads = N_THREADS;
         opts.prewarm_text = "Warm up the vocoder sidecar.";
+        opts.coreml.wait = tts_cpp::CoremlOptions::Wait::construct;
         Engine engine(opts);
         expect(engine.vocoder_on_coreml(), "warm-up: sidecar not attached");
     } catch (const std::exception & e) {
@@ -270,9 +301,362 @@ void check_invalid_sidecar(const std::string & gguf, int latent_len) {
     fs::remove_all(dir, ec);
 }
 
+// ---- generated sidecar ----------------------------------------------------------
+
+std::string status_field(const std::string & status, const std::string & field) {
+    const std::string key = "\"" + field + "\":\"";
+    const size_t at = status.find(key);
+    if (at == std::string::npos) return {};
+    const size_t begin = at + key.size();
+    return status.substr(begin, status.find('"', begin) - begin);
+}
+
+double mib(uint64_t bytes) { return bytes / 1048576.0; }
+
+// A model whose vocoder runs on the shared Core ML runtime, like the Engine's.
+struct managed_model {
+    owned_model owned;
+    std::shared_ptr<supertonic_vocoder_coreml> stage;
+};
+
+bool load_managed(const std::string & gguf, const tts_cpp::CoremlOptions & o, managed_model & m) {
+    m.owned.model.vocoder_coreml_managed = true;
+    if (!load(gguf, m.owned)) return false;
+    try {
+        m.stage = supertonic_vocoder_coreml::create(m.owned.model, gguf, o);
+    } catch (const std::exception & e) {
+        fail(std::string("create the vocoder stage: ") + e.what());
+        return false;
+    }
+    return m.stage != nullptr;
+}
+
+void check_generated_parity(const supertonic_model & ggml_model, const supertonic_model & coreml_model,
+                            int latent_len, uint32_t seed, double min_cosine) {
+    const std::string tag = "generated, latent_len=" + std::to_string(latent_len);
+    const std::vector<float> latent = make_latent(ggml_model.hparams.latent_channels, latent_len, seed);
+    std::vector<float> wav_ggml, wav_coreml;
+    std::string error, backend;
+    if (!supertonic_vocoder_forward_ggml(ggml_model, latent.data(), latent_len, wav_ggml, &error, &backend)) {
+        fail(tag + ": ggml vocoder failed: " + error);
+        return;
+    }
+    bool pending = true;
+    if (!supertonic_vocoder_forward_ggml(coreml_model, latent.data(), latent_len, wav_coreml, &error, &backend,
+                                         &pending)) {
+        fail(tag + ": Core ML vocoder failed: " + error);
+        return;
+    }
+    expect(backend.rfind("coreml", 0) == 0 && !pending, tag + ": the call ran on " + backend);
+    expect(wav_coreml.size() == wav_ggml.size(), tag + ": size mismatch");
+    if (wav_coreml.size() != wav_ggml.size()) return;
+    const double cos = cosine(wav_ggml, wav_coreml);
+    std::fprintf(stderr, "[supertonic-coreml-parity] %s %s cosine=%.6f (gate %.4f)\n", tag.c_str(), backend.c_str(),
+                 cos, min_cosine);
+    expect(cos >= min_cosine, tag + ": cosine " + std::to_string(cos) + " below " + std::to_string(min_cosine));
+}
+
+void check_engine_generated(const std::string & gguf, const tts_cpp::CoremlOptions & o) {
+    using tts_cpp::supertonic::Engine;
+    using tts_cpp::supertonic::EngineOptions;
+    try {
+        EngineOptions opts;
+        opts.model_gguf_path = gguf;
+        opts.n_threads = N_THREADS;
+        opts.coreml = o;
+        opts.coreml.wait = tts_cpp::CoremlOptions::Wait::construct;
+        Engine engine(opts);
+        expect(engine.vocoder_on_coreml() && engine.coreml_wait(0), "engine: the generated sidecar is not ready");
+        const std::string status = engine.coreml_status();
+        expect(status_field(status, "state") == "ready", "engine: status " + status);
+        auto result = engine.synthesize("Core ML generated vocoder check.");
+        expect(result.vocoder_synthesis_backend.rfind("coreml", 0) == 0 && !result.coreml_pending,
+               "engine: vocoder ran on " + result.vocoder_synthesis_backend);
+        expect(!result.pcm.empty(), "engine: empty PCM");
+    } catch (const std::exception & e) {
+        fail(std::string("engine on the generated sidecar: ") + e.what());
+    }
+}
+
+// Fit charges the generated route's envelope; with a budget that only the
+// ggml projection fits, it degrades to ggml (use = off) instead of refusing.
+void check_fit(const std::string & gguf, const tts_cpp::CoremlOptions & o, const supertonic_vocoder_route & route) {
+    tts_cpp::supertonic::FitOptions f;
+    f.model_gguf_path = gguf;
+    f.n_gpu_layers = 99;  // the fused GPU path is the one fit projects
+    f.coreml = o;
+    const tts_cpp::FitResult r = tts_cpp::supertonic::fit_params(f);
+    if (r.status == tts_cpp::FitStatus::Error) {
+        std::fprintf(stderr, "[supertonic-coreml-parity] fit: %s (not projected on this backend)\n", r.reason.c_str());
+        return;
+    }
+    expect(r.coreml.route == "generate" && r.coreml.bytes == route.envelope_bytes && r.coreml.disabled_reason.empty(),
+           "fit: route " + r.coreml.route + ", Core ML " + std::to_string(r.coreml.bytes) + " bytes (envelope " +
+               std::to_string(route.envelope_bytes) + ")");
+    uint64_t required = r.device.total_bytes + f.margin_bytes;
+    if (r.device_shares_host_memory) required += r.host_bytes;
+    if (required + r.coreml.bytes / 2 > r.device_free_bytes) {
+        std::fprintf(stderr, "[supertonic-coreml-parity] fit near the budget: not run (free memory too low)\n");
+        return;
+    }
+    tts_cpp::supertonic::FitOptions near = f;
+    near.coreml.memory_budget_bytes = (int64_t) (required + r.coreml.bytes / 2);
+    const tts_cpp::FitResult d = tts_cpp::supertonic::fit_params(near);
+    expect(d.coreml.disabled_reason == "memory" && d.fits && d.coreml.ggml_only_fits,
+           "fit near the budget: disabled_reason '" + d.coreml.disabled_reason + "', fits " +
+               std::to_string(d.fits));
+    std::fprintf(stderr, "[supertonic-coreml-parity] fit: envelope %.1f MiB, near-budget degrade ok\n",
+                 mib(r.coreml.bytes));
+}
+
+// A generated sidecar stays off on the device classes the template prefers
+// ggml on, unless use = require.
+void check_device_gating(const std::string & gguf, const std::string & cache_dir) {
+    tts_cpp::CoremlOptions o;
+    o.cache_dir = cache_dir;
+    for (const char * brand : {"Apple M3 Ultra", "Apple M4 Max", "Apple M4 Max (Virtual)"}) {
+        const supertonic_vocoder_route r = supertonic_vocoder_plan_route(gguf, o, brand);
+        expect(r.route == "none" && r.state == "unsupported" && r.reason == "device",
+               std::string(brand) + ": route " + r.route + " " + r.state + " " + r.reason);
+    }
+    for (const char * brand : {"Apple M2", "Apple M4 Pro", "Apple M1"}) {
+        const supertonic_vocoder_route r = supertonic_vocoder_plan_route(gguf, o, brand);
+        expect(r.route == "generate", std::string(brand) + ": route " + r.route + " " + r.reason);
+    }
+    tts_cpp::CoremlOptions req = o;
+    req.use = tts_cpp::CoremlOptions::Use::require;
+    expect(supertonic_vocoder_plan_route(gguf, req, "Apple M3 Ultra").route == "generate",
+           "use = require generates on an Ultra");
+}
+
+// The overlapped memory schedule: ggml vocoder calls on this thread while the
+// sidecar is generated, compiled, loaded and warmed in the background into a
+// fresh `cache_dir`, until five calls have run on Core ML. One sampler thread
+// reads the footprint and the slot's state every millisecond (the warm-up
+// prediction takes a few); another reads ANECompilerService every 20 ms. Every phase must stay within the
+// template constant that charges it (engines/coreml/test/memory_schedule.h).
+void memory_schedule(const std::string & gguf, const std::string & cache_dir) {
+    using namespace qvac_coreml_memory;
+    const std::string chip = supertonic_cpu_brand();
+    std::fprintf(stderr, "[supertonic-coreml-parity] memory schedule (cache %s, host %s)\n", cache_dir.c_str(),
+                 chip.c_str());
+    tts_cpp::CoremlOptions opts;
+    opts.cache_dir = cache_dir;
+    const supertonic_vocoder_route route = supertonic_vocoder_plan_route(gguf, opts, UNGATED_BRAND);
+    if (route.route != "generate") {
+        fail("memory schedule: route " + route.route + " " + route.state + " " + route.reason);
+        return;
+    }
+    owned_model owned;
+    owned.model.vocoder_coreml_managed = true;
+    if (!load(gguf, owned)) return;
+    supertonic_model & model = owned.model;
+    const int latent_len = 150;  // three windows
+    const std::vector<float> latent = make_latent(model.hparams.latent_channels, latent_len, 29u);
+    std::vector<float> wav;
+    std::string error, backend;
+    for (int i = 0; i < 2; ++i) supertonic_vocoder_forward_ggml(model, latent.data(), latent_len, wav);  // warm ggml
+    const uint64_t base = phys_footprint();
+    std::atomic<bool> stop{false};
+    std::atomic<int> phase{(int) mem_phase::ggml};
+    std::atomic<const supertonic_vocoder_coreml *> watched{nullptr};
+    std::vector<AneSample> ane_samples;
+    std::vector<mem_sample> samples;
+    samples.reserve(1 << 16);
+    std::thread sampler([&] {
+        while (!stop.load()) {
+            const supertonic_vocoder_coreml * v = watched.load();
+            if (v != nullptr) phase.store((int) mem_phase_of(v->state()));
+            samples.push_back({phys_footprint(), (mem_phase) phase.load()});
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    });
+    std::thread ane_sampler([&] {
+        while (!stop.load()) {
+            const uint64_t a = ane_compiler_rss();
+            const auto p = (mem_phase) phase.load();
+            ane_samples.push_back({a, p == mem_phase::load || p == mem_phase::warm});
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+    });
+    const auto t0 = std::chrono::steady_clock::now();
+    std::shared_ptr<supertonic_vocoder_coreml> stage;
+    try {
+        stage = supertonic_vocoder_coreml::create(model, gguf, opts, false, UNGATED_BRAND);
+    } catch (const std::exception & e) {
+        fail(std::string("memory schedule: create: ") + e.what());
+    }
+    watched.store(stage.get());
+    int ggml_calls = 0, coreml_calls = 0;
+    while (stage && std::chrono::steady_clock::now() - t0 < std::chrono::minutes(5)) {
+        bool pending = false;
+        if (!supertonic_vocoder_forward_ggml(model, latent.data(), latent_len, wav, &error, &backend, &pending)) {
+            fail("memory schedule: vocoder call failed: " + error);
+            break;
+        }
+        if (backend == "ggml") {
+            ++ggml_calls;
+        } else if (++coreml_calls >= 5) {
+            break;
+        }
+    }
+    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    stop.store(true);
+    sampler.join();
+    ane_sampler.join();
+    if (!stage) return;
+    std::fprintf(stderr, "  status: %s\n", stage->status_json().c_str());
+
+    const mem_breakdown b = mem_breakdown_of(samples, base);
+    const AneGrowth ane = ane_compiler_growth(ane_samples);
+    const AneBaseline baseline = ane_compiler_baseline(ane);
+    uint64_t ane_peak = 0;
+    for (const auto & a : ane_samples) ane_peak = std::max(ane_peak, a.rss);
+    const mem_charges c{route.prepare_peak_bytes, route.load_peak_bytes, route.resident_bytes,
+                        route.ane_compile_reserve_bytes, route.envelope_bytes};
+    const uint64_t other_resident = route.resident_bytes - route.workspace_bytes;
+    const uint64_t workspace = b.steady > other_resident ? b.steady - other_resident : 0;
+    std::fprintf(stderr,
+                 "  memory (MiB; each phase over the footprint just before it began, steady over the footprint just "
+                 "before the load, whole run over the warm ggml baseline %.1f):\n"
+                 "    prepare    %7.1f  charged %7.1f  (generate %.1f, compile %.1f)\n"
+                 "    load+warm  %7.1f  charged %7.1f  (load %.1f, warm-up %.1f)\n"
+                 "    steady     %7.1f  charged %7.1f  (workspace %.1f, charged %.1f; over the baseline %.1f)\n"
+                 "    whole run  %7.1f  charged %7.1f  (envelope, margin included)\n"
+                 "    ANECompilerService growth while loading and warming %.1f, reserve %.1f (before the load %.1f, "
+                 "a %s baseline; peak while loading %.1f, whole run %.1f)\n",
+                 mib(base), mib(b.prepare), mib(c.prepare), mib(b.generate), mib(b.compile), mib(b.load_warm),
+                 mib(c.load), mib(b.load), mib(b.warm), mib(b.steady), mib(c.resident), mib(workspace),
+                 mib(route.workspace_bytes), mib(b.steady_over_base), mib(b.total), mib(c.envelope), mib(ane.growth),
+                 mib(c.ane_reserve), mib(ane.before), ane_baseline_name(baseline), mib(ane.peak), mib(ane_peak));
+    std::fprintf(stderr,
+                 "  memory report: {\"chip\":\"%s\",\"template\":\"%s\",\"units\":\"%s\",\"base\":%llu,\"prepare\":%llu,"
+                 "\"generate\":%llu,\"compile\":%llu,\"load_warm\":%llu,\"load\":%llu,\"warm\":%llu,\"steady\":%llu,"
+                 "\"steady_over_base\":%llu,\"workspace\":%llu,\"total\":%llu,\"ane_compiler_load_peak\":%llu,"
+                 "\"ane_compiler_before_load\":%llu,\"ane_compiler_growth\":%llu,\"ane_compiler_peak\":%llu,"
+                 "\"ane_compiler_baseline\":\"%s\",\"samples\":%zu}\n",
+                 chip.c_str(), route.template_id.c_str(), route.compute_units.c_str(), (unsigned long long) base,
+                 (unsigned long long) b.prepare, (unsigned long long) b.generate, (unsigned long long) b.compile,
+                 (unsigned long long) b.load_warm, (unsigned long long) b.load, (unsigned long long) b.warm,
+                 (unsigned long long) b.steady, (unsigned long long) b.steady_over_base,
+                 (unsigned long long) workspace, (unsigned long long) b.total, (unsigned long long) ane.peak,
+                 (unsigned long long) ane.before, (unsigned long long) ane.growth, (unsigned long long) ane_peak,
+                 ane_baseline_name(baseline), samples.size());
+    const std::vector<std::string> failures = mem_failures(b, ane.growth, c);
+    for (const std::string & f : failures) fail("memory schedule: " + f);
+    std::fprintf(stderr,
+                 "[supertonic-coreml-parity] overlapped schedule: %d ggml + %d Core ML calls in %.1f s; footprint base "
+                 "%.1f MiB, peak +%.1f MiB (envelope %.1f MiB, units %s); ANECompilerService grew %.1f MiB\n",
+                 ggml_calls, coreml_calls, secs, mib(base), mib(b.total), mib(route.envelope_bytes),
+                 route.compute_units.c_str(), mib(ane.growth));
+    expect(coreml_calls >= 5 && ggml_calls >= 1, "memory schedule: " + std::to_string(ggml_calls) + " ggml and " +
+                                                     std::to_string(coreml_calls) + " Core ML calls");
+    model.vocoder_pending.reset();
+}
+
+int generated_main(const std::string & gguf, const std::string & cache_dir, double min_cosine, bool require_coreml,
+                   const std::string & memory_dir) {
+    unsetenv("SUPERTONIC_COREML_DISABLE");
+    unsetenv("SUPERTONIC_COREML_STRICT");
+    if (fs::exists(coreml_vocoder_sidecar_path(gguf))) {
+        fail("a prebuilt sidecar sits next to " + gguf + "; the generated route needs none");
+        return 1;
+    }
+    if (!memory_dir.empty()) {
+        memory_schedule(gguf, memory_dir);
+        std::fprintf(stderr, g_failures ? "test_supertonic_coreml_parity: %d failure(s)\n"
+                                        : "test_supertonic_coreml_parity: OK\n", g_failures);
+        return g_failures ? 1 : 0;
+    }
+    tts_cpp::CoremlOptions o;
+    o.cache_dir = cache_dir;
+    const supertonic_vocoder_route route = supertonic_vocoder_plan_route(gguf, o);
+    std::fprintf(stderr, "[supertonic-coreml-parity] %s: route %s%s%s template %s units %s envelope %.1f MiB%s\n",
+                 gguf.c_str(), route.route.c_str(), route.reason.empty() ? "" : " ",
+                 route.reason.c_str(), route.template_id.c_str(), route.compute_units.c_str(),
+                 mib(route.envelope_bytes), route.validated ? " (validated)" : "");
+    if (route.route != "generate") {
+        // A Max or Ultra host keeps the generated sidecar off by default; the
+        // gates below need it, so they run with use = require there.
+        const bool device = route.reason == "device";
+        if (!device) {
+            if (require_coreml) fail("route " + route.route + " (" + route.state + ": " + route.reason + ")");
+            return require_coreml ? 1 : SKIP_EXIT_CODE;
+        }
+        std::fprintf(stderr, "[supertonic-coreml-parity] this device class prefers ggml; gates run with use = require\n");
+        o.use = tts_cpp::CoremlOptions::Use::require;
+    }
+
+    owned_model ggml_owned;
+    {
+        scoped_env disable("SUPERTONIC_COREML_DISABLE", "1");
+        if (!load(gguf, ggml_owned)) return 1;
+    }
+    tts_cpp::CoremlOptions first = o;
+    first.wait = tts_cpp::CoremlOptions::Wait::construct;
+    first.use = tts_cpp::CoremlOptions::Use::require;
+    managed_model gen;
+    const auto t0 = std::chrono::steady_clock::now();
+    if (!load_managed(gguf, first, gen)) return 1;
+    const double ready_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    const std::string status = gen.stage->status_json();
+    std::fprintf(stderr, "[supertonic-coreml-parity] ready after %.1f s: %s\n", ready_s, status.c_str());
+    expect(status_field(status, "state") == "ready", "first owner: state " + status_field(status, "state"));
+    const std::string first_route = status_field(status, "route");
+    expect(first_route == "generated" || first_route == "cached", "first owner: route " + first_route);
+
+    const int window = 64;
+    check_generated_parity(ggml_owned.model, gen.owned.model, window / 2, 11u, min_cosine);
+    check_generated_parity(ggml_owned.model, gen.owned.model, window, 13u, min_cosine);
+    check_generated_parity(ggml_owned.model, gen.owned.model, 3 * window - window / 3, 17u, min_cosine);
+
+    // A second owner adopts the published artifact.
+    managed_model second;
+    if (load_managed(gguf, first, second)) {
+        const std::string st = second.stage->status_json();
+        expect(status_field(st, "route") == "cached" && status_field(st, "state") == "ready",
+               "second owner: " + st);
+    }
+
+    check_engine_generated(gguf, o);
+    check_fit(gguf, o, supertonic_vocoder_plan_route(gguf, o));
+    check_device_gating(gguf, cache_dir);
+
+    if (g_failures == 0) {
+        std::printf("test_supertonic_coreml_parity: OK\n");
+        return 0;
+    }
+    std::fprintf(stderr, "test_supertonic_coreml_parity: %d failure(s)\n", g_failures);
+    return 1;
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char ** argv) {
+    std::string gguf, cache_dir, memory_dir;
+    double min_cosine = MIN_COSINE;
+    bool require_coreml = false;
+    for (int i = 1; i < argc; ++i) {
+        const std::string a = argv[i];
+        auto next = [&]() { return i + 1 < argc ? std::string(argv[++i]) : std::string(); };
+        if (a == "--gguf") gguf = next();
+        else if (a == "--cache-dir") cache_dir = next();
+        else if (a == "--memory-schedule") memory_dir = next();
+        else if (a == "--min-cosine") min_cosine = std::atof(next().c_str());
+        else if (a == "--require-coreml") require_coreml = true;
+        else {
+            std::fprintf(stderr, "[supertonic-coreml-parity] unknown argument %s\n", a.c_str());
+            return 2;
+        }
+    }
+    if (!gguf.empty()) {
+        if (cache_dir.empty() && memory_dir.empty()) {
+            std::fprintf(stderr, "[supertonic-coreml-parity] --gguf needs --cache-dir or --memory-schedule\n");
+            return 2;
+        }
+        return generated_main(gguf, cache_dir, min_cosine, require_coreml, memory_dir);
+    }
+
     const char * env_dir = std::getenv("SUPERTONIC_COREML_TEST_MODELS_DIR");
     if (env_dir == nullptr) {
         std::fprintf(stderr,
@@ -281,7 +665,7 @@ int main() {
         return SKIP_EXIT_CODE;
     }
     const std::string dir = env_dir;
-    const std::string gguf = find_supertonic_gguf(dir);
+    gguf = find_supertonic_gguf(dir);
     if (gguf.empty()) {
         std::fprintf(stderr,
                      "[supertonic-coreml-parity] no Supertonic GGUF under %s; skipping\n",

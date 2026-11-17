@@ -2000,6 +2000,9 @@ static void attach_coreml_vocoder_sidecar(const std::string & gguf_path,
                                           bool verbose) {
     model.coreml_vocoder = nullptr;
     model.vocoder_on_coreml = false;
+    // The Engine loads the vocoder sidecar (prebuilt or generated) through the
+    // shared Core ML runtime instead (supertonic_vocoder_coreml.h).
+    if (model.vocoder_coreml_managed) return;
     if (!coreml_vocoder_sidecar_enabled()) return;
     const std::string sidecar = coreml_vocoder_sidecar_path(gguf_path);
     if (!::tts_cpp::detail::coreml_sidecar_exists(sidecar)) return;
@@ -2025,8 +2028,9 @@ static void attach_coreml_vocoder_sidecar(const std::string & gguf_path,
 #ifdef TTS_CPP_USE_COREML
     const int64_t samples_per_frame =
         (int64_t) model.hparams.base_chunk_size * model.hparams.ttl_chunk_compress_factor;
+    const char * units = std::getenv("SUPERTONIC_COREML_COMPUTE_UNITS");
     model.coreml_vocoder = supertonic_coreml_vocoder_init(
-        sidecar.c_str(), model.hparams.latent_channels, samples_per_frame);
+        sidecar.c_str(), model.hparams.latent_channels, samples_per_frame, units, nullptr);
     model.vocoder_on_coreml = model.coreml_vocoder != nullptr;
     if (!model.coreml_vocoder) {
         fprintf(stderr,

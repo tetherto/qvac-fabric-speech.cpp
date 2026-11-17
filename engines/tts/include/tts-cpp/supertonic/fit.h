@@ -54,8 +54,20 @@
 //   * A latent length is a PREDICTION of the duration model at runtime; the
 //     audio_seconds knob sets the projected utterance length explicitly.
 //
+// Core ML (FitResult::coreml): the vocoder's route, from `coreml` and the
+// SUPERTONIC_COREML_* environment, decided without reading the cache.
+//   - A prebuilt sidecar next to the GGUF keeps today's verdict: its resident
+//     model and prediction buffers are not projected.
+//   - A generated sidecar (coreml.cache_dir set, template match, macOS 15, a
+//     device class the template does not prefer ggml on) adds the template's
+//     Core ML envelope to the projection; the verdict is the Core
+//     ML-inclusive one. With coreml.memory_budget_bytes, a budget only the
+//     ggml projection fits resolves use = off instead (memory-degrade:
+//     coreml.disabled_reason "memory", the ggml verdict).
+//
 // See tts-cpp/fit.h for the status contract and result layout.
 
+#include "tts-cpp/coreml_options.h"
 #include "tts-cpp/export.h"
 #include "tts-cpp/fit.h"
 
@@ -80,6 +92,9 @@ struct FitOptions {
     // EngineOptions::f16_weights tri-state (-1 auto / 0 off / 1 on).
     int         f16_weights = -1;
     std::string backends_dir;
+    // Mirrors EngineOptions::coreml: the vocoder's route and, for a generated
+    // sidecar, its Core ML envelope (FitResult::coreml).
+    CoremlOptions coreml;
 
     // ── Workload ──────────────────────────────────────────────────────────
     // Text length in Supertonic text tokens (Unicode code points).  The text

@@ -39,13 +39,27 @@
 //     ctor) keys the stage-internal caches so two Engines don't collide.
 //   - cancel() is safe from any thread.
 //
+// Core ML (Apple, TTS_CPP_COREML builds): the vocoder runs on a Core ML
+// sidecar, either prebuilt next to the GGUF (`supertonic2-q8_0.gguf` ->
+// `supertonic2-vocoder.mlmodelc`, the quant tag dropped) or, with
+// EngineOptions::coreml.cache_dir set and macOS 15 or later, generated from the
+// GGUF's own vocoder weights into that cache. Either loads in the background:
+// until it is ready each vocoder call runs on ggml
+// (SynthesisResult::coreml_pending), and coreml.wait = construct makes the
+// constructor wait instead. A generated sidecar is skipped on Max and Ultra
+// parts, whose GPU runs the ggml vocoder faster (coreml.use = require
+// generates anyway). The optional text-encoder and vector-estimator sidecars
+// are unchanged: they load at construction when present.
+//
 // Implemented in src/supertonic_engine.cpp on top of the library-internal
 // helpers in src/supertonic_internal.h.
 
 #include "tts-cpp/backend.h"
+#include "tts-cpp/coreml_options.h"
 #include "tts-cpp/export.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
@@ -371,6 +385,13 @@ struct EngineOptions {
     // Default empty (zero behaviour change for every existing
     // operator config).
     std::map<std::string, std::string> vulkan_env_overrides;
+
+    // The vocoder sidecar on the shared Core ML runtime
+    // (tts-cpp/coreml_options.h): cache_dir enables generation, wait /
+    // prewarm choose when it loads, use = require makes a sidecar that cannot
+    // serve a call an error. Unset fields fall back to the SUPERTONIC_COREML_*
+    // environment. Supertonic's minimal set is the vocoder.
+    CoremlOptions coreml;
 };
 
 // Per-chunk PCM callback for streaming synthesis.  Receives a pointer to
@@ -395,6 +416,10 @@ struct SynthesisResult {
     // Actual encoder/vector paths; "mixed" for streaming across paths.
     std::string text_encoder_synthesis_backend = "ggml";
     std::string vector_estimator_synthesis_backend = "ggml";
+    // True when a vocoder call of this synthesis ran on ggml only because its
+    // Core ML sidecar was not ready yet (still generating, compiling or
+    // loading).
+    bool coreml_pending = false;
 };
 
 // Persistent engine.  Loads the GGUF once at construction; subsequent
@@ -479,16 +504,29 @@ public:
     // allowlist), so we fell back to CPU. Always false when backend_device() == GPU.
     bool gpu_unsupported() const;
 
-    // True when a Core ML vocoder sidecar (`<model>-vocoder.mlmodelc` next
-    // to the GGUF) loaded at construction.  Load status only — a call can
-    // still fall back to the ggml vocoder graph; the per-call truth is
-    // SynthesisResult::vocoder_synthesis_backend.  Always false when the build is not
-    // compiled with TTS_CPP_COREML or SUPERTONIC_COREML_DISABLE is set.
+    // True when the Core ML vocoder sidecar (prebuilt next to the GGUF or
+    // generated into coreml.cache_dir) is loaded and ready.  Load status only
+    // — a call can still fall back to the ggml vocoder graph; the per-call
+    // truth is SynthesisResult::vocoder_synthesis_backend.  Always false when
+    // the build is not compiled with TTS_CPP_COREML or
+    // SUPERTONIC_COREML_DISABLE is set.
     bool vocoder_on_coreml() const;
     // Load status of the optional <model>-encoder.mlmodelc sidecar.
     bool encoder_on_coreml() const;
     // Load status only; individual shapes/predictions can fall back to ggml.
     bool vector_estimator_on_coreml() const;
+
+    // Core ML status of the vocoder stage as JSON (schema 1: engine,
+    // cache_dir, generation, stages with state, route, compute units, label,
+    // artifact key, timings and error); "{}" in builds without TTS_CPP_COREML.
+    std::string coreml_status() const;
+    // Waits until the vocoder sidecar is ready or has failed, or `timeout_ms`
+    // passes (< 0: no limit), or cancel() is called from another thread.
+    // True when it is ready. Returns false at once while nothing has
+    // requested the sidecar (prewarm none before the first synthesis) or it
+    // waits for memory (deferred). coreml_wait(0) only polls; a wait never
+    // clears a cancel() meant for a synthesis on another thread.
+    bool coreml_wait(int64_t timeout_ms = -1) const;
 
 private:
     struct Impl;

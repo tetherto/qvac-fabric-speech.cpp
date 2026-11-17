@@ -16,6 +16,7 @@
 #include "backend_util.h"
 #include "fit_price.h"
 #include "fit_util.h"
+#include "coreml_fit_verdict.h"
 #include "parler/internal.h"
 
 #include "ggml-backend.h"
@@ -67,16 +68,14 @@ namespace detail {
 parler_coreml_fit_verdict parler_decide_coreml_fit(uint64_t required, uint64_t coreml_bytes, bool generate,
                                                    uint64_t device_free,
                                                    const std::optional<int64_t> & budget) {
+    const ::tts_cpp::detail::coreml_fit_verdict d =
+        ::tts_cpp::detail::decide_coreml_fit(required, coreml_bytes, generate, device_free, budget);
     parler_coreml_fit_verdict v;
-    const uint64_t with_coreml = sat_add(required, generate ? coreml_bytes : 0);
-    v.ggml_only_fits = required <= device_free;
-    v.coreml_fits    = with_coreml <= device_free;
-    if (generate && budget.has_value()) {
-        const uint64_t cap = std::min(device_free, (uint64_t) std::max<int64_t>(*budget, 0));
-        v.degraded = with_coreml > cap && required <= cap;
-    }
-    v.charged = generate && !v.degraded ? with_coreml : required;
-    v.fits = v.charged <= device_free;
+    v.ggml_only_fits = d.ggml_only_fits;
+    v.coreml_fits    = d.coreml_fits;
+    v.degraded       = d.degraded;
+    v.fits           = d.fits;
+    v.charged        = d.charged;
     return v;
 }
 
