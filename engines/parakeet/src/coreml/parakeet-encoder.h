@@ -33,6 +33,10 @@ struct parakeet_coreml_context * parakeet_coreml_init(const char * path_mlmodelc
 struct parakeet_coreml_context * parakeet_coreml_init_cpu(const char * path_mlmodelc);
 struct parakeet_coreml_context * parakeet_coreml_init_ane(const char * path_mlmodelc);
 struct parakeet_coreml_context * parakeet_coreml_init_gpu(const char * path_mlmodelc);
+// Select a named full-EU function in a shared-weight bundle (macOS 15/iOS 18+).
+// The returned context owns its model and prediction buffers independently.
+struct parakeet_coreml_context * parakeet_coreml_init_eu_function(
+    const char * path_mlmodelc, const char * function_name, bool cpu_only);
 bool parakeet_coreml_is_fp32(const struct parakeet_coreml_context * ctx);
 bool parakeet_coreml_preserves_encoder_padding(const struct parakeet_coreml_context * ctx);
 

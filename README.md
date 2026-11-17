@@ -147,8 +147,10 @@ palettization with `--nbits-out`; see the
 Full-EU Core ML export requires an F16 GGUF and macOS with Xcode for compilation.
 The [full-EU guide](engines/parakeet/docs/transcribepsy-eu-coreml.md#export-and-deployment)
 provides the conversion command and recommends explicit FP16 encoders/decoder
-as the baseline, with six-bit encoders for smaller deployments. It also documents
-the current eager route loading and duplicated weights, plus possible optimizations.
+as the baseline, with six-bit encoders for smaller deployments. The Engine also
+loads a [shared-weight multifunction encoder](engines/parakeet/docs/transcribepsy-eu-coreml.md#shared-weight-runtime-deployment)
+for English, adapted and gate routes, including encoder-less GGUF deployments.
+It replaces the three fixed bundles without changing the public API or Core ML build option.
 An [experimental route-sharing harness](engines/parakeet/docs/transcribepsy-eu-coreml.md#trying-route-sharing-exports)
 can measure those alternatives separately from the deployed runtime.
 Its [automated regression tests](engines/parakeet/examples/ios-coreml-bench/README.md#route-harness-regression-tests)
