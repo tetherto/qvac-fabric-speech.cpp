@@ -14,6 +14,7 @@ requirement fails instead.
 import importlib.util
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -423,6 +424,63 @@ class TwinTest(unittest.TestCase):
             self.assertEqual(ctpl.coinciding_tensors(a, b), ["same"])
             with self.assertRaisesRegex(ctpl.TemplateError, r"same values for 1 tensor\(s\).*: same"):
                 ctpl.check_twins_differ(a, b, "extract")
+
+
+class RepoTemplatePatchTest(unittest.TestCase):
+    """For every template in the repository with patch sites: two GGUFs that
+    differ only in a tensor its patch lines read get different artifact keys,
+    and generated programs that differ only at the patch sites. A program
+    constant computed from a tensor the recipe does not read would make both
+    the same."""
+
+    def run_tool(self, *args):
+        p = subprocess.run([TOOL] + [str(a) for a in args], capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return p.stdout
+
+    @NEEDS_TOOL
+    def test_patch_tensors_reach_key_and_program(self):
+        import gguf
+
+        checked = 0
+        for tdir in ctpl.find_templates(ctpl.repo_root()):
+            patches = json.loads((tdir / "template.json").read_text()).get("patches", [])
+            if not patches:
+                continue
+            lines = [l for l in (tdir / "recipe.txt").read_text().splitlines() if l.startswith("patch ")]
+            names = sorted(set(re.findall(r't\("([^"]+)"\)', "\n".join(lines))))
+            self.assertTrue(names, f"{tdir.name}: patch lines read no tensor")
+            sites = [(p["spec_offset"], p["spec_offset"] + p["len"]) for p in patches]
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                a = tmp / "a.gguf"
+                self.run_tool("twin", "--manifest", tdir / "reference-gguf.json", "--seed", "1", "--types", "f32",
+                              "-o", a)
+                key_a = json.loads(self.run_tool("digest", "--template", tdir, "--gguf", a))["artifact_key"]
+                self.run_tool("generate", "--template", tdir, "--gguf", a, "-o", tmp / "a.mlpackage")
+                spec_a = ctpl.package_parts(tmp / "a.mlpackage")["spec"].read_bytes()
+                for name in names:
+                    b = tmp / "b.gguf"
+                    shutil.copyfile(a, b)
+                    r = gguf.GGUFReader(str(b), "r+")
+                    t = next(x for x in r.tensors if x.name == name)
+                    t.data[...] = np.asarray(t.data) * -1.5 - 0.125
+                    del t, r
+                    others = sorted(set(ctpl.gguf_tensors(a)) - {name})
+                    self.assertEqual(ctpl.coinciding_tensors(a, b), others)  # only `name` differs
+                    key_b = json.loads(self.run_tool("digest", "--template", tdir, "--gguf", b))["artifact_key"]
+                    self.assertNotEqual(key_a, key_b, f"{tdir.name}: {name} is not in the artifact key")
+                    gen_b = tmp / "b.mlpackage"
+                    shutil.rmtree(gen_b, ignore_errors=True)
+                    self.run_tool("generate", "--template", tdir, "--gguf", b, "-o", gen_b)
+                    spec_b = ctpl.package_parts(gen_b)["spec"].read_bytes()
+                    self.assertEqual(len(spec_a), len(spec_b))
+                    diff = [i for i, (x, y) in enumerate(zip(spec_a, spec_b)) if x != y]
+                    self.assertTrue(diff, f"{tdir.name}: {name} does not reach the program")
+                    for i in diff:
+                        self.assertTrue(any(lo <= i < hi for lo, hi in sites), f"{tdir.name}: byte {i} is no patch site")
+            checked += 1
+        self.assertGreater(checked, 0, "no template in the repository has patch sites")
 
 
 def run_ctpl(*args):

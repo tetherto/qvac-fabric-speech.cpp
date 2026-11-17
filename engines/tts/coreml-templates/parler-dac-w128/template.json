@@ -64,7 +64,13 @@
       "basis": "Each constant is 1.25 x the largest value measured over every overlapped generated-schedule run on the validated_for hosts, rounded up to 1 MiB, so the envelope's own margin is 1.0: the prepare charge (generation_peak_bytes + 8 MiB + compile_peak_bytes) covers the prepare from the start of generation to the end of the compile; load_peak_bytes.all the load and warm-up increment; the resident part (runtime_weight_bytes + 2 x I/O + workspace_bytes, runtime_weight_bytes being weight.bin's size) the steady state over the footprint just before the load, which under `all` on the M4 Max holds the GPU's copy of the weights and its working memory; and ane_compile_reserve_bytes ANECompilerService's largest absolute size while the M2 loaded, where `all` compiles the whole program for the Neural Engine. No run found the service clean (every recorded baseline held 124-358 MiB), and a service that already holds memory reuses it, so its growth during the load understates a cold compile on a clean host, whose growth is its whole size; on the M4 Max `all` puts only the output stage on the Neural Engine and the service grew at most 2.8 MiB in every run that recorded its baseline, so its absolute size there comes from other jobs' compiles on the runner's Mac, earlier or concurrent: the largest, 821.2 MiB, came from a run that recorded no baseline while the next two runs of the same job read 494 MiB, so at least 320 MiB that it held during that load was gone by the next run. The four macOS 15.7.3 runs recorded only the whole-run peak and ANECompilerService's absolute size; the resident part comes from the runs that measured it"
     }
   },
-  "patches": [],
+  "patches": [
+    {
+      "spec_offset": 170847,
+      "len": 2,
+      "sentinel_hex": "c7d1"
+    }
+  ],
   "prefer_ggml_on": [],
   "match": {
     "architecture": "parler",
