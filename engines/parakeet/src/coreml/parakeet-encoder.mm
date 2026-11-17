@@ -37,6 +37,7 @@ NSString * const kAneKeyBiasInput = @"key_bias";
 // Optional: exports that mask every subsampling resolution take the
 // mel-frame validity too; the published TranscribePsy export does not.
 NSString * const kAneMelMaskInput = @"mel_mask";
+NSString * const kEuSharedSchemaVersion = @"1";
 
 // Additive attention bias for pad keys. Matches KEY_BIAS_PAD in the exporter:
 // fp16 -inf would make an all-pad softmax row NaN, -1e4 saturates just as hard.
@@ -398,6 +399,7 @@ struct parakeet_coreml_context {
     std::string  valid_mask_name;
     bool         masks_mel_padding = false;
     std::string  output_name;
+    std::string  function_name;
     std::string  label;
     std::vector<int64_t> declared_input_dims;
     std::vector<int64_t> declared_output_dims;
@@ -720,7 +722,16 @@ bool prepare_cached_masked_io(parakeet_coreml_context * ctx, MLModel * model,
 }  // namespace
 
 enum class CoremlPlacement { Automatic, Cpu, NeuralEngine, Gpu };
-static parakeet_coreml_context * init_coreml_model(const char *, const char *, CoremlPlacement);
+static parakeet_coreml_context * init_coreml_model(const char *, const char *, CoremlPlacement,
+                                                 const char * function_name = nullptr);
+
+struct parakeet_coreml_context * parakeet_coreml_init_eu_function(
+        const char * path, const char * function_name, bool cpu_only) {
+    if (!function_name || (std::strcmp(function_name, "en") != 0 &&
+        std::strcmp(function_name, "other") != 0 && std::strcmp(function_name, "gate") != 0)) return nullptr;
+    return init_coreml_model(path, kComputeUnitsEnv,
+        cpu_only ? CoremlPlacement::Cpu : CoremlPlacement::NeuralEngine, function_name);
+}
 
 struct parakeet_coreml_context * parakeet_coreml_init(const char * path_mlmodelc) {
     return init_coreml_model(path_mlmodelc, kComputeUnitsEnv, CoremlPlacement::Automatic);
@@ -744,7 +755,8 @@ struct parakeet_coreml_context * parakeet_coreml_init_with_units_env(const char 
 }
 
 static parakeet_coreml_context * init_coreml_model(const char * path_mlmodelc,
-                                                  const char * units_env, CoremlPlacement placement) {
+                                                  const char * units_env, CoremlPlacement placement,
+                                                  const char * function_name) {
     if (path_mlmodelc == nullptr || units_env == nullptr) return nullptr;
 
     @autoreleasepool {
@@ -756,6 +768,13 @@ static parakeet_coreml_context * init_coreml_model(const char * path_mlmodelc,
         // available, since their few GPU-preferred operations would otherwise
         // fall back to the CPU and erase the encoder speedup.
         MLModelConfiguration * config = [[MLModelConfiguration alloc] init];
+        if (function_name != nullptr) {
+            if (@available(macOS 15.0, iOS 18.0, *)) {
+                config.functionName = [NSString stringWithUTF8String:function_name];
+            } else {
+                return nullptr;
+            }
+        }
         std::string label;
         config.computeUnits = parakeet_coreml_requested_units(
             units_env, mlmodelc_declares_ane_inputs(path), &label);
@@ -786,6 +805,7 @@ static parakeet_coreml_context * init_coreml_model(const char * path_mlmodelc,
             auto * ctx = new parakeet_coreml_context();
             ctx->model = CFBridgingRetain(model);
             ctx->label = std::move(label);
+            if (function_name != nullptr) ctx->function_name = function_name;
             if (!bind_ane_window(ctx, model, ane_out)) {
                 parakeet_coreml_free(ctx);
                 return nullptr;
@@ -835,6 +855,14 @@ bool parakeet_coreml_matches_eu_route(const struct parakeet_coreml_context * ctx
     @autoreleasepool {
         MLModel * model = (__bridge MLModel *) ctx->model;
         NSDictionary * metadata = model.modelDescription.metadata[MLModelCreatorDefinedKey];
+        const bool shared = !ctx->function_name.empty();
+        NSString * layer_key = shared
+            ? [NSString stringWithFormat:@"parakeet.eu.%s.n_layers", route]
+            : @"parakeet.encoder.n_layers";
+        const bool valid_route = shared
+            ? ctx->function_name == route && !flexible &&
+                [metadata[@"parakeet.eu.shared_version"] isEqualToString:kEuSharedSchemaVersion]
+            : [metadata[@"parakeet.eu.route"] isEqualToString:[NSString stringWithUTF8String:route]];
         const bool valid_interface = flexible
             ? !ctx->input_shape_fixed &&
                 [metadata[@"parakeet.eu.flexible"] isEqualToString:@"true"] &&
@@ -847,8 +875,8 @@ bool parakeet_coreml_matches_eu_route(const struct parakeet_coreml_context * ctx
                 model.modelDescription.inputDescriptionsByName[kAneMelMaskInput].type == MLFeatureTypeMultiArray;
         return valid_interface &&
             [metadata[@"parakeet.model_variant"] isEqualToString:@"transcribepsy-250m-eu"] &&
-            [metadata[@"parakeet.eu.route"] isEqualToString:[NSString stringWithUTF8String:route]] &&
-            [metadata[@"parakeet.encoder.n_layers"] isEqualToString:[NSString stringWithFormat:@"%d", layers]];
+            valid_route &&
+            [metadata[layer_key] isEqualToString:[NSString stringWithFormat:@"%d", layers]];
     }
 }
 
