@@ -491,6 +491,23 @@ std::vector<std::string> mem_failures(const mem_breakdown & b, uint64_t ane_comp
     return out;
 }
 
+// What the probes failed to measure: the baseline, footprint samples, or (on
+// the Neural Engine) ANECompilerService while loading. A run with any of them
+// fails instead of counting the missing readings as 0.
+std::vector<std::string> probe_failures(bool base_ok, size_t footprint_failures, bool ane_units,
+                                        const qvac_coreml_memory::AneGrowth & ane) {
+    std::vector<std::string> out;
+    if (!base_ok) out.push_back("no footprint baseline (the probe failed)");
+    if (footprint_failures > 0) out.push_back(std::to_string(footprint_failures) + " footprint probe(s) failed");
+    if (ane_units && !qvac_coreml_memory::ane_compiler_measured(ane)) {
+        out.push_back("no successful ANECompilerService query while loading or warming");
+    }
+    if (ane_units && ane.failed_samples > 0) {
+        out.push_back(std::to_string(ane.failed_samples) + " ANECompilerService query(ies) failed");
+    }
+    return out;
+}
+
 void memory_schedule_gates() {
     check(mem_phase_of("digesting") == mem_phase::generate && mem_phase_of("generating") == mem_phase::generate &&
               mem_phase_of("compiling") == mem_phase::compile && mem_phase_of("loading") == mem_phase::load &&
@@ -565,6 +582,21 @@ void memory_schedule_gates() {
           "memory schedule: ANECompilerService growth without a sample before the load is its peak");
     check(growth({{800, false}, {700, true}}).growth == 0 && growth({}).growth == 0,
           "memory schedule: ANECompilerService shrinking or never sampled grows 0");
+    {
+        const auto f = growth({{700, false, true}, {0, false, false}, {900, true, true}, {0, true, false}});
+        check(f.before == 700 && f.peak == 900 && f.growth == 200 && f.loading_samples == 1 && f.failed_samples == 2 &&
+                  qvac_coreml_memory::ane_compiler_measured(f),
+              "memory schedule: a failed ANECompilerService query is skipped, not read as 0");
+        const auto none = growth({{700, false, true}, {0, true, false}, {0, true, false}});
+        check(!qvac_coreml_memory::ane_compiler_measured(none) && !qvac_coreml_memory::ane_compiler_measured(growth({})),
+              "memory schedule: no successful query while loading is no compiler measurement");
+        check(probe_failures(true, 0, true, f).size() == 1 && probe_failures(true, 0, false, f).empty() &&
+                  probe_failures(true, 0, true, growth({{700, false}, {900, true}})).empty(),
+              "memory schedule: failed compiler queries fail a Neural Engine run");
+        check(probe_failures(false, 0, false, none).size() == 1 && probe_failures(true, 3, false, none).size() == 1 &&
+                  probe_failures(true, 0, true, none).size() == 2,
+              "memory schedule: a failed baseline, failed footprint samples or an unmeasured compiler fail the run");
+    }
     const uint64_t clean = qvac_coreml_memory::ANE_COMPILER_CLEAN_BYTES;
     using qvac_coreml_memory::AneBaseline;
     const auto baseline = [&](const std::vector<AneSample> & s) {
@@ -1477,7 +1509,9 @@ void memory_schedule(parler_model & model, const std::string & gguf, const std::
     model.dac_pending.reset();
     std::vector<float> pcm;
     for (int i = 0; i < 2; ++i) decode(model, codes, n_frames, pcm);  // warm the ggml arena
-    const uint64_t base = qvac_coreml_memory::phys_footprint();
+    uint64_t base = 0;
+    const bool base_ok = qvac_coreml_memory::phys_footprint(base);
+    size_t footprint_failures = 0;
     std::atomic<bool> stop{false};
     std::atomic<int> phase{(int) mem_phase::ggml};
     std::atomic<const parler_dac_coreml *> watched{nullptr};
@@ -1488,15 +1522,21 @@ void memory_schedule(parler_model & model, const std::string & gguf, const std::
         for (int tick = 0; !stop.load(); ++tick) {
             const parler_dac_coreml * d = watched.load();
             if (d != nullptr && tick % 5 == 0) phase.store((int) mem_phase_of(status_state(d->status_json())));
-            samples.push_back({qvac_coreml_memory::phys_footprint(), (mem_phase) phase.load()});
+            uint64_t fp = 0;
+            if (qvac_coreml_memory::phys_footprint(fp)) {
+                samples.push_back({fp, (mem_phase) phase.load()});
+            } else {
+                ++footprint_failures;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
     });
     std::thread ane_sampler([&] {
         while (!stop.load()) {
-            const uint64_t a = qvac_coreml_memory::ane_compiler_rss();
+            uint64_t a = 0;
+            const bool ok = qvac_coreml_memory::ane_compiler_rss(a);
             const auto p = (mem_phase) phase.load();
-            ane_samples.push_back({a, p == mem_phase::load || p == mem_phase::warm});
+            ane_samples.push_back({a, p == mem_phase::load || p == mem_phase::warm, ok});
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
     });
@@ -1574,14 +1614,17 @@ void memory_schedule(parler_model & model, const std::string & gguf, const std::
             (unsigned long long) b.steady, (unsigned long long) b.steady_over_base, (unsigned long long) workspace, (unsigned long long) b.total,
             (unsigned long long) ane.peak, (unsigned long long) ane.before, (unsigned long long) ane.growth,
             (unsigned long long) ane_peak, baseline_name, samples.size());
-    for (const std::string & f : mem_failures(b, ane.peak, c)) check(false, "memory schedule: " + f);
+    const bool ane_units = route.compute_units == "all" || route.compute_units == "cpu_and_ane";
+    std::vector<std::string> failures = probe_failures(base_ok, footprint_failures, ane_units, ane);
+    for (const std::string & f : mem_failures(b, ane.peak, c)) failures.push_back(f);
+    for (const std::string & f : failures) check(false, "memory schedule: " + f);
     char line[512];
     std::snprintf(line, sizeof(line),
                   "overlapped schedule: %d ggml + %d Core ML calls in %.1f s; footprint base %.1f MiB, peak +%.1f MiB "
                   "(envelope %.1f MiB, units %s); ANECompilerService %.1f MiB while loading, grew %.1f MiB (%s)",
                   ggml_calls, coreml_calls, secs, mib(base), mib(b.total), mib(route.envelope_bytes),
                   route.compute_units.c_str(), mib(ane.peak), mib(ane.growth), before_load);
-    check(coreml_calls >= 5 && ggml_calls >= 1 && mem_failures(b, ane.peak, c).empty(), line);
+    check(coreml_calls >= 5 && ggml_calls >= 1 && failures.empty(), line);
     model.dac_pending.reset();
 }
 #endif
