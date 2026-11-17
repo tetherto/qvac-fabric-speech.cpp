@@ -29,6 +29,11 @@
 //                         naming the Core ML error domain; a diarizer bundle
 //                         whose capacity is not the one its name says fails
 //                         as deterministic, a corrupt one as transient
+//   fit-stable            fit_params on the same GGUF and options is identical
+//                         with no hint, after the encoder load wrote its warm
+//                         hint, and with that hint stale; each charges the
+//                         sidecar (nonzero), so a projection that read the
+//                         cache would show
 //   fit-degrade           memory-degrade at construction follows the host's
 //                         fit (EngineOptions::coreml_fit, assessed with a
 //                         nondefault margin and audio length): at the host's
@@ -79,6 +84,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <iterator>
 #include <memory>
 #include <fstream>
 #include <stdexcept>
@@ -367,6 +373,58 @@ void case_fit_layouts(const std::string & eu_gguf, const std::string & sortforme
     }
 }
 
+bool same_fit(const parakeet::FitResult & a, const parakeet::FitResult & b) {
+    return a.status == b.status && a.ggml_required_bytes == b.ggml_required_bytes &&
+           a.ggml_only_fits == b.ggml_only_fits && a.coreml.fits == b.coreml.fits &&
+           a.coreml.bytes == b.coreml.bytes && a.coreml.encoder_route == b.coreml.encoder_route &&
+           a.coreml.disabled_reason == b.coreml.disabled_reason && a.coreml_bytes == b.coreml_bytes;
+}
+
+void case_fit_stable(const std::string & gguf) {
+    const fs::path cache = fresh_dir("fit-stable-cache");
+    parakeet::FitOptions fo;
+    fo.model_gguf_path = gguf;
+    fo.n_gpu_layers = 99;
+    fo.audio_seconds = 60.0f;
+    fo.coreml.cache_dir = cache.string();
+    const parakeet::FitResult before = parakeet::fit_params(fo);
+    std::printf("       fit before any load: route=%s coreml=%llu\n", before.coreml.encoder_route.c_str(),
+                (unsigned long long) before.coreml.bytes);
+    expect(before.status != parakeet::FitStatus::Error && before.coreml.encoder_route == "prebuilt" &&
+               before.coreml.bytes > 0,
+           "fit-stable: fit_params charges the adjacent encoder sidecar");
+
+    {
+        CoremlOptions coreml = coreml_ready_options();
+        coreml.cache_dir = cache.string();
+        parakeet::Engine engine(engine_options(gguf, coreml));
+        expect(engine.encoder_on_coreml(), "fit-stable: the encoder loaded");
+    }
+    std::vector<fs::path> hints;
+    std::error_code ec;
+    for (const auto & e : fs::recursive_directory_iterator(cache, ec)) {
+        if (e.path().parent_path().filename() == "hints" && e.path().extension() == ".json") hints.push_back(e.path());
+    }
+    expect(!hints.empty(), "fit-stable: the load wrote its warm hint");
+    const parakeet::FitResult warm = parakeet::fit_params(fo);
+    expect(same_fit(before, warm) && warm.coreml.bytes > 0, "fit-stable: fit with a warm hint equals fit with none");
+
+    for (const fs::path & hint : hints) {
+        std::ifstream in(hint);
+        std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const size_t at = text.find("\"stale_until\"");
+        if (at == std::string::npos) continue;
+        const size_t colon = text.find(':', at);
+        const size_t end = text.find_first_of(",}", colon);
+        text.replace(colon + 1, end - colon - 1, "\"2999-01-01T00:00:00Z\"");
+        std::ofstream(hint) << text;
+    }
+    const parakeet::FitResult stale = parakeet::fit_params(fo);
+    expect(same_fit(before, stale) && stale.coreml.bytes > 0,
+           "fit-stable: fit with a stale hint equals fit with none");
+    fs::remove_all(cache, ec);
+}
+
 void case_fit_degrade(const std::string & gguf) {
     parakeet::FitOptions host;  // the host's own assessment
     host.model_gguf_path = gguf;
@@ -617,6 +675,7 @@ int main(int argc, char ** argv) {
             case_capacity_miss(gguf, wav);
             case_coreml_only_full(gguf, wav, reference);
             case_encoder_load_error(gguf);
+            case_fit_stable(gguf);
             case_fit_degrade(gguf);
         } else if (which == "diarizer") {
             case_diarizer(diar_gguf, wav);

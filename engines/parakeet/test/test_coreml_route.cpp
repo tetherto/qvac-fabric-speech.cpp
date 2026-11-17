@@ -32,8 +32,10 @@
 //                         domain and code; a verified incompatibility is
 //                         deterministic
 //   options               public CoremlOptions -> runtime options, resolution
-//   fit-stable            the fit route and envelope never read the cache:
-//                         identical with no hint, a warm hint and a stale hint
+//   fit-envelope          the fit route helpers and envelope arithmetic never
+//                         read the cache (identical with no hint, a warm hint
+//                         and a stale hint). fit_params itself is checked on a
+//                         real GGUF by test-parakeet-coreml-runtime (fit-stable).
 
 #include "coreml/parakeet_coreml_sidecars.h"
 #include "coreml_fit.h"
@@ -815,7 +817,7 @@ void case_options() {
     if (saved) setenv("PARAKEET_COREML_COMPUTE_UNITS", saved_value.c_str(), 1);
 }
 
-void case_fit_stable() {
+void case_fit_envelope() {
     const fs::path dir = make_temp_dir("fit");
     const fs::path sidecar = dir / "m-encoder.mlmodelc";
     write_text(sidecar / "weights" / "weight.bin", std::string(4096, 'w'));
@@ -933,7 +935,7 @@ int main() {
     case_relative_paths();
     case_load_error_class();
     case_options();
-    case_fit_stable();
+    case_fit_envelope();
     std::printf("test-parakeet-coreml-route: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }
