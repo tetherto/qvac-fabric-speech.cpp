@@ -105,6 +105,14 @@ EncoderRoute route_from_acquired(pcm::Acquired && acquired, const EncoderModelOp
                                 route_ops, /*owner=*/false, strict);
 }
 
+pcm::Error sidecar_load_error(const std::string & what, const parakeet_coreml_load_error & error) {
+    std::string message = "failed to load the " + what;
+    if (error.domain[0] != '\0') message += " (" + std::string(error.domain) + " " + std::to_string(error.code) + ")";
+    if (error.message[0] != '\0') message += ": " + std::string(error.message);
+    if (error.incompatible != 0) return pcm::Error::deterministic(message, "parakeet", 0);
+    return pcm::Error::transient(message, error.domain, error.code);
+}
+
 uint64_t ane_compile_reserve_bytes(const std::string & mlmodelc, pcm::ComputeUnits units) {
     if (!pcm::units_include_ane(units)) return 0;
     return static_cast<uint64_t>(kAneCompileReserveFactor *

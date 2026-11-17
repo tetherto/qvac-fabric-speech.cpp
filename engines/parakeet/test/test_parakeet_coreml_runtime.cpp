@@ -21,6 +21,10 @@
 //                         the slot stays ready; with default windowing too,
 //                         since a standard TDT sidecar is never split into
 //                         Core ML windows
+//   load-error-class      a corrupt encoder bundle fails its slot as transient,
+//                         naming the Core ML error domain; a diarizer bundle
+//                         whose capacity is not the one its name says fails
+//                         as deterministic, a corrupt one as transient
 //   strict-push-stream    with use = require, stream_start refuses a TDT push
 //                         stream whose windows are longer than the sidecar,
 //                         before any audio; use = automatic still starts it
@@ -46,6 +50,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -137,6 +142,101 @@ void case_transcription(const std::string & gguf, const std::string & wav,
            "prebuilt-slot-loads: the next call runs on Core ML");
     std::error_code ec;
     fs::remove_all(cache, ec);
+}
+
+// `"key":"value"` in the status JSON, compact or pretty-printed.
+bool has_kv(const std::string & json, const char * key, const char * value) {
+    const std::string k = std::string("\"") + key + "\":";
+    const std::string v = std::string("\"") + value + "\"";
+    return json.find(k + v) != std::string::npos || json.find(k + " " + v) != std::string::npos;
+}
+
+// The status object of one stage ("" when absent): the innermost object
+// around its "stage" key, found by matching braces (keys may come in any
+// order, and a slot object holds nested objects).
+std::string stage_status(const std::string & status, const std::string & stage) {
+    for (const char * sep : {"\"stage\":\"", "\"stage\": \""}) {
+        const size_t at = status.find(sep + stage + "\"");
+        if (at == std::string::npos) continue;
+        size_t begin = std::string::npos;
+        for (size_t i = at, depth = 0; i-- > 0;) {
+            if (status[i] == '}') ++depth;
+            else if (status[i] == '{') {
+                if (depth == 0) { begin = i; break; }
+                --depth;
+            }
+        }
+        if (begin == std::string::npos) continue;
+        for (size_t i = begin, depth = 0; i < status.size(); ++i) {
+            if (status[i] == '{') ++depth;
+            else if (status[i] == '}' && --depth == 0) return status.substr(begin, i - begin + 1);
+        }
+    }
+    return {};
+}
+
+// A directory Core ML cannot load as a model.
+void write_corrupt_bundle(const fs::path & bundle) {
+    fs::create_directories(bundle / "weights");
+    std::ofstream(bundle / "coremldata.bin") << "not a Core ML model";
+    std::ofstream(bundle / "model.mil") << "not MIL";
+    std::ofstream(bundle / "weights" / "weight.bin") << std::string(64, 'x');
+}
+
+void case_encoder_load_error(const std::string & gguf) {
+    const fs::path dir = fresh_dir("corrupt-encoder");
+    const fs::path staged = dir / "model.gguf";
+    fs::create_symlink(fs::absolute(gguf), staged);
+    write_corrupt_bundle(dir / "model-encoder.mlmodelc");
+    parakeet::Engine engine(engine_options(staged.string(), coreml_ready_options()));
+    const std::string encoder = stage_status(engine.coreml_status_json(), "encoder");
+    std::printf("       corrupt encoder: %s\n", encoder.c_str());
+    expect(has_kv(encoder, "state", "failed") && has_kv(encoder, "error_class", "transient") &&
+               encoder.find("com.apple.CoreML") != std::string::npos,
+           "load-error-class: a corrupt encoder bundle fails as transient with the Core ML error domain");
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+void case_diarizer_load_errors(const std::string & gguf) {
+    // The smallest capacity bundle, staged under a larger capacity's name.
+    const fs::path source_dir = fs::absolute(gguf).parent_path();
+    const std::string stem = fs::path(gguf).stem().string();
+    const std::string base = stem.substr(0, stem.find('.'));
+    fs::path smallest;
+    int smallest_frames = 0;
+    for (const auto & entry : fs::directory_iterator(source_dir)) {
+        const std::string name = entry.path().filename().string();
+        const std::string prefix = base + "-diarizer-";
+        if (name.rfind(prefix, 0) != 0 || entry.path().extension() != ".mlmodelc") continue;
+        const int frames = std::atoi(name.c_str() + prefix.size());
+        if (frames > 0 && (smallest_frames == 0 || frames < smallest_frames)) {
+            smallest_frames = frames;
+            smallest = entry.path();
+        }
+    }
+    expect(smallest_frames > 0, "load-error-class: a diarizer bundle is next to the GGUF");
+    if (smallest_frames == 0) return;
+    const fs::path dir = fresh_dir("diarizer-errors");
+    const fs::path staged = dir / (base + ".gguf");
+    fs::create_symlink(fs::absolute(gguf), staged);
+    const int renamed = smallest_frames * 2;
+    const int corrupt = smallest_frames * 3;
+    fs::create_directory_symlink(fs::canonical(smallest),
+                                 dir / (base + "-diarizer-" + std::to_string(renamed) + ".mlmodelc"));
+    write_corrupt_bundle(dir / (base + "-diarizer-" + std::to_string(corrupt) + ".mlmodelc"));
+    parakeet::Engine engine(engine_options(staged.string(), coreml_ready_options()));
+    const std::string status = engine.coreml_status_json();
+    const std::string wrong = stage_status(status, "diarizer-" + std::to_string(renamed));
+    const std::string broken = stage_status(status, "diarizer-" + std::to_string(corrupt));
+    std::printf("       renamed diarizer: %s\n       corrupt diarizer: %s\n", wrong.c_str(), broken.c_str());
+    expect(has_kv(wrong, "state", "failed") && has_kv(wrong, "error_class", "deterministic"),
+           "load-error-class: a diarizer whose capacity is not its name's fails as deterministic");
+    expect(has_kv(broken, "state", "failed") && has_kv(broken, "error_class", "transient") &&
+               broken.find("com.apple.CoreML") != std::string::npos,
+           "load-error-class: a corrupt diarizer bundle fails as transient with the Core ML error domain");
+    std::error_code ec;
+    fs::remove_all(dir, ec);
 }
 
 void case_diarizer(const std::string & gguf, const std::string & wav) {
@@ -317,8 +417,10 @@ int main(int argc, char ** argv) {
             case_transcription(gguf, wav, reference);
             case_capacity_miss(gguf, wav);
             case_coreml_only_full(gguf, wav, reference);
+            case_encoder_load_error(gguf);
         } else if (which == "diarizer") {
             case_diarizer(diar_gguf, wav);
+            case_diarizer_load_errors(diar_gguf);
         } else {
             case_encoderless(encoderless);
         }

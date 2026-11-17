@@ -15,6 +15,7 @@
 // Objective-C here, so the routing glue builds and is tested on every
 // platform with fake loaders.
 
+#include "coreml/parakeet_coreml_load_error.h"
 #include "encoder_route.h"
 #include "parakeet/coreml_options.h"
 #include "qvac_coreml/manager.h"
@@ -62,6 +63,13 @@ struct EncoderModelOps {
 // running on ggml.
 EncoderRoute route_from_acquired(pcm::Acquired && acquired, const EncoderModelOps & ops, int n_mels,
                                  bool strict = false);
+
+// A sidecar load failure as the runtime's error. A framework failure (the
+// model did not load: a corrupt or unreadable bundle, a compile error, memory
+// pressure) is transient and keeps the framework's domain and code, so a
+// repeat can be recognised; only a verified incompatibility (the model loaded
+// but its interface or capacity is not the one expected) is deterministic.
+pcm::Error sidecar_load_error(const std::string & what, const parakeet_coreml_load_error & error);
 
 // Bytes ANECompilerService needs for a cold compile of `mlmodelc` (by
 // default 1.6 x weights/weight.bin), or 0 when `units` cannot use the ANE.

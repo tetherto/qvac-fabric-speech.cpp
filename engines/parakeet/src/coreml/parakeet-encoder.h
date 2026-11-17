@@ -49,6 +49,11 @@ struct parakeet_coreml_context * parakeet_coreml_init_with_units_env(const char 
 struct parakeet_coreml_context * parakeet_coreml_init_with_units(const char * path_mlmodelc,
                                                                  const char * units);
 
+// The same load, reporting why it failed in `error` (may be null).
+struct parakeet_coreml_load_error;
+struct parakeet_coreml_context * parakeet_coreml_init_with_units_error(
+    const char * path_mlmodelc, const char * units, struct parakeet_coreml_load_error * error);
+
 // True when the bundle is the fixed-window Neural Engine export (its
 // metadata declares the pad_mask / key_bias inputs), read without loading
 // it: its default compute units are cpu_and_ane, every other export's are all.

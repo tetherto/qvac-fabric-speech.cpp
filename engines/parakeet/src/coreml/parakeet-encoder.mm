@@ -12,6 +12,7 @@
 #endif
 
 #import "coreml/parakeet-encoder.h"
+#include "coreml/parakeet_coreml_load_error.h"
 #include "coreml/parakeet_coreml_shape.h"
 #include "coreml/parakeet_coreml_units.h"
 
@@ -20,6 +21,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -355,6 +357,23 @@ int mlmodelc_export_kind(NSString * path) {
     }
     return 0;
 }
+
+}  // namespace
+
+// A framework load failure: the error's domain, code and description.
+void parakeet_coreml_record_load_error(NSError * err, parakeet_coreml_load_error * error) {
+    if (error == nullptr) return;
+    *error = parakeet_coreml_load_error{};
+    if (err == nil) {
+        std::snprintf(error->message, sizeof(error->message), "%s", "MLModel returned no model");
+        return;
+    }
+    std::snprintf(error->domain, sizeof(error->domain), "%s", err.domain.UTF8String);
+    error->code = (long long) err.code;
+    std::snprintf(error->message, sizeof(error->message), "%s", err.localizedDescription.UTF8String);
+}
+
+namespace {
 
 bool declares_ane_inputs(NSDictionary<NSString *, MLFeatureDescription *> * ins) {
     return ins[kAneMelInput].type == MLFeatureTypeMultiArray &&
@@ -755,7 +774,8 @@ enum class CoremlPlacement { Automatic, Cpu, NeuralEngine, Gpu };
 // export's own default); the fixed placements ignore them. `function_name`
 // selects one function of a multifunction program.
 static parakeet_coreml_context * init_coreml_model(const char *, const char * units, CoremlPlacement,
-                                                  const char * function_name = nullptr);
+                                                  const char * function_name = nullptr,
+                                                  parakeet_coreml_load_error * error = nullptr);
 
 struct parakeet_coreml_context * parakeet_coreml_init_eu_function(
         const char * path, const char * function_name, bool cpu_only) {
@@ -792,6 +812,11 @@ struct parakeet_coreml_context * parakeet_coreml_init_with_units(const char * pa
     return init_coreml_model(path_mlmodelc, units, CoremlPlacement::Automatic);
 }
 
+struct parakeet_coreml_context * parakeet_coreml_init_with_units_error(
+        const char * path_mlmodelc, const char * units, parakeet_coreml_load_error * error) {
+    return init_coreml_model(path_mlmodelc, units, CoremlPlacement::Automatic, nullptr, error);
+}
+
 int parakeet_coreml_encoder_export_kind(const char * path_mlmodelc) {
     if (path_mlmodelc == nullptr) return -1;
     @autoreleasepool {
@@ -810,7 +835,17 @@ bool parakeet_coreml_encoder_prefers_ane(const char * path_mlmodelc) {
 
 static parakeet_coreml_context * init_coreml_model(const char * path_mlmodelc,
                                                   const char * units, CoremlPlacement placement,
-                                                  const char * function_name) {
+                                                  const char * function_name,
+                                                  parakeet_coreml_load_error * error) {
+    if (error != nullptr) *error = parakeet_coreml_load_error{};
+    // The model loaded, but its interface is not one Parakeet runs.
+    auto incompatible = [error](const char * what) -> parakeet_coreml_context * {
+        if (error != nullptr) {
+            error->incompatible = 1;
+            std::snprintf(error->message, sizeof(error->message), "%s", what);
+        }
+        return nullptr;
+    };
     if (path_mlmodelc == nullptr) return nullptr;
 
     @autoreleasepool {
@@ -849,20 +884,23 @@ static parakeet_coreml_context * init_coreml_model(const char * path_mlmodelc,
         MLModel * model = [MLModel modelWithContentsOfURL:[NSURL fileURLWithPath:path]
                                             configuration:config
                                                     error:&err];
-        if (model == nil || err != nil) return nullptr;
+        if (model == nil || err != nil) {
+            parakeet_coreml_record_load_error(err, error);
+            return nullptr;
+        }
 
         NSDictionary<NSString *, MLFeatureDescription *> * input_descs =
             model.modelDescription.inputDescriptionsByName;
         if (declares_ane_inputs(input_descs)) {
             NSString * ane_out = sole_multiarray_feature(model.modelDescription.outputDescriptionsByName);
-            if (ane_out == nil) return nullptr;
+            if (ane_out == nil) return incompatible("the Neural Engine export has no single output");
             auto * ctx = new parakeet_coreml_context();
             ctx->model = CFBridgingRetain(model);
             ctx->label = std::move(label);
             if (function_name != nullptr) ctx->function_name = function_name;
             if (!bind_ane_window(ctx, model, ane_out)) {
                 parakeet_coreml_free(ctx);
-                return nullptr;
+                return incompatible("the Neural Engine window inputs do not bind");
             }
             return ctx;
         }
@@ -883,11 +921,11 @@ static parakeet_coreml_context * init_coreml_model(const char * path_mlmodelc,
             masks_mel_padding = true;
         }
         NSString * out_name = sole_multiarray_feature(model.modelDescription.outputDescriptionsByName);
-        if (in_name == nil || out_name == nil) return nullptr;
+        if (in_name == nil || out_name == nil) return incompatible("unexpected encoder inputs or outputs");
 
         MLMultiArrayConstraint * input_constraint = model.modelDescription.inputDescriptionsByName[in_name].multiArrayConstraint;
         MLMultiArrayConstraint * output_constraint = model.modelDescription.outputDescriptionsByName[out_name].multiArrayConstraint;
-        if (input_constraint == nil) return nullptr;
+        if (input_constraint == nil) return incompatible("the encoder input has no array constraint");
 
         auto * ctx = new parakeet_coreml_context();
         ctx->model       = CFBridgingRetain(model);

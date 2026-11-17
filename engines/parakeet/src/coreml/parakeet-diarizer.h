@@ -32,6 +32,11 @@ struct parakeet_coreml_diarizer * parakeet_coreml_diarizer_init(const char * pat
 struct parakeet_coreml_diarizer * parakeet_coreml_diarizer_init_with_units(const char * path_mlmodelc,
                                                                            const char * units);
 
+// The same load, reporting why it failed in `error` (may be null).
+struct parakeet_coreml_load_error;
+struct parakeet_coreml_diarizer * parakeet_coreml_diarizer_init_with_units_error(
+    const char * path_mlmodelc, const char * units, struct parakeet_coreml_load_error * error);
+
 void parakeet_coreml_diarizer_free(struct parakeet_coreml_diarizer * ctx);
 
 int64_t parakeet_coreml_diarizer_capacity(const struct parakeet_coreml_diarizer * ctx);

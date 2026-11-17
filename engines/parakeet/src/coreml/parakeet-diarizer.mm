@@ -4,6 +4,7 @@
 
 #import "coreml/parakeet-diarizer.h"
 #include "coreml/coreml_diarizers.h"
+#include "coreml/parakeet_coreml_load_error.h"
 #include "coreml/parakeet_coreml_sidecars.h"
 #include "coreml/parakeet_coreml_units.h"
 #include "parakeet_coreml_path.h"
@@ -15,6 +16,7 @@
 #include <algorithm>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -271,21 +273,35 @@ struct parakeet_coreml_diarizer * parakeet_coreml_diarizer_init(const char * pat
 
 struct parakeet_coreml_diarizer * parakeet_coreml_diarizer_init_with_units(const char * path_mlmodelc,
                                                                            const char * units) {
+    return parakeet_coreml_diarizer_init_with_units_error(path_mlmodelc, units, nullptr);
+}
+
+struct parakeet_coreml_diarizer * parakeet_coreml_diarizer_init_with_units_error(
+        const char * path_mlmodelc, const char * units, parakeet_coreml_load_error * error) {
+    if (error != nullptr) *error = parakeet_coreml_load_error{};
     if (path_mlmodelc == nullptr) return nullptr;
     @autoreleasepool {
         std::string label;
         MLModelConfiguration * config = [[MLModelConfiguration alloc] init];
         config.computeUnits = parakeet_coreml_units_for(
             units, /*prefer_neural_engine=*/true, &label);
-        NSError * error = nil;
+        NSError * load_error = nil;
         NSURL * url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path_mlmodelc]];
-        MLModel * model = [MLModel modelWithContentsOfURL:url configuration:config error:&error];
-        if (model == nil || error != nil) return nullptr;
+        MLModel * model = [MLModel modelWithContentsOfURL:url configuration:config error:&load_error];
+        if (model == nil || load_error != nil) {
+            parakeet_coreml_record_load_error(load_error, error);
+            return nullptr;
+        }
         auto * ctx = new parakeet_coreml_diarizer();
         ctx->model = CFBridgingRetain(model);
         ctx->label = label;
         if (!bind_model(ctx, model)) {
             parakeet_coreml_diarizer_free(ctx);
+            if (error != nullptr) {
+                error->incompatible = 1;
+                std::snprintf(error->message, sizeof(error->message), "%s",
+                              "unexpected diarizer inputs or outputs");
+            }
             return nullptr;
         }
         return ctx;
@@ -409,13 +425,22 @@ namespace {
 pcm::LoadResult load_diarizer(const pcm::LoadRequest & request) {
     pcm::LoadResult result;
     const int64_t capacity = request.geometry.empty() ? 0 : request.geometry.front();
-    parakeet_coreml_diarizer * context = parakeet_coreml_diarizer_init_with_units(
-        request.artifact_path.c_str(), pcm::to_string(request.units));
-    if (context == nullptr || parakeet_coreml_diarizer_capacity(context) != capacity) {
-        PARAKEET_LOG_WARN("parakeet: failed to load Core ML diarizer at '%s'; using ggml\n",
-                          request.artifact_path.c_str());
+    parakeet_coreml_load_error error{};
+    parakeet_coreml_diarizer * context = parakeet_coreml_diarizer_init_with_units_error(
+        request.artifact_path.c_str(), pcm::to_string(request.units), &error);
+    if (context != nullptr && parakeet_coreml_diarizer_capacity(context) != capacity) {
+        // A verified incompatibility: the bundle is not the capacity its name says.
+        error = parakeet_coreml_load_error{};
+        error.incompatible = 1;
+        std::snprintf(error.message, sizeof(error.message), "capacity %lld, expected %lld",
+                      (long long) parakeet_coreml_diarizer_capacity(context), (long long) capacity);
         parakeet_coreml_diarizer_free(context);
-        result.error = pcm::Error::deterministic("failed to load Core ML diarizer", "parakeet", capacity);
+        context = nullptr;
+    }
+    if (context == nullptr) {
+        result.error = sidecar_load_error("Core ML diarizer", error);
+        PARAKEET_LOG_WARN("parakeet: failed to load Core ML diarizer at '%s' (%s); using ggml\n",
+                          request.artifact_path.c_str(), result.error.message.c_str());
         return result;
     }
     PARAKEET_LOG_INFO("parakeet: Core ML diarizer loaded from '%s'\n", request.artifact_path.c_str());

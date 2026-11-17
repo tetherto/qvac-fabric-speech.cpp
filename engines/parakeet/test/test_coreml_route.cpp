@@ -28,6 +28,9 @@
 //                         different directories get distinct absolute paths:
 //                         two shared models, each loaded from its own
 //                         directory even after the process changes directory
+//   load-error-class      a framework load failure is transient and keeps its
+//                         domain and code; a verified incompatibility is
+//                         deterministic
 //   options               public CoremlOptions -> runtime options, resolution
 //   fit-stable            the fit route and envelope never read the cache:
 //                         identical with no hint, a warm hint and a stale hint
@@ -695,6 +698,32 @@ void case_relative_paths() {
     fs::remove_all(root);
 }
 
+void case_load_error_class() {
+    parakeet_coreml_load_error framework{};
+    std::snprintf(framework.domain, sizeof(framework.domain), "%s", "com.apple.CoreML");
+    framework.code = 3;
+    std::snprintf(framework.message, sizeof(framework.message), "%s", "compile failed");
+    const pcm::Error transient = sidecar_load_error("Core ML encoder", framework);
+    CHECK(transient.cls == pcm::ErrorClass::transient && transient.domain == "com.apple.CoreML" &&
+              transient.code == 3,
+          "load-error-class: a framework load failure is transient with its domain and code");
+    CHECK(transient.message.find("com.apple.CoreML 3") != std::string::npos &&
+              transient.message.find("compile failed") != std::string::npos,
+          "load-error-class: the message names the framework error");
+
+    parakeet_coreml_load_error mismatch{};
+    mismatch.incompatible = 1;
+    std::snprintf(mismatch.message, sizeof(mismatch.message), "%s", "capacity 358, expected 745");
+    const pcm::Error deterministic = sidecar_load_error("Core ML diarizer", mismatch);
+    CHECK(deterministic.cls == pcm::ErrorClass::deterministic &&
+              deterministic.message.find("capacity 358") != std::string::npos,
+          "load-error-class: a verified incompatibility is deterministic");
+
+    const pcm::Error unknown = sidecar_load_error("Core ML encoder", parakeet_coreml_load_error{});
+    CHECK(unknown.cls == pcm::ErrorClass::transient,
+          "load-error-class: a failure with no detail is not called deterministic");
+}
+
 void case_options() {
     CoremlOptions o;
     o.use = CoremlOptions::Use::require;
@@ -853,6 +882,7 @@ int main() {
     case_pending_route();
     case_sidecar_groups();
     case_relative_paths();
+    case_load_error_class();
     case_options();
     case_fit_stable();
     std::printf("test-parakeet-coreml-route: %d checks, %d failures\n", g_checks, g_failures);

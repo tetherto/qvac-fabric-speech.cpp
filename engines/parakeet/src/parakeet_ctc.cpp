@@ -2176,12 +2176,14 @@ static void init_eu_coreml_encoders(const std::string & path, ParakeetCtcModel &
 // Runs on the runtime's load lane with the resolved compute units.
 static pcm::LoadResult load_encoder_sidecar(const pcm::LoadRequest & request) {
     pcm::LoadResult result;
-    parakeet_coreml_context * ctx = parakeet_coreml_init_with_units(
-        request.artifact_path.c_str(), pcm::to_string(request.units));
+    parakeet_coreml_load_error error{};
+    parakeet_coreml_context * ctx = parakeet_coreml_init_with_units_error(
+        request.artifact_path.c_str(), pcm::to_string(request.units), &error);
     if (ctx == nullptr) {
-        PARAKEET_LOG_WARN("parakeet: failed to load Core ML %s at '%s'; falling back to ggml\n",
-                          request.stage.c_str(), request.artifact_path.c_str());
-        result.error = pcm::Error::deterministic("failed to load the Core ML " + request.stage);
+        result.error = sidecar_load_error("Core ML " + request.stage, error);
+        PARAKEET_LOG_WARN("parakeet: failed to load Core ML %s at '%s' (%s); falling back to ggml\n",
+                          request.stage.c_str(), request.artifact_path.c_str(),
+                          result.error.message.c_str());
         return result;
     }
     PARAKEET_LOG_INFO("parakeet: Core ML %s loaded from '%s'\n",
