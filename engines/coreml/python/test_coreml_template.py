@@ -312,6 +312,66 @@ class PatchSiteTest(unittest.TestCase):
             ctpl.find_sites(b"zz.zz", [("p", b"zz")])
 
 
+class StringPatchSiteTest(unittest.TestCase):
+    @needs(HAVE_CT, "coremltools")
+    def test_metadata_string_sites(self):
+        fixed = ("eps", ctpl.MIL_TYPE_FP16, "bytes", [1e-5])
+        a, b = mil_spec([fixed]), mil_spec([fixed])
+        for spec, sha in ((a, "a" * 64), (b, "b" * 64)):
+            spec.description.metadata.userDefined["toy.source_sha256"] = sha
+            spec.description.metadata.userDefined["toy.schema"] = "1"
+            spec.description.metadata.userDefined["com.github.apple.coremltools.conversion_date"] = sha[:3]
+        path = "description.metadata.userDefined['toy.source_sha256']"
+        strings = [("toy.sha", "a" * 64, "b" * 64)]
+        self.assertEqual(ctpl.differing_strings(a, b, strings), [(path, "toy.source_sha256", "toy.sha")])
+        # A string the twins do not vary is not a site (spec_diff then fails the extraction).
+        self.assertEqual(ctpl.differing_strings(a, b), [])
+        spec, out = ctpl.patch_spec(a, b, strings)
+        self.assertEqual([(p, d) for p, _, d, _ in out], [(path, "str:toy.sha")])
+        self.assertEqual(out[0][3], b"a" * 64)  # A's value, for the draft
+        data = spec.SerializeToString(deterministic=True)
+        self.assertEqual(len(data), len(a.SerializeToString(deterministic=True)))
+        found = ctpl.find_sites(data, [(p, sent) for p, sent, _, _ in out])
+        self.assertEqual(found[0]["len"], 64)
+        sent = bytes.fromhex(found[0]["sentinel_hex"])
+        self.assertEqual(sent, ctpl.str_sentinel(path, 64))
+        self.assertTrue(sent.isascii() and sent != b"a" * 64)
+        drafts = ctpl.patch_drafts(out, found, {})
+        self.assertEqual(drafts[0][1], f'patch {found[0]["spec_offset"]} str 64 meta_s("toy.sha")')
+        with self.assertRaisesRegex(ctpl.TemplateError, "spec differs between twin A and twin B"):
+            ctpl.patch_spec(a, b)
+
+    def test_twin_strings(self):
+        text = 'mlrecipe 1\nsource "w" f32 [2]\nmeta "toy.sha" str\nmeta "toy.n" u32\nmeta  "toy.other"  str\nend\n'
+        self.assertEqual(ctpl.recipe_str_metas(text), ["toy.sha", "toy.other"])
+        manifest = {"metadata": [{"key": "toy.sha", "value": "x" * 64}, {"key": "toy.other", "value": "abc"}]}
+        sa = ctpl.twin_sets(manifest, ["toy.sha", "toy.other"], "a")
+        sb = ctpl.twin_sets(manifest, ["toy.sha", "toy.other"], "b")
+        self.assertEqual([s.split("=", 1)[0] for s in sa], ["toy.sha", "toy.other"])
+        self.assertEqual([len(s.split("=", 1)[1]) for s in sa], [64, 3])
+        self.assertNotEqual(sa, sb)
+        self.assertEqual(sa, ctpl.twin_sets(manifest, ["toy.sha", "toy.other"], "a"))
+        with self.assertRaisesRegex(ctpl.TemplateError, "lacks"):
+            ctpl.twin_sets(manifest, ["toy.nope"], "a")
+
+    def test_exporter_gguf_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            script = tmp / "exporter.py"
+            script.write_text("import sys, pathlib\n"
+                              "out = pathlib.Path(sys.argv[2]) / (pathlib.Path(sys.argv[1]).name + '.mlpackage')\n"
+                              "out.mkdir(parents=True)\n")
+            gguf = tmp / "twin-a.gguf"
+            gguf.write_bytes(b"GGUF")
+            exp = {"path": str(script), "args": ["{gguf}", "{out}"], "gguf_name": "flow-lm.gguf"}
+            pkg = ctpl.run_exporter(exp, gguf, tmp / "export-a")
+            self.assertEqual(pkg.name, "flow-lm.gguf.mlpackage")
+            pkg = ctpl.run_exporter({"path": str(script), "args": ["{gguf}", "{out}"]}, gguf, tmp / "export-b")
+            self.assertEqual(pkg.name, "twin-a.gguf.mlpackage")
+            with self.assertRaisesRegex(ctpl.TemplateError, "plain"):
+                ctpl.run_exporter(dict(exp, gguf_name="../x.gguf"), gguf, tmp / "export-c")
+
+
 class PatchDraftTest(unittest.TestCase):
     def test_add_patch_drafts(self):
         text = 'mlrecipe 1\nblob 64 fp16 2 f16(t("a"))\npatch 10 fp16 1 f16(t("b"))\nend\n'

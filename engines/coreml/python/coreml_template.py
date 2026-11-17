@@ -19,7 +19,12 @@ compares is written by the C++ interpreter through `qvac-coreml-tool`).
             existing recipe.txt. Inline spec constants whose values differ
             between A and B (weights folded into the spec) become patch sites:
             model.mlmodel holds a sentinel there and template.json `patches`
-            records it; the recipe's patch lines compute the values. Literals
+            records it; the recipe's patch lines compute the values. The same
+            holds for a spec metadata string that differs between A and B: for
+            every `meta "<key>" str` line of the recipe, twins A and B carry
+            different values of that GGUF string, so a spec string the
+            exporter copies from it (a checkpoint hash) becomes a `str` patch
+            site the recipe fills with meta_s("<key>"). Literals
             declared in template.json with an `exporter_blob` offset are copied
             from that weight.bin blob into literals.bin, once A and B agree on it.
   report    The extraction and cross-seed gates: for each template, runs the
@@ -35,9 +40,11 @@ compares is written by the C++ interpreter through `qvac-coreml-tool`).
 
 Twins come from the template's reference-gguf.json (`qvac-coreml-tool dump`
 of a real GGUF) through `qvac-coreml-tool twin`. The exporter is described by
-template.json `exporter`: {"path", "args"}; in `args`, {gguf} is replaced by
-the input GGUF and {out} by an output directory, which must then hold exactly
-one .mlpackage.
+template.json `exporter`: {"path", "args"[, "gguf_name"]}; in `args`, {gguf}
+is replaced by the input GGUF and {out} by an output directory, which must
+then hold exactly one .mlpackage. With `gguf_name`, the exporter always sees
+the input GGUF under that file name (for exporters that record it in the
+spec), so every export of the template carries the same name.
 
 Requirements: numpy, gguf (gguf-py) and coremltools, pinned by
 engines/parakeet/scripts/requirements-coreml.txt; the exporter's own
@@ -352,6 +359,62 @@ def _set_payload(attr, data, dtype):
         t.floats.values.extend(struct.unpack(f"<{len(data) // 4}f", data))
 
 
+def str_sentinel(path, n):
+    """A deterministic, path-specific ASCII string of n characters for a string patch site."""
+    out, c = "", 0
+    while len(out) < n:
+        out += hashlib.sha256(SENTINEL_TAG + b"str\0" + path.encode() + struct.pack("<I", c)).hexdigest()
+        c += 1
+    return out[:n].encode()
+
+
+def twin_string(key, label, n):
+    """The value of GGUF string `key` in twin `label`: n characters that differ per twin."""
+    out, c = "", 0
+    while len(out) < n:
+        out += hashlib.sha256(b"qvac-coreml-twin-string\0" + label.encode() + b"\0" + key.encode() +
+                              struct.pack("<I", c)).hexdigest()
+        c += 1
+    return out[:n]
+
+
+def recipe_str_metas(recipe_text):
+    """The keys of the recipe's `meta "<key>" str` lines."""
+    return re.findall(r'^meta\s+"([^"]+)"\s+str\s*$', recipe_text or "", re.M)
+
+
+def twin_sets(manifest, keys, label):
+    """`twin --set` values giving each GGUF string in `keys` a twin-specific value of its reference length."""
+    ref = {m.get("key"): m.get("value") for m in manifest.get("metadata", [])}
+    sets = []
+    for k in keys:
+        v = ref.get(k)
+        if not isinstance(v, str) or not v:
+            raise TemplateError(f"extract: the recipe reads GGUF string {k}, which the reference manifest lacks")
+        sets.append(f"{k}={twin_string(k, label, len(v))}")
+    return sets
+
+
+def differing_strings(spec_a, spec_b, strings=()):
+    """Spec user metadata strings copied from a twin GGUF string: [(path, spec key, GGUF key)].
+
+    `strings` lists (GGUF key, twin A value, twin B value) of the strings the
+    twins vary (twin_sets). A spec string that holds A's value in A and B's in
+    B becomes a site; any other difference is left to spec_diff, which fails
+    the extraction.
+    """
+    ua, ub = spec_a.description.metadata.userDefined, spec_b.description.metadata.userDefined
+    out = []
+    for k in sorted(set(ua.keys()) & set(ub.keys())):
+        if k in VOLATILE_METADATA or ua[k] == ub[k]:
+            continue
+        for gguf_key, va, vb in strings:
+            if ua[k] == va and ub[k] == vb:
+                out.append((f"description.metadata.userDefined[{k!r}]", k, gguf_key))
+                break
+    return out
+
+
 def find_sites(spec_bytes, sentinels):
     """[{spec_offset, len, sentinel_hex}] for (path, sentinel) pairs; each must occur once."""
     sites = []
@@ -363,16 +426,18 @@ def find_sites(spec_bytes, sentinels):
     return sorted(sites, key=lambda p: p["spec_offset"])
 
 
-def patch_spec(spec_a, spec_b):
-    """A's spec with a sentinel at every weight-dependent inline constant.
+def patch_spec(spec_a, spec_b, strings=()):
+    """A's spec with a sentinel at every weight-dependent inline constant and metadata string.
 
-    Returns (spec message, [(path, sentinel bytes, dtype, A's payload)]). The
-    sentinel spec must equal B structurally once B gets the same sentinels;
-    otherwise the graphs differ and TemplateError is raised.
+    Returns (spec message, [(path, sentinel bytes, dtype, A's payload)]), dtype
+    'fp16', 'fp32' or 'str' (for a str site the payload is A's string bytes).
+    The sentinel spec must equal B structurally once B gets the same
+    sentinels; otherwise the graphs differ and TemplateError is raised.
     """
     from coremltools.proto import Model_pb2
 
     sites = differing_constants(spec_a, spec_b)
+    strings = differing_strings(spec_a, spec_b, strings)
     sa, sb = Model_pb2.Model(), Model_pb2.Model()
     sa.CopyFrom(spec_a)
     sb.CopyFrom(spec_b)
@@ -384,6 +449,12 @@ def patch_spec(spec_a, spec_b):
         _set_payload(ca[path], sent, dtype)
         _set_payload(cb[path], sent, dtype)
         out.append((path, sent, dtype, payload))
+    for path, key, gguf_key in strings:
+        payload = sa.description.metadata.userDefined[key].encode()
+        sent = str_sentinel(path, len(payload))
+        sa.description.metadata.userDefined[key] = sent.decode()
+        sb.description.metadata.userDefined[key] = sent.decode()
+        out.append((path, sent, "str:" + gguf_key, payload))
     diff = spec_diff(sa, sb)
     if diff:
         raise TemplateError("extract: the exporter's spec differs between twin A and twin B at\n  " +
@@ -457,7 +528,7 @@ def expand_args(args, gguf, out):
 
 
 def run_exporter(exporter, gguf, out_dir, python=None, root=None):
-    """Runs template.json-style `exporter` {path, args} on `gguf`; returns the .mlpackage."""
+    """Runs template.json-style `exporter` {path, args[, gguf_name]} on `gguf`; returns the .mlpackage."""
     root = Path(root or repo_root())
     script = Path(exporter["path"])
     if not script.is_absolute():
@@ -466,6 +537,17 @@ def run_exporter(exporter, gguf, out_dir, python=None, root=None):
         raise TemplateError(f"exporter {script} not found")
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    name = exporter.get("gguf_name")
+    if name:
+        if Path(name).name != name or not name.endswith(".gguf"):
+            raise TemplateError(f"exporter gguf_name {name!r} must be a plain *.gguf file name")
+        feed_dir = out_dir.parent / (out_dir.name + "-input")
+        feed_dir.mkdir(parents=True, exist_ok=True)
+        feed = feed_dir / name
+        if feed.exists() or feed.is_symlink():
+            feed.unlink()
+        feed.symlink_to(Path(gguf).resolve())
+        gguf = feed
     cmd = [python or sys.executable, str(script)] + expand_args(exporter.get("args", []), gguf, out_dir)
     run(cmd, f"exporter {script.name}")
     pkgs = sorted(p for p in out_dir.rglob("*.mlpackage") if p.is_dir())
@@ -696,7 +778,10 @@ def load_manifest(path):
 
 
 def exporter_from_args(a):
-    return {"path": a.exporter, "args": list(a.exporter_arg or [])}
+    e = {"path": a.exporter, "args": list(a.exporter_arg or [])}
+    if getattr(a, "exporter_gguf_name", None):
+        e["gguf_name"] = a.exporter_gguf_name
+    return e
 
 
 def cmd_suggest(a):
@@ -769,6 +854,10 @@ def patch_drafts(sites, patch_sites, tensors):
     drafts = []
     for path, sent, dtype, payload in sites:
         site = by_sent[sent.hex()]
+        if dtype.startswith("str:"):
+            key = dtype[4:]
+            drafts.append((site["spec_offset"], f'patch {site["spec_offset"]} str {len(payload)} meta_s("{key}")', path))
+            continue
         blob = Blob(site["spec_offset"], MIL_FP16 if dtype == "fp16" else MIL_FP32, len(payload), 0, payload)
         cands = explain_blob(blob, tensors)
         expr = cands[0] if cands else "???"
@@ -805,15 +894,21 @@ def cmd_extract(a):
         raise TemplateError("extract: no exporter (pass --exporter or keep template.json `exporter`)")
     root = Path(a.root) if a.root else repo_root()
     template_id = a.id or existing.get("id") or out.name
+    recipe_path = out / "recipe.txt"
+    # GGUF strings the recipe reads (meta "<key>" str): twin-specific values,
+    # so a spec string copied from one of them becomes a str patch site.
+    str_keys = recipe_str_metas(recipe_path.read_text() if recipe_path.is_file() else "")
     with tempfile.TemporaryDirectory(prefix="qvac-coreml-extract-") as tmp:
         work = Path(tmp)
-        _, pkg_a = _export_twin(tool, manifest_path, exporter, SEED_A, "f32", work, a.python, root, "a")
-        _, pkg_b = _export_twin(tool, manifest_path, exporter, SEED_B, "f32", work, a.python, root, "b")
+        sets_a, sets_b = twin_sets(manifest, str_keys, "a"), twin_sets(manifest, str_keys, "b")
+        _, pkg_a = _export_twin(tool, manifest_path, exporter, SEED_A, "f32", work, a.python, root, "a", sets_a)
+        _, pkg_b = _export_twin(tool, manifest_path, exporter, SEED_B, "f32", work, a.python, root, "b", sets_b)
+        strings = [(k, va.split("=", 1)[1], vb.split("=", 1)[1]) for k, va, vb in zip(str_keys, sets_a, sets_b)]
         pa, pb = package_parts(pkg_a), package_parts(pkg_b)
         spec_a, spec_b = load_spec(pa["spec"]), load_spec(pb["spec"])
         # Weight-dependent inline constants become patch sites (sentinels in
         # the template's spec); any other difference fails the extraction.
-        spec_a, sites = patch_spec(spec_a, spec_b)
+        spec_a, sites = patch_spec(spec_a, spec_b, strings)
         wa, wb = pa["weights"].read_bytes(), pb["weights"].read_bytes()
         blobs_a, blobs_b = read_weight_bin(wa), read_weight_bin(wb)
         la, lb = layout_of(blobs_a), layout_of(blobs_b)
@@ -847,9 +942,10 @@ def cmd_extract(a):
         spec_sha = hashlib.sha256(spec_bytes).hexdigest()
         script = Path(exporter["path"])
         exp_abs = script if script.is_absolute() else root / script
-        computed = {"schema": SCHEMA, "id": template_id,
-                    "exporter": {"path": exporter["path"], "sha256": file_sha256(exp_abs),
-                                 "args": exporter.get("args", [])},
+        exporter_out = {"path": exporter["path"], "sha256": file_sha256(exp_abs), "args": exporter.get("args", [])}
+        if exporter.get("gguf_name"):
+            exporter_out["gguf_name"] = exporter["gguf_name"]
+        computed = {"schema": SCHEMA, "id": template_id, "exporter": exporter_out,
                     "toolchain": toolchain_versions(), "functions": functions, "stateful": stateful,
                     "weight_bin_size": len(wa), "patches": patch_sites}
         recipe = out / "recipe.txt"
@@ -1018,6 +1114,7 @@ def build_parser():
     s.add_argument("--manifest", required=True, help="reference-gguf.json")
     s.add_argument("--exporter", required=True, help="exporter script")
     s.add_argument("--exporter-arg", action="append", help="one exporter argument ({gguf}, {out}); repeatable")
+    s.add_argument("--exporter-gguf-name", help="file name the exporter sees its input GGUF under")
     s.add_argument("--id", required=True, help="template id")
     s.add_argument("-o", "--output", required=True, help="draft recipe.txt")
     s.set_defaults(fn=cmd_suggest)
@@ -1027,6 +1124,7 @@ def build_parser():
     e.add_argument("--manifest", help="reference-gguf.json (default: the template directory's)")
     e.add_argument("--exporter", help="exporter script (default: template.json `exporter`)")
     e.add_argument("--exporter-arg", action="append")
+    e.add_argument("--exporter-gguf-name", help="file name the exporter sees its input GGUF under")
     e.add_argument("--id", help="template id (default: template.json `id`, then the directory name)")
     e.set_defaults(fn=cmd_extract)
 
