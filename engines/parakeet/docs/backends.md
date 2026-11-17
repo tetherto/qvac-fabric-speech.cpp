@@ -969,6 +969,40 @@ ggml's 2.97 %, all of it speaker confusion in the long-form chunks around
 `cpu_only` (2.99 %) and `cpu_and_gpu` (2.97 %) match ggml, so the difference
 comes from the Neural Engine's arithmetic, not from generation.
 
+The Sortformer v2.1 template (`sortformer-diar-f410`) is validated the same
+way, on the same two hosts. Its one capacity is in the construction set, so
+`diarizer-coreml-memory` runs AOSC-sized passes on ggml while the runtime
+generates, compiles, loads and warms it in the background, and on Core ML
+after. Increments over a ggml-only run of the same passes:
+
+| Host | Runs | Peak increment | Prepare | Load and warm | Resident step | `ANECompilerService` growth |
+|---|---:|---:|---:|---:|---:|---:|
+| M2, macOS 27.2.1 | 6 | 64.7-68.7 MiB | 73.3-78.3 MiB | 38.8-45.8 MiB | 0.0-55.3 MiB | 380.3-674.2 MiB |
+| M4 Max, macOS 26.7.2 | 4 | 55.8-68.0 MiB | 80.9-96.3 MiB | 37.2-47.3 MiB | 39.2-49.3 MiB | 335.4-459.5 MiB |
+
+Each constant is 1.25 times the largest value over the ten runs, rounded up
+to 1 MiB:
+
+| Constant | Largest measured | Recorded |
+|---|---:|---:|
+| prepare: `generation_peak_bytes` (8 MiB) + 8 MiB + `compile_peak_bytes` | 96.3 MiB (M4 Max) | 121 MiB |
+| `load_peak_bytes.cpu_and_ane` | 47.3 MiB (M4 Max) | 60 MiB |
+| resident part: `runtime_weight_bytes` + 2 x I/O (`workspace_bytes` 0) | 55.3 MiB (M2) | 70 MiB |
+| `ane_compile_reserve_bytes` | 674.2 MiB (M2) | 843 MiB |
+
+Fit charges the capacity 70 + 121 = 191 MiB, against a largest measured peak
+increment of 68.7 MiB. `diarizer-coreml-memory` labels the compiler's size
+before the load as a clean (at most 32 MiB), dirty or unknown baseline,
+because a service that already holds memory grows less than a clean one
+would. Every run here started from a dirty or unknown baseline (61-438 MiB
+held), and the largest growth came from the smallest baseline (61.5 MiB, on
+the M2), so a clean host may grow somewhat more.
+
+On the pinned diarization set (AOSC streaming, 250 ms collar) the generated
+diarizer produces the same segments as the exporter's bundle, so generation
+changes the DER by 0: `abcba` 23.76 % (ggml 23.74 %) and `abcdba` 23.38 %
+(ggml 23.44 %).
+
 Each capacity is a separate bundle of Float16 weights, about 190 MB for
 Nemotron 3 Diarization and 220 MB for Sortformer v2.1. A multifunction package
 would share the weights, but on macOS 15.3 Core ML refuses to select a function
