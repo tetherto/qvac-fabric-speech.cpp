@@ -1,6 +1,12 @@
-// Parakeet Core ML runtime adoption on the device.
-// Needs a TDT GGUF with its adjacent `-encoder.mlmodelc` and a wav; the
-// diarizer and encoder-less cases run when their fixtures are given.
+// Parakeet Core ML runtime adoption on the device. `--case` picks one group,
+// each registered as its own CTest test so a missing fixture shows as a test
+// that did not run, never as a pass:
+//   transcription  (default) --gguf TDT.gguf (with its adjacent
+//                  `-encoder.mlmodelc`) --wav W.wav: every case below except
+//                  the two that follow
+//   diarizer       --diar-gguf D.gguf (with its `-diarizer-<frames>.mlmodelc`
+//                  sidecars) --wav W.wav: diarizer-pending
+//   encoderless    --encoderless-gguf E.gguf: encoderless-use-off
 //
 //   ggml-unchanged        a call whose sidecar is still loading runs on ggml
 //                         (coreml_pending) and its transcript equals use = off
@@ -282,35 +288,44 @@ void case_capacity_miss(const std::string & gguf, const std::string & wav) {
 }
 
 int main(int argc, char ** argv) {
-    std::string gguf, wav, diar_gguf, diar_wav, encoderless;
+    std::string which = "transcription", gguf, wav, diar_gguf, encoderless;
     for (int i = 1; i + 1 < argc; i += 2) {
         const std::string a = argv[i];
-        if (a == "--gguf") gguf = argv[i + 1];
+        if (a == "--case") which = argv[i + 1];
+        else if (a == "--gguf") gguf = argv[i + 1];
         else if (a == "--wav") wav = argv[i + 1];
         else if (a == "--diar-gguf") diar_gguf = argv[i + 1];
-        else if (a == "--diar-wav") diar_wav = argv[i + 1];
         else if (a == "--encoderless-gguf") encoderless = argv[i + 1];
         else {
             std::fprintf(stderr, "unknown argument %s\n", a.c_str());
             return 2;
         }
     }
-    if (gguf.empty() || wav.empty()) {
-        std::fprintf(stderr, "usage: %s --gguf TDT.gguf --wav W.wav [--diar-gguf D.gguf --diar-wav W.wav] "
-                             "[--encoderless-gguf E.gguf]\n", argv[0]);
+    const bool ok_args = (which == "transcription" && !gguf.empty() && !wav.empty()) ||
+                         (which == "diarizer" && !diar_gguf.empty() && !wav.empty()) ||
+                         (which == "encoderless" && !encoderless.empty());
+    if (!ok_args) {
+        std::fprintf(stderr, "usage: %s [--case transcription] --gguf TDT.gguf --wav W.wav\n"
+                             "       %s --case diarizer --diar-gguf D.gguf --wav W.wav\n"
+                             "       %s --case encoderless --encoderless-gguf E.gguf\n",
+                     argv[0], argv[0], argv[0]);
         return 2;
     }
     try {
-        parakeet::EngineResult reference;
-        case_transcription(gguf, wav, reference);
-        case_capacity_miss(gguf, wav);
-        case_coreml_only_full(gguf, wav, reference);
-        if (!diar_gguf.empty()) case_diarizer(diar_gguf, diar_wav.empty() ? wav : diar_wav);
-        if (!encoderless.empty()) case_encoderless(encoderless);
+        if (which == "transcription") {
+            parakeet::EngineResult reference;
+            case_transcription(gguf, wav, reference);
+            case_capacity_miss(gguf, wav);
+            case_coreml_only_full(gguf, wav, reference);
+        } else if (which == "diarizer") {
+            case_diarizer(diar_gguf, wav);
+        } else {
+            case_encoderless(encoderless);
+        }
     } catch (const std::exception & e) {
         std::fprintf(stderr, "FAIL: exception: %s\n", e.what());
         return 1;
     }
-    std::printf("test-parakeet-coreml-runtime: %d failure(s)\n", g_failures);
+    std::printf("test-parakeet-coreml-runtime (%s): %d failure(s)\n", which.c_str(), g_failures);
     return g_failures == 0 ? 0 : 1;
 }

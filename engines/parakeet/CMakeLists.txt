@@ -3115,17 +3115,23 @@ if (PARAKEET_BUILD_TESTS)
         parakeet_apply_ccache(test-parakeet-coreml-runtime)
         set(_qvp_nd_q8_gguf "${PARAKEET_TEST_MODEL_DIR}/Nemotron-3-Diarization.q8_0.gguf")
         set(_qvp_nd_diarizer "${PARAKEET_TEST_MODEL_DIR}/Nemotron-3-Diarization-diarizer-1125.mlmodelc")
-        set(_qvp_cr_args "--gguf" "${_qvp_tdt_q8_gguf}" "--wav" "${_qvp_jfk_wav}")
-        if (EXISTS "${_qvp_nd_q8_gguf}" AND EXISTS "${_qvp_nd_diarizer}")
-            list(APPEND _qvp_cr_args "--diar-gguf" "${_qvp_nd_q8_gguf}")
-        endif()
-        if (EXISTS "${_qvp_transcribepsy_coreml_gguf}")
-            list(APPEND _qvp_cr_args "--encoderless-gguf" "${_qvp_transcribepsy_coreml_gguf}")
-        endif()
+        # One test per fixture set: a missing fixture disables that test
+        # (reported as not run, which the device CI step rejects), never
+        # passes it.
         parakeet_register_test(test-parakeet-coreml-runtime
             LABEL    "fixture;coreml"
-            ARGS     ${_qvp_cr_args}
+            ARGS     "--case" "transcription" "--gguf" "${_qvp_tdt_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
             REQUIRES "${_qvp_tdt_q8_gguf}" "${_qvp_tdt_coreml}" "${_qvp_jfk_wav}")
+        parakeet_register_test(test-parakeet-coreml-runtime-diarizer
+            LABEL    "fixture;coreml"
+            EXE      test-parakeet-coreml-runtime
+            ARGS     "--case" "diarizer" "--diar-gguf" "${_qvp_nd_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
+            REQUIRES "${_qvp_nd_q8_gguf}" "${_qvp_nd_diarizer}" "${_qvp_jfk_wav}")
+        parakeet_register_test(test-parakeet-coreml-runtime-encoderless
+            LABEL    "fixture;coreml"
+            EXE      test-parakeet-coreml-runtime
+            ARGS     "--case" "encoderless" "--encoderless-gguf" "${_qvp_transcribepsy_coreml_gguf}"
+            REQUIRES "${_qvp_transcribepsy_coreml_gguf}")
     endif()
 
     # TranscribePsy on the engine API: expected transcript, precomputed-mel
