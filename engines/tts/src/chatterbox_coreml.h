@@ -348,10 +348,19 @@ struct coreml_test_hooks {
     std::vector<std::string> loads() const;
     void clear_loads();
     void record_load(const std::string & what);
+    // While `tracing`, the Engine's batch loop records its sentence events
+    // in order: "t3 <i>" when T3 of sentence i finished, "handed back <i>"
+    // when its S3Gen worker returned S3GEN_RC_COREML_REDO, "replay <i>
+    // cfm=<label>" when the dispatching thread starts rendering it again.
+    std::atomic<bool> tracing{false};
+    void trace(const std::string & event);
+    std::vector<std::string> events() const;
+    void clear_events();
 
 private:
     mutable std::mutex mu_;
     std::vector<std::string> loads_;
+    std::vector<std::string> events_;
 };
 
 coreml_test_hooks & coreml_test();

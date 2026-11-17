@@ -1529,15 +1529,31 @@ int engine_fixture(bool slow_load) {
     cfm_rollback_check(s3gen, root.path);
     cfm_replay_check(s3gen, root.path);
 
-    // A prediction failure on the worker during the overlap (last: the
-    // retirement is process-wide): the worker hands the sentence back and the
-    // dispatching thread renders it again on its own plan, CFM on ggml, the
-    // encoder and HiFT on Core ML.
-    cb::coreml_test().fail_stage = (int) cb::s3gen_stage::cfm;
+    // A prediction failure on the worker during the overlap (sentence 1's
+    // CFM; last: the retirement is process-wide): the worker hands the
+    // sentence back instead of running ggml there, and the dispatching thread
+    // renders it again only after T3 of sentence 2 finished, CFM on ggml (every
+    // width is loaded, so a wider covering one was ready), the encoder and
+    // HiFT on Core ML.
+    auto & hooks = cb::coreml_test();
+    hooks.clear_events();
+    hooks.tracing = true;
+    hooks.fail_stage = (int) cb::s3gen_stage::cfm;
     const SynthesisResult redone = engine.synthesize(OVERLAP_TEXT);
-    require(cb::coreml_test().fail_stage == -1, "the worker's CFM prediction failed");
-    std::printf("[overlap retire] redone backend=%s\n", redone.s3gen_backend.c_str());
-    require(redone.s3gen_backend == cb::MIXED_STAGE_BACKEND, "the replayed sentence runs CFM on ggml");
+    hooks.tracing = false;
+    require(hooks.fail_stage == -1, "the worker's CFM prediction failed");
+    const auto events = hooks.events();
+    std::string trace;
+    for (const auto & e : events) trace += (trace.empty() ? "" : ", ") + e;
+    std::printf("[overlap retire] %s; backend=%s\n", trace.c_str(), redone.s3gen_backend.c_str());
+    auto at = [&](const std::string & e) {
+        return (size_t) (std::find(events.begin(), events.end(), e) - events.begin());
+    };
+    require(at("handed back 0") < events.size(), "the worker returned the sentence for a redo");
+    require(at("replay 0 cfm=ggml") < events.size(), "the replay runs CFM on ggml");
+    require(at("t3 1") < at("replay 0 cfm=ggml") && at("handed back 0") < at("replay 0 cfm=ggml"),
+            "the replay starts after the overlapping T3 finished");
+    require(redone.s3gen_backend == cb::MIXED_STAGE_BACKEND, "the replayed sentence mixes ggml CFM with Core ML");
     s3gen_unload();
     return 0;
 #endif

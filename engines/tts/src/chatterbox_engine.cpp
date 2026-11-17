@@ -690,6 +690,7 @@ struct Engine::Impl {
         std::string        backend;
         double             s3gen_ms = 0.0;
         int                tokens   = 0;
+        size_t             index    = 0;  // the sentence
         // A Core ML stage failed on the worker: nothing was rendered, and the
         // dispatching thread renders the segment again (redo_tokens) with
         // the same plan, the failed stage now on ggml (detail::replay_plan).
@@ -726,10 +727,10 @@ struct Engine::Impl {
     // `plan` and appends it (see append_batch_segment).  All per-segment
     // s3gen state is local to this call, so consecutive calls reset
     // naturally.
-    void synthesize_batch_segment(const std::vector<int32_t> & speech_tokens,
+    void synthesize_batch_segment(const std::vector<int32_t> & speech_tokens, size_t index,
                                   std::shared_ptr<const S3genCoremlPlan> plan,
                                   SynthesisResult & result) {
-        append_batch_segment(render_batch_segment(speech_tokens, std::move(plan)), result);
+        append_batch_segment(render_batch_segment(speech_tokens, index, std::move(plan)), result);
     }
 
     // S3Gen + HiFT of one batch segment on the models in `plan`.  Touches no
@@ -737,12 +738,13 @@ struct Engine::Impl {
     // on a worker thread while T3 decodes the next segment; with a plan
     // marked defer_coreml_failures, a Core ML failure returns `redo` instead
     // of running ggml there.
-    rendered_segment render_batch_segment(const std::vector<int32_t> & speech_tokens,
+    rendered_segment render_batch_segment(const std::vector<int32_t> & speech_tokens, size_t index,
                                           std::shared_ptr<const S3genCoremlPlan> plan) {
         s3gen_synthesize_opts sopts = batch_segment_opts();
         sopts.coreml_plan = plan;
 
         rendered_segment seg;
+        seg.index = index;
         sopts.pcm_out = &seg.pcm;
         sopts.s3gen_backend_out = &seg.backend;
 
@@ -753,6 +755,7 @@ struct Engine::Impl {
             seg.redo = true;
             seg.redo_tokens = speech_tokens;
             seg.redo_plan = std::move(plan);
+            detail::coreml_test().trace("handed back " + std::to_string(index));
             return seg;
         }
         if (rc == 2) {
@@ -776,7 +779,10 @@ struct Engine::Impl {
     void append_batch_segment(rendered_segment && seg, SynthesisResult & result) {
         if (seg.redo) {
             const std::vector<int32_t> tokens = std::move(seg.redo_tokens);
-            seg = render_batch_segment(tokens, detail::replay_plan(std::move(seg.redo_plan)));
+            auto plan = detail::replay_plan(std::move(seg.redo_plan));
+            detail::coreml_test().trace("replay " + std::to_string(seg.index) + " cfm=" +
+                                        detail::plan_view(*plan, detail::s3gen_stage::cfm).label);
+            seg = render_batch_segment(tokens, seg.index, std::move(plan));
         }
         s3gen_backends.insert(seg.backend);
         // First segment: result.pcm is empty, so this is a plain append.
@@ -1012,6 +1018,7 @@ struct Engine::Impl {
             std::vector<int32_t> speech_tokens = run_t3(segments[si]);
             const auto t3_t1 = std::chrono::steady_clock::now();
             result.t3_ms += std::chrono::duration<double, std::milli>(t3_t1 - t3_t0).count();
+            detail::coreml_test().trace("t3 " + std::to_string(si));
 
             if (use_streaming) {
                 synthesize_streaming_segment(
@@ -1028,11 +1035,11 @@ struct Engine::Impl {
                 // the segment back to be rendered on this thread.
                 detail::defer_coreml_failures(*plan);
                 in_flight = std::async(std::launch::async,
-                                       [this, tokens = std::move(speech_tokens), plan = std::move(plan)]() mutable {
-                                           return render_batch_segment(tokens, std::move(plan));
+                                       [this, tokens = std::move(speech_tokens), si, plan = std::move(plan)]() mutable {
+                                           return render_batch_segment(tokens, si, std::move(plan));
                                        });
             } else {
-                synthesize_batch_segment(speech_tokens, std::move(plan), result);
+                synthesize_batch_segment(speech_tokens, si, std::move(plan), result);
             }
         }
         if (in_flight.valid()) append_batch_segment(in_flight.get(), result);

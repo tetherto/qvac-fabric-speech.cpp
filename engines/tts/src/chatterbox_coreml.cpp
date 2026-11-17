@@ -501,6 +501,22 @@ void coreml_test_hooks::record_load(const std::string & what) {
     loads_.push_back(what);
 }
 
+void coreml_test_hooks::trace(const std::string & event) {
+    if (!tracing.load(std::memory_order_relaxed)) return;
+    std::lock_guard<std::mutex> lock(mu_);
+    events_.push_back(event);
+}
+
+std::vector<std::string> coreml_test_hooks::events() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return events_;
+}
+
+void coreml_test_hooks::clear_events() {
+    std::lock_guard<std::mutex> lock(mu_);
+    events_.clear();
+}
+
 coreml_test_hooks & coreml_test() {
     static coreml_test_hooks hooks;
     return hooks;
