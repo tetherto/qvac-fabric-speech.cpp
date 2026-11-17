@@ -494,15 +494,19 @@ BUNDLE --memory-schedule DIR`: ggml FlowLM and Mimi work while both sidecars
 are generated, compiled, loaded and warmed in the background, and each phase
 is held to its constant. Each constant is 1.25 times the largest value over
 every run on every validated host (`template.json` `memory`), rounded up to
-1 MiB. On an Apple M2 (macOS 27.2.1, 8 runs):
+1 MiB. On an Apple M2 (macOS 27.2.1, 11 runs):
 
 | Phase | Step (`cpu_and_gpu`) | Mimi (`cpu_and_ane`) |
 |---|---|---|
 | prepare (generate + compile) | 57.8–72.8 MiB, charged 91 | 21.1–62.5 MiB, charged 79 |
-| load + warm-up | 54.2–95.3 MiB, charged 120 | 0.8–49.1 MiB, charged 62 |
+| load + warm-up | 52.0–95.3 MiB, charged 120 | 0.8–49.9 MiB, charged 63 |
 | steady, both running | 79.1–103.3 MiB, charged 212.9 (both resident parts) | |
 | whole run | 143.1–152.2 MiB, envelope 332.9 | |
-| ANECompilerService while Mimi loads | | growth 19.9–24.6 MiB over a dirty 62–67 MiB baseline; reserve 112 MiB (1.25 x the largest absolute size) | This is a memory projection, not a
+| ANECompilerService while Mimi loads | | growth 19.8–24.6 MiB over a dirty 62–69 MiB baseline; reserve 114 MiB (1.25 x the largest absolute size, 90.6 MiB) |
+
+The M4 Max CI runner is not measured yet.
+
+Preflight is a memory projection, not a
 validation of tensor contents, checkpoint encoder capability, or speech quality.
 
 OpenCL fit uses the same selection rules as synthesis. Adreno OpenCL is treated
