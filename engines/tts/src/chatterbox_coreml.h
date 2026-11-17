@@ -208,9 +208,11 @@ public:
     void start_construction(const std::atomic<bool> * cancel = nullptr);
     std::string construction_json() const;
 
-    // A call is starting: request the widths `calls` need at `current`
-    // priority (ahead of unstarted construction loads) and mark them, plus
-    // HiFT, predicted, so the resident cap never releases them.
+    // A call is starting: mark the widths `calls` need, plus HiFT,
+    // predicted, so the resident cap never releases them, and with prewarm
+    // predicted (or all) request them at `current` priority, ahead of
+    // unstarted construction loads. With prewarm none or minimal nothing is
+    // requested here: a width loads when a call demands it.
     void predict(const std::vector<s3gen_call_shape> & calls);
     // The call ended: nothing is predicted any more.
     void end_call();

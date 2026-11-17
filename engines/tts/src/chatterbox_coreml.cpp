@@ -964,9 +964,14 @@ void s3gen_sidecars::predict(const std::vector<s3gen_call_shape> & calls) {
             if (exact >= 0) add(s, p_->slot(s, exact));
         }
     }
+    // Only prewarm = predicted (and all) loads a call's predictions ahead of
+    // time; none and minimal load a width when a call demands it. Every scope
+    // keeps the predicted widths from the resident cap's evictions.
+    const bool speculative = p_->resolved.prewarm == pcm::Prewarm::predicted || p_->resolved.prewarm == pcm::Prewarm::all;
     // HiFT first (every call uses it), then the widths in call order.
     for (s3gen_stage s : {s3gen_stage::hift, s3gen_stage::encoder, s3gen_stage::cfm}) {
         if (p_->stages[(int) s].pool) p_->stages[(int) s].pool->set_predicted(predicted[(int) s]);
+        if (!speculative) continue;
         for (const auto & slot : predicted[(int) s]) slot->request(pcm::Priority::current);
     }
 }

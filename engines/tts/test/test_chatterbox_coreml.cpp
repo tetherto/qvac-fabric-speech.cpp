@@ -664,8 +664,10 @@ std::string routing_case(const fs::path & fixture, const fs::path & root, const 
     return (dir / "routing-s3gen.gguf").string();
 }
 
+// prewarm = predicted: predict() loads a call's widths ahead of time (no
+// construction group is issued unless a case starts one).
 CoremlOptions routing_options(const std::string & cache_dir = {},
-                              CoremlOptions::Prewarm prewarm = CoremlOptions::Prewarm::none) {
+                              CoremlOptions::Prewarm prewarm = CoremlOptions::Prewarm::predicted) {
     CoremlOptions o;
     o.compute_units = "cpu_only";
     o.wait = CoremlOptions::Wait::none;
@@ -969,6 +971,29 @@ int pending_fixture() {
         require(most <= cb::COREML_RESIDENT_CAP && set->live(S::cfm) <= cb::COREML_RESIDENT_CAP,
                 "never more live functions than the cap");
         set->end_call();
+    }
+
+    // 12. prewarm none and minimal never load a call's predicted widths ahead
+    //     of time; the call's own demand still loads what it needs.
+    for (const auto scope : {CoremlOptions::Prewarm::none, CoremlOptions::Prewarm::minimal}) {
+        const char * name = scope == CoremlOptions::Prewarm::none ? "none" : "minimal";
+        auto set = cb::s3gen_sidecars::create(routing_case(fixture, root.path, std::string("scope-") + name, all),
+                                              routing_options({}, scope));
+        set->start_construction();
+        settle(*set, std::string("scope ") + name);
+        hooks.clear_loads();
+        set->predict({shape(8), shape(16)});
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        settle(*set, std::string("scope ") + name);
+        const auto speculative = hooks.loads();
+        require(speculative.empty(), std::string("prewarm ") + name + " queues no predicted width");
+        set->acquire(shape(8), steady::now());
+        settle(*set, std::string("scope ") + name);
+        require(set->state(S::cfm, 16) == "ready" && set->state(S::encoder, 8) == "ready" &&
+                    set->state(S::cfm, 32).empty() == false && set->state(S::cfm, 32) != "ready",
+                std::string("prewarm ") + name + ": the demanded widths load, the merely predicted one does not");
+        set->end_call();
+        std::printf("[scope %s] no speculative loads; the demanded widths loaded\n", name);
     }
 
     // 11. A ready function covers the call: it serves at once. wait = call
