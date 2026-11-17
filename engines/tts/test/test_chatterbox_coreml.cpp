@@ -1063,6 +1063,54 @@ void slow_load_checks(const std::string & t3, const std::string & s3gen, const s
     require(warm_labels == std::set<std::string>{"coreml-ane"}, "tts-cli runs every stage on Core ML once loaded");
 }
 
+// tts-cli's sentence loop with a CFM prediction failure on an overlapped
+// sentence: the call hands the sentence back instead of starting ggml while
+// T3 of the next sentence may hold the GPU; the CLI lets that T3 finish, then
+// renders the sentence again on its own plan, CFM on ggml, the encoder and
+// HiFT on Core ML. Nothing falls back in place.
+void cli_replay_check(const std::string & t3, const std::string & s3gen, const std::string & cli,
+                      const fs::path & root) {
+    const fs::path wav = root / "cli-replay.wav", log_path = root / "cli-replay.log";
+    require(run_cli(cli, t3, s3gen, wav, log_path, "--coreml-wait call --coreml-fail-stage cfm") == 0,
+            "tts-cli with a failing CFM prediction");
+    const std::string log = read_file(log_path);
+    const size_t handed_back = log.find("rendering the call again");
+    // T3 of segment 2 reports its tokens once it finished.
+    size_t next_t3 = std::string::npos;
+    for (size_t at = log.find("[t3 segment 2/3] "); at != std::string::npos;
+         at = log.find("[t3 segment 2/3] ", at + 1)) {
+        const size_t eol = log.find('\n', at);
+        if (log.substr(at, eol - at).find("speech tokens") != std::string::npos) {
+            next_t3 = at;
+            break;
+        }
+    }
+    const std::string marker = "--- segment 1/3: rendering again after T3 of segment 2 ---";
+    const size_t replay = log.find(marker);
+    std::printf("[cli replay] handed back at %zu, T3 of segment 2 done at %zu, replay at %zu\n", handed_back, next_t3,
+                replay);
+    require(handed_back != std::string::npos && log.find("ggml takes over") == std::string::npos,
+            "tts-cli: the overlapped call hands the sentence back, nothing falls back in place");
+    require(replay != std::string::npos && next_t3 != std::string::npos && handed_back < replay && next_t3 < replay,
+            "tts-cli: the sentence is rendered again after the next sentence's T3 finished");
+    const size_t replay_end = log.find("\n--- segment 2/3", replay);
+    std::set<std::string> cfm, others;
+    std::istringstream lines(log.substr(replay, replay_end == std::string::npos ? std::string::npos
+                                                                                  : replay_end - replay));
+    std::string line;
+    while (std::getline(lines, line)) {
+        const size_t open = line.rfind('('), close = line.rfind(')');
+        if (open == std::string::npos || close == std::string::npos || close < open) continue;
+        const std::string label = line.substr(open + 1, close - open - 1);
+        if (line.find("[cfm_step") != std::string::npos) cfm.insert(label);
+        if (line.find("[encoder]") != std::string::npos || line.find("[hift_decode]") != std::string::npos) {
+            others.insert(label);
+        }
+    }
+    require(cfm == std::set<std::string>{cb::GGML_STAGE_BACKEND}, "tts-cli: the replay runs CFM on ggml");
+    require(others == std::set<std::string>{"coreml-ane"}, "tts-cli: the replay keeps the encoder and HiFT models");
+}
+
 // The real CFM latch: a Core ML failure at the second Euler step restores the
 // initial noise and integrates on ggml, so the call equals use = off sample
 // for sample (only the CFM sidecar is present, so the encoder and HiFT run
@@ -1219,6 +1267,7 @@ int engine_fixture(bool slow_load) {
 
     // First, before anything is loaded in this process.
     if (slow_load) slow_load_checks(t3, s3gen, cli_env, root.path);
+    if (slow_load) cli_replay_check(t3, s3gen, cli_env, root.path);
 
     // Overlapped synthesis equals the segments synthesized one call at a time
     // (one segment never overlaps) and crossfaded in order, sample for sample:

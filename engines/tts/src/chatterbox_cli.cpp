@@ -254,11 +254,13 @@ struct cli_params {
     bool    cfm_f16_kv_attn = false;
 
     // Chatterbox S3Gen Core ML sidecars (--coreml-*): the options, where to
-    // write the status JSON on exit, and a testing-only delay of every
-    // sidecar function load (a slow, cold load).
+    // write the status JSON on exit, and testing-only controls: a delay of
+    // every sidecar function load (a slow, cold load) and one failing
+    // prediction of a stage.
     tts_cpp::CoremlOptions coreml;
     std::string coreml_status_json;
     int32_t     coreml_slow_load_ms = 0;
+    int32_t     coreml_fail_stage = -1;
 
     // Multilingual-only knobs. Python ChatterboxMultilingualTTS.generate()
     // defaults: cfg_weight=0.5, temperature=0.8, repetition_penalty=2.0,
@@ -582,6 +584,8 @@ static void print_usage(const char * argv0) {
     fprintf(stderr, "  --coreml-status-json PATH  write the sidecar status (JSON) to PATH on exit;\n");
     fprintf(stderr, "                          '-' writes to stdout\n");
     fprintf(stderr, "  --coreml-slow-load-ms N Testing: delay every sidecar function load by N ms\n");
+    fprintf(stderr, "  --coreml-fail-stage S   Testing: the first Core ML prediction of stage S\n");
+    fprintf(stderr, "                          (encoder, cfm or hift) fails once\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "  --input-file PATH       Stream text from PATH as another process writes to it.\n");
     fprintf(stderr, "                          tail -f semantics: each complete sentence (ending in\n");
@@ -821,6 +825,15 @@ static bool parse_args(int argc, char ** argv, cli_params & params) {
         else if (arg == "--coreml-cache-dir")    { auto v = next("--coreml-cache-dir");    if (!v) return false; params.coreml.cache_dir = std::string(v); }
         else if (arg == "--coreml-status-json")  { auto v = next("--coreml-status-json");  if (!v) return false; params.coreml_status_json = v; }
         else if (arg == "--coreml-slow-load-ms") { if (!parse_int("--coreml-slow-load-ms", params.coreml_slow_load_ms)) return false; }
+        else if (arg == "--coreml-fail-stage") {
+            auto v = next("--coreml-fail-stage"); if (!v) return false;
+            const std::string m = v;
+            using S = tts_cpp::chatterbox::detail::s3gen_stage;
+            if      (m == "encoder") params.coreml_fail_stage = (int32_t) S::encoder;
+            else if (m == "cfm")     params.coreml_fail_stage = (int32_t) S::cfm;
+            else if (m == "hift")    params.coreml_fail_stage = (int32_t) S::hift;
+            else { fprintf(stderr, "error: --coreml-fail-stage must be encoder, cfm or hift (got '%s')\n", v); return false; }
+        }
         else if (arg == "--max-sentence-chars") { if (!parse_int("--max-sentence-chars", params.max_sentence_chars)) return false; }
         else if (arg == "--no-auto-split")  { params.max_sentence_chars = 0; }
         else if (arg == "--crossfade-ms")   { if (!parse_int("--crossfade-ms",   params.crossfade_ms))   return false; }
@@ -1253,6 +1266,7 @@ int tts_cpp_cli_main(int argc, char ** argv) {
         // below resolves the same options to the same slots.
         apply_cli_coreml_defaults(params.coreml);
         tts_cpp::chatterbox::detail::coreml_test().load_delay_ms = params.coreml_slow_load_ms;
+        tts_cpp::chatterbox::detail::coreml_test().fail_stage = params.coreml_fail_stage;
         std::shared_ptr<tts_cpp::chatterbox::detail::s3gen_sidecars> coreml_sidecars;
         if (!params.s3gen_gguf.empty()) {
             coreml_sidecars = tts_cpp::chatterbox::detail::s3gen_sidecars::get(params.s3gen_gguf, params.coreml);
@@ -2661,10 +2675,29 @@ int tts_cpp_cli_main(int argc, char ** argv) {
                         copts, seg_generated[si],
                         std::chrono::steady_clock::now() +
                             std::chrono::duration_cast<std::chrono::steady_clock::duration>(budget));
-                    if (copts.coreml_plan && s3gen_coreml_plan_offloads(*copts.coreml_plan)) prefetch_t3(si + 1);
+                    const bool overlap = si + 1 < N_SEG && copts.coreml_plan &&
+                                         s3gen_coreml_plan_offloads(*copts.coreml_plan);
+                    if (overlap) {
+                        // While T3 may hold the GPU, a Core ML failure never
+                        // starts ggml: the call hands the sentence back.
+                        tts_cpp::chatterbox::detail::defer_coreml_failures(*copts.coreml_plan);
+                        prefetch_t3(si + 1);
+                    }
                     fprintf(stderr, "\n--- segment %zu/%zu: %zu speech tokens ---\n",
                             si + 1, N_SEG, seg_generated[si].size());
                     int rc = s3gen_synthesize_to_wav(seg_generated[si], copts);
+                    if (rc == tts_cpp::chatterbox::detail::S3GEN_RC_COREML_REDO) {
+                        // Let the next sentence's T3 finish (its tokens are
+                        // kept for the next iteration), then render this
+                        // sentence again on its own plan, the failed stage
+                        // on ggml.
+                        ensure_t3(si + 1);
+                        fprintf(stderr, "--- segment %zu/%zu: rendering again after T3 of segment %zu ---\n",
+                                si + 1, N_SEG, si + 2);
+                        seg_pcm.clear();
+                        copts.coreml_plan = tts_cpp::chatterbox::detail::replay_plan(std::move(copts.coreml_plan));
+                        rc = s3gen_synthesize_to_wav(seg_generated[si], copts);
+                    }
                     if (rc != 0) return rc;
                     append_pcm_crossfade(full_pcm, seg_pcm, sr, params.crossfade_ms);
                 }
