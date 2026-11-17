@@ -109,37 +109,39 @@ tts_cpp::CoremlOptions at(const fs::path & cache) {
 
 // The templates' memory charges under `all` (the default), before the
 // margin. Each is 1.25 x the largest value measured over every overlapped
-// generated-schedule run on the validated hosts, rounded up to 1 MiB, so the
-// envelope's own margin is 1.0 (template.json memory.measured). A change of a
-// template's memory changes these on purpose.
+// generated-schedule run on the validated hosts (an M2 and the M4 Max CI
+// runner), rounded up to 1 MiB, so the envelope's own margin is 1.0
+// (template.json memory.measured). Both templates compile the same program
+// with the same weights, so the load, resident and compiler-reserve charges
+// come from both templates' runs; the prepare is each template's own. A change
+// of a template's memory changes these on purpose.
 constexpr uint64_t MIB = 1ull << 20;
-constexpr uint64_t VOCODER_WEIGHTS = 50670336;          // weight.bin
+constexpr uint64_t VOCODER_WEIGHTS = 50670336;                  // weight.bin
 constexpr uint64_t VOCODER_IO = 2 * (2 * (144 * 64 + 196608));  // latent and wav (fp16), twice
-constexpr uint64_t GENERATION_PEAK = 18 * MIB;          // generation_peak_bytes
-struct charges {
-    uint64_t prepare, load, resident, ane_reserve;
-};
-const std::map<std::string, charges> TEMPLATE_CHARGES = {
-    // prepare: 1.25 x 23.3 MiB; load and warm-up: 1.25 x 5.3; compiler reserve: 1.25 x 129.3
-    {SUPERTONIC_VOCODER_TEMPLATE_W64, {30 * MIB, 7 * MIB, VOCODER_WEIGHTS + VOCODER_IO, 162 * MIB}},
-    // prepare: 1.25 x 37.7 MiB (dequantising the pointwise weights); load: 1.25 x 6.1; reserve: 1.25 x 130.0
-    {SUPERTONIC_VOCODER_TEMPLATE_PW2D_W64, {48 * MIB, 8 * MIB, VOCODER_WEIGHTS + VOCODER_IO, 163 * MIB}},
+constexpr uint64_t GENERATION_PEAK = 18 * MIB;                  // generation_peak_bytes
+constexpr uint64_t VOCODER_LOAD = 62 * MIB;      // 1.25 x 49.4 MiB (an M4 Max run with the weights in the process)
+constexpr uint64_t VOCODER_RESIDENT = 63 * MIB;  // 1.25 x 49.8 MiB of steady state, the same run
+constexpr uint64_t VOCODER_ANE_RESERVE = 163 * MIB;  // 1.25 x 130.0 MiB, ANECompilerService while the M2 loaded
+const std::map<std::string, uint64_t> TEMPLATE_PREPARE = {
+    {SUPERTONIC_VOCODER_TEMPLATE_W64, 30 * MIB},       // 1.25 x 23.3 MiB
+    {SUPERTONIC_VOCODER_TEMPLATE_PW2D_W64, 48 * MIB},  // 1.25 x 37.7 MiB (dequantising the pointwise weights)
 };
 
 void template_charges(const supertonic_vocoder_route & r) {
-    auto it = TEMPLATE_CHARGES.find(r.template_id);
-    if (it == TEMPLATE_CHARGES.end()) {
+    auto it = TEMPLATE_PREPARE.find(r.template_id);
+    if (it == TEMPLATE_PREPARE.end()) {
         check(false, "template charges: no pin for template '" + r.template_id + "'");
         return;
     }
-    const charges & c = it->second;
-    check(r.prepare_peak_bytes == c.prepare && r.load_peak_bytes == c.load && r.workspace_bytes == 0 &&
-              r.resident_bytes == c.resident && r.ane_compile_reserve_bytes == c.ane_reserve,
+    const uint64_t prepare = it->second;
+    check(r.prepare_peak_bytes == prepare && r.load_peak_bytes == VOCODER_LOAD &&
+              r.workspace_bytes == VOCODER_RESIDENT - VOCODER_WEIGHTS - VOCODER_IO &&
+              r.resident_bytes == VOCODER_RESIDENT && r.ane_compile_reserve_bytes == VOCODER_ANE_RESERVE,
           r.template_id + " charges: prepare " + std::to_string(r.prepare_peak_bytes) + ", load " +
               std::to_string(r.load_peak_bytes) + ", workspace " + std::to_string(r.workspace_bytes) + ", resident " +
               std::to_string(r.resident_bytes) + ", compiler reserve " + std::to_string(r.ane_compile_reserve_bytes));
     check(r.prepare_peak_bytes >= GENERATION_PEAK + 8 * MIB, r.template_id + ": prepare covers generation + 8 MiB");
-    const uint64_t envelope = c.resident + std::max(c.prepare, c.load);
+    const uint64_t envelope = VOCODER_RESIDENT + std::max(prepare, VOCODER_LOAD);
     check(r.envelope_bytes == envelope && r.validated,
           r.template_id + " envelope " + std::to_string(r.envelope_bytes) + " bytes (expected " +
               std::to_string(envelope) + ", margin 1.0), validated for all");

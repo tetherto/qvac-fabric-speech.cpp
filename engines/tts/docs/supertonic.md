@@ -350,27 +350,34 @@ load 0.9-1.0 s, warm-up 5 ms).
 1.25 times the largest value measured over the overlapped memory schedule
 (`test-supertonic-coreml-parity --memory-schedule`: ggml vocoder calls while
 the sidecar is generated, compiled, loaded and warmed in the background) on
-every validated host, rounded up to 1 MiB, with no further envelope margin:
+every validated host, rounded up to 1 MiB, with no further envelope margin.
+Hosts: an M2 (macOS 27.2.1, 12 runs) and the M4 Max CI runner (macOS 26.7.2,
+6 runs). Both templates compile the same program with the same weights, so
+the load, resident and compiler-reserve charges are taken over both
+templates' runs; the prepare is each template's own.
 
-| | `supertonic-vocoder-w64` | `supertonic-vocoder-pw2d-w64` |
-|---|---:|---:|
-| prepare (generation + compile), largest measured | 23.3 MiB | 37.7 MiB |
-| load and warm-up, largest measured | 5.3 MiB | 6.1 MiB |
-| steady state from the load start, largest measured | 5.3 MiB | 6.5 MiB |
-| resident charge (weights, twice the I/O) | 49.1 MiB | 49.1 MiB |
-| envelope fit charges (resident + prepare) | 79.1 MiB | 97.1 MiB |
-| `ANECompilerService` reserve (runtime admission) | 162 MiB | 163 MiB |
+| Largest measured (MiB) | M2 | M4 Max | charged |
+|---|---:|---:|---:|
+| prepare, `supertonic-vocoder-w64` | 23.3 | 22.6 | 30 |
+| prepare, `supertonic-vocoder-pw2d-w64` | 37.7 | 35.9 | 48 |
+| load and warm-up | 6.1 | 49.4 | 62 |
+| steady state from the load start | 6.5 | 49.8 | 63 (resident) |
+| `ANECompilerService` while loading | 130.0 | (other jobs') | 163 (reserve) |
 
-The requantised template's prepare is larger because generation dequantises
-the q8_0 pointwise weights. The Neural Engine keeps the weights outside the
-process, so the steady state stays far below the resident charge, which
-still counts the weights. `ANECompilerService` held 74-82 MiB before every
-load (no clean start), so its growth during the load (at most 53 MiB) would
-understate a cold compile on a clean host; the reserve is 1.25 times its
-largest absolute size while loading (129-130 MiB). Measured so far on an M2
-(macOS 27.2.1, 12 runs); the CI step "Memory schedule (generated Supertonic
-vocoder, overlapped, this runner)" runs the same schedule on the CI runner's
-chip and fails when a phase exceeds its constant.
+Envelope fit charges: 125 MiB for either template (resident 63 + the larger
+of prepare and load, 62). The requantised template's prepare is larger
+because generation dequantises the q8_0 pointwise weights. On the M2 the
+Neural Engine keeps the weights outside the process, so load and steady state
+stay under 7 MiB; one of the six M4 Max runs held a weight-sized copy in the
+process (49 MiB) and sets the load and resident charges. `ANECompilerService`
+held 74-82 MiB before every M2 load (no clean start), so its growth during the
+load (at most 53 MiB) would understate a cold compile on a clean host; the
+reserve is 1.25 times its largest absolute size while the M2 loaded. On the
+M4 Max it grew at most 3 MiB in five of six runs, so its absolute size there
+(477-523 MiB) is what other jobs compiled and is not used. The CI step
+"Memory schedule (generated Supertonic vocoder, overlapped, this runner)"
+reruns the schedule on every change and fails when a phase exceeds its
+constant.
 
 **Tests.** `test-supertonic-coreml-route` (unit, every build: the device
 class of brand strings, gating with faked Max and Ultra brands, template
