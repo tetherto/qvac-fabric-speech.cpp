@@ -324,14 +324,15 @@ void parity_floor_gates() {
 //               load begins is the prepare transient's, which the envelope
 //               charges next to the resident; the whole run checks the sum;
 //   whole run   the peak over the baseline, against the envelope fit charges;
-//   compiler    ANECompilerService's growth while loading and warming (its
-//               peak less its size just before the first load; see
-//               qvac_coreml_memory::ane_compiler_growth), against
-//               ane_compile_reserve_bytes (when the units include the
-//               Neural Engine). The report prints the size before the load
-//               and labels that baseline clean, dirty (a service that already
-//               held memory grows less than a clean one would) or unknown (no
-//               sample before the load).
+//   compiler    ANECompilerService's size while loading and warming (its
+//               peak over every instance), against ane_compile_reserve_bytes
+//               (when the units include the Neural Engine): no run could
+//               start the service clean, and its growth over a service that
+//               already holds memory understates a cold compile, so the
+//               reserve charges its absolute size. The report also prints its
+//               growth (the peak less its size just before the first load;
+//               see qvac_coreml_memory::ane_compiler_growth) and labels that
+//               baseline clean, dirty or unknown (no sample before the load).
 // generate, compile, load and warm are also reported on their own, each over
 // the footprint just before that state began.
 enum class mem_phase { ggml, generate, compile, load, warm, ready };
@@ -412,7 +413,7 @@ constexpr double MEASURED_MARGIN = 1.25;
 
 // One line per charge the run exceeds (with `margin` applied to every phase
 // but the whole run), or per state it never sampled.
-std::vector<std::string> mem_failures(const mem_breakdown & b, uint64_t ane_compiler_growth, const mem_charges & c,
+std::vector<std::string> mem_failures(const mem_breakdown & b, uint64_t ane_compiler_load_peak, const mem_charges & c,
                                       double margin = MEASURED_MARGIN) {
     std::vector<std::string> out;
     const std::pair<bool, const char *> states[] = {{b.generated, "generating"}, {b.compiled, "compiling"},
@@ -433,7 +434,9 @@ std::vector<std::string> mem_failures(const mem_breakdown & b, uint64_t ane_comp
     over("load and warm-up", b.load_warm, c.load, margin);
     over("steady state (resident)", b.steady, c.resident, margin);
     over("whole run (envelope)", b.total, c.envelope, 1.0);
-    if (c.ane_reserve > 0) over("ANECompilerService growth (reserve)", ane_compiler_growth, c.ane_reserve, margin);
+    if (c.ane_reserve > 0) {
+        over("ANECompilerService size while loading (reserve)", ane_compiler_load_peak, c.ane_reserve, margin);
+    }
     return out;
 }
 
@@ -1453,14 +1456,14 @@ void memory_schedule(parler_model & model, const std::string & gguf, const std::
             "    load+warm  %7.1f  needs %7.1f  charged %7.1f  (load %.1f, warm-up %.1f)\n"
             "    steady     %7.1f  needs %7.1f  charged %7.1f  (workspace %.1f, charged %.1f; over the baseline %.1f)\n"
             "    whole run  %7.1f  needs %7.1f  charged %7.1f  (the envelope: margined phases)\n"
-            "    ANECompilerService growth while loading and warming %.1f, needs %.1f, reserve %.1f (%s; peak while "
-            "loading %.1f, whole run %.1f)\n",
+            "    ANECompilerService size while loading and warming %.1f, needs %.1f, reserve %.1f (growth %.1f, %s; "
+            "whole run %.1f)\n",
             mib(base), MEASURED_MARGIN, mib(b.prepare), MEASURED_MARGIN * mib(b.prepare), mib(c.prepare),
             mib(b.generate), mib(b.compile), mib(b.load_warm), MEASURED_MARGIN * mib(b.load_warm), mib(c.load),
             mib(b.load), mib(b.warm), mib(b.steady), MEASURED_MARGIN * mib(b.steady), mib(c.resident),
             mib(workspace), mib(route.workspace_bytes), mib(b.steady_over_base), mib(b.total), mib(b.total),
-            mib(c.envelope), mib(ane.growth), MEASURED_MARGIN * mib(ane.growth), mib(c.ane_reserve), before_load,
-            mib(ane.peak), mib(ane_peak));
+            mib(c.envelope), mib(ane.peak), MEASURED_MARGIN * mib(ane.peak), mib(c.ane_reserve), mib(ane.growth),
+            before_load, mib(ane_peak));
     if (baseline == qvac_coreml_memory::AneBaseline::dirty) {
         fprintf(stderr,
                 "    note: ANECompilerService held %.1f MiB before the load, so it reused memory of earlier compiles "
@@ -1482,14 +1485,14 @@ void memory_schedule(parler_model & model, const std::string & gguf, const std::
             (unsigned long long) b.steady, (unsigned long long) b.steady_over_base, (unsigned long long) workspace, (unsigned long long) b.total,
             (unsigned long long) ane.peak, (unsigned long long) ane.before, (unsigned long long) ane.growth,
             (unsigned long long) ane_peak, baseline_name, samples.size());
-    for (const std::string & f : mem_failures(b, ane.growth, c)) check(false, "memory schedule: " + f);
+    for (const std::string & f : mem_failures(b, ane.peak, c)) check(false, "memory schedule: " + f);
     char line[512];
     std::snprintf(line, sizeof(line),
                   "overlapped schedule: %d ggml + %d Core ML calls in %.1f s; footprint base %.1f MiB, peak +%.1f MiB "
-                  "(envelope %.1f MiB, units %s); ANECompilerService grew %.1f MiB (%s; peak %.1f MiB)",
+                  "(envelope %.1f MiB, units %s); ANECompilerService %.1f MiB while loading, grew %.1f MiB (%s)",
                   ggml_calls, coreml_calls, secs, mib(base), mib(b.total), mib(route.envelope_bytes),
-                  route.compute_units.c_str(), mib(ane.growth), before_load, mib(ane_peak));
-    check(coreml_calls >= 5 && ggml_calls >= 1 && mem_failures(b, ane.growth, c).empty(), line);
+                  route.compute_units.c_str(), mib(ane.peak), mib(ane.growth), before_load);
+    check(coreml_calls >= 5 && ggml_calls >= 1 && mem_failures(b, ane.peak, c).empty(), line);
     model.dac_pending.reset();
 }
 #endif

@@ -142,6 +142,10 @@ Parler DAC's. Its constants follow this convention:
     already cover it, as on the Neural Engine, which keeps the weights
     outside the process;
   - `ane_compile_reserve_bytes`: below.
+- A schedule run passes only when 1.25 times each phase it measured fits the
+  constant that charges it, so a run that sets a new maximum fails until the
+  constants are recomputed. The whole run is held to the envelope as
+  measured, since the envelope adds phases that each carry the margin.
 - Each constant carries its own 1.25, so the envelope adds none: `margin` 1.0
   and `coreml_bound: "measured"`. The runtime reads `margin`; `coreml_bound`
   and `measured` are records.
@@ -161,20 +165,22 @@ admission: a cold Neural Engine load waits until that much memory is free.
 schedule measures it in two ways:
 
 - its **growth** during the load: its peak while loading, less its size just
-  before the first load. The schedule holds the growth to the reserve, since
-  on a shared host the absolute size includes what other processes compiled.
-  The size is summed over every instance of the service, so another process
-  that compiles for the Neural Engine during the load counts as growth;
-- its **absolute** size while loading.
+  before the first load;
+- its **absolute** size while loading. On a shared host it includes what
+  other processes compiled, before the load or during it.
 
-A service that already holds memory from earlier compiles reuses it, so on
-such a dirty baseline the growth understates a cold compile on a clean host,
-where the growth is the whole size. The reserve is therefore 1.25 times the
-largest growth measured from a clean start (at most 32 MiB before the load,
-`ANE_COMPILER_CLEAN_BYTES` in `test/memory_probe.h`). Without clean starts,
-it is 1.25 times the largest absolute size on a host whose placement compiles
-the stage for the Neural Engine. Each run report prints the size before the
-load and labels that baseline clean, dirty or unknown (no sample before the
+Both sum every instance of the service, so another process that compiles
+for the Neural Engine during the load counts in both. A service that
+already holds memory from earlier compiles reuses it, so on such a dirty
+baseline the growth understates a cold compile on a clean host, where the
+growth is the whole size. The reserve is therefore 1.25 times the largest
+growth measured from a clean start (at most 32 MiB before the load,
+`ANE_COMPILER_CLEAN_BYTES` in `test/memory_probe.h`) on every validated
+host, when every host has such runs. Otherwise it is 1.25 times the largest
+absolute size while loading on any validated host, a conservative basis
+that compares across placements, and the schedule holds 1.25 times the
+absolute size to it. Each run report prints both, the size before the load,
+and labels that baseline clean, dirty or unknown (no sample before the
 load, in which case the growth is the whole size while loading).
 
 ## Building the tests and the tool
