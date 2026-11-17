@@ -580,8 +580,9 @@ Error write_package(const recipe::Template & t, recipe::TensorSource & src, cons
     // GGUF); a template without patch lines is written as it is.
     const recipe::TemplateFile * spec = t.file("model.mlmodel");
     std::vector<uint8_t> patched;
+    recipe::EvalStats patch_stats;
     if (t.recipe().patch_count() > 0) {
-        Error pe = recipe::patched_spec(t.recipe(), src, spec->data, spec->size, patched, observer);
+        Error pe = recipe::patched_spec(t.recipe(), src, spec->data, spec->size, patched, observer, &patch_stats);
         if (!pe.ok()) return pe;
     }
     for (const auto & [name, dst] : {std::pair<const char *, std::string>{"Manifest.json", pkg + "/Manifest.json"},
@@ -600,6 +601,7 @@ Error write_package(const recipe::Template & t, recipe::TensorSource & src, cons
         ::close(fd);
         if (!e.ok()) return e;
     }
+    std::vector<uint8_t>().swap(patched);  // written: the blob pass never holds the spec
     const std::string wb = data + "/weights/weight.bin";
     const int fd = ::open(wb.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     if (fd < 0) return io_error("create " + wb, errno);
@@ -629,6 +631,11 @@ Error write_package(const recipe::Template & t, recipe::TensorSource & src, cons
                               b.data, b.bytes);
             },
             stats, observer);
+    }
+    if (stats) {
+        // The two passes run one after the other: the larger peak is the generator's.
+        stats->peak_bytes = std::max(stats->peak_bytes, patch_stats.peak_bytes);
+        stats->tensors_read += patch_stats.tensors_read;
     }
     if (e.ok()) e = w.finish();
     if (e.ok()) e = flush();

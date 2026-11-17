@@ -262,6 +262,38 @@ void case_generate_and_artifact_json() {
     CHECK(read_bytes(env.td / "pkg.mlpackage/Manifest.json") == read_bytes(env.td / "tpl/Manifest.json"));
 }
 
+// The generation peak covers the spec patch pass too: a patch expression
+// whose interpreter peak exceeds every blob expression's sets it.
+void case_patch_pass_peak() {
+    TempDir td;
+    TemplateSpec spec = cache_spec();
+    spec.decls = "source \"w\" f32 [4,8]\nsource \"b\" f32 [8]\nsource \"big\" f32 [4096]\n"
+                 "meta \"general.architecture\" str\n";
+    spec.items.push_back(patch_(16, "fp16", 4096, "f16(mul(t(\"big\"), 2))"));
+    spec.spec_bytes = std::string(16 + 4096 * 2 + 16, '\x01');
+    std::string sentinel;
+    for (int i = 0; i < 4096 * 2; ++i) sentinel += "01";
+    spec.extra["patches"] = json::array({{{"spec_offset", 16}, {"len", 4096 * 2}, {"sentinel_hex", sentinel}}});
+    auto tpl = make_template(td / "tpl", spec);
+    std::vector<TT> ts = tensors(1.0f);
+    ts.push_back(TT{"big", T_F32, {4096}, std::vector<float>(4096, 0.25f)});
+    MemSource ms(ts, kMeta);
+    recipe::EvalStats blobs, patches;
+    CHECK(recipe::evaluate(tpl->recipe(), ms, [](const recipe::BlobOut &) { return Error{}; }, &blobs).ok());
+    std::vector<uint8_t> patched;
+    const recipe::TemplateFile * f = tpl->file("model.mlmodel");
+    CHECK(recipe::patched_spec(tpl->recipe(), ms, f->data, f->size, patched, nullptr, &patches).ok());
+    // t("big") and its product are live together, plus the spec copy.
+    CHECK(patches.peak_bytes >= 2 * 4096 * 4 + f->size);
+    CHECK(patches.peak_bytes > blobs.peak_bytes);
+    recipe::EvalStats st;
+    CHECK(cache::write_package(*tpl, ms, td / "pkg.mlpackage", &st).ok());
+    CHECK_MSG(st.peak_bytes == patches.peak_bytes,
+              std::to_string(st.peak_bytes) + " vs patch pass " + std::to_string(patches.peak_bytes));
+    CHECK(read_bytes(td / "pkg.mlpackage/Data/com.apple.CoreML/model.mlmodel") ==
+          std::string(patched.begin(), patched.end()));
+}
+
 void case_memo_hot_path() {
     Env env;
     const std::string a = env.source("a.gguf");
@@ -1815,6 +1847,7 @@ int main(int argc, char ** argv) {
                      {
                          {"golden-keys", case_golden_keys},
                          {"generate-and-artifact-json", case_generate_and_artifact_json},
+                         {"patch-pass-peak", case_patch_pass_peak},
                          {"memo-hot-path", case_memo_hot_path},
                          {"publish-race", case_publish_race},
                          {"recheck-under-lock", case_recheck_under_lock},
