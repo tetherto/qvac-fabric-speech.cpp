@@ -282,6 +282,21 @@ bool sweep_row_gated(const std::string & units, const std::string & chip, double
     return units == "cpu_and_ane" && generated_min_snr("coreml-all", chip, min_snr) < min_snr;
 }
 
+// One parity case of a --units-sweep row holds when both decodes ran, the
+// reference on ggml and the candidate on the sidecar under test (a fallback
+// to ggml would compare ggml with itself and report an infinite SNR), and
+// the SNR reaches the gate.
+bool sweep_case_holds(bool ref_ok, const std::string & ref_backend, bool ok, const std::string & backend,
+                      const std::string & label, double snr, double gate) {
+    return ref_ok && ref_backend == PARLER_DAC_GGML_BACKEND && ok && backend == label && snr >= gate;
+}
+
+// A chip with a gated row needs the sweep: a sweep that cannot find, link or
+// load the artifact fails there instead of reporting nothing.
+bool sweep_required(const std::string & chip, double min_snr) {
+    return sweep_row_gated("cpu_and_ane", chip, min_snr);
+}
+
 void parity_floor_gates() {
     check(generated_min_snr("coreml-all", "Apple M4 Max", 54) == 50, "parity floor: M4 Max under all is 50 dB");
     check(generated_min_snr("coreml-all", "Apple M2", 54) == 54, "parity floor: an unlisted chip keeps --min-snr");
@@ -299,6 +314,17 @@ void parity_floor_gates() {
           "parity floor: still needed while a multi-frame case is below --min-snr");
     check(!floor_expired(54, 54, {56.2, 56.4}) && !floor_expired(50, 54, {}),
           "parity floor: nothing expires without a floor or a case");
+    check(sweep_case_holds(true, "ggml", true, "coreml-ane", "coreml-ane", 54.2, 54),
+          "units sweep: a case decoded by the sidecar at the gate holds");
+    check(!sweep_case_holds(true, "ggml", true, "ggml", "coreml-ane", INFINITY, 54) &&
+              !sweep_case_holds(true, "ggml", true, "coreml-all", "coreml-ane", 60, 54) &&
+              !sweep_case_holds(false, "ggml", true, "coreml-ane", "coreml-ane", 60, 54) &&
+              !sweep_case_holds(true, "coreml-ane", true, "coreml-ane", "coreml-ane", INFINITY, 54) &&
+              !sweep_case_holds(true, "ggml", false, "coreml-ane", "coreml-ane", 60, 54) &&
+              !sweep_case_holds(true, "ggml", true, "coreml-ane", "coreml-ane", 53.9, 54),
+          "units sweep: a fallback to ggml, another sidecar, a failed decode or a low SNR fails the case");
+    check(sweep_required("Apple M4 Max", 54) && !sweep_required("Apple M2", 54) && !sweep_required("Apple M4 Max", 45),
+          "units sweep: required where a row is gated");
     check(sweep_row_gated("cpu_and_ane", "Apple M4 Max", 54) && !sweep_row_gated("all", "Apple M4 Max", 54) &&
               !sweep_row_gated("cpu_and_gpu", "Apple M4 Max", 54) &&
               !sweep_row_gated("cpu_and_ane", "Apple M2", 54) &&
@@ -972,8 +998,14 @@ void units_sweep(parler_model & model, const std::string & cache_dir, double min
             break;
         }
     }
+    // On a chip with a gated row a setup failure is a failure, not a silent skip.
+    const bool required = sweep_required(chip, min_snr);
+    const auto setup_failed = [&](const std::string & what) {
+        fprintf(stderr, "  %s\n", what.c_str());
+        if (required) check(false, "units sweep on " + chip + ": " + what);
+    };
     if (artifact.empty()) {
-        fprintf(stderr, "  no generated artifact under %s\n", cache_dir.c_str());
+        setup_failed("no generated artifact under " + cache_dir);
         return;
     }
     const fs::path dir = fs::temp_directory_path() /
@@ -982,7 +1014,8 @@ void units_sweep(parler_model & model, const std::string & cache_dir, double min
     const std::string fake_gguf = (dir / "parler-sweep.gguf").string();
     fs::create_directory_symlink(artifact, parler_dac_sidecar_path(fake_gguf), ec);
     if (ec) {
-        fprintf(stderr, "  cannot link %s: %s\n", artifact.c_str(), ec.message().c_str());
+        setup_failed("cannot link " + artifact + ": " + ec.message());
+        fs::remove_all(dir, ec);
         return;
     }
     fprintf(stderr, "  artifact %s\n", artifact.c_str());
@@ -1001,27 +1034,32 @@ void units_sweep(parler_model & model, const std::string & cache_dir, double min
         }
         const int window = sidecar->window();
         const int keep = window - 2 * parler_dac_rf_frames(model);
+        const std::string label = sidecar->label();
         std::string line;
         bool row_holds = true;
         for (const int n_frames : {2 * keep + keep / 2, window / 3, 1}) {
             const std::vector<int32_t> codes = random_codes(hp, n_frames, 100 + n_frames);
             model.dac_sidecar.reset();
             std::vector<float> ref, pcm;
-            decode(model, codes, n_frames, ref);
+            std::string ref_backend, backend;
+            const bool ref_ok = decode(model, codes, n_frames, ref, nullptr, 0, -1, &ref_backend);
             model.dac_sidecar = sidecar;
-            std::string backend;
             const bool ok = decode(model, codes, n_frames, pcm, nullptr, 0, -1, &backend);
             double max_abs = 0;
-            const double snr = ok && pcm.size() == ref.size() ? snr_db(pcm, ref, max_abs) : NAN;
-            if (!(snr >= gate_for(n_frames, min_snr))) row_holds = false;
-            char buf[96];
-            snprintf(buf, sizeof buf, "  %d frames %.2f dB (max_abs %.2e)", n_frames, snr, max_abs);
+            const double snr = ref_ok && ok && pcm.size() == ref.size() ? snr_db(pcm, ref, max_abs) : NAN;
+            if (!sweep_case_holds(ref_ok, ref_backend, ok, backend, label, snr, gate_for(n_frames, min_snr))) {
+                row_holds = false;
+            }
+            char buf[160];
+            snprintf(buf, sizeof buf, "  %d frames %.2f dB (max_abs %.2e%s%s)", n_frames, snr, max_abs,
+                     backend == label ? "" : ", decoded on ", backend == label ? "" : backend.c_str());
             line += buf;
         }
         fprintf(stderr, "  units %-11s:%s\n", units, line.c_str());
         if (gated) {
-            check(row_holds, std::string("units ") + units + " on " + chip + " holds --min-snr " +
-                                 std::to_string(min_snr) + " dB (the gate `all` has a floor for)");
+            check(row_holds, std::string("units ") + units + " on " + chip + " decodes every case on " + label +
+                                 " and holds --min-snr " + std::to_string(min_snr) +
+                                 " dB (the gate `all` has a floor for)");
         }
         parler_attach_dac_sidecar(model, std::shared_ptr<parler_dac_sidecar>{}, policy);
     }
