@@ -5,6 +5,7 @@
 #include "vae_encode_windows.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <stdexcept>
 
@@ -46,6 +47,12 @@ bool valid_units(const std::string & u) {
 }
 
 }  // namespace
+
+namespace {
+std::atomic<vae_coreml_completion_hook> g_completion_hook{nullptr};
+}  // namespace
+
+void vae_coreml_set_completion_hook(vae_coreml_completion_hook hook) { g_completion_hook.store(hook); }
 
 void vae_coreml_validate_options(const CoremlOptions & o) {
     if (o.compute_units && !valid_units(*o.compute_units)) {
@@ -163,6 +170,7 @@ rt::Error warm_vae(void * model, const rt::LoadRequest &) {
     if (acestep_coreml_vae_decode(m.ctx, latent.data(), pcm.data()) != 0) {
         return rt::Error::transient("acestep: the Core ML VAE warm-up prediction failed");
     }
+    if (const vae_coreml_completion_hook hook = g_completion_hook.load()) hook();
     return {};
 }
 

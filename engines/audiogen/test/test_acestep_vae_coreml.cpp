@@ -39,7 +39,8 @@
 //       the decoder is generated, compiled, loaded and warmed into DIR; each
 //       phase is held to the template constant that charges it. --late evicts
 //       the decoder while it loads (the late-completion schedule) and holds
-//       what the load costs after the eviction to the load charge.
+//       every sample after the eviction, over the warmed ggml-only baseline,
+//       to the transient charge fit applies outside the VAE decode phase.
 //
 // Without --require-coreml a route other than `generate` skips the device
 // cases (exit 77); with it, that fails.
@@ -62,11 +63,13 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -165,6 +168,52 @@ std::vector<float> make_latent(int T_latent, uint32_t seed) {
     }
     return latent;
 }
+
+// Holds the decoder load's completion (after its warm-up, before the runtime
+// publishes it) until release(), so a late-completion case orders the
+// completion after its eviction instead of hoping a cold load is slow enough.
+struct completion_barrier {
+    std::mutex mu;
+    std::condition_variable cv;
+    bool entered = false, released = false;
+
+    static completion_barrier & get() {
+        static completion_barrier b;
+        return b;
+    }
+    static void hold() {
+        completion_barrier & b = get();
+        std::unique_lock<std::mutex> lk(b.mu);
+        b.entered = true;
+        b.cv.notify_all();
+        b.cv.wait(lk, [&] { return b.released; });
+    }
+    static void arm() {
+        completion_barrier & b = get();
+        {
+            std::lock_guard<std::mutex> lk(b.mu);
+            b.entered = b.released = false;
+        }
+        detail::vae_coreml_set_completion_hook(&completion_barrier::hold);
+    }
+    static bool is_entered() {
+        completion_barrier & b = get();
+        std::lock_guard<std::mutex> lk(b.mu);
+        return b.entered;
+    }
+    static bool wait_entered(std::chrono::seconds timeout) {
+        completion_barrier & b = get();
+        std::unique_lock<std::mutex> lk(b.mu);
+        return b.cv.wait_for(lk, timeout, [&] { return b.entered; });
+    }
+    static void release() {
+        detail::vae_coreml_set_completion_hook(nullptr);
+        completion_barrier & b = get();
+        std::lock_guard<std::mutex> lk(b.mu);
+        b.released = true;
+        b.cv.notify_all();
+    }
+};
 
 // ---- model-free checks -------------------------------------------------------
 
@@ -552,32 +601,37 @@ std::string case_lowmem(const std::string & models, const std::string & root, fl
     const std::string at_create = engine->coreml_status();
     check(state_of(at_create) == "idle", "create() requests nothing (" + state_of(at_create) + ")");
 
-    // Gen 1: hold the ggml decode until the cold load has started, so its
-    // completion falls after the eviction at the end of the VAE stage.
+    // Gen 1: the decode runs on ggml while the cold load proceeds; the load's
+    // completion is held at its end (after the warm-up, before it publishes)
+    // until free_vae() has evicted the slot, then released: it must write its
+    // hint and never repopulate the slot.
+    completion_barrier::arm();
     std::string at_vae;
-    bool load_started = false;
+    bool held = false, asked = false;
     // The engine reports ("vae", 0, 1) before the decode; the decode's own
     // progress (the ggml graph's node counts) comes after its acquisition.
     const GenerateResult g1 = engine->generate(short_params(duration), [&](const std::string & stage, int step, int) {
-        if (stage == "vae" && step > 0 && at_vae.empty()) {
-            load_started = poll_until([&] { return engine->coreml_status(); },
-                                      [](const std::string & s) {
-                                          const std::string st = state_of(s);
-                                          return st == "loading" || st == "warming";
-                                      },
-                                      std::chrono::seconds(300), &at_vae);
+        if (stage == "vae" && step > 0 && !asked) {
+            asked = true;
+            held = completion_barrier::wait_entered(std::chrono::seconds(300));
+            at_vae = engine->coreml_status();
         }
         return true;
     });
     const std::string after1 = engine->coreml_status();
-    std::fprintf(stderr, "  gen 1: %s pending=%d, %zu samples; slot after: %s\n", g1.vae_backend.c_str(),
-                 (int) g1.coreml_pending, g1.pcm.size(), head(after1).c_str());
-    check(load_started, "gen 1: the cold load started during the ggml decode (" + state_of(at_vae) + ")");
+    std::fprintf(stderr, "  gen 1: %s pending=%d, %zu samples; slot while held %s; after: %s\n", g1.vae_backend.c_str(),
+                 (int) g1.coreml_pending, g1.pcm.size(), state_of(at_vae).c_str(), head(after1).c_str());
+    check(held && state_of(at_vae) == "warming",
+          "gen 1: the cold load reached its completion during the ggml decode and is held there (" +
+              state_of(at_vae) + ")");
     check(!g1.pcm.empty() && g1.vae_backend == "ggml" && g1.coreml_pending,
           "gen 1 decodes on ggml, coreml_pending (" + g1.vae_backend + ")");
-    check(state_of(after1) == "idle", "gen 1: free_vae() evicted the slot (" + state_of(after1) + ")");
-    // The started load completes after the eviction: it writes the hint and
+    check(state_of(after1) == "idle" && !has_hint(after1),
+          "gen 1: free_vae() evicted the slot before the load completed (" + state_of(after1) +
+              (has_hint(after1) ? ", hint already written" : ", no hint yet") + ")");
+    // Released after the eviction: the load completes, writes the hint and
     // never repopulates the slot.
+    completion_barrier::release();
     bool repopulated = false;
     std::string last;
     const bool hinted = poll_until([&] { return engine->coreml_status(); },
@@ -586,7 +640,10 @@ std::string case_lowmem(const std::string & models, const std::string & root, fl
                                        return has_hint(s);
                                    },
                                    std::chrono::seconds(300), &last);
-    std::this_thread::sleep_for(std::chrono::seconds(1));
+    for (int i = 0; i < 20; ++i) {
+        if (state_of(engine->coreml_status()) != "idle") repopulated = true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
     const std::string settled = engine->coreml_status();
     check(hinted, "the late cold load wrote its hint: " + head(last));
     check(!repopulated && state_of(settled) == "idle", "the late load never repopulated the evicted slot (" +
@@ -869,9 +926,12 @@ struct mem_sample {
 
 // Increments in bytes, each over the footprint just before its group began:
 // prepare (generate, compile), load and warm-up, the steady state (over the
-// footprint just before the load), the late tail (from the eviction until the
-// late load released its model, over the footprint just before the load) and
-// the whole run over the baseline.
+// footprint just before the load) and the whole run over the baseline. The
+// late tail (every sample from the eviction until the late load released its
+// model) is taken over the baseline itself: the warmed ggml-only footprint,
+// so it holds everything this process kept above what the ggml work needs
+// outside the VAE decode phase, preparation leftovers included, which is what
+// fit's transient charge covers there.
 struct mem_breakdown {
     uint64_t prepare = 0, load_warm = 0, steady = 0, late = 0, total = 0;
     bool prepared = false, loaded = false, ready = false, late_seen = false;
@@ -895,7 +955,7 @@ mem_breakdown mem_breakdown_of(const std::vector<mem_sample> & samples, uint64_t
         switch (group(s.phase)) {
             case 1: b.prepared = true; b.prepare = std::max(b.prepare, over(s.footprint, group_start)); break;
             case 2: b.loaded = true; b.load_warm = std::max(b.load_warm, over(s.footprint, group_start)); break;
-            case 3: b.late_seen = true; b.late = std::max(b.late, over(s.footprint, load_start.value_or(base))); break;
+            case 3: b.late_seen = true; b.late = std::max(b.late, over(s.footprint, base)); break;
             default: break;
         }
         if (s.phase == mem_phase::ready) {
@@ -907,6 +967,24 @@ mem_breakdown mem_breakdown_of(const std::vector<mem_sample> & samples, uint64_t
         last = s.phase;
     }
     return b;
+}
+
+// The breakdown on a synthetic late schedule: preparation leaves 200 above
+// the baseline, the load adds 50, and after the eviction the footprint stays
+// at 280 above the baseline. The late tail is 280 (over the baseline), not
+// the 30 it is over the footprint just before the load.
+void breakdown_self_test() {
+    const uint64_t base = 1000;
+    const std::vector<mem_sample> samples = {
+        {1000, mem_phase::ggml},    {1150, mem_phase::generate}, {1200, mem_phase::compile},
+        {1200, mem_phase::ggml},    {1230, mem_phase::load},     {1250, mem_phase::warm},
+        {1280, mem_phase::late},    {1240, mem_phase::late},     {1210, mem_phase::ggml},
+    };
+    const mem_breakdown b = mem_breakdown_of(samples, base);
+    check(b.prepared && b.loaded && b.late_seen && b.prepare == 200 && b.load_warm == 50 && b.late == 280 &&
+              b.total == 280,
+          "memory breakdown: the late tail is every post-eviction sample over the ggml-only baseline (" +
+              std::to_string(b.late) + ")");
 }
 
 void memory_schedule(const std::string & vae, const std::string & cache, bool late, bool require) {
@@ -958,30 +1036,40 @@ void memory_schedule(const std::string & vae, const std::string & cache, bool la
 
     const auto t0 = Clock::now();
     int ggml_calls = 0, coreml_calls = 0;
-    bool evicted = false, hint_seen = false;
+    bool evicted = false, hint_seen = false, repopulated = false;
+    if (late) completion_barrier::arm();
     while (Clock::now() - t0 < std::chrono::minutes(6)) {
         if (late && evicted) {
             // After the eviction: ggml keeps working until the late load
-            // wrote its hint, then two more seconds for the release.
+            // wrote its hint, then two more seconds for the release. The slot
+            // must stay idle throughout.
             ggml_vae->decode(latent, T);
             ++ggml_calls;
-            if (!hint_seen && has_hint(stage->status_json())) {
+            const std::string st = stage->status_json();
+            if (state_of(st) != "idle") repopulated = true;
+            if (!hint_seen && has_hint(st)) {
                 hint_seen = true;
                 const auto t_hint = Clock::now();
                 while (Clock::now() - t_hint < std::chrono::seconds(2)) {
                     ggml_vae->decode(latent, T);
                     ++ggml_calls;
+                    if (state_of(stage->status_json()) != "idle") repopulated = true;
                 }
                 break;
             }
             continue;
         }
         detail::vae_coreml_call call = stage->acquire(T);
-        if (late && !evicted && (phase.load() == (int) mem_phase::load || phase.load() == (int) mem_phase::warm)) {
+        if (late && !evicted && completion_barrier::is_entered()) {
+            // The cold load finished its warm-up and is held before it
+            // publishes: a VAE stage boundary now, then the completion.
             call = {};
             in_late.store(true);
-            stage->evict();  // a VAE stage boundary while the cold load runs
+            stage->evict();
             evicted = true;
+            const std::string st = stage->status_json();
+            if (state_of(st) != "idle" || has_hint(st)) repopulated = true;
+            completion_barrier::release();
             continue;
         }
         if (!call.decoder) {
@@ -1001,6 +1089,7 @@ void memory_schedule(const std::string & vae, const std::string & cache, bool la
         if (++coreml_calls >= 5) break;
     }
     const double secs = std::chrono::duration<double>(Clock::now() - t0).count();
+    if (late) completion_barrier::release();  // never leave a load held (the loop may have timed out)
     if (!late) stage->evict();  // the early-completion schedule ends at a stage boundary
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
     stop.store(true);
@@ -1015,10 +1104,10 @@ void memory_schedule(const std::string & vae, const std::string & cache, bool la
     for (const auto & a : ane_samples) ane_peak = std::max(ane_peak, a.rss);
     std::fprintf(stderr,
                  "  memory (MiB; base %.1f): prepare %.1f (charged %.1f), load+warm %.1f (charged %.1f), steady %.1f "
-                 "(resident charged %.1f), late tail %.1f (load charged %.1f), whole run %.1f (envelope %.1f); "
+                 "(resident charged %.1f), late tail over the baseline %.1f (transient charged %.1f), whole run %.1f (envelope %.1f); "
                  "ANECompilerService growth %.1f from %.1f (%s), peak %.1f, reserve %.1f\n",
                  mib(base), mib(b.prepare), mib(route.prepare_peak_bytes), mib(b.load_warm), mib(route.load_peak_bytes),
-                 mib(b.steady), mib(route.resident_bytes), mib(b.late), mib(route.load_peak_bytes), mib(b.total),
+                 mib(b.steady), mib(route.resident_bytes), mib(b.late), mib(route.transient_bytes), mib(b.total),
                  mib(route.envelope_bytes), mib(ane.growth), mib(ane.before), baseline, mib(ane_peak),
                  mib(route.ane_compile_reserve_bytes));
     std::fprintf(stderr,
@@ -1041,9 +1130,10 @@ void memory_schedule(const std::string & vae, const std::string & cache, bool la
     }
     if (late) {
         check(evicted && hint_seen && b.late_seen, "late completion: evicted while loading, the load wrote its hint");
-        check(b.late <= route.load_peak_bytes, "late tail within the load charge (the transient fit charges in "
-                                               "every phase)");
-        check(coreml_calls == 0, "late completion: no Core ML decode ran (the slot was never repopulated)");
+        check(b.late <= route.transient_bytes, "late tail over the warmed ggml-only baseline within the transient "
+                                               "charge (what fit charges outside the VAE decode phase)");
+        check(coreml_calls == 0 && !repopulated && state_of(stage->status_json()) == "idle",
+              "late completion: the load completed after the eviction and never repopulated the slot");
     } else {
         check(b.ready && coreml_calls >= 5 && ggml_calls >= 1, "early completion: ggml then 5 Core ML calls (" +
                                                                     std::to_string(ggml_calls) + " / " +
@@ -1082,7 +1172,10 @@ int main(int argc, char ** argv) {
     }
     if (vae.empty() && !models.empty()) vae = models + "/vae-BF16.gguf";
 
-    if (self) self_test();
+    if (self) {
+        self_test();
+        breakdown_self_test();
+    }
     if (fit) {
         if (vae.empty()) {
             std::fprintf(stderr, "--fit-stable needs --vae or --models\n");

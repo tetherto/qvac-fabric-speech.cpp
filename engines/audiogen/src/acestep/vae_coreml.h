@@ -98,6 +98,13 @@ struct vae_coreml_call {
     std::function<void(const std::string & reason)> retire;
 };
 
+// Tests: called by the decoder's warm-up after the load and its warm
+// prediction, before the runtime publishes the model (null: nothing, the
+// default). It may block, which holds the load's completion until the test
+// releases it, so a test can order the completion after an eviction.
+using vae_coreml_completion_hook = void (*)();
+void vae_coreml_set_completion_hook(vae_coreml_completion_hook hook);
+
 class vae_coreml_stage {
 public:
     // Resolves `options` (with the ACESTEP_* environment) and plans the
