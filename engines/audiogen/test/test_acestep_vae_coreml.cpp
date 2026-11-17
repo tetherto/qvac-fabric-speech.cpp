@@ -511,6 +511,38 @@ void fit_stable(const std::string & vae, const std::string & models, const std::
     fs::remove_all(cache, ec);
 }
 
+// Route none (generation off, nothing prebuilt; with prewarm all and wait
+// construct, which must not block) still issues the construction group: an
+// empty one that succeeds with nothing to prepare and lists the decoder under
+// skipped_route_none.
+void route_none_construction(const std::string & vae, const std::string & root) {
+#ifdef AUDIOGEN_USE_COREML
+    std::fprintf(stderr, "route none: the construction group\n");
+    const fs::path cache = fresh_dir(root, "route-none");
+    for (const bool generate_off : {true, false}) {
+        CoremlOptions o;
+        o.cache_dir = cache.string();
+        o.prewarm = CoremlOptions::Prewarm::all;
+        o.wait = CoremlOptions::Wait::construct;
+        if (generate_off) o.generate = CoremlOptions::Generate::never;
+        else o.use = CoremlOptions::Use::off;
+        auto stage = detail::vae_coreml_stage::create(vae, o, false, true);
+        const std::string group = stage ? stage->construction_json() : std::string("(no stage)");
+        const std::string what = generate_off ? "generate never" : "use off";
+        std::fprintf(stderr, "  %s: %s\n", what.c_str(), head(group, 300).c_str());
+        check(stage && !stage->active() && contains(group, "\"success\":true") &&
+                  contains(group, "\"nothing_to_prepare\":true") && contains(group, "\"skipped_route_none\":[{") &&
+                  contains(group, "\"stage\":\"vae\""),
+              what + ": route none issues an empty construction group with the decoder's status");
+    }
+    std::error_code ec;
+    fs::remove_all(cache, ec);
+#else
+    (void) vae;
+    (void) root;
+#endif
+}
+
 // The same comparison on a cache a real run populated (a compiled artifact and
 // the hint its load wrote) against a fresh empty directory: the cache as it
 // is, then with its hints stale.
@@ -1303,6 +1335,7 @@ int main(int argc, char ** argv) {
             return 2;
         }
         fit_stable(vae, models, cache_root.empty() ? fs::temp_directory_path().string() : cache_root, require);
+        route_none_construction(vae, cache_root.empty() ? fs::temp_directory_path().string() : cache_root);
     }
 #ifdef AUDIOGEN_USE_COREML
     if (!first_decode.empty()) {

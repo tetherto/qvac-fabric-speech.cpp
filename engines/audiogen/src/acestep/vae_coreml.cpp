@@ -310,6 +310,11 @@ std::shared_ptr<vae_coreml_stage> vae_coreml_stage::create(const std::string & g
         if (p->resolved.strict()) {
             throw_strict("no usable Core ML VAE decoder (" + p->plan.route.state + ": " + p->plan.route.reason + ")");
         }
+        // The construction group still exists: empty, nothing to prepare,
+        // with the decoder's route-none status, so prewarm all reports a
+        // normal (successful) result instead of none at all.
+        p->construction = p->manager->issue_group(rt::GroupKind::construction, {},
+                                                  p->resolved.wait == rt::Wait::construct, {p->none_status});
         return std::shared_ptr<vae_coreml_stage>(new vae_coreml_stage(std::move(p)));
     }
 

@@ -144,7 +144,8 @@ public:
     const vae_coreml_route & route() const;
     // The status JSON (schema 1: engine, cache_dir, generation, stages).
     std::string status_json() const;
-    // The construction group's result JSON ("{}" without one).
+    // The construction group's result JSON; with route none an empty group
+    // (success, nothing_to_prepare, the decoder under skipped_route_none).
     std::string construction_json() const;
     // Blocks until the decoder is ready or terminal, `timeout_ms` passes (< 0:
     // no limit) or `cancel` (optional) is set. True when it is ready. Returns
