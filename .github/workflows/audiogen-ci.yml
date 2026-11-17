@@ -331,6 +331,93 @@ jobs:
           AUDIOGEN_TEST_MODELS_DIR="$GITHUB_WORKSPACE/coreml-fixture-p8" \
             ./build/bench-vae-coreml >> "$GITHUB_STEP_SUMMARY"
 
+      # The ACE-Step VAE decoder generated from vae-BF16.gguf by the shared
+      # Core ML runtime (template acestep-vae-t64): G3, the exporter on the
+      # real GGUF against the generator, every blob within the template's
+      # tolerance; then G4, test-vae-coreml-parity on the generated route from
+      # an empty cache (the GGUF linked into a directory with no prebuilt
+      # sidecar), strict, cosine >= 0.999 against the ggml decode, and a
+      # second owner adopting the published artifact. The test fails on any
+      # skip path: --cache-dir with a prebuilt next to the GGUF, or a route
+      # that is not generate, is a failure.
+      - name: Test (Core ML VAE generated sidecar, staged vae-BF16.gguf)
+        id: acestep-vae-generated
+        run: |
+          set -euo pipefail
+          sw_vers
+          .venv-coreml/bin/python engines/coreml/python/coreml_template.py --tool build/qvac-coreml-tool real \
+            --template-dir engines/audiogen/coreml-templates/acestep-vae-t64 --gguf coreml-fixture/vae-BF16.gguf
+          rm -rf acestep-vae-gen
+          mkdir -p acestep-vae-gen/models
+          ln -s "$GITHUB_WORKSPACE/coreml-fixture/vae-BF16.gguf" acestep-vae-gen/models/vae-BF16.gguf
+          AUDIOGEN_TEST_MODELS_DIR="$PWD/acestep-vae-gen/models" \
+            ./build/test-vae-coreml-parity --cache-dir "$PWD/acestep-vae-gen/cache"
+          rm -rf acestep-vae-gen
+
+      # The low-memory semantics on the staged generation models, each case
+      # on an empty cache: an encoding starts no decoder job; three
+      # generate() calls (the first decodes on ggml while the cold load
+      # completes after its eviction, writing its hint without repopulating
+      # the slot; the second and third reload warm and decode on Core ML);
+      # {prewarm all, wait construct} succeeds with no decoder retained; an
+      # eviction cancels an unstarted job. Then fit is the same with an empty
+      # and a populated cache. --require-coreml turns every skip into a
+      # failure.
+      - name: Test (Core ML VAE low-memory mode and fit, staged models)
+        if: >-
+          !cancelled() &&
+          (steps.acestep-vae-generated.outcome == 'success' || steps.acestep-vae-generated.outcome == 'failure')
+        env:
+          AUDIOGEN_TEST_GPU: '1'
+        run: |
+          set -euo pipefail
+          rm -rf acestep-vae-lowmem
+          mkdir -p acestep-vae-lowmem
+          ./build/test-acestep-vae-coreml --models "$AUDIOGEN_TEST_MODELS_DIR" \
+            --cache-root "$PWD/acestep-vae-lowmem" --require-coreml --fit-stable
+          rm -rf acestep-vae-lowmem
+
+      # The memory validation behind the acestep-vae-t64 memory constants, on
+      # this runner's chip: ggml VAE decodes run while the decoder is
+      # generated, compiled, loaded and warmed in the background, three times
+      # to completion (early completion, then a stage-boundary eviction) and
+      # twice evicted while loading (late completion: the load finishes after
+      # the eviction, writes its hint and releases its model), each from a
+      # re-signed copy of the test and an empty cache, so every Neural Engine
+      # load is cold. Each run prints its per-phase table and a one-line JSON
+      # report and fails when a phase exceeds the constant that charges it;
+      # ANECompilerService is held by its growth during the load (its absolute
+      # size includes what other jobs on this runner's Mac compiled). Known
+      # failure mode: a co-hosted job compiling for the Neural Engine during
+      # the load counts as growth; it shows as one run growing far more than
+      # the others; rerun the job.
+      - name: Memory schedule (generated ACE-Step VAE decoder, overlapped, this runner)
+        if: >-
+          !cancelled() &&
+          (steps.acestep-vae-generated.outcome == 'success' || steps.acestep-vae-generated.outcome == 'failure')
+        run: |
+          set -euo pipefail
+          sysctl -n machdep.cpu.brand_string hw.memsize
+          rm -rf acestep-vae-memory
+          mkdir -p acestep-vae-memory/models
+          # No prebuilt sidecar next to this GGUF: the generated route.
+          ln -s "$GITHUB_WORKSPACE/coreml-fixture/vae-BF16.gguf" acestep-vae-memory/models/vae-BF16.gguf
+          status=0
+          for run in early:1 early:2 early:3 late:1 late:2; do
+            kind="${run%%:*}"
+            i="${run##*:}"
+            id="qvac-memory-$(uuidgen)"
+            cp build/test-acestep-vae-coreml "acestep-vae-memory/$id"
+            codesign -s - -f -i "$id" "acestep-vae-memory/$id"
+            late_flag=""
+            if [ "$kind" = late ]; then late_flag="--late"; fi
+            "acestep-vae-memory/$id" --vae acestep-vae-memory/models/vae-BF16.gguf \
+              --memory-schedule "$PWD/acestep-vae-memory/cache-$kind-$i" --require-coreml $late_flag || status=1
+            rm -rf "acestep-vae-memory/cache-$kind-$i" "acestep-vae-memory/$id" "$HOME/Library/Caches/$id"
+          done
+          rm -rf acestep-vae-memory
+          exit "$status"
+
   # No opt-in GPU job here: audiogen's only gpu-labeled test is the Metal
   # parity check (SKIP_RETURN_CODE 77 without Metal), which the build-test
   # macOS lane already runs — and skip-guards — in its "Test (Metal)" step.
