@@ -31,7 +31,7 @@
     "runtime_weight_bytes": 170113920,
     "workspace_bytes": 948765824,
     "compile_peak_bytes": 0,
-    "ane_compile_reserve_bytes": 245366784,
+    "ane_compile_reserve_bytes": 430964736,
     "load_peak_bytes": {
       "cpu_and_ane": null,
       "all": 1120927744,
@@ -45,13 +45,18 @@
         "units": "all",
         "os": "27.2.1",
         "chip": "M2"
+      },
+      {
+        "units": "all",
+        "os": "26.7.2",
+        "chip": "M4 Max"
       }
     ],
     "measured": {
       "margin": 1.25,
-      "runs": 5,
+      "runs": 10,
       "resident_bytes": 1119879168,
-      "basis": "Each constant is 1.25 x the largest value measured over every overlapped generated-schedule run on the validated_for hosts (three early-completion and two late-completion runs), rounded up to 1 MiB, so the envelope's own margin is 1.0: the prepare charge (generation_peak_bytes + 8 MiB + compile_peak_bytes, compile_peak_bytes 0) covers the prepare from the start of generation to the end of the compile (at most 242.6 MiB); load_peak_bytes.all covers the load and warm-up, early (over the footprint just before the load) or late (from the eviction until the load that finished after it released its model), at most 854.9 MiB; the resident part (runtime_weight_bytes + 2 x I/O + workspace_bytes, runtime_weight_bytes being weight.bin's size) covers the steady state over the footprint just before the load, at most 854.0 MiB, which holds the memory the warm-up prediction allocates for the program's GPU and CPU segments; ane_compile_reserve_bytes covers ANECompilerService's largest absolute size while loading (190.8 MiB), since no run found the service clean (it held 67-106 MiB before every load) and a service that already holds memory reuses it, so its growth (at most 97.6 MiB) understates a cold compile on a clean host"
+      "basis": "Each constant is 1.25 x the largest value measured over every overlapped generated-schedule run on the validated_for hosts (on each host three early-completion and two late-completion runs), rounded up to 1 MiB, so the envelope's own margin is 1.0: the prepare charge (generation_peak_bytes + 8 MiB + compile_peak_bytes, compile_peak_bytes 0) covers the prepare from the start of generation to the end of the compile (at most 242.6 MiB, M2); load_peak_bytes.all covers the load and warm-up, early (over the footprint just before the load) or late (from the eviction until the load that finished after it released its model), at most 854.9 MiB (M2); the resident part (runtime_weight_bytes + 2 x I/O + workspace_bytes, runtime_weight_bytes being weight.bin's size) covers the steady state over the footprint just before the load, at most 854.0 MiB (M2), which holds the memory the warm-up prediction allocates for the program's GPU and CPU segments; the M4 Max stayed below each of these (prepare 242.4, load 555.3, steady 555.3 MiB). ane_compile_reserve_bytes covers ANECompilerService's largest growth during a load, 328.7 MiB on the M4 Max (234.3-328.7 MiB in four runs; the fifth found the service already at its load size), which also exceeds the service's largest absolute size while the M2 loaded (187.0 MiB; it grew at most 97.6 MiB there). No run found the service clean: it held 67-101 MiB before every M2 load and 386-406 MiB, left by other jobs' compiles on the runner's Mac, before every M4 Max load, so the M4 Max's absolute sizes (up to 731.4 MiB) are not this load's. A service that already holds memory may reuse some of it, but on the M2 a load from a clean service (20 MiB) grew 104.0 MiB against at most 97.6 MiB from a dirty one, inside the margin"
     }
   },
   "patches": [],

@@ -403,7 +403,7 @@ void fit_stable(const std::string & vae, const std::string & models, const std::
     if (ra.route == "generate") {
         // The template's measured charges (template.json memory), pinned so a
         // change to them is deliberate.
-        constexpr uint64_t RESIDENT = 1119879168, TRANSIENT = 1120927744, RESERVE = 245366784;
+        constexpr uint64_t RESIDENT = 1119879168, TRANSIENT = 1120927744, RESERVE = 430964736;
         check(ra.validated && ra.resident_bytes == RESIDENT && ra.transient_bytes == TRANSIENT &&
                   ra.envelope_bytes == RESIDENT + TRANSIENT && ra.ane_compile_reserve_bytes == RESERVE,
               "template charges: resident " + std::to_string(ra.resident_bytes) + ", transient " +
