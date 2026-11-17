@@ -53,7 +53,7 @@ struct Job {
     JobKind kind = JobKind::load;
     uint64_t seq = 0;
     std::string dedup_key;  // key in Runtime::inflight
-    std::string model_key;  // (artifact, function, units): registry and retirement key
+    std::string model_key;  // (artifact, function, units, geometry): registry and retirement key
     LoadRequest load;
     LoadFn load_fn = nullptr;
     WarmFn warm_fn = nullptr;
@@ -312,7 +312,8 @@ private:
     std::mutex hint_mu_;  // serialises hint read-modify-write within this image
 };
 
-std::string model_key(const std::string & artifact, const std::string & function, ComputeUnits units);
+std::string model_key(const std::string & artifact, const std::string & function, ComputeUnits units,
+                      const std::vector<int64_t> & geometry);
 
 }  // namespace detail
 }  // namespace QVAC_COREML_NS

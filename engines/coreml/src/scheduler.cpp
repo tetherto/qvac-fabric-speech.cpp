@@ -84,8 +84,14 @@ TestHooks & test_hooks() {
 }
 #endif
 
-std::string model_key(const std::string & artifact, const std::string & function, ComputeUnits units) {
-    return artifact + '\n' + function + '\n' + to_string(units);
+std::string model_key(const std::string & artifact, const std::string & function, ComputeUnits units,
+                      const std::vector<int64_t> & geometry) {
+    // The geometry is part of the identity: an owner whose loader validates
+    // another geometry never adopts this model or joins its load, so every
+    // geometry is validated by its own LoadFn.
+    std::string k = artifact + '\n' + function + '\n' + to_string(units) + '\n';
+    for (int64_t g : geometry) k += std::to_string(g) + ',';
+    return k;
 }
 
 Runtime::Runtime(Config c) : cfg(std::move(c)) {
@@ -241,7 +247,7 @@ void Runtime::evict_locked(const std::shared_ptr<SlotCore> & c, Graveyard & gy) 
 }
 
 void Runtime::subscribe_load_locked(const std::shared_ptr<SlotCore> & c, Priority p, bool nd, Graveyard & gy) {
-    const std::string key = model_key(c->artifact_path, c->spec.function, c->spec.units);
+    const std::string key = model_key(c->artifact_path, c->spec.function, c->spec.units, c->spec.geometry);
     if (auto r = retired_.find(key); r != retired_.end()) {
         c->state = SlotState::retired;
         c->reason = r->second;
@@ -340,7 +346,8 @@ void Runtime::request_locked(const std::shared_ptr<SlotCore> & c, Priority p, bo
     if (c->model && c->model->retired()) {
         drop_model_locked(*c, gy);
         c->state = SlotState::retired;
-        if (auto r = retired_.find(model_key(c->artifact_path, c->spec.function, c->spec.units)); r != retired_.end()) {
+        const std::string key = model_key(c->artifact_path, c->spec.function, c->spec.units, c->spec.geometry);
+        if (auto r = retired_.find(key); r != retired_.end()) {
             c->reason = r->second;
         }
         return;
