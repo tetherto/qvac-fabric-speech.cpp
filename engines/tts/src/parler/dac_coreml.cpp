@@ -686,7 +686,7 @@ std::string parler_dac_coreml::construction_json() const {
     return p_->construction ? pcm::to_json(p_->construction->result()) : std::string("{}");
 }
 
-bool parler_dac_coreml::wait(int64_t timeout_ms, const std::atomic<bool> * cancel) const {
+bool parler_dac_coreml::wait(int64_t timeout_ms, const std::atomic<uint64_t> * cancels, uint64_t since) const {
     if (!p_->slot) return false;
     const auto start = pcm::Clock::now();
     for (;;) {
@@ -697,7 +697,7 @@ bool parler_dac_coreml::wait(int64_t timeout_ms, const std::atomic<bool> * cance
         if (pcm::is_terminal(st) || st == pcm::SlotState::idle || st == pcm::SlotState::deferred_memory) {
             return false;
         }
-        if (cancel && cancel->load()) return false;
+        if (cancels && cancels->load() != since) return false;
         if (timeout_ms >= 0 && pcm::Clock::now() - start >= std::chrono::milliseconds(timeout_ms)) return false;
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
@@ -735,7 +735,7 @@ const parler_dac_route & parler_dac_coreml::route() const { return p_->route; }
 bool parler_dac_coreml::active() const { return false; }
 std::string parler_dac_coreml::status_json() const { return "{}"; }
 std::string parler_dac_coreml::construction_json() const { return "{}"; }
-bool parler_dac_coreml::wait(int64_t, const std::atomic<bool> *) const { return false; }
+bool parler_dac_coreml::wait(int64_t, const std::atomic<uint64_t> *, uint64_t) const { return false; }
 
 #endif
 

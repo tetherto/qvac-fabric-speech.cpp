@@ -210,7 +210,8 @@ public:
     // limit) or `cancel` (optional) is set. True when it is ready. Returns
     // false at once while nothing has requested the sidecar (idle: prewarm
     // none before the first call) or it is deferred(memory).
-    bool wait(int64_t timeout_ms, const std::atomic<bool> * cancel = nullptr) const;
+    // `cancels` (when set) ends the wait once it differs from `since`.
+    bool wait(int64_t timeout_ms, const std::atomic<uint64_t> * cancels = nullptr, uint64_t since = 0) const;
 
     struct impl;
 private:

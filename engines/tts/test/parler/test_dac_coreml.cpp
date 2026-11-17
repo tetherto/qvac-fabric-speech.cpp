@@ -1277,6 +1277,36 @@ void engine_wait_cancel_gate(const std::string & gguf, const std::string & cache
     check(!ready && ms >= CANCEL_AFTER_MS - 20 && ms < 2000 && state != "ready",
           "Engine::cancel() ends coreml_wait(-1) after " + std::to_string((int) ms) + " ms (sidecar " + state +
               (ready ? ", wait returned ready" : "") + ")");
+    {
+        // Two blocking waits: a cancel() ends the one running, and a wait
+        // started right after it neither swallows that cancel nor ends by it.
+        std::atomic<bool> a_done{false}, b_done{false}, a_ready{false};
+        std::thread a([&] {
+            a_ready = engine.coreml_wait(-1);
+            a_done = true;
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        const auto cancelled_at = std::chrono::steady_clock::now();
+        engine.cancel();
+        std::thread b([&] {
+            engine.coreml_wait(-1);
+            b_done = true;
+        });
+        while (!a_done && std::chrono::steady_clock::now() - cancelled_at < std::chrono::seconds(30)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        const double a_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - cancelled_at).count();
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        const bool b_waiting = !b_done || status_state(engine.coreml_status()) == "ready";
+        engine.cancel();  // ends b
+        a.join();
+        b.join();
+        check(a_done && !a_ready && a_ms < 1500 && b_waiting,
+              "a cancel() ends the running coreml_wait(-1) after " + std::to_string((int) a_ms) +
+                  " ms although another wait starts right after it" + (a_ready ? " (it returned ready)" : "") +
+                  (b_waiting ? "; the later wait kept waiting" : "; the later wait ended on the earlier cancel"));
+    }
     const bool done = engine.coreml_wait(-1);
     const std::string st = engine.coreml_status();
     check(done && contains(st, "\"route\":\"generated\""),

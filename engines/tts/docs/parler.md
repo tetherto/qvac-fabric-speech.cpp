@@ -248,9 +248,10 @@ or has failed; it returns false at once while nothing has requested the DAC
 (`wait = call` or `use = require`): the synthesis fails as cancelled. It
 ends a `coreml_wait()` in progress too, which then returns false; the
 sidecar keeps loading, and the next `coreml_wait()` waits for it again. A
-wait never clears a cancel meant for a synthesis on another thread:
-`coreml_wait(0)` only polls, and a longer wait watches a flag of its own,
-which `cancel()` sets along with the synthesis's. With
+wait clears nothing: `coreml_wait(0)` only polls, and a longer wait ends
+on any `cancel()` made after it started (a count of cancels it compares
+with the one it started with), so concurrent waits and a synthesis on
+another thread each keep the cancels meant for them. With
 `prewarm = none` the constructor issues nothing, so `wait = construct` does
 not wait and `use = require` fails only when a call cannot be served.
 
