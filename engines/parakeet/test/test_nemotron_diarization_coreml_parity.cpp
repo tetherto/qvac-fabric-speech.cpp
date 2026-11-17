@@ -22,6 +22,8 @@ constexpr int kGpuLayers = 99;
 constexpr int kLiveMelFrames = 112;
 constexpr int kLongFormCacheFrames = 300;
 constexpr int kTemplateCapacities = 3;  // the embedded Nemotron templates: 358, 745 and 1125 frames
+// Their stage names, sorted as strings.
+constexpr const char * kTemplateStages[kTemplateCapacities] = {"diarizer-1125", "diarizer-358", "diarizer-745"};
 constexpr double kMaximumProbabilityError = 0.02;
 constexpr double kMaximumProbabilityRelativeError = 0.003;
 constexpr double kMaximumEmbeddingRelativeError = 0.01;
@@ -113,10 +115,46 @@ bool within_tolerance(const Comparison & probabilities, const Comparison & embed
            embeddings.relative_error <= kMaximumEmbeddingRelativeError;
 }
 
+// The smallest capacity covering `frames` (0 when none does): the one that
+// serves the pass while every capacity is ready.
+int covering_capacity(const parakeet::ParakeetCtcModel & model, int frames) {
+#ifdef PARAKEET_USE_COREML
+    const parakeet::CoremlDiarizers * diarizers = parakeet::model_coreml_diarizers(model);
+    for (int capacity : diarizers ? diarizers->capacities() : std::vector<int>()) {
+        if (capacity >= frames) return capacity;
+    }
+#else
+    (void) model;
+    (void) frames;
+#endif
+    return 0;
+}
+
+// The capacity that served the model's last Core ML pass (0: none).
+int served_capacity(const parakeet::ParakeetCtcModel & model) {
+#ifdef PARAKEET_USE_COREML
+    parakeet::CoremlDiarizers * diarizers = parakeet::model_coreml_diarizers(model);
+    return diarizers ? diarizers->call_stats().capacity : 0;
+#else
+    (void) model;
+    return 0;
+#endif
+}
+
+void reset_served(const parakeet::ParakeetCtcModel & model) {
+#ifdef PARAKEET_USE_COREML
+    parakeet::CoremlDiarizers * diarizers = parakeet::model_coreml_diarizers(model);
+    if (diarizers) diarizers->reset_call_stats();
+#else
+    (void) model;
+#endif
+}
+
 bool run_case(const parakeet::ParakeetCtcModel & accelerated, const parakeet::ParakeetCtcModel & reference,
               const std::vector<float> & mel, const std::vector<float> & cache, const Case & test) {
     parakeet::NemotronDiarizationChunk actual;
     parakeet::NemotronDiarizationChunk expected;
+    reset_served(accelerated);
     if (!run_chunk(accelerated, mel, test.mel_frames, cache, test.cache_frames, actual) ||
         !run_chunk(reference, mel, test.mel_frames, cache, test.cache_frames, expected)) {
         std::printf("[FAIL] %s: inference failed\n", test.name.c_str());
@@ -125,10 +163,16 @@ bool run_case(const parakeet::ParakeetCtcModel & accelerated, const parakeet::Pa
     const Comparison probabilities = compare(actual.probabilities, expected.probabilities);
     const Comparison embeddings = compare(actual.embeddings, expected.embeddings);
     const bool routed = actual.used_coreml == test.expects_coreml && !expected.used_coreml;
-    const bool passed = routed && within_tolerance(probabilities, embeddings);
-    std::printf("[%s] %s: cache=%d chunk=%d coreml=%d max=%.5f rel=%.6f embedding_rel=%.6f\n",
+    // The pass ran on the smallest covering capacity, not on a larger one
+    // standing in for a capacity that failed.
+    const int frames = actual.state_frames + actual.chunk_frames;
+    const int want = actual.used_coreml ? covering_capacity(accelerated, frames) : 0;
+    const int served = served_capacity(accelerated);
+    const bool passed = routed && served == want && within_tolerance(probabilities, embeddings);
+    std::printf("[%s] %s: cache=%d chunk=%d coreml=%d capacity=%d (expected %d) max=%.5f rel=%.6f "
+        "embedding_rel=%.6f\n",
         passed ? "ok  " : "FAIL", test.name.c_str(), test.cache_frames, actual.chunk_frames,
-        actual.used_coreml ? 1 : 0, probabilities.maximum_error, probabilities.relative_error,
+        actual.used_coreml ? 1 : 0, served, want, probabilities.maximum_error, probabilities.relative_error,
         embeddings.relative_error);
     return passed;
 }
@@ -199,24 +243,26 @@ bool run_cases(const parakeet::ParakeetCtcModel & accelerated, const parakeet::P
 
 }
 
-// Every diarizer stage of the status JSON came from the generation cache,
-// one per embedded template. Stage objects have sorted keys, so each starts
-// at its "artifact_key".
+// Every embedded template's stage (diarizer-358, -745 and -1125, once each)
+// came from the generation cache and is ready, and no other diarizer stage
+// exists. Stage objects have sorted keys, so each starts at its "artifact_key".
 bool every_diarizer_generated(const std::string & status) {
     const std::string start = "{\"artifact_key\"";
-    int stages = 0;
+    std::vector<std::string> seen;
     for (size_t at = status.find(start); at != std::string::npos;) {
         const size_t next = status.find(start, at + 1);
         const std::string stage = status.substr(at, next == std::string::npos ? std::string::npos : next - at);
         at = next;
-        if (stage.find("\"stage\":\"diarizer-") == std::string::npos) continue;
-        ++stages;
-        if (stage.find("\"route\":\"generated\"") == std::string::npos &&
-            stage.find("\"route\":\"cached\"") == std::string::npos) {
-            return false;
-        }
+        const size_t name = stage.find("\"stage\":\"diarizer-");
+        if (name == std::string::npos) continue;
+        const size_t from = name + std::string("\"stage\":\"").size();
+        seen.push_back(stage.substr(from, stage.find('"', from) - from));
+        const bool cached = stage.find("\"route\":\"generated\"") != std::string::npos ||
+                            stage.find("\"route\":\"cached\"") != std::string::npos;
+        if (!cached || stage.find("\"state\":\"ready\"") == std::string::npos) return false;
     }
-    return stages == kTemplateCapacities;
+    std::sort(seen.begin(), seen.end());
+    return seen == std::vector<std::string>(kTemplateStages, kTemplateStages + kTemplateCapacities);
 }
 
 int main(int argc, char ** argv) {
