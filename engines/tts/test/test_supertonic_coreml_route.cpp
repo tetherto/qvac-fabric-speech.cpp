@@ -15,7 +15,9 @@
 // template's memory charges are pinned. The route (and, with --fit,
 // supertonic::fit_params' Core ML part) must then be the same on an empty
 // cache, after a generation, and with non-stale and stale warm hints at the
-// runtime's own hint ids. With --cache-dir DIR (a cache a real run populated)
+// runtime's own hint ids; wherever the build can generate, that route is the
+// generated one (with use = require on a device class that prefers ggml) and
+// fit charges its envelope. --fit needs a whole Supertonic GGUF. With --cache-dir DIR (a cache a real run populated)
 // DIR is compared as it is, then a copy of it gets the hint cases.
 
 #include "supertonic_coreml_path.h"
@@ -24,6 +26,13 @@
 
 #include "../test/test_env_portable.h"
 #include "fit_stable_cache.h"
+
+#ifdef TTS_CPP_USE_COREML
+#include "qvac_coreml/generation.h"
+#include "qvac_coreml/manager.h"
+#include "qvac_coreml/options.h"
+namespace pcm = QVAC_COREML_NS;
+#endif
 
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
@@ -53,11 +62,12 @@ void check(bool ok, const std::string & what) {
     if (!ok) ++g_failures;
 }
 
-// Whether this build can choose the generated route at all (a macOS Core ML
-// build with the generator, on a supported OS).
+// Whether this build can choose the generated route at all: a macOS Core ML
+// build with the generator, on macOS 15 or later (the runtime's own checks).
 bool generation_expected() {
 #if defined(TTS_CPP_USE_COREML) && defined(__APPLE__) && TARGET_OS_OSX
-    return true;
+    const auto m = pcm::Manager::instance();
+    return pcm::generation::built() && m->platform() == pcm::Platform::macos && pcm::os_at_least(m->os_version(), 15, 0);
 #else
     return false;
 #endif
@@ -211,32 +221,55 @@ void route_gates(const std::string & gguf, const std::string & want, const fs::p
     fs::remove_all(dir, ec);
 }
 
-// Route and fit before a generation, after it, and with warm hints.
+// Route and fit before a generation, after it, and with warm hints. On a
+// device class the template prefers ggml on (this host's brand), the
+// comparisons run with use = require, so they hold the generated route and
+// its envelope there too instead of comparing two `none` routes.
 void stability_gates(const std::string & gguf, const fs::path & scratch, bool fit, const std::string & given_cache) {
     std::fprintf(stderr, "route and fit stability (%s)\n", gguf.c_str());
     const fs::path empty = scratch / "empty";
     fs::create_directories(empty);
-    auto route_at = [&](const fs::path & cache) { return describe(supertonic_vocoder_plan_route(gguf, at(cache))); };
+    const bool gated = supertonic_vocoder_plan_route(gguf, at(empty)).reason == "device";
+    auto options_at = [&](const fs::path & cache) {
+        tts_cpp::CoremlOptions o = at(cache);
+        if (gated) o.use = tts_cpp::CoremlOptions::Use::require;
+        return o;
+    };
+    if (gated) std::fprintf(stderr, "  this device class prefers ggml: the comparisons run with use = require\n");
+    auto route_at = [&](const fs::path & cache) {
+        return describe(supertonic_vocoder_plan_route(gguf, options_at(cache)));
+    };
     auto fit_at = [&](const fs::path & cache) {
         tts_cpp::supertonic::FitOptions f;
         f.model_gguf_path = gguf;
         f.n_gpu_layers = 99;
-        f.coreml = at(cache);
-        return describe(tts_cpp::supertonic::fit_params(f));
+        f.coreml = options_at(cache);
+        return tts_cpp::supertonic::fit_params(f);
     };
-    const std::string route0 = route_at(empty);
-    const std::string fit0 = fit ? fit_at(empty) : std::string();
+    const supertonic_vocoder_route r0 = supertonic_vocoder_plan_route(gguf, options_at(empty));
+    tts_cpp::FitResult f0;
+    if (fit) f0 = fit_at(empty);
+    if (generation_expected()) {
+        check(r0.route == "generate" && r0.envelope_bytes > 0,
+              "the comparisons hold a generated route: " + describe(r0));
+        if (fit) {
+            check(f0.coreml.route == "generate" && f0.coreml.bytes == r0.envelope_bytes,
+                  "fit charges the generated route's envelope " + std::to_string(r0.envelope_bytes) + ": " +
+                      describe(f0));
+        }
+    }
+    const std::string route0 = describe(r0);
+    const std::string fit0 = fit ? describe(f0) : std::string();
     std::fprintf(stderr, "  route on an empty cache: %s\n", route0.c_str());
     if (fit) std::fprintf(stderr, "  fit on an empty cache:   %s\n", fit0.c_str());
     auto same = [&](const fs::path & cache, const std::string & what) {
         const std::string r = route_at(cache);
         check(r == route0, what + ": route " + r);
         if (fit) {
-            const std::string f = fit_at(cache);
+            const std::string f = describe(fit_at(cache));
             check(f == fit0, what + ": fit " + f);
         }
     };
-    const supertonic_vocoder_route r0 = supertonic_vocoder_plan_route(gguf, at(empty));
     fs::path cache;
     if (given_cache.empty()) {
         cache = scratch / "cache";

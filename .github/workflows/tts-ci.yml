@@ -1186,7 +1186,9 @@ jobs:
 
       # The vocoder's route and fit are the same with an empty cache and with
       # the caches the generated-sidecar step populated, whose hints are also
-      # rewritten stale and non-stale. Runs whenever that step ran.
+      # rewritten stale and non-stale. The route compared is the generated one
+      # (use = require on this runner's device class, which prefers ggml), and
+      # fit must charge its envelope. Runs whenever that step ran.
       - name: Test (Supertonic vocoder route and fit with an empty and a populated Core ML cache)
         if: >-
           !cancelled() && runner.os == 'macOS' &&

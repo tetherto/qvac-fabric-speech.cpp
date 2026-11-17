@@ -2566,6 +2566,11 @@ if (TTS_CPP_BUILD_TESTS)
         set_tests_properties(test-supertonic-coreml-route PROPERTIES LABELS "unit"
                              FIXTURES_REQUIRED supertonic-vocoder-twins)
     endif()
+    # Fit needs a whole model: route and fit stability on a staged Supertonic 2
+    # GGUF (the converter stores its pointwise convolutions as [OC, IC, 1]).
+    tts_cpp_register_test(test-supertonic-coreml-route-fit EXE test-supertonic-coreml-route LABEL "fixture"
+        ARGS --gguf "${_tcb_super2_gguf}" --template supertonic-vocoder-w64 --fit
+        REQUIRES "${_tcb_super2_gguf}")
 
     add_executable(test-supertonic-vocoder-handoff test/test_supertonic_vocoder_handoff.cpp)
     target_link_libraries(test-supertonic-vocoder-handoff PRIVATE tts-cpp ggml)
