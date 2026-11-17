@@ -360,8 +360,11 @@ jobs:
       # completes after its eviction, writing its hint without repopulating
       # the slot; the second and third reload warm and decode on Core ML);
       # {prewarm all, wait construct} succeeds with no decoder retained; an
-      # eviction cancels an unstarted job. Then fit is the same with an empty
-      # and a populated cache. --require-coreml turns every skip into a
+      # eviction cancels an unstarted job. Fit (route and whole projection) is
+      # the same on an empty cache, on one holding a simulated generation in
+      # the runtime's layout with a non-stale and then a stale hint, and on the
+      # cache the three generations really populated (its compiled artifact
+      # and the hint its load wrote). --require-coreml turns every skip into a
       # failure.
       - name: Test (Core ML VAE low-memory mode and fit, staged models)
         if: >-
