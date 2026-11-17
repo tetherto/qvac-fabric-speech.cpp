@@ -69,6 +69,10 @@ struct Candidate {
     std::string sha256_hex;
     std::optional<ComputeUnits> default_units;  // template.json default_compute_units
     TemplateMemory memory;
+    // template.json prefer_ggml_on: device classes where the engine prefers
+    // its ggml stage over a generated sidecar. The engine decides the device
+    // class (PlanInput::device_excluded); the runtime never reads it.
+    std::vector<std::string> prefer_ggml_on;
 };
 
 // Looks the templates up (embedded, or <resolved.template_dir>/<id> where the

@@ -761,6 +761,91 @@ void case_op_slice_neg_consts() {
     for (const recipe::Item & it : r.items) CHECK(!it.ulp);
 }
 
+// ---- sub, sqrt -------------------------------------------------------------------------------
+
+// One fp32 step at a time, so the expected values never contract into an FMA.
+float f32_sub(float a, float b) {
+    volatile float r = a - b;
+    return r;
+}
+float f32_mul(float a, float b) {
+    volatile float r = a * b;
+    return r;
+}
+float f32_div(float a, float b) {
+    volatile float r = a / b;
+    return r;
+}
+float f32_add(float a, float b) {
+    volatile float r = a + b;
+    return r;
+}
+
+void case_op_sub_sqrt() {
+    MemSource s({TT{"a", T_F32, {2, 3}, {1, 2, 3, 4, 5, 6}}, TT{"b", T_F32, {3}, {0.5f, 10, -1}}}, {});
+    const std::string d = "source \"a\" f32 [2,3]\nsource \"b\" f32 [3]\n";
+    auto out = run(recipe_text("t", zeros64(), d,
+                               {blob("fp32", 6, "f32(sub(t(\"a\"), t(\"b\")))"),
+                                blob("fp32", 6, "f32(sub(t(\"a\"), 1))"),
+                                blob("fp32", 6, "f32(sub(2, t(\"a\")))"),
+                                blob("fp32", 6, "f32(sub(t(\"a\"), t(\"a\")))"),
+                                blob("fp32", 6, "f32(sqrt(t(\"a\")))"),
+                                blob("fp32", 6, "f32(sqrt(f64(t(\"a\"))))"),
+                                blob("fp32", 1, "f32(add(sqrt(4), zeros([1])))")}),
+                   s);
+    CHECK(out.size() == 7);
+    if (out.size() != 7) return;
+    CHECK(f32s(out[0]) == std::vector<float>({0.5f, -8, 4, 3.5f, -5, 7}));  // numpy broadcasting
+    CHECK(f32s(out[1]) == std::vector<float>({0, 1, 2, 3, 4, 5}));
+    CHECK(f32s(out[2]) == std::vector<float>({1, 0, -1, -2, -3, -4}));       // operand order kept
+    for (float v : f32s(out[3])) CHECK(bits(v) == 0u);                       // x - x is +0, unlike neg(x)
+    // Correctly rounded in each dtype: sqrt(2) in f32 is 0x3fb504f3; in f64
+    // then rounded to f32 it is the same value (the f32 result is exact-rounded).
+    const auto r32 = f32s(out[4]);
+    CHECK(bits(r32[0]) == 0x3f800000u && bits(r32[1]) == 0x3fb504f3u && bits(r32[3]) == 0x40000000u);
+    for (int i = 0; i < 6; ++i) CHECK(bits(r32[i]) == bits(std::sqrt(static_cast<float>(i + 1))));
+    CHECK(f32s(out[5]) == r32);
+    CHECK(f32s(out[6]) == std::vector<float>({2.0f}));
+
+    // The BatchNorm fold: scale = gamma / sqrt(var + eps), shift = beta - mean * scale, in f32.
+    const std::vector<float> g = {0.75f, -1.25f, 2.0f}, v = {0.1f, 3.0f, 1e-6f}, m = {0.2f, -0.3f, 5.0f},
+                             be = {0.01f, 0.5f, -2.0f};
+    MemSource bn({TT{"g", T_F32, {3}, g}, TT{"v", T_F32, {3}, v}, TT{"m", T_F32, {3}, m}, TT{"be", T_F32, {3}, be}}, {});
+    const std::string bd = "source \"g\" f32 [3]\nsource \"v\" f32 [3]\nsource \"m\" f32 [3]\nsource \"be\" f32 [3]\n";
+    auto fold = run(recipe_text("t", zeros64(), bd,
+                                {blob("fp32", 3, "f32(div(t(\"g\"), sqrt(add(t(\"v\"), 1e-5))))"),
+                                 blob("fp32", 3, "f32(sub(t(\"be\"), mul(t(\"m\"), div(t(\"g\"), sqrt(add(t(\"v\"), 1e-5))))))")}),
+                    bn);
+    CHECK(fold.size() == 2);
+    if (fold.size() != 2) return;
+    const auto sc = f32s(fold[0]), sh = f32s(fold[1]);
+    for (int i = 0; i < 3; ++i) {
+        const float want_s = f32_div(g[i], std::sqrt(f32_add(v[i], 1e-5f)));
+        CHECK(bits(sc[i]) == bits(want_s));
+        CHECK(bits(sh[i]) == bits(f32_sub(be[i], f32_mul(m[i], want_s))));
+    }
+
+    // sqrt of a negative value is NaN, which an output cast rejects as non-finite.
+    MemSource neg = src_a({4, -1, 0, 0, 0, 0});
+    Error e;
+    run(recipe_text("t", zeros64(), kSrcA, {blob("fp16", 6, "f16(sqrt(t(\"a\")))")}), neg, &e);
+    CHECK(!e.ok() && e.cls == ErrorClass::deterministic && e.message.find("non-finite") != std::string::npos);
+    // sqrt(-0) is -0 (IEEE).
+    MemSource nz = src_a({-0.0f, 0, 0, 0, 0, 0});
+    auto z = run(recipe_text("t", zeros64(), kSrcA, {blob("fp32", 6, "f32(sqrt(t(\"a\")))")}), nz);
+    CHECK(!z.empty() && bits(f32s(z[0])[0]) == 0x80000000u);
+
+    const std::string b6 = "\nend\n";
+    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(sqrt(t(\"a\"), 1))" + b6, "takes 1 argument");
+    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(sub(t(\"a\")))" + b6, "takes 2 argument");
+    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(sub(t(\"a\"), reshape(t(\"a\"), [3,2])))" + b6,
+                 "do not broadcast");
+    // Neither op is a reduction or a transcendental: every blob stays `exact`.
+    const recipe::Recipe r = recipe::parse(recipe_text(
+        "t", zeros64(), kSrcA, {blob("fp16", 6, "f16(sqrt(sub(t(\"a\"), 1)))"), blob("fp16", 6, "f16(sub(1, t(\"a\")))")}));
+    for (const recipe::Item & it : r.items) CHECK(!it.ulp);
+}
+
 // ---- lit --------------------------------------------------------------------------------------
 
 void case_op_lit() {
@@ -1109,6 +1194,140 @@ void case_match() {
     CHECK(!m.ok && m.reason.find("not u32") != std::string::npos);  // value equal, declared type differs
 }
 
+// ---- template names --------------------------------------------------------------------------
+
+// A GGUF that stores its tensors as t0, t1, ... and lists the model's names in
+// metadata, the way the Supertonic converter does.
+std::vector<TM> names_meta(const std::vector<std::string> & from, const std::vector<std::string> & to,
+                           const std::vector<std::string> & alias_from = {},
+                           const std::vector<std::string> & alias_to = {}) {
+    std::vector<TM> m = {{"m.from", "arr_str", json(from)}, {"m.to", "arr_str", json(to)}};
+    if (!alias_from.empty()) m.push_back({"m.alias", "arr_str", json(alias_from)});
+    if (!alias_to.empty()) m.push_back({"m.alias_to", "arr_str", json(alias_to)});
+    return m;
+}
+
+TemplateSpec names_spec() {
+    TemplateSpec s;
+    s.id = "toy-names";
+    s.decls = "source \"x\" f32 [3]\nsource \"canon.y\" f32 [3]\nsource \"canon.z\" f32 [2]\n";
+    s.items = {blob("fp32", 3, "f32(t(\"x\"))"), blob("fp32", 3, "f32(t(\"canon.y\"))"),
+               blob("fp32", 2, "f32(t(\"canon.z\"))")};
+    s.extra = {{"names",
+                {{"map", {"m.from", "m.to"}},
+                 {"aliases", {"m.alias", "m.alias_to"}},
+                 {"fallbacks", json::array({json::array({"canon.z", "legacy.z"}), json::array({"x", "legacy.y"})})}}}};
+    return s;
+}
+
+void case_template_names() {
+    TempDir td;
+    auto t = make_template(td / "tpl", names_spec());
+    const recipe::NameSpec & ns = t->info().names;
+    CHECK(ns.map_from == "m.from" && ns.map_to == "m.to" && ns.aliases_from == "m.alias" &&
+          ns.aliases_to == "m.alias_to" && ns.fallbacks.size() == 2);
+    const std::vector<TT> tensors = {TT{"t0", T_F32, {3}, {1, 2, 3}}, TT{"t1", T_F32, {3}, {4, 5, 6}},
+                                     TT{"t2", T_F32, {2}, {7, 8}}};
+    auto blobs_of = [&](recipe::TensorSource & src) {
+        std::vector<std::vector<float>> out;
+        Error e = recipe::evaluate(t->recipe(), src, [&](const recipe::BlobOut & b) {
+            out.push_back(f32s(std::vector<uint8_t>(b.data, b.data + b.bytes)));
+            return Error{};
+        });
+        CHECK_MSG(e.ok(), e.message);
+        return out;
+    };
+
+    // map + aliases (the current converter): x = t0, canon.y via its alias of
+    // legacy.y = t1, canon.z via its alias of legacy.z = t2. The fallback
+    // x -> legacy.y never replaces a name the map resolves.
+    MemSource cur(tensors, names_meta({"x", "legacy.y", "legacy.z"}, {"t0", "t1", "t2"}, {"canon.y", "canon.z"},
+                                      {"legacy.y", "legacy.z"}));
+    recipe::RenamedSource named(cur, ns);
+    CHECK(named.error().empty());
+    CHECK(named.stored_name("x") == "t0" && named.stored_name("canon.y") == "t1" &&
+          named.stored_name("canon.z") == "t2" && named.stored_name("t0").empty());
+    CHECK(named.tensor("canon.y") && named.tensor("canon.y")->name == "canon.y");
+    CHECK(named.tensor("t0") == nullptr);  // the GGUF's own names are not recipe names
+    CHECK(recipe::match(*t, named).ok);
+    CHECK(!recipe::match(*t, cur).ok);  // unrenamed, the recipe's names are absent
+    const auto v = blobs_of(named);
+    CHECK(v == std::vector<std::vector<float>>({{1, 2, 3}, {4, 5, 6}, {7, 8}}));
+    digest::SourceDigest d1;
+    CHECK(digest::source_digest(t->recipe(), named, d1).ok());
+
+    // An older converter (no alias arrays): the fallbacks resolve canon.z; the
+    // same weights stored in another order give the same source digest.
+    MemSource old({TT{"t0", T_F32, {2}, {7, 8}}, TT{"t1", T_F32, {3}, {4, 5, 6}}, TT{"t2", T_F32, {3}, {1, 2, 3}}},
+                  names_meta({"legacy.z", "canon.y", "x"}, {"t0", "t1", "t2"}));
+    recipe::RenamedSource named_old(old, ns);
+    CHECK(named_old.error().empty());
+    CHECK(named_old.stored_name("canon.z") == "t0" && named_old.stored_name("x") == "t2");
+    CHECK(recipe::match(*t, named_old).ok);
+    CHECK(blobs_of(named_old) == v);
+    digest::SourceDigest d2;
+    CHECK(digest::source_digest(t->recipe(), named_old, d2).ok());
+    CHECK(d1.digest == d2.digest);
+
+    // An alias never replaces a name the map already resolves.
+    MemSource clash(tensors, names_meta({"x", "canon.y", "legacy.z"}, {"t0", "t1", "t2"}, {"canon.y", "canon.z"},
+                                        {"x", "legacy.z"}));
+    recipe::RenamedSource named_clash(clash, ns);
+    CHECK(named_clash.stored_name("canon.y") == "t1" && named_clash.stored_name("canon.z") == "t2");
+
+    // A name the table does not resolve is absent; reads of it fail deterministically.
+    MemSource missing(tensors, names_meta({"x", "canon.y"}, {"t0", "t1"}));
+    recipe::RenamedSource named_missing(missing, ns);
+    const recipe::MatchResult m = recipe::match(*t, named_missing);
+    CHECK(!m.ok && m.reason.find("canon.z is absent") != std::string::npos);
+    std::vector<float> f;
+    Error re = named_missing.read_f32("canon.z", f, nullptr);
+    CHECK(!re.ok() && re.cls == ErrorClass::deterministic);
+
+    // Absent or malformed name arrays resolve nothing and say why.
+    MemSource none(tensors, {});
+    recipe::RenamedSource named_none(none, ns);
+    CHECK(named_none.error().find("m.from is absent") != std::string::npos && named_none.tensor("x") == nullptr);
+    MemSource uneven(tensors, names_meta({"x", "canon.y"}, {"t0"}));
+    CHECK(recipe::RenamedSource(uneven, ns).error().find("differ in length") != std::string::npos);
+    MemSource uneven_alias(tensors, names_meta({"x"}, {"t0"}, {"canon.y", "canon.z"}, {"x"}));
+    CHECK(recipe::RenamedSource(uneven_alias, ns).error().find("differ in length") != std::string::npos);
+    MemSource not_strings(tensors, {{"m.from", "arr_u32", json::array({1, 2})}, {"m.to", "arr_str", json({"t0", "t1"})}});
+    CHECK(recipe::RenamedSource(not_strings, ns).error().find("not an array of strings") != std::string::npos);
+
+    // template_source wraps only a template that declares names, and keeps the
+    // opened file's identity checks.
+    auto wrapped = template_source(*t, std::make_unique<MemSource>(tensors, names_meta({"x"}, {"t0"})));
+    CHECK(wrapped && wrapped->tensor("x") && wrapped->tensor("t0") == nullptr);
+    SourceStat st;
+    CHECK(wrapped->stat_now(st));
+    auto plain = make_template(td / "plain", toy_spec());
+    auto raw = std::make_unique<MemSource>(tensors, std::vector<TM>{});
+    const MemSource * raw_ptr = raw.get();
+    CHECK(template_source(*plain, std::move(raw)).get() == raw_ptr);
+    CHECK(template_source(*t, nullptr) == nullptr);
+
+    // template.json `names` is checked when the template loads.
+    auto rejects = [&](const json & names, const std::string & needle) {
+        TemplateSpec bad = names_spec();
+        bad.extra["names"] = names;
+        TempDir d2;
+        try {
+            make_template(d2 / "x", bad);
+            CHECK_MSG(false, "accepted, expected '" + needle + "'");
+        } catch (const std::exception & e) {
+            CHECK_MSG(std::string(e.what()).find(needle) != std::string::npos, e.what());
+        }
+    };
+    rejects(json::array(), "an object with a map");
+    rejects({{"aliases", {"a", "b"}}}, "an object with a map");
+    rejects({{"map", json::array({"a"})}}, "names.map must be [from, to]");
+    rejects({{"map", {"a", ""}}}, "names.map must be [from, to]");
+    rejects({{"map", {"a", "b"}}, {"aliases", "a"}}, "names.aliases must be [from, to]");
+    rejects({{"map", {"a", "b"}}, {"fallbacks", json::array({json::array({"a"})})}}, "[name, other]");
+    rejects({{"map", {"a", "b"}}, {"other", 1}}, "names.other is not a known field");
+}
+
 #if defined(QVAC_COREML_HAVE_GGML)
 // ---- GgufSource (ggml-base only) --------------------------------------------------------------
 
@@ -1262,6 +1481,7 @@ int main(int argc, char ** argv) {
                          {"op-layout", case_op_layout},
                          {"op-slice-neg-consts", case_op_slice_neg_consts},
                          {"op-lit", case_op_lit},
+                         {"op-sub-sqrt", case_op_sub_sqrt},
                          {"patches", case_patches},
                          {"template-literals-patches", case_template_literals_patches},
                          {"shape-overflow", case_shape_overflow},
@@ -1273,6 +1493,7 @@ int main(int argc, char ** argv) {
                          {"verify-weight-bin", case_verify_weight_bin},
                          {"template", case_template},
                          {"match", case_match},
+                         {"template-names", case_template_names},
 #if defined(QVAC_COREML_HAVE_GGML)
                          {"gguf-source", case_gguf_source},
                          {"twin-types", case_twin_types},

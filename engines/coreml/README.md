@@ -117,7 +117,9 @@ replaces them with measured constants. It runs an overlapped schedule:
 ggml work on the calling thread while the stage is generated, compiled,
 loaded and warmed in the background, sampling the process footprint and
 `ANECompilerService`'s size. `test-parler-dac-coreml --memory-schedule` is the
-Parler DAC's. Its constants follow this convention:
+Parler DAC's and `test-supertonic-coreml-parity --memory-schedule` the
+Supertonic vocoder's; both attribute each sample to a phase with
+`test/memory_schedule.h`. Their constants follow this convention:
 
 - Each constant is 1.25 times the largest value measured over every run on
   every host in `validated_for`, rounded up to 1 MiB:
@@ -292,6 +294,47 @@ script).
 6. Add the template's golden line:
    `python3 engines/coreml/python/golden.py update --tool build/qvac-coreml-tool`.
 
+### Tensor names
+
+A recipe names the tensors it reads in its `source` lines and `t()` calls.
+By default these are the GGUF's own tensor names. A GGUF that stores its
+tensors under generated names (Supertonic writes `supertonic/vocoder/t0012`
+and lists the model's own name of each tensor in metadata) can keep the
+recipe on the model's names instead: `template.json` `names` says how they
+map, and the same table applies wherever the template meets a GGUF (the
+engine's match and generation, `qvac-coreml-tool generate`, `digest` and
+`verify`, and so the extraction gates):
+
+```json
+"names": {
+  "map": ["supertonic.source_names", "supertonic.tensor_names"],
+  "aliases": ["supertonic.source_aliases", "supertonic.source_alias_targets"],
+  "fallbacks": [["vocoder:node:/decoder/embed/net/Conv#1", "vocoder:onnx::Conv_1440"]]
+}
+```
+
+- `map` names two string-array metadata keys of equal length: the recipe
+  name `from[i]` reads the GGUF tensor `to[i]` (a later duplicate wins).
+- `aliases` (optional) names two more: `from[i]` reads what `to[i]` reads,
+  unless `from[i]` already resolves. Both arrays absent: no aliases.
+- `fallbacks` lists `[name, other]` pairs: `name` reads what `other` reads
+  when nothing else resolves it (names an older converter did not write).
+
+A name the table does not resolve is absent, so the template does not match
+(`no_template`). The source digest hashes the recipe's names, so the same
+weights stored in another order give the same artifact key. The table is
+part of `template.json`, so changing it changes `template_sha256`.
+
+### Device preference
+
+`template.json` `prefer_ggml_on` lists device classes (for example `max`,
+`ultra`) on which the engine prefers its ggml stage to a generated sidecar,
+because the measured sidecar is slower there. The runtime passes the list on
+(`generation::Candidate::prefer_ggml_on`); the engine decides the device
+class and sets `PlanInput::device_excluded`, and `plan()` then reports
+`unsupported(device)` for the generated route. Prebuilt sidecars are not
+affected.
+
 ### Recipe vocabulary
 
 This generator version knows `t f32 f64 f16 add mul div recip clip reshape
@@ -303,6 +346,8 @@ permute take concat`, `let` bindings, and:
 | `neg(x)` | IEEE negation (`neg(0)` is `-0`) |
 | `zeros([d...])`, `ones([d...])` | f32 constants |
 | `lit("id")` | a `template.json` `literals` entry `{id, dtype, shape, offset}`: bytes of `literals.bin` (fp16 or fp32, numpy order), as f32 |
+| `sub(x, y)` | IEEE subtraction in the promoted dtype, numpy broadcasting (like `add`); `sub(x, x)` is `+0` |
+| `sqrt(x)` | IEEE square root, correctly rounded in the operand's dtype (so still `exact`); a negative input gives NaN, which the output cast rejects |
 
 `patch <spec_offset> fp16|fp32 <count> <expr>` lines write `count` values
 into `model.mlmodel` at `spec_offset`, replacing the sentinel that
