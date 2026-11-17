@@ -90,7 +90,7 @@ private:
     bool ok_;
 };
 
-enum class acquire_mode { ready, failing, pending, throws, cancelled_wait };
+enum class acquire_mode { ready, failing, pending, throws };
 
 class fake_pending final : public supertonic_vocoder_pending {
 public:
@@ -112,10 +112,6 @@ public:
                 break;
             case acquire_mode::throws:
                 throw std::runtime_error("fake: the sidecar cannot serve this call");
-            case acquire_mode::cancelled_wait:
-                // The runtime's wait returned early: nothing to run on.
-                call.pending = true;
-                break;
         }
         return call;
     }
@@ -186,6 +182,19 @@ void fake_stage_gates() {
         check(!o.ok && o.error.find("strict") != std::string::npos && stage->retired.size() == 1 &&
                   stage->retired[0] == "prediction failed" && o.wav.empty(),
               "a failed prediction retires the sidecar and fails the call under strict: " + describe(o));
+    }
+    for (bool strict : {false, true}) {
+        // The runtime's wait returns early, with nothing to run on, once the
+        // flag is set.
+        shape_model m;
+        auto stage = std::make_shared<fake_pending>(m.samples_per_frame(), acquire_mode::pending, strict);
+        m.model.vocoder_coreml_managed = true;
+        m.model.vocoder_pending = stage;
+        std::atomic<bool> cancel{true};
+        const outcome o = forward(m.model, LATENT_FRAMES, &cancel);
+        check(!o.ok && o.error == "cancelled" && o.wav.empty(),
+              std::string("a wait ended by cancellation cancels the call, not a ggml run") +
+                  (strict ? " (strict): " : ": ") + describe(o));
     }
     {
         shape_model m;

@@ -1081,6 +1081,12 @@ bool supertonic_vocoder_forward_ggml(const supertonic_model & model,
             return false;
         }
         if (pending) *pending = call.pending;
+        // A wait for the sidecar ended by cancellation hands back no sidecar;
+        // the call is cancelled, not redone on ggml.
+        if (cancel && cancel->load()) {
+            if (error) *error = "cancelled";
+            return false;
+        }
     }
 #ifdef TTS_CPP_USE_COREML
     else if (!model.vocoder_coreml_managed && coreml_vocoder_strict()) {
