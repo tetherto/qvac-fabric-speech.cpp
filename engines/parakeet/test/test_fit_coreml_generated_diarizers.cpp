@@ -1,5 +1,6 @@
-// fit_params on a Nemotron 3 Diarization GGUF with no adjacent diarizer
-// bundle charges the generated capacities' Core ML envelope, and the charge
+// fit_params on a Nemotron 3 Diarization or Sortformer v2.1 GGUF with no
+// adjacent diarizer bundle charges the generated capacities' Core ML
+// envelope, and the charge
 // never depends on the cache: an empty cache and a cache holding every
 // generated capacity give the same Core ML bytes, verdict and validation.
 // An Engine whose memory budget lies between the ggml-only total and the
@@ -7,17 +8,22 @@
 // both keeps generation on. An Engine on compute units the templates were not
 // validated for generates nothing, and every capacity keeps a status entry
 // that says so; so does an Engine with generation off (generate = never).
-// With prewarm = all the charge covers every generated capacity.
+// With prewarm = all the charge covers every generated capacity: more than
+// the default when the model has several capacities, the same when it has
+// one (construction loads the only capacity either way).
 //
-// Usage: test-fit-coreml-generated-diarizers <model.gguf> <empty cache dir>
-// The GGUF's directory must hold no diarizer bundle. Never skips: every check
-// needs Core ML generation (macOS 15, the generator built in).
+// Usage: test-fit-coreml-generated-diarizers <model.gguf> <empty cache dir> [capacities]
+// `capacities` is the number of the model's diarizer templates (default 3,
+// Nemotron's; Sortformer has 1). The GGUF's directory must hold no diarizer
+// bundle. Never skips: every check needs Core ML generation (macOS 15, the
+// generator built in).
 
 #include "parakeet/engine.h"
 #include "parakeet/fit.h"
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <string>
 #include <system_error>
@@ -26,7 +32,7 @@ namespace {
 
 constexpr int kGpuLayers = 1;
 constexpr uint64_t kRoomy = 64ull * 1024 * 1024 * 1024;
-constexpr int kCapacities = 3;  // the embedded Nemotron templates: 358, 745 and 1125 frames
+int g_capacities = 3;  // the model's diarizer templates (Nemotron: 358, 745 and 1125 frames)
 
 bool g_passed = true;
 
@@ -40,6 +46,21 @@ bool contains(const std::string & text, const char * needle) { return text.find(
 int count(const std::string & text, const std::string & needle) {
     int n = 0;
     for (size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + needle.size())) ++n;
+    return n;
+}
+
+// Occurrences of `needle` in the diarizer stage objects of a status JSON
+// (other stages, such as an absent Sortformer encoder sidecar, are left out).
+// Stage objects have sorted keys, so each starts at its "artifact_key".
+int count_in_diarizers(const std::string & status, const std::string & needle) {
+    const std::string start = "{\"artifact_key\"";
+    int n = 0;
+    for (size_t at = status.find(start); at != std::string::npos;) {
+        const size_t next = status.find(start, at + 1);
+        const std::string stage = status.substr(at, next == std::string::npos ? std::string::npos : next - at);
+        at = next;
+        if (stage.find("\"stage\":\"diarizer-") != std::string::npos) n += count(stage, needle);
+    }
     return n;
 }
 
@@ -80,8 +101,13 @@ std::string engine_status(const std::string & gguf, parakeet::CoremlOptions core
 }  // namespace
 
 int main(int argc, char ** argv) {
-    if (argc != 3) {
-        std::fprintf(stderr, "usage: %s <model.gguf> <empty cache dir>\n", argv[0]);
+    if (argc != 3 && argc != 4) {
+        std::fprintf(stderr, "usage: %s <model.gguf> <empty cache dir> [capacities]\n", argv[0]);
+        return 2;
+    }
+    if (argc == 4) g_capacities = std::atoi(argv[3]);
+    if (g_capacities < 1) {
+        std::fprintf(stderr, "capacities must be at least 1\n");
         return 2;
     }
     const std::string gguf = argv[1];
@@ -97,21 +123,27 @@ int main(int argc, char ** argv) {
           "the generated capacities are charged, validated for the resolved units");
 
     // prewarm = all loads every capacity at construction: the charge covers
-    // all of them, more than the capacities this workload's calls load.
+    // all of them, more than the capacities this workload's calls load. A
+    // model with one capacity loads it at construction either way.
     parakeet::CoremlOptions every = coreml_options(cache);
     every.prewarm = parakeet::CoremlOptions::Prewarm::all;
     const parakeet::FitResult all = project(gguf, every);
     print("prewarm all", all);
-    check(all.coreml.bytes > before.coreml.bytes && all.coreml.validated,
-          "prewarm all charges every generated capacity");
+    if (g_capacities > 1) {
+        check(all.coreml.bytes > before.coreml.bytes && all.coreml.validated,
+              "prewarm all charges every generated capacity");
+    } else {
+        check(all.coreml.bytes == before.coreml.bytes && all.coreml.validated,
+              "one capacity: prewarm all charges what the default charges");
+    }
 
     // Generate every capacity (wait for construction, prewarm all).
     parakeet::CoremlOptions generate = coreml_options(cache);
     generate.wait = parakeet::CoremlOptions::Wait::construct;
     generate.prewarm = parakeet::CoremlOptions::Prewarm::all;
     const std::string generated = engine_status(gguf, generate);
-    check(count(generated, "\"route\":\"generated\"") == kCapacities &&
-              count(generated, "\"state\":\"ready\"") == kCapacities,
+    check(count_in_diarizers(generated, "\"route\":\"generated\"") == g_capacities &&
+              count_in_diarizers(generated, "\"state\":\"ready\"") == g_capacities,
           "every capacity was generated into the cache and loaded");
 
     const parakeet::FitResult after = project(gguf, coreml_options(cache));
@@ -136,11 +168,11 @@ int main(int argc, char ** argv) {
     const std::string unvalidated = engine_status(gguf, gpu, &gpu_group);
     check(contains(unvalidated, "\"generation\":{\"reason\":\"unvalidated_units\",\"supported\":false}"),
           "unvalidated compute units: generation off, reason unvalidated_units");
-    check(count(unvalidated, "\"state\":\"unsupported(unvalidated_units)\"") == kCapacities &&
-              count(unvalidated, "\"route\":\"none\"") == kCapacities,
+    check(count_in_diarizers(unvalidated, "\"state\":\"unsupported(unvalidated_units)\"") == g_capacities &&
+              count_in_diarizers(unvalidated, "\"route\":\"none\"") == g_capacities,
           "every capacity reports unsupported(unvalidated_units), route none");
-    check(contains(gpu_group, "\"slots\":[]") && count(gpu_group, "\"stage\":\"diarizer-") == kCapacities &&
-              count(gpu_group, "unsupported(unvalidated_units)") == kCapacities,
+    check(contains(gpu_group, "\"slots\":[]") && count(gpu_group, "\"stage\":\"diarizer-") == g_capacities &&
+              count(gpu_group, "unsupported(unvalidated_units)") == g_capacities,
           "the construction group loads nothing and lists every capacity as skipped");
 
     // Generation off for the instance: every capacity is still listed, with
@@ -150,9 +182,9 @@ int main(int argc, char ** argv) {
     std::string never_group;
     const std::string off = engine_status(gguf, never, &never_group);
     check(contains(off, "\"generation\":{\"reason\":\"generate=never\",\"supported\":false}") &&
-              count(off, "\"stage\":\"diarizer-") == kCapacities,
+              count(off, "\"stage\":\"diarizer-") == g_capacities,
           "generate = never: generation off, every capacity keeps a status entry");
-    check(contains(never_group, "\"slots\":[]") && count(never_group, "\"stage\":\"diarizer-") == kCapacities,
+    check(contains(never_group, "\"slots\":[]") && count(never_group, "\"stage\":\"diarizer-") == g_capacities,
           "generate = never: the construction group lists every capacity as skipped");
 
     // A budget between the two totals: Core ML off for memory, before any load.
