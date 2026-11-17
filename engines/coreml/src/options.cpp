@@ -84,6 +84,14 @@ bool os_at_least(const OsVersion & v, int major, int minor) {
     return v.major > major || (v.major == major && v.minor >= minor);
 }
 
+bool template_dir_override_compiled() {
+#if defined(QVAC_COREML_DEV)
+    return true;
+#else
+    return false;
+#endif
+}
+
 namespace {
 const char * system_getenv(const char * name) { return std::getenv(name); }
 }  // namespace
@@ -125,6 +133,16 @@ Resolved resolve_coreml(const Options & o, std::string_view prefix, GetenvFn get
     } else if (const char * c = getenv_fn("QVAC_COREML_CACHE_DIR"); c != nullptr && *c != '\0') {
         r.cache_dir = c;
         r.cache_dir_source = Source::shared_env;
+    }
+
+    if (template_dir_override_compiled()) {
+        if (o.template_dir.has_value()) {
+            r.template_dir = *o.template_dir;
+        } else if (const char * d = getenv_fn("QVAC_COREML_TEMPLATE_DIR"); d != nullptr && *d != '\0') {
+            r.template_dir = d;
+        }
+    } else if (o.template_dir.has_value() && !o.template_dir->empty()) {
+        r.warnings.push_back("ignoring template_dir: this build has no template override (QVAC_COREML_DEV)");
     }
 
     if (o.compute_units.has_value() && !o.compute_units->empty()) {

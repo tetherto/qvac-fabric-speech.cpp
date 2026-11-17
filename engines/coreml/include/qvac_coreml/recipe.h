@@ -282,6 +282,10 @@ public:
     // Files whose bytes outlive the template (static embedded data). Each
     // file's sha256 is computed here.
     static std::shared_ptr<const Template> from_files(std::vector<TemplateFile> files);
+    // Embedded files whose sha256 the build computed (the embedded-template
+    // table): nothing is hashed, so the large files (model.mlmodel,
+    // Manifest.json, literals.bin) are not paged in until a package is written.
+    static std::shared_ptr<const Template> from_embedded(std::vector<TemplateFile> files);
 
     const std::string & id() const { return info_.id; }
     const TemplateInfo & info() const { return info_; }
@@ -294,7 +298,7 @@ public:
 
 private:
     Template() = default;
-    void init();
+    void init(bool hash_files);
     std::vector<TemplateFile> files_;
     std::vector<std::shared_ptr<std::vector<uint8_t>>> owned_;
     TemplateInfo info_;
