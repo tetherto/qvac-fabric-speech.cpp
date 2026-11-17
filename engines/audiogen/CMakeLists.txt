@@ -410,11 +410,14 @@ if (AUDIOGEN_BUILD_TESTS)
                          --manifest "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/acestep-vae-t64/reference-gguf.json"
                          --seed 1 --types bf16 -o "${_acestep_vae_twin}")
         set_tests_properties(test-acestep-vae-fit-stable-twin PROPERTIES LABELS "unit" FIXTURES_SETUP acestep-vae-twin)
-        # A macOS Core ML build plans the generated route for the twin, so the
-        # template charges it pins are always checked there.
+        # A macOS Core ML build expects the route its build options and the
+        # host's macOS support: generate (and the template charges it pins)
+        # with the generator built in on macOS 15 or later, none on a
+        # prebuilt-only build or an older macOS. On the CI runner, which has
+        # both, the generated route is therefore mandatory.
         set(_acestep_vae_require "")
         if (AUDIOGEN_COREML AND CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-            set(_acestep_vae_require --require-coreml)
+            set(_acestep_vae_require --host-route)
         endif()
         add_test(NAME test-acestep-vae-fit-stable
                  COMMAND test-acestep-vae-coreml --fit-stable --vae "${_acestep_vae_twin}" ${_acestep_vae_require})

@@ -6,6 +6,7 @@
 //       option validation, the per-phase Core ML charge and the Core ML fit
 //       verdict with memory-degrade.
 //   test-acestep-vae-coreml --fit-stable --vae GGUF [--models DIR]
+//       [--require-coreml | --host-route]
 //       The decoder's route and envelope, and with --models the whole fit,
 //       are the same on an empty cache directory, on one holding what a
 //       generation leaves (artifact, memo, used marker in the runtime's
@@ -47,7 +48,9 @@
 //       to the transient charge fit applies outside the VAE decode phase.
 //
 // Without --require-coreml a route other than `generate` skips the device
-// cases (exit 77); with it, that fails.
+// cases (exit 77); with it, that fails. --host-route (fit-stable) expects the
+// route this build and host support: `generate` with the generator built on
+// macOS 15 or later, `none` otherwise.
 
 #include "audiogen-cpp/acestep/engine.h"
 #include "audiogen-cpp/acestep/fit.h"
@@ -60,6 +63,7 @@
 
 #ifdef AUDIOGEN_USE_COREML
 #include "hints.h"
+#include "qvac_coreml/generation.h"
 #include "qvac_coreml/manager.h"
 #endif
 
@@ -478,17 +482,32 @@ void hint_cases(const cache_comparison & cmp, const fs::path & cache, const std:
 // The decoder's route and envelope (and with `models` the whole fit) are the
 // same on an empty cache, after a generation, and with a non-stale and a stale
 // warm hint: the route never reads the cache.
-void fit_stable(const std::string & vae, const std::string & models, const std::string & root, bool require) {
+void fit_stable(const std::string & vae, const std::string & models, const std::string & root, bool require,
+                bool host_route) {
     std::fprintf(stderr, "fit stability (%s)\n", vae.c_str());
     const fs::path empty = fresh_dir(root, "fit-empty");
     const fs::path cache = fresh_dir(root, "fit-generated");
     CoremlOptions a;
     a.cache_dir = empty.string();
     const detail::vae_coreml_route ra = detail::vae_coreml_plan_route(vae, a);
+    const std::string got = ra.route + " " + ra.state + " " + ra.reason;
 #ifdef AUDIOGEN_USE_COREML
-    if (require) check(ra.route == "generate", "route generate (" + ra.route + " " + ra.state + " " + ra.reason + ")");
+    if (require) {
+        check(ra.route == "generate", "route generate (" + got + ")");
+    } else if (host_route) {
+        // The route this build and host support: generation needs the
+        // generator built in and macOS 15 or later; otherwise (a prebuilt-only
+        // build, an older macOS) the decoder plans no generated route.
+        const auto m = rt::Manager::instance();
+        const bool capable = rt::generation::built() && m->platform() == rt::Platform::macos &&
+                             rt::os_at_least(m->os_version(), 15, 0);
+        if (capable) check(ra.route == "generate", "generation built, macOS 15 or later: route generate (" + got + ")");
+        else check(ra.route == "none", "no generation on this build or OS: route none (" + got + ")");
+    }
 #else
     (void) require;
+    (void) host_route;
+    (void) got;
 #endif
     if (ra.route == "generate") {
         // The template's measured charges (template.json memory), pinned so a
@@ -1279,7 +1298,12 @@ void memory_schedule(const std::string & vae, const std::string & cache, bool la
     check(b.load_warm <= route.load_peak_bytes, "load and warm-up within the load charge");
     check(b.total <= route.envelope_bytes, "whole run within the envelope");
     if (route.ane_compile_reserve_bytes > 0) {
-        check(ane.growth <= route.ane_compile_reserve_bytes, "ANECompilerService growth within the reserve");
+        // The reserve is set from the service's absolute size while loading
+        // (a growth over a service that already holds memory understates a
+        // cold compile), so the absolute size is what it must cover.
+        check(ane.peak <= route.ane_compile_reserve_bytes,
+              "ANECompilerService absolute size while loading within the reserve (" + std::string(baseline) +
+                  " baseline)");
     }
     if (late) {
         check(evicted && hint_seen && b.late_seen, "late completion: evicted while loading, the load wrote its hint");
@@ -1298,7 +1322,7 @@ void memory_schedule(const std::string & vae, const std::string & cache, bool la
 }  // namespace
 
 int main(int argc, char ** argv) {
-    bool self = false, fit = false, require = false, late = false;
+    bool self = false, fit = false, require = false, late = false, host_route = false;
     std::string models, vae, cache_root, memory_dir, first_decode, cases = "encode,lowmem,cached,cancel,repaint,prewarm,prewarm-async,evict,degrade";
     float duration = 20.0f;
     for (int i = 1; i < argc; ++i) {
@@ -1310,6 +1334,7 @@ int main(int argc, char ** argv) {
         if (a == "--self-test") self = true;
         else if (a == "--fit-stable") fit = true;
         else if (a == "--require-coreml") require = true;
+        else if (a == "--host-route") host_route = true;
         else if (a == "--late") late = true;
         else if (a == "--models") models = next();
         else if (a == "--vae") vae = next();
@@ -1334,7 +1359,8 @@ int main(int argc, char ** argv) {
             std::fprintf(stderr, "--fit-stable needs --vae or --models\n");
             return 2;
         }
-        fit_stable(vae, models, cache_root.empty() ? fs::temp_directory_path().string() : cache_root, require);
+        fit_stable(vae, models, cache_root.empty() ? fs::temp_directory_path().string() : cache_root, require,
+                   host_route);
         route_none_construction(vae, cache_root.empty() ? fs::temp_directory_path().string() : cache_root);
     }
 #ifdef AUDIOGEN_USE_COREML
