@@ -499,7 +499,8 @@ void case_encode(const std::string & models, const std::string & root) {
     });
     bool idle = at_source.size() == 2;
     for (const std::string & st : at_source) {
-        std::fprintf(stderr, "  status during the encoding: %s\n", head(st).c_str());
+        std::fprintf(stderr, "  decoder slot during the encoding: %s%s\n", state_of(st).c_str(),
+                     has_hint(st) ? ", hint" : "");
         idle = idle && state_of(st) == "idle" && !has_hint(st);
     }
     check(stopped && idle, "with the VAE encoder loaded, before and after the encode (before free_vae): decoder slot "
