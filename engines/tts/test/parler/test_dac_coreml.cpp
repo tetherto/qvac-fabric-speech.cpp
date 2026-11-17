@@ -309,7 +309,8 @@ void parity_floor_gates() {
 // The memory schedule (--memory-schedule) samples this process's footprint
 // while the generated sidecar is prepared, loaded and warmed in the
 // background, and attributes each sample to the DAC slot's state when it was
-// taken. Each phase is held to the template constant that charges it:
+// taken. Each phase needs 1.25 x its measurement (MEASURED_MARGIN) within the
+// template constant that charges it:
 //   prepare     digesting, generating and compiling: the peak over the
 //               footprint just before generation began, against
 //               generation_peak_bytes + 8 MiB + compile_peak_bytes;
@@ -397,13 +398,22 @@ mem_breakdown mem_breakdown_of(const std::vector<mem_sample> & samples, uint64_t
     return b;
 }
 
-// The template's charges for one run, before the margin, and the envelope.
+// The template's charges for one run and the envelope.
 struct mem_charges {
     uint64_t prepare = 0, load = 0, resident = 0, ane_reserve = 0, envelope = 0;
 };
 
-// One line per charge the run exceeds, or per state it never sampled.
-std::vector<std::string> mem_failures(const mem_breakdown & b, uint64_t ane_compiler_growth, const mem_charges & c) {
+// The template's memory constants are 1.25 x the largest value measured for
+// each phase over every validated host and run (template.json
+// memory.measured.margin), so a run passes only when 1.25 x what it measured
+// stays within the constant. The whole run is held to the envelope as
+// measured: the envelope adds phases that each carry the margin.
+constexpr double MEASURED_MARGIN = 1.25;
+
+// One line per charge the run exceeds (with `margin` applied to every phase
+// but the whole run), or per state it never sampled.
+std::vector<std::string> mem_failures(const mem_breakdown & b, uint64_t ane_compiler_growth, const mem_charges & c,
+                                      double margin = MEASURED_MARGIN) {
     std::vector<std::string> out;
     const std::pair<bool, const char *> states[] = {{b.generated, "generating"}, {b.compiled, "compiling"},
                                                     {b.loaded, "loading"},       {b.warmed, "warming"},
@@ -411,18 +421,19 @@ std::vector<std::string> mem_failures(const mem_breakdown & b, uint64_t ane_comp
     for (const auto & [seen, state] : states) {
         if (!seen) out.push_back(std::string("the schedule never sampled the slot ") + state);
     }
-    const auto over = [&out](const char * what, uint64_t got, uint64_t charged) {
-        if (got <= charged) return;
+    const auto over = [&out](const char * what, uint64_t got, uint64_t charged, double m) {
+        const uint64_t need = (uint64_t) std::ceil((double) got * m);
+        if (need <= charged) return;
         char line[256];
-        std::snprintf(line, sizeof(line), "%s: %llu bytes over the charged %llu", what, (unsigned long long) got,
-                      (unsigned long long) charged);
+        std::snprintf(line, sizeof(line), "%s: %llu bytes measured, x%.2f = %llu over the charged %llu", what,
+                      (unsigned long long) got, m, (unsigned long long) need, (unsigned long long) charged);
         out.push_back(line);
     };
-    over("prepare", b.prepare, c.prepare);
-    over("load and warm-up", b.load_warm, c.load);
-    over("steady state (resident)", b.steady, c.resident);
-    over("whole run (envelope)", b.total, c.envelope);
-    if (c.ane_reserve > 0) over("ANECompilerService growth (reserve)", ane_compiler_growth, c.ane_reserve);
+    over("prepare", b.prepare, c.prepare, margin);
+    over("load and warm-up", b.load_warm, c.load, margin);
+    over("steady state (resident)", b.steady, c.resident, margin);
+    over("whole run (envelope)", b.total, c.envelope, 1.0);
+    if (c.ane_reserve > 0) over("ANECompilerService growth (reserve)", ane_compiler_growth, c.ane_reserve, margin);
     return out;
 }
 
@@ -447,7 +458,7 @@ void memory_schedule_gates() {
           "memory schedule: steady state over the load start, whole run over the baseline");
     check(b.generated && b.compiled && b.loaded && b.warmed && b.ready, "memory schedule: every state sampled");
     const mem_charges exact{70, 98, 93, 400, 100};
-    check(mem_failures(b, 400, exact).empty(), "memory schedule: a run at every charge passes");
+    check(mem_failures(b, 400, exact, 1.0).empty(), "memory schedule: a run at every charge passes (no margin)");
     const struct {
         mem_charges c;
         uint64_t ane;
@@ -458,11 +469,31 @@ void memory_schedule_gates() {
         {{70, 98, 93, 400, 100}, 401, "ANECompilerService"},
     };
     for (const auto & o : over) {
-        const std::vector<std::string> f = mem_failures(b, o.ane, o.c);
+        const std::vector<std::string> f = mem_failures(b, o.ane, o.c, 1.0);
         check(f.size() == 1 && f[0].find(o.stage) != std::string::npos,
               std::string("memory schedule: one byte over the ") + o.stage + " charge fails");
     }
-    check(mem_failures(b, 999, {70, 98, 93, 0, 100}).empty(), "memory schedule: no compiler check without the Neural Engine");
+    check(mem_failures(b, 999, {70, 98, 93, 0, 100}, 1.0).empty(),
+          "memory schedule: no compiler check without the Neural Engine");
+    // With the template's 1.25 margin each phase needs 1.25 x its measurement
+    // (rounded up); the whole run is held to the envelope as measured.
+    const mem_charges margined{88, 123, 117, 500, 100};  // 87.5, 122.5, 116.25, 500 rounded up
+    check(mem_failures(b, 400, margined).empty(), "memory schedule: a run at 1.25 x every phase passes");
+    check(mem_failures(b, 400, exact).size() == 4,
+          "memory schedule: a run that reaches a charge without the 1.25 margin fails each margined phase");
+    const struct {
+        mem_charges c;
+        uint64_t ane;
+        const char * stage;
+    } short_of_margin[] = {
+        {{87, 123, 117, 500, 100}, 400, "prepare"},      {{88, 122, 117, 500, 100}, 400, "load and warm-up"},
+        {{88, 123, 116, 500, 100}, 400, "steady state"}, {{88, 123, 117, 499, 100}, 400, "ANECompilerService"},
+    };
+    for (const auto & o : short_of_margin) {
+        const std::vector<std::string> f = mem_failures(b, o.ane, o.c);
+        check(f.size() == 1 && f[0].find(o.stage) != std::string::npos,
+              std::string("memory schedule: one byte short of 1.25 x the ") + o.stage + " fails");
+    }
     // Generation memory the allocator still holds when the load begins (the
     // M4 Max runner's 3.5 s schedule) belongs to the prepare transient; the
     // steady state charges only what the load and warm-up leave.
@@ -1417,17 +1448,19 @@ void memory_schedule(parler_model & model, const std::string & gguf, const std::
     const uint64_t workspace = b.steady > other_resident ? b.steady - other_resident : 0;
     fprintf(stderr,
             "  memory (MiB; each phase over the footprint just before it began, steady over the footprint just "
-            "before the load, whole run over the warm ggml baseline %.1f):\n"
-            "    prepare    %7.1f  charged %7.1f  (generate %.1f, compile %.1f)\n"
-            "    load+warm  %7.1f  charged %7.1f  (load %.1f, warm-up %.1f)\n"
-            "    steady     %7.1f  charged %7.1f  (workspace %.1f, charged %.1f; over the baseline %.1f)\n"
-            "    whole run  %7.1f  charged %7.1f  (envelope, margin included)\n"
-            "    ANECompilerService growth while loading and warming %.1f, reserve %.1f (%s; peak while loading "
-            "%.1f, whole run %.1f)\n",
-            mib(base), mib(b.prepare), mib(c.prepare), mib(b.generate), mib(b.compile), mib(b.load_warm),
-            mib(c.load), mib(b.load), mib(b.warm), mib(b.steady), mib(c.resident), mib(workspace),
-            mib(route.workspace_bytes), mib(b.steady_over_base), mib(b.total), mib(c.envelope), mib(ane.growth),
-            mib(c.ane_reserve), before_load, mib(ane.peak), mib(ane_peak));
+            "before the load, whole run over the warm ggml baseline %.1f; a phase needs x%.2f its measurement):\n"
+            "    prepare    %7.1f  needs %7.1f  charged %7.1f  (generate %.1f, compile %.1f)\n"
+            "    load+warm  %7.1f  needs %7.1f  charged %7.1f  (load %.1f, warm-up %.1f)\n"
+            "    steady     %7.1f  needs %7.1f  charged %7.1f  (workspace %.1f, charged %.1f; over the baseline %.1f)\n"
+            "    whole run  %7.1f  needs %7.1f  charged %7.1f  (the envelope: margined phases)\n"
+            "    ANECompilerService growth while loading and warming %.1f, needs %.1f, reserve %.1f (%s; peak while "
+            "loading %.1f, whole run %.1f)\n",
+            mib(base), MEASURED_MARGIN, mib(b.prepare), MEASURED_MARGIN * mib(b.prepare), mib(c.prepare),
+            mib(b.generate), mib(b.compile), mib(b.load_warm), MEASURED_MARGIN * mib(b.load_warm), mib(c.load),
+            mib(b.load), mib(b.warm), mib(b.steady), MEASURED_MARGIN * mib(b.steady), mib(c.resident),
+            mib(workspace), mib(route.workspace_bytes), mib(b.steady_over_base), mib(b.total), mib(b.total),
+            mib(c.envelope), mib(ane.growth), MEASURED_MARGIN * mib(ane.growth), mib(c.ane_reserve), before_load,
+            mib(ane.peak), mib(ane_peak));
     if (baseline == qvac_coreml_memory::AneBaseline::dirty) {
         fprintf(stderr,
                 "    note: ANECompilerService held %.1f MiB before the load, so it reused memory of earlier compiles "
