@@ -16,8 +16,8 @@
 //   test-acestep-vae-coreml --models DIR --cache-root DIR [--cases LIST]
 //       [--duration S] [--require-coreml]
 //       Device cases (AUDIOGEN_COREML, macOS 15), each on a fresh cache under
-//       --cache-root (LIST: encode,lowmem,cached,cancel,prewarm,evict,degrade;
-//       default all):
+//       --cache-root (LIST: encode,lowmem,cached,cancel,repaint,prewarm,evict,
+//       degrade; default all):
 //       encode   an encoding (ensure_vae(true)) starts no decoder job;
 //       lowmem   three generate() calls in low-memory mode: the first decodes
 //                on ggml while the cold load completes after its eviction (no
@@ -30,6 +30,8 @@
 //                Core ML decode, an acquisition waiting for the loading
 //                decoder, also strict) end at the stage boundary with the slot
 //                idle and never start a ggml decode they were not asked for;
+//       repaint  (after lowmem) a warm repaint that materialises its source
+//                evicts the decoder before the materialisation's encode;
 //       prewarm  {prewarm all, wait construct} succeeds with no decoder
 //                retained, and the next generate() decodes on Core ML;
 //       evict    an eviction while a job is unstarted cancels it;
@@ -802,6 +804,63 @@ void case_cancel(const std::string & models, const std::string & root, const std
     }
 }
 
+// A warm repaint that materialises its source (a flow edit, then a repaint)
+// decodes on the ready Core ML decoder and then encodes the result with the
+// ggml VAE in the same phase. Fit charges that encode without the resident
+// decoder, so the decoder is evicted at the decode -> encode boundary: the
+// first progress report of the encode finds the slot idle.
+void case_repaint(const std::string & models, const std::string & primed) {
+    std::fprintf(stderr, "repaint: the decoder is evicted before the materialisation's encode\n");
+    EngineOptions o = engine_options(models, primed);
+    o.coreml.wait = CoremlOptions::Wait::call;
+    std::unique_ptr<Engine> engine = Engine::create(o);
+    GenerateParams p;
+    p.caption = "Replace the middle with bright synth guitar";
+    p.lyrics = AUDIO_EDIT_DEFAULT_LYRICS;
+    const int seconds = 10, frames = 48000 * seconds;
+    p.source_audio.resize((size_t) frames * 2);
+    for (int i = 0; i < frames; ++i) {
+        const float v = 0.3f * std::sin(2.0f * 3.14159265f * 220.0f * (float) i / 48000.0f);
+        p.source_audio[(size_t) 2 * i] = v;
+        p.source_audio[(size_t) 2 * i + 1] = v;
+    }
+    p.inference_steps = 2;
+    p.shift = 3.0f;
+    p.seed = 22886;
+    p.lm_phase1 = false;
+    FlowEditParams flow;
+    flow.source_caption = "A plain sine tone";
+    flow.source_lyrics = AUDIO_EDIT_DEFAULT_LYRICS;
+    flow.target_caption = "A warm evolving synth pad";
+    flow.target_lyrics = AUDIO_EDIT_DEFAULT_LYRICS;
+    flow.n_max = 0.5f;
+    RepaintParams repaint;
+    repaint.start_seconds = 3.0f;
+    repaint.end_seconds = 6.0f;
+    repaint.mode = RepaintMode::Balanced;
+    p.edit_plan.emplace_back(flow);
+    p.edit_plan.emplace_back(repaint);
+    struct report { int done, total; std::string state; };
+    std::vector<report> vae;
+    const GenerateResult r = engine->generate(p, [&](const std::string & stage, int done, int total) {
+        if (stage == "vae") vae.push_back({done, total, state_of(engine->coreml_status())});
+        return true;
+    });
+    // The materialisation's decode: the reports up to the first done == total
+    // (> 0); the next report is the encode's first.
+    size_t end = 0;
+    while (end < vae.size() && !(vae[end].done > 0 && vae[end].done == vae[end].total)) ++end;
+    const bool decoded_ready = end < vae.size() && vae[end].state == "ready";
+    const std::string at_encode = end + 1 < vae.size() ? vae[end + 1].state : std::string("none");
+    std::fprintf(stderr, "  %zu vae reports; materialisation decode ends at %zu (%s); encode starts with the slot %s; "
+                         "result %s, %zu samples\n",
+                 vae.size(), end, end < vae.size() ? vae[end].state.c_str() : "-", at_encode.c_str(),
+                 r.vae_backend.c_str(), r.pcm.size());
+    check(!r.pcm.empty() && decoded_ready, "the materialisation decoded on the ready Core ML decoder");
+    check(at_encode == "idle", "the decoder was evicted before the materialisation's encode (" + at_encode + ")");
+    check(state_of(engine->coreml_status()) == "idle", "idle after the repaint");
+}
+
 // Install-time preparation: {prewarm all, wait construct} in low-memory mode.
 void case_prewarm(const std::string & models, const std::string & root, float duration) {
     std::fprintf(stderr, "prewarm: {prewarm all, wait construct}\n");
@@ -1168,7 +1227,7 @@ void memory_schedule(const std::string & vae, const std::string & cache, bool la
 
 int main(int argc, char ** argv) {
     bool self = false, fit = false, require = false, late = false;
-    std::string models, vae, cache_root, memory_dir, first_decode, cases = "encode,lowmem,cached,cancel,prewarm,evict,degrade";
+    std::string models, vae, cache_root, memory_dir, first_decode, cases = "encode,lowmem,cached,cancel,repaint,prewarm,evict,degrade";
     float duration = 20.0f;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -1229,6 +1288,10 @@ int main(int argc, char ** argv) {
             if (contains(cases, "lowmem")) lowmem_cache = case_lowmem(models, cache_root, duration);
             if (contains(cases, "cached") && !lowmem_cache.empty()) case_cached(argv[0], models, lowmem_cache, duration);
             if (contains(cases, "cancel")) case_cancel(models, cache_root, lowmem_cache, duration);
+            if (contains(cases, "repaint")) {
+                if (lowmem_cache.empty()) check(false, "the repaint case needs the lowmem case's primed cache");
+                else case_repaint(models, lowmem_cache);
+            }
             if (contains(cases, "prewarm")) case_prewarm(models, cache_root, duration);
             if (contains(cases, "evict")) case_evict(vae, cache_root);
             if (contains(cases, "degrade")) case_degrade(models, cache_root);

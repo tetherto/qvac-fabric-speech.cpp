@@ -253,6 +253,12 @@ struct Engine::Impl {
         vae.reset();
         if (vae_coreml) vae_coreml->evict();
     }
+    // The end of a decode that the same VAE phase follows with an encode
+    // (repaint materialisation): the Core ML decoder is evicted, the ggml VAE
+    // the encode needs stays. Fit charges that encode without the decoder.
+    void evict_vae_decoder() {
+        if (vae_coreml) vae_coreml->evict();
+    }
 };
 
 // ------------------------------------------------------------ construction
@@ -1718,6 +1724,7 @@ static void materialize_repaint_source(EngineImpl & engine, const EditPlanState 
     artifact.pcm = std::move(materialized);
     artifact.pcm_is_current = true;
     artifact.pending_waveform_splice = false;
+    if (state.generation.low_memory) engine.evict_vae_decoder();  // decode -> encode boundary
     artifact.latent = engine.vae->encode(
         artifact.pcm, (int) artifact.pcm.size() / AUDIO_CHANNELS,
         &artifact.latent_frames, [&](int done, int total) {
