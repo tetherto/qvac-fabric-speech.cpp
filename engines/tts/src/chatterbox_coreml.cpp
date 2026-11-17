@@ -33,6 +33,10 @@ struct S3genCoremlPlan {
         int bucket = -1;
         bool pending = false;
         bool present = false;
+        // The model failed a prediction during this call (plan_retire): the
+        // plan runs the stage on ggml from then on, a replay included.
+        mutable std::atomic<bool> dropped{false};
+        bool usable() const { return model && !dropped.load(std::memory_order_acquire); }
     };
     stage stages[tts_cpp::chatterbox::detail::S3GEN_STAGES];
     bool strict = false;
@@ -504,10 +508,10 @@ plan_stage_view plan_view(const S3genCoremlPlan & plan, s3gen_stage stage) {
     const auto & st = plan.stages[(int) stage];
     plan_stage_view v;
     v.present = st.present;
-    v.model = static_cast<bool>(st.model);
-    v.bucket = st.model ? st.bucket : -1;
+    v.model = st.usable();
+    v.bucket = v.model ? st.bucket : -1;
     v.pending = st.pending;
-    v.label = st.model ? st.model->label() : GGML_STAGE_BACKEND;
+    v.label = v.model ? st.model->label() : GGML_STAGE_BACKEND;
     return v;
 }
 
@@ -521,12 +525,13 @@ bool plan_pending(const S3genCoremlPlan & plan) {
 void plan_retire(const S3genCoremlPlan & plan, s3gen_stage stage, const std::string & reason) {
     const auto & st = plan.stages[(int) stage];
     if (st.model) st.model->retire(reason);
+    st.dropped.store(true, std::memory_order_release);
 }
 
 bool plan_encode(const S3genCoremlPlan & plan, const std::vector<float> & embedding, int tokens, int ratio,
                  std::vector<float> & mu) {
     const auto & st = plan.stages[(int) s3gen_stage::encoder];
-    if (!st.model || tokens <= 0 || st.bucket < tokens || (int64_t) embedding.size() != (int64_t) tokens * EMBED) {
+    if (!st.usable() || tokens <= 0 || st.bucket < tokens || (int64_t) embedding.size() != (int64_t) tokens * EMBED) {
         return false;
     }
     maybe_fail(s3gen_stage::encoder);
@@ -555,7 +560,7 @@ bool plan_velocity(const S3genCoremlPlan & plan, size_t step, int batch, int fra
     const auto & st = plan.stages[(int) s3gen_stage::cfm];
     // Callers pass the CFG pair; a batch-1 (meanflow) sidecar uses the first.
     const size_t planes = (size_t) std::max(batch, 0);
-    if (!st.model || frames <= 0 || batch <= 0 || st.bucket < frames || x.size() < planes || mu.size() < planes ||
+    if (!st.usable() || frames <= 0 || batch <= 0 || st.bucket < frames || x.size() < planes || mu.size() < planes ||
         cond.size() < planes || spks.size() < planes || t_emb.size() < planes) {
         return false;
     }
@@ -613,7 +618,7 @@ bool plan_vocode(const S3genCoremlPlan & plan, const std::vector<float> & mel, i
                  const std::vector<float> & source_stft, std::vector<float> & spectrum) {
     const auto & st = plan.stages[(int) s3gen_stage::hift];
     const int64_t stft = (int64_t) frames * HIFT_STFT_PER_FRAME + 1;
-    if (!st.model || frames <= 0 || (int64_t) mel.size() != (int64_t) MEL * frames ||
+    if (!st.usable() || frames <= 0 || (int64_t) mel.size() != (int64_t) MEL * frames ||
         (int64_t) source_stft.size() != HIFT_STFT_BINS * stft) {
         return false;
     }
@@ -699,6 +704,11 @@ bool coreml_failures_deferred(const S3genCoremlPlan & plan) {
 
 bool plan_strict(const S3genCoremlPlan & plan) {
     return plan.strict;
+}
+
+std::shared_ptr<const S3genCoremlPlan> replay_plan(std::shared_ptr<const S3genCoremlPlan> plan) {
+    if (plan) plan->defer.store(false, std::memory_order_release);
+    return plan;
 }
 
 // ----------------------------------------------------------- the sidecars --
@@ -1102,7 +1112,7 @@ bool s3gen_coreml_plan_offloads(const S3genCoremlPlan & plan) {
     const auto & hift = plan.stages[(int) s3gen_stage::hift];
     // `all` and `cpu_and_gpu` may put a stage on the GPU, where it would
     // contend with T3.
-    return cfm.model && hift.model && cfm.model->request().units == pcm::ComputeUnits::cpu_and_ane &&
+    return cfm.usable() && hift.usable() && cfm.model->request().units == pcm::ComputeUnits::cpu_and_ane &&
            hift.model->request().units == pcm::ComputeUnits::cpu_and_ane;
 #else
     (void) plan;

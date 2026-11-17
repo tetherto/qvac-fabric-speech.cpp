@@ -267,8 +267,16 @@ struct coreml_stage_failure : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
-// Retires the stage's model process-wide after a failed prediction.
+// Retires the stage's model process-wide after a failed prediction and drops
+// it from this plan: the plan runs that stage on ggml from then on.
 void plan_retire(const S3genCoremlPlan & plan, s3gen_stage stage, const std::string & reason);
+
+// The plan a handed-back call (S3GEN_RC_COREML_REDO) is rendered again with,
+// on the dispatching thread: the same plan, so the sentence keeps its other
+// stage choices while the failed stage (dropped by plan_retire) runs every
+// step on ggml from the call's own initial noise and conditioning, never on
+// another width; failures are no longer deferred.
+std::shared_ptr<const S3genCoremlPlan> replay_plan(std::shared_ptr<const S3genCoremlPlan> plan);
 
 // Runs one stage on the plan's model under its prediction lock. Each returns
 // false when the plan holds no model for the stage or it does not cover the

@@ -784,33 +784,46 @@ int pending_fixture() {
     std::printf("[cfm-rollback] a later-step failure equals a whole ggml integration from z0\n");
 
     // 5. A failure during an overlapped call: the plan defers it (the worker
-    //    hands the call back), the function is retired process-wide, and the
-    //    redo's fresh plan no longer uses it (here a wider ready function).
+    //    hands the call back), the function is retired process-wide and
+    //    dropped from the plan, and the replay runs on that same plan: the
+    //    failed stage on ggml even though a wider covering width is ready,
+    //    the other stages on their own models. Later calls use the wider one.
     {
         auto set = cb::s3gen_sidecars::create(routing_case(fixture, root.path, "retire", all), routing_options());
         set->predict({shape(8), shape(12)});
         settle(*set, "retire");
-        auto plan = set->acquire(shape(8), steady::now());
-        require(view(plan, S::cfm).bucket == 16, "the overlapped call holds frames_16");
+        require(set->state(S::cfm, 24) == "ready", "a wider covering CFM width is ready");
+        std::shared_ptr<const S3genCoremlPlan> plan = set->acquire(shape(8), steady::now());
+        require(cb::plan_view(*plan, S::cfm).bucket == 16, "the overlapped call holds frames_16");
         cb::defer_coreml_failures(*plan);
         require(cb::coreml_failures_deferred(*plan), "the worker's plan defers failures");
         hooks.fail_stage = (int) S::cfm;
         std::vector<float> x(80 * 16, 0.0f), spks(80, 0.0f), t_emb(1024, 0.0f);
         std::vector<std::vector<float>> out;
+        auto velocity = [&] {
+            return cb::plan_velocity(*plan, 0, 1, 16, {x.data()}, {x.data()}, {x.data()}, {spks.data()},
+                                     {t_emb.data()}, out);
+        };
         bool failed = false;
         try {
-            cb::plan_velocity(*plan, 0, 1, 16, {x.data()}, {x.data()}, {x.data()}, {spks.data()}, {t_emb.data()}, out);
+            velocity();
         } catch (const cb::coreml_stage_failure &) {
             failed = true;
         }
         require(failed && hooks.fail_stage == -1, "the injected prediction failure surfaces as a stage failure");
         cb::plan_retire(*plan, S::cfm, "injected");
-        plan.reset();
-        auto redo = set->acquire(shape(8), steady::now());
-        require(view(redo, S::cfm).bucket == 24 && view(redo, S::encoder).bucket == 8,
-                "the redo runs CFM on the next ready width, the other stages unchanged");
+        plan = cb::replay_plan(plan);
+        require(!cb::coreml_failures_deferred(*plan), "the replay no longer defers failures");
+        require(!cb::plan_view(*plan, S::cfm).model && cb::plan_view(*plan, S::cfm).label == cb::GGML_STAGE_BACKEND,
+                "the replay runs CFM on ggml");
+        require(!velocity(), "the replay's CFM step does not reach Core ML");
+        require(cb::plan_view(*plan, S::encoder).bucket == 8 && cb::plan_view(*plan, S::hift).model,
+                "the replay keeps the sentence's encoder and HiFT models");
+        require(!s3gen_coreml_plan_offloads(*plan), "the replay never overlaps T3");
         require(set->state(S::cfm, 16) == "retired", "the failed function is retired");
-        std::printf("[retire] frames_16 retired; the redo runs on frames_24\n");
+        auto later = set->acquire(shape(8), steady::now());
+        require(view(later, S::cfm).bucket == 24, "a later call runs CFM on the next ready width");
+        std::printf("[retire] frames_16 retired; the replay runs CFM on ggml, a later call on frames_24\n");
     }
 
     // 6. Dropping the sidecars while a load is in flight returns at once.
@@ -1086,6 +1099,87 @@ void cfm_rollback_check(const std::string & s3gen, const fs::path & root) {
     require(rolled.backend == cb::GGML_STAGE_BACKEND, "after the failure the whole call ran on ggml");
     require(same_pcm(rolled.wav, reference.wav), "a CFM failure at step 2 equals a whole ggml integration from z0");
 }
+
+// A CFM failure on a call whose failures are deferred (an overlapped
+// sentence): the call returns S3GEN_RC_COREML_REDO with nothing rendered, and
+// its replay on the same plan integrates CFM on ggml from the call's own
+// initial noise, equal to use = off sample for sample, although a wider
+// covering CFM width is ready (a fresh plan would take that one). Only the
+// CFM sidecar is present, so the encoder and HiFT run on ggml in both.
+void cfm_replay_check(const std::string & s3gen, const fs::path & root) {
+    const fs::path dir = stage_dir(root, s3gen, {cb::COREML_CFM_SUFFIX}, "cfm-replay");
+    const std::string gguf = (dir / fs::path(s3gen).filename()).string();
+    CoremlOptions waited;
+    waited.wait = CoremlOptions::Wait::call;
+    waited.compute_units = "cpu_only";
+    waited.prewarm = CoremlOptions::Prewarm::none;
+    auto sidecars = cb::s3gen_sidecars::get(gguf, waited);
+    require(sidecars != nullptr, "replay: the CFM sidecar is found");
+    const std::vector<int> widths = sidecars->buckets(cb::s3gen_stage::cfm);
+    require(widths.size() >= 2, "replay: the CFM sidecar has two widths");
+    const cb::s3gen_gguf_facts & facts = sidecars->facts();
+    // The call fits a width below the widest, so a wider one covers it too.
+    const int speech = std::min(90, widths[widths.size() - 2] / facts.token_mel_ratio - facts.builtin_prompt_tokens -
+                                        cb::S3GEN_LOOKAHEAD_TOKENS);
+    require(speech >= 8, "replay: a call fits below the widest CFM width");
+    const std::vector<int32_t> tokens = fixture_tokens(speech);
+    s3gen_synthesize_opts opts;
+    opts.s3gen_gguf_path = gguf;
+    opts.n_gpu_layers = 99;
+    opts.seed = 42;
+    opts.coreml = waited;
+    const cb::s3gen_call_shape call = cb::s3gen_call_shape_for(opts, tokens, facts);
+    const int exact = cb::coreml_pick_bucket(widths, call.frames);
+    require(exact > 0 && exact < widths.back(), "replay: the call's width is not the widest");
+    const int next = *std::upper_bound(widths.begin(), widths.end(), exact);
+    cb::s3gen_call_shape wider = call;
+    wider.frames = next;
+    sidecars->predict({call, wider});
+    require(wait_for([&] {
+                return sidecars->state(cb::s3gen_stage::cfm, exact) == "ready" &&
+                       sidecars->state(cb::s3gen_stage::cfm, next) == "ready";
+            }, 900000),
+            "replay: the call's width and a wider one load");
+    sidecars->end_call();
+
+    auto run = [&](std::shared_ptr<const S3genCoremlPlan> plan, const CoremlOptions & coreml, int & rc) {
+        s3gen_synthesize_opts o = opts;
+        o.coreml = coreml;
+        o.coreml_plan = std::move(plan);
+        run_result r;
+        o.pcm_out = &r.wav;
+        o.s3gen_backend_out = &r.backend;
+        rc = s3gen_synthesize_to_wav(tokens, o);
+        return r;
+    };
+    CoremlOptions off;
+    off.use = CoremlOptions::Use::off;
+    int rc = -1;
+    const run_result reference = run(nullptr, off, rc);
+    require(rc == 0, "replay: the use = off reference");
+
+    auto plan = s3gen_acquire_coreml_plan(opts, tokens, std::chrono::steady_clock::now());
+    require(plan && cb::plan_view(*plan, cb::s3gen_stage::cfm).bucket == exact,
+            "replay: the call holds its exact CFM width");
+    cb::defer_coreml_failures(*plan);
+    cb::coreml_test().fail_cfm_step = 1;
+    const run_result handed_back = run(plan, waited, rc);
+    require(cb::coreml_test().fail_cfm_step == -1, "replay: the failure was injected");
+    require(rc == cb::S3GEN_RC_COREML_REDO && handed_back.wav.empty(),
+            "replay: a deferred failure hands the call back with nothing rendered");
+    const run_result replayed = run(cb::replay_plan(plan), waited, rc);
+    require(rc == 0, "replay: the replay renders");
+    auto fresh = s3gen_acquire_coreml_plan(opts, tokens, std::chrono::steady_clock::now());
+    std::printf("[cfm-replay] frames_%d failed; replay backend=%s, max |replay - use=off| = %.3e; a fresh plan "
+                "would take frames_%d\n",
+                exact, replayed.backend.c_str(),
+                replayed.wav.size() == reference.wav.size() ? max_abs(replayed.wav, reference.wav) : -1.0,
+                fresh ? cb::plan_view(*fresh, cb::s3gen_stage::cfm).bucket : -1);
+    require(fresh && cb::plan_view(*fresh, cb::s3gen_stage::cfm).bucket == next,
+            "replay: a wider ready width covers the call");
+    require(replayed.backend == cb::GGML_STAGE_BACKEND, "replay: CFM runs on ggml, not on the wider width");
+    require(same_pcm(replayed.wav, reference.wav), "replay: equal to a whole ggml integration from z0");
+}
 #endif
 
 int engine_fixture(bool slow_load) {
@@ -1208,18 +1302,17 @@ int engine_fixture(bool slow_load) {
             "a CFM fallback aggregates as mixed");
 
     cfm_rollback_check(s3gen, root.path);
+    cfm_replay_check(s3gen, root.path);
 
-    // A prediction failure on the worker during the overlap: the worker hands
-    // the segment back, the dispatching thread renders it again, and the
-    // result equals a later run with the same function retired (last: the
-    // retirement is process-wide).
+    // A prediction failure on the worker during the overlap (last: the
+    // retirement is process-wide): the worker hands the sentence back and the
+    // dispatching thread renders it again on its own plan, CFM on ggml, the
+    // encoder and HiFT on Core ML.
     cb::coreml_test().fail_stage = (int) cb::s3gen_stage::cfm;
     const SynthesisResult redone = engine.synthesize(OVERLAP_TEXT);
     require(cb::coreml_test().fail_stage == -1, "the worker's CFM prediction failed");
-    const SynthesisResult after = engine.synthesize(OVERLAP_TEXT);
-    std::printf("[overlap retire] redone backend=%s, later backend=%s\n", redone.s3gen_backend.c_str(),
-                after.s3gen_backend.c_str());
-    require(same_pcm(redone.pcm, after.pcm), "the redone segment equals a run with the function retired");
+    std::printf("[overlap retire] redone backend=%s\n", redone.s3gen_backend.c_str());
+    require(redone.s3gen_backend == cb::MIXED_STAGE_BACKEND, "the replayed sentence runs CFM on ggml");
     s3gen_unload();
     return 0;
 #endif

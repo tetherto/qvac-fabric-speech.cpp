@@ -687,9 +687,11 @@ struct Engine::Impl {
         double             s3gen_ms = 0.0;
         int                tokens   = 0;
         // A Core ML stage failed on the worker: nothing was rendered, and the
-        // dispatching thread renders the segment again (redo_tokens).
+        // dispatching thread renders the segment again (redo_tokens) with
+        // the same plan, the failed stage now on ggml (detail::replay_plan).
         bool                 redo = false;
         std::vector<int32_t> redo_tokens;
+        std::shared_ptr<const S3genCoremlPlan> redo_plan;
     };
 
     // The batch-segment options of this Engine (no plan yet).
@@ -734,7 +736,7 @@ struct Engine::Impl {
     rendered_segment render_batch_segment(const std::vector<int32_t> & speech_tokens,
                                           std::shared_ptr<const S3genCoremlPlan> plan) {
         s3gen_synthesize_opts sopts = batch_segment_opts();
-        sopts.coreml_plan = std::move(plan);
+        sopts.coreml_plan = plan;
 
         rendered_segment seg;
         sopts.pcm_out = &seg.pcm;
@@ -746,6 +748,7 @@ struct Engine::Impl {
         if (rc == detail::S3GEN_RC_COREML_REDO) {
             seg.redo = true;
             seg.redo_tokens = speech_tokens;
+            seg.redo_plan = std::move(plan);
             return seg;
         }
         if (rc == 2) {
@@ -763,12 +766,13 @@ struct Engine::Impl {
     // Folds a rendered segment into result.pcm (crossfaded into the previous
     // segment's tail when not the first) and accumulates its stats.  A
     // segment the worker handed back (a Core ML failure there) is rendered
-    // again here first, on this thread and so in sequence with T3, with a
-    // fresh plan (the failed function is retired, so that stage is on ggml).
+    // again here first, on this thread and so in sequence with T3, with its
+    // own plan: the other stages keep their models and the failed one runs
+    // on ggml (never on another width of the retired function's sidecar).
     void append_batch_segment(rendered_segment && seg, SynthesisResult & result) {
         if (seg.redo) {
             const std::vector<int32_t> tokens = std::move(seg.redo_tokens);
-            seg = render_batch_segment(tokens, acquire_plan(batch_segment_opts(), tokens));
+            seg = render_batch_segment(tokens, detail::replay_plan(std::move(seg.redo_plan)));
         }
         s3gen_backends.insert(seg.backend);
         // First segment: result.pcm is empty, so this is a plain append.
