@@ -806,7 +806,9 @@ class PowerRunnerTest(unittest.TestCase):
                           ("cfm", "frames_512"), ("cfm", "frames_1024"), ("cfm", "frames_1536"), ("hift", "main")])
         self.assertEqual([x["power"]["source"] for x in rows], ["battery"] * 3 + ["ac"] * 4)
         self.assertEqual([x["power_changed"] for x in rows], [True] * 6 + [False])
-        self.assertEqual(len(fx.calls), 3)
+        # Each process sees only the readings taken before it ran: the start's
+        # and one after each earlier process, never one taken just before it.
+        self.assertEqual([c["power_reads"] for c in fx.calls], [1, 2, 3])
         self.assertEqual(fx.power_reads, 1 + len(fx.calls))
         self.assertIn("6 rows are flagged power_changed (load_cold 6)", r.power_warning())
 
