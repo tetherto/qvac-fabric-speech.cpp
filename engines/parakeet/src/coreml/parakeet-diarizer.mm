@@ -461,6 +461,7 @@ int CoremlDiarizers::run(int valid_frames,
                          const parakeet_coreml_rows_out * outputs, int n_outputs) {
     const bool strict = state_->slots.strict();
     std::string label;
+    int served = 0;
     const DiarizerPass pass = state_->slots.run(valid_frames, [&](pcm::Handle & model, int capacity) {
         auto * context = model->as<parakeet_coreml_diarizer>();
         int status = 0;
@@ -473,6 +474,7 @@ int CoremlDiarizers::run(int valid_frames,
                               "quarantining it%s\n", capacity, status, strict ? "" : " and using ggml");
         } else {
             label = parakeet_coreml_diarizer_label(context);
+            served = capacity;
         }
         return status;
     });
@@ -482,6 +484,7 @@ int CoremlDiarizers::run(int valid_frames,
         state_->label = label;
         ++state_->stats.coreml;
         state_->stats.label = label;
+        state_->stats.capacity = served;
     }
     return pass.status;
 }

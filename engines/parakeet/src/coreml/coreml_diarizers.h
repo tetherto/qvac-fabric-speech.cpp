@@ -21,6 +21,7 @@ struct CoremlDiarizerCallStats {
     int coreml = 0;      // passes that ran on a diarizer sidecar
     int not_ready = 0;   // passes that ran on ggml because the capacity was loading
     std::string label;   // Core ML label of the passes that ran on a sidecar
+    int capacity = 0;    // the capacity (frames) that served the last such pass
 };
 
 // The diarizer sidecars of one model, one runtime slot per capacity
