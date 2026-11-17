@@ -27,7 +27,8 @@
 // `--stub-tdt-skip-load` needs no fixture: with a tensor-less TDT GGUF and a
 // stub bundle that holds only metadata.json, the loader skips the synchronous
 // sidecar load when the metadata shows an export that cannot own a TDT
-// encoder, and still attempts it for Neural Engine metadata or none.
+// encoder, and still attempts it for Neural Engine metadata, for none, and
+// for metadata that does not show the export.
 //
 // Exit 0 on success; non-zero on failure or invalid arguments.
 
@@ -328,6 +329,19 @@ void check_stub_tdt_skips_throwaway_load() {
     expect(load_logged(gguf.string(), log) == kGgufLoadNoEncoderWeights &&
                log.find(kFailedLoad) != std::string::npos,
            "no metadata: the loader still loads the sidecar to find out");
+
+    // Metadata that does not show the export (unparsable, or no input names)
+    // is inconclusive: only the model's own description can rule ownership
+    // out, so the bundle is loaded, as with no metadata.
+    for (const char * inconclusive : {"not json", "{}", R"([{"inputSchema":[]}])",
+                                      R"([{"shortDescription":"encoder"}])"}) {
+        write_text(bundle / "metadata.json", inconclusive);
+        expect(load_logged(gguf.string(), log) == kGgufLoadNoEncoderWeights &&
+                   log.find(kFailedLoad) != std::string::npos &&
+                   log.find("no validated seam policy") == std::string::npos,
+               std::string("inconclusive metadata '") + inconclusive +
+                   "': the loader still loads the sidecar to find out");
+    }
     fs::remove_all(dir);
 }
 

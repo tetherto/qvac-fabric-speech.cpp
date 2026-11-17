@@ -1901,11 +1901,6 @@ static bool path_is_directory(const std::string & path) {
     return ::stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
 }
 
-static bool path_is_regular_file(const std::string & path) {
-    struct stat st{};
-    return ::stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
-}
-
 static constexpr const char * kCoremlOnlyEnv    = "PARAKEET_COREML_ONLY";
 static constexpr const char * kCoremlDecoderUnitsEnv = "PARAKEET_COREML_DECODER_COMPUTE_UNITS";
 
@@ -2084,10 +2079,9 @@ static parakeet_coreml_context * init_coreml_only_encoder(const gguf_context * g
     // (coreml_can_own_encoder). When the bundle's metadata shows another
     // export, a load here would only be thrown away, so it is skipped: a
     // full GGUF gets the background encoder slot and an encoder-less one is
-    // rejected, as after the load. A bundle without metadata is loaded to
-    // find out.
-    if (type == "tdt" && path_is_regular_file(path + "/metadata.json") &&
-        !parakeet_coreml_encoder_prefers_ane(path.c_str())) {
+    // rejected, as after the load. A bundle whose metadata is missing,
+    // unreadable or does not list its inputs is loaded to find out.
+    if (type == "tdt" && parakeet_coreml_encoder_export_kind(path.c_str()) == 0) {
         PARAKEET_LOG_WARN("parakeet: TDT sidecar has no validated seam policy; native encoder "
                           "weights are required for oversized inputs and push streaming\n");
         return nullptr;

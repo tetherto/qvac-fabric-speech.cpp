@@ -54,6 +54,12 @@ struct parakeet_coreml_context * parakeet_coreml_init_with_units(const char * pa
 // it: its default compute units are cpu_and_ane, every other export's are all.
 bool parakeet_coreml_encoder_prefers_ane(const char * path_mlmodelc);
 
+// The bundle's export kind from its metadata.json, without loading it: 1 the
+// fixed-window Neural Engine export, 0 conclusively another export (its input
+// schema names inputs, without the Neural Engine ones), -1 unknown (missing,
+// unreadable or incomplete metadata; load the model to find out).
+int parakeet_coreml_encoder_export_kind(const char * path_mlmodelc);
+
 // Release a context created by parakeet_coreml_init. Safe to call with nullptr.
 void parakeet_coreml_free(struct parakeet_coreml_context * ctx);
 

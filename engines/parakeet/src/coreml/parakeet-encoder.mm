@@ -327,6 +327,35 @@ bool mlmodelc_declares_ane_inputs(NSString * path) {
     return [text containsString:pad_mask] && [text containsString:key_bias];
 }
 
+// What metadata.json shows about the export without loading it: 1 the
+// fixed-window Neural Engine export, 0 conclusively another export (a parsed
+// input schema that names its inputs, without both Neural Engine inputs), -1
+// unknown (no metadata, or metadata that cannot be read, parsed or that lists
+// no input names). Only the model's own description is authoritative for -1.
+int mlmodelc_export_kind(NSString * path) {
+    if (mlmodelc_declares_ane_inputs(path)) return 1;
+    NSString * metadata = [path stringByAppendingPathComponent:@"metadata.json"];
+    NSData * data = [NSData dataWithContentsOfFile:metadata];
+    if (data == nil) return -1;
+    id root = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    NSDictionary * description = nil;
+    if ([root isKindOfClass:[NSArray class]] && [(NSArray *) root count] > 0 &&
+        [((NSArray *) root)[0] isKindOfClass:[NSDictionary class]]) {
+        description = ((NSArray *) root)[0];
+    } else if ([root isKindOfClass:[NSDictionary class]]) {
+        description = root;
+    }
+    id schema = description[@"inputSchema"];
+    if (![schema isKindOfClass:[NSArray class]] || [(NSArray *) schema count] == 0) return -1;
+    for (id input in (NSArray *) schema) {
+        if (![input isKindOfClass:[NSDictionary class]] ||
+            ![((NSDictionary *) input)[@"name"] isKindOfClass:[NSString class]]) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
 bool declares_ane_inputs(NSDictionary<NSString *, MLFeatureDescription *> * ins) {
     return ins[kAneMelInput].type == MLFeatureTypeMultiArray &&
            ins[kAnePadMaskInput].type == MLFeatureTypeMultiArray &&
@@ -761,6 +790,14 @@ struct parakeet_coreml_context * parakeet_coreml_init_with_units_env(const char 
 struct parakeet_coreml_context * parakeet_coreml_init_with_units(const char * path_mlmodelc,
                                                                  const char * units) {
     return init_coreml_model(path_mlmodelc, units, CoremlPlacement::Automatic);
+}
+
+int parakeet_coreml_encoder_export_kind(const char * path_mlmodelc) {
+    if (path_mlmodelc == nullptr) return -1;
+    @autoreleasepool {
+        NSString * path = [[NSString alloc] initWithUTF8String:path_mlmodelc];
+        return path != nil ? mlmodelc_export_kind(path) : -1;
+    }
 }
 
 bool parakeet_coreml_encoder_prefers_ane(const char * path_mlmodelc) {
