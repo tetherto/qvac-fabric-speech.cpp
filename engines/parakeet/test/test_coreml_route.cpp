@@ -24,6 +24,10 @@
 //                         pending; with wait = call the acquisition waits
 //   sidecar-groups        construction group = the minimal set; prewarm all
 //                         adds the rest; an absent sidecar is skipped
+//   relative-paths        two bundles registered by the same relative name from
+//                         different directories get distinct absolute paths:
+//                         two shared models, each loaded from its own
+//                         directory even after the process changes directory
 //   options               public CoremlOptions -> runtime options, resolution
 //   fit-stable            the fit route and envelope never read the cache:
 //                         identical with no hint, a warm hint and a stale hint
@@ -623,6 +627,74 @@ void case_sidecar_groups() {
     fs::remove_all(dir);
 }
 
+void write_text(const fs::path & p, const std::string & text) {
+    fs::create_directories(p.parent_path());
+    std::ofstream(p) << text;
+}
+
+std::mutex g_loaded_mu;
+std::vector<std::string> g_loaded_paths;
+
+pcm::LoadResult recording_load(const pcm::LoadRequest & req) {
+    {
+        std::lock_guard<std::mutex> lock(g_loaded_mu);
+        g_loaded_paths.push_back(req.artifact_path);
+    }
+    return fake_load(req);
+}
+
+void case_relative_paths() {
+    const fs::path root = make_temp_dir("relative");
+    for (const char * sub : {"a", "b"}) {
+        write_text(root / sub / "model-encoder.mlmodelc" / "weights" / "weight.bin", std::string(10, 'x'));
+    }
+    fs::create_directories(root / "elsewhere");
+    const fs::path saved = fs::current_path();
+    auto m = pcm::Manager::create(fast_config());
+    const bool routable = m->platform() != pcm::Platform::other;
+
+    CoremlOptions opts;
+    opts.prewarm = CoremlOptions::Prewarm::none;
+    opts.wait = CoremlOptions::Wait::call;
+    auto request = [] {
+        SidecarRequest r;
+        r.stage = "encoder";
+        r.path = "model-encoder.mlmodelc";  // relative, as a GGUF opened by a relative name gives
+        r.present = true;
+        r.stage_default = pcm::ComputeUnits::cpu_and_ane;
+        r.load_fn = &recording_load;
+        return r;
+    };
+    CoremlSidecars first(opts, m), second(opts, m);
+    fs::current_path(root / "a");
+    auto slot_a = first.add(request());
+    fs::current_path(root / "b");
+    auto slot_b = second.add(request());
+    fs::current_path(root / "elsewhere");  // with prewarm none, the loads run after this
+
+    const std::string path_a = slot_a->spec().artifact_path;
+    const std::string path_b = slot_b->spec().artifact_path;
+    CHECK(fs::path(path_a).is_absolute() && fs::path(path_b).is_absolute(),
+          "relative-paths: the slot keeps an absolute bundle path");
+    CHECK(path_a != path_b, "relative-paths: the same relative name in two directories gives two paths");
+    std::error_code ec_a, ec_b;
+    CHECK(fs::path(path_a).is_absolute() && fs::equivalent(path_a, root / "a" / "model-encoder.mlmodelc", ec_a) &&
+              fs::path(path_b).is_absolute() && fs::equivalent(path_b, root / "b" / "model-encoder.mlmodelc", ec_b),
+          "relative-paths: each path names the bundle next to its own model");
+    if (routable) {
+        const pcm::Acquired got_a = slot_a->acquire(pcm::Demand::now);
+        const pcm::Acquired got_b = slot_b->acquire(pcm::Demand::now);
+        CHECK(got_a.model && got_b.model && got_a.model->get() != got_b.model->get(),
+              "relative-paths: two bundles load two models, not one shared");
+        std::lock_guard<std::mutex> lock(g_loaded_mu);
+        CHECK(g_loaded_paths.size() == 2 && g_loaded_paths[0] != g_loaded_paths[1] &&
+                  fs::path(g_loaded_paths[0]).is_absolute() && fs::path(g_loaded_paths[1]).is_absolute(),
+              "relative-paths: the loader opens each bundle by its absolute path after a chdir");
+    }
+    fs::current_path(saved);
+    fs::remove_all(root);
+}
+
 void case_options() {
     CoremlOptions o;
     o.use = CoremlOptions::Use::require;
@@ -663,11 +735,6 @@ void case_options() {
     CHECK(loader_units(resolve_parakeet_coreml(CoremlOptions{})) == nullptr,
           "unset units leave the loader's own default");
     if (saved) setenv("PARAKEET_COREML_COMPUTE_UNITS", saved_value.c_str(), 1);
-}
-
-void write_text(const fs::path & p, const std::string & text) {
-    fs::create_directories(p.parent_path());
-    std::ofstream(p) << text;
 }
 
 void case_fit_stable() {
@@ -785,6 +852,7 @@ int main() {
     case_strict_route();
     case_pending_route();
     case_sidecar_groups();
+    case_relative_paths();
     case_options();
     case_fit_stable();
     std::printf("test-parakeet-coreml-route: %d checks, %d failures\n", g_checks, g_failures);

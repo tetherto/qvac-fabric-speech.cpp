@@ -3,6 +3,8 @@
 #include <sys/stat.h>
 
 #include <chrono>
+#include <filesystem>
+#include <system_error>
 #include <utility>
 
 namespace parakeet {
@@ -19,6 +21,19 @@ constexpr double kAneCompileReserveFactor = 1.6;
 uint64_t file_bytes(const std::string & path) {
     struct stat st {};
     return ::stat(path.c_str(), &st) == 0 ? static_cast<uint64_t>(st.st_size) : 0;
+}
+
+// The bundle path a slot keys its shared model by and loads from: absolute
+// and canonical, resolved once at registration. A relative path would name
+// a different bundle after the process changes directory, and two models
+// opened by the same relative name from different directories would share
+// one model.
+std::string canonical_bundle_path(const std::string & path) {
+    if (path.empty()) return path;
+    std::error_code ec;
+    std::filesystem::path p = std::filesystem::weakly_canonical(path, ec);
+    if (ec) p = std::filesystem::absolute(path, ec).lexically_normal();
+    return ec ? path : p.string();
 }
 
 template <class E, class F>
@@ -127,11 +142,11 @@ std::shared_ptr<pcm::Slot> CoremlSidecars::add(const SidecarRequest & request) {
     spec.route = plan.route;
     spec.none_state = plan.none_state;
     spec.none_reason = plan.reason;
-    spec.artifact_path = request.path;
+    spec.artifact_path = canonical_bundle_path(request.path);
     spec.load_fn = request.load_fn;
     spec.geometry = request.geometry;
     spec.ane_compile_reserve_bytes =
-        plan.route == pcm::Route::prebuilt ? ane_compile_reserve_bytes(request.path, in.units) : 0;
+        plan.route == pcm::Route::prebuilt ? ane_compile_reserve_bytes(spec.artifact_path, in.units) : 0;
     auto slot = manager_->make_slot(std::move(spec), pcm::SlotPolicy::from(resolved_));
     entries_.push_back(Entry{slot, request.minimal});
     return slot;

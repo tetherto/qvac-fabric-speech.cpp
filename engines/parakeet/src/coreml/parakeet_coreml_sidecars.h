@@ -70,7 +70,7 @@ uint64_t ane_compile_reserve_bytes(const std::string & mlmodelc, pcm::ComputeUni
 // One sidecar to register (route from plan(): prebuilt when present).
 struct SidecarRequest {
     std::string stage;          // status "stage": encoder, bypass-encoder, diarizer-<frames>
-    std::string path;           // adjacent .mlmodelc
+    std::string path;           // adjacent .mlmodelc (made absolute and canonical by add())
     bool present = false;       // the directory exists (today's path rules)
     pcm::ComputeUnits stage_default = pcm::ComputeUnits::all;
     pcm::LoadFn load_fn = nullptr;
