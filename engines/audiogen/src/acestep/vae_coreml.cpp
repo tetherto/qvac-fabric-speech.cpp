@@ -316,6 +316,9 @@ std::shared_ptr<vae_coreml_stage> vae_coreml_stage::create(const std::string & g
         spec.tmpl    = c.tmpl;
         spec.prepare = rt::generation::prepare_request(c, source, p->resolved);
         spec.prepare_fn = &rt::generation::prepare;
+        // A decode adopts an artifact a previous process left in the cache
+        // (and its warm hint) before deciding the bounded wait.
+        spec.lookup_fn = &rt::generation::lookup;
         spec.ane_compile_reserve_bytes = rt::generation::ane_compile_reserve_bytes(c.memory, spec.units);
         if (auto w = c.expected_warm_load_ms.find("main"); w != c.expected_warm_load_ms.end()) {
             spec.expected_warm_load_ms = w->second;

@@ -16,12 +16,15 @@
 //   test-acestep-vae-coreml --models DIR --cache-root DIR [--cases LIST]
 //       [--duration S] [--require-coreml]
 //       Device cases (AUDIOGEN_COREML, macOS 15), each on a fresh cache under
-//       --cache-root (LIST: encode,lowmem,prewarm,evict,degrade; default all):
+//       --cache-root (LIST: encode,lowmem,cached,prewarm,evict,degrade; default all):
 //       encode   an encoding (ensure_vae(true)) starts no decoder job;
 //       lowmem   three generate() calls in low-memory mode: the first decodes
 //                on ggml while the cold load completes after its eviction (no
 //                repopulation, hint written), the second and third reload warm
 //                within their deadlines and decode on Core ML;
+//       cached   (after lowmem) a second process on the primed cache: its
+//                first decode, with the default wait settings, adopts the
+//                cached artifact and decodes on Core ML;
 //       prewarm  {prewarm all, wait construct} succeeds with no decoder
 //                retained, and the next generate() decodes on Core ML;
 //       evict    an eviction while a job is unstarted cancels it;
@@ -67,6 +70,12 @@
 
 #if defined(__APPLE__)
 #include <sys/sysctl.h>
+#endif
+#ifdef AUDIOGEN_USE_COREML
+#include <spawn.h>
+#include <sys/wait.h>
+
+extern char ** environ;
 #endif
 
 namespace fs = std::filesystem;
@@ -583,6 +592,49 @@ std::string case_lowmem(const std::string & models, const std::string & root, fl
     return cache;
 }
 
+// A fresh process on a cache another process primed (the lowmem case left a
+// compiled artifact and the warm hint its load wrote): the first decode of
+// this process adopts the cached artifact and waits for its warm load within
+// the decode's deadline, with the default wait settings, and decodes on Core
+// ML. Runs in a child process (--first-decode) so nothing of the priming
+// process's runtime is shared.
+void first_decode_on(const std::string & models, const std::string & cache, float duration) {
+    std::fprintf(stderr, "first decode of a fresh process on the primed cache %s\n", cache.c_str());
+    std::unique_ptr<Engine> engine = Engine::create(engine_options(models, cache));
+    const std::string at_create = engine->coreml_status();
+    check(state_of(at_create) == "idle", "create() requests nothing (" + state_of(at_create) + ")");
+    const GenerateResult r = engine->generate(short_params(duration));
+    const std::string st = engine->coreml_status();
+    std::fprintf(stderr, "  first generate: %s pending=%d; slot after: %s\n", r.vae_backend.c_str(),
+                 (int) r.coreml_pending, head(st, 400).c_str());
+    check(!r.pcm.empty() && r.vae_backend.rfind("coreml-", 0) == 0 && !r.coreml_pending,
+          "the first decode of a fresh process uses the cached artifact (" + r.vae_backend + ")");
+    check(contains(st, "\"route\":\"cached\""), "status route cached");
+}
+
+int run_child(const std::vector<std::string> & args) {
+#ifndef AUDIOGEN_USE_COREML
+    (void) args;
+    return -1;
+#else
+    std::vector<char *> argv;
+    for (const std::string & a : args) argv.push_back(const_cast<char *>(a.c_str()));
+    argv.push_back(nullptr);
+    pid_t pid = 0;
+    if (posix_spawn(&pid, argv[0], nullptr, nullptr, argv.data(), environ) != 0) return -1;
+    int status = 0;
+    if (waitpid(pid, &status, 0) != pid) return -1;
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+#endif
+}
+
+void case_cached(const std::string & self, const std::string & models, const std::string & cache, float duration) {
+    std::fprintf(stderr, "cached: a second process's first decode on a primed cache\n");
+    const int rc = run_child({self, "--models", models, "--first-decode", cache, "--duration",
+                              std::to_string(duration)});
+    check(rc == 0, "the child process's first decode ran on Core ML (exit " + std::to_string(rc) + ")");
+}
+
 // Install-time preparation: {prewarm all, wait construct} in low-memory mode.
 void case_prewarm(const std::string & models, const std::string & root, float duration) {
     std::fprintf(stderr, "prewarm: {prewarm all, wait construct}\n");
@@ -894,7 +946,7 @@ void memory_schedule(const std::string & vae, const std::string & cache, bool la
 
 int main(int argc, char ** argv) {
     bool self = false, fit = false, require = false, late = false;
-    std::string models, vae, cache_root, memory_dir, cases = "encode,lowmem,prewarm,evict,degrade";
+    std::string models, vae, cache_root, memory_dir, first_decode, cases = "encode,lowmem,cached,prewarm,evict,degrade";
     float duration = 20.0f;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -912,6 +964,7 @@ int main(int argc, char ** argv) {
         else if (a == "--cases") cases = next();
         else if (a == "--duration") duration = std::stof(next());
         else if (a == "--memory-schedule") memory_dir = next();
+        else if (a == "--first-decode") first_decode = next();
         else {
             std::fprintf(stderr, "unknown argument %s\n", a.c_str());
             return 2;
@@ -928,6 +981,11 @@ int main(int argc, char ** argv) {
         fit_stable(vae, models, cache_root.empty() ? fs::temp_directory_path().string() : cache_root, require);
     }
 #ifdef AUDIOGEN_USE_COREML
+    if (!first_decode.empty()) {
+        first_decode_on(models, first_decode, duration);
+        std::fprintf(stderr, "%s (%d failure(s))\n", g_failures ? "FAIL" : "OK", g_failures);
+        return g_failures ? 1 : 0;
+    }
     if (!memory_dir.empty()) memory_schedule(vae, memory_dir, late, require);
     if (!models.empty() && !cache_root.empty()) {
         CoremlOptions probe;
@@ -944,6 +1002,7 @@ int main(int argc, char ** argv) {
             if (contains(cases, "encode")) case_encode(models, cache_root);
             std::string lowmem_cache;
             if (contains(cases, "lowmem")) lowmem_cache = case_lowmem(models, cache_root, duration);
+            if (contains(cases, "cached") && !lowmem_cache.empty()) case_cached(argv[0], models, lowmem_cache, duration);
             if (contains(cases, "prewarm")) case_prewarm(models, cache_root, duration);
             if (contains(cases, "evict")) case_evict(vae, cache_root);
             if (contains(cases, "degrade")) case_degrade(models, cache_root);

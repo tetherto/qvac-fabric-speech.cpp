@@ -118,6 +118,13 @@ struct PrepareResult {
 };
 
 using PrepareFn = PrepareResult (*)(const PrepareRequest & req, PrepareContext & ctx);
+// Route generate: the artifact the cache already holds for `req`, found
+// without digesting, generating or compiling (a memo lookup). True with
+// `out.artifact_path`, `out.artifact_key` and `out.cache_hit` set on a hit.
+// Called on the acquiring thread, outside the runtime's lock, so a decode
+// demand adopts a cached artifact (and its warm hint) before deciding the
+// bounded wait instead of queueing a preparation that would discover it.
+using LookupFn = bool (*)(const PrepareRequest & req, PrepareResult & out);
 
 // One loaded MLModel instance (per (artifact, function, units) when shareable).
 class SharedModel {
@@ -217,6 +224,7 @@ struct SlotSpec {
     std::string artifact_path;  // route prebuilt: today's adjacent .mlmodelc
     PrepareRequest prepare;     // route generate
     PrepareFn prepare_fn = nullptr;
+    LookupFn lookup_fn = nullptr;  // route generate: optional cache lookup on decode demand
     LoadFn load_fn = nullptr;
     WarmFn warm_fn = nullptr;
     const void * tmpl = nullptr;

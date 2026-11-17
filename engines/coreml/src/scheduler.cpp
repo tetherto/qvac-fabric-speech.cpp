@@ -1216,11 +1216,35 @@ Runtime::WaitPlan Runtime::plan_bounded_wait_locked(SlotCore & c, std::optional<
     return WaitPlan{true, w};
 }
 
+void Runtime::adopt_cached(const std::shared_ptr<SlotCore> & c) {
+    if (c->spec.route != Route::generate || c->spec.lookup_fn == nullptr) return;
+    PrepareRequest req;
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        if (stopping_ || exiting() || !c->artifact_path.empty() || c->job || is_terminal(c->state)) return;
+        req = c->spec.prepare;
+    }
+    PrepareResult r;
+    if (!c->spec.lookup_fn(req, r) || !r.error.ok() || r.artifact_path.empty()) return;
+    std::lock_guard<std::mutex> lk(mu);
+    // A preparation queued meanwhile adopts the same artifact itself.
+    if (!c->artifact_path.empty() || c->job || is_terminal(c->state)) return;
+    c->artifact_path = r.artifact_path;
+    c->artifact_key = r.artifact_key;
+    c->status_route = StatusRoute::cached;
+    c->hint_path = hint_path_for(c->policy.cache_dir, host_id, c->artifact_path, c->spec.function,
+                                 to_string(c->spec.units), os_build);
+    event_locked("cached:" + req.key);
+}
+
 Acquired Runtime::acquire(const std::shared_ptr<SlotCore> & c, Demand d, std::optional<Clock::time_point> deadline,
                           const std::atomic<bool> * cancel) {
     Acquired out;
     std::string stale_path, stale_artifact;
-    if (d == Demand::now) pin_for_work();
+    if (d == Demand::now) {
+        pin_for_work();
+        adopt_cached(c);
+    }
     {
         Graveyard gy;
         std::unique_lock<std::mutex> lk(mu);

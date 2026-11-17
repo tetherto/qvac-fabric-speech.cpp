@@ -189,6 +189,10 @@ public:
     // Pins this image before work is requested; never under mu. Every
     // entry point that reaches request_locked() calls it first.
     void pin_for_work();
+    // Route generate on decode demand: when the slot has no artifact and no
+    // job yet, runs its LookupFn outside mu and adopts a cached artifact
+    // (with its hint path) as a finished preparation would. Never under mu.
+    void adopt_cached(const std::shared_ptr<SlotCore> & c);
     Stats stats_snapshot();
     std::vector<std::string> events_snapshot();
 

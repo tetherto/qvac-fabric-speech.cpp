@@ -93,6 +93,11 @@ PrepareRequest prepare_request(const Candidate & c, const SourceStat & source, c
 // is released when it returns; the LoadFn takes its own (begin_load).
 PrepareResult prepare(const PrepareRequest & req, PrepareContext & ctx);
 
+// LookupFn of route `generate` (SlotSpec::lookup_fn): the complete artifact
+// the cache's memo maps this source (same file identity, template and
+// options) to. Reads only the cache: no digest, no generation, no lock kept.
+bool lookup(const PrepareRequest & req, PrepareResult & out);
+
 // For LoadFns. A generated artifact (LoadRequest::tmpl set) loads under the
 // shared lease of its cache entry: begin_load takes it and returns false
 // when the load must not start (`out` then carries would_block, or the

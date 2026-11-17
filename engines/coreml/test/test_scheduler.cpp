@@ -281,6 +281,17 @@ PrepareResult fake_prepare(const PrepareRequest & req, PrepareContext & ctx) {
     return out;
 }
 
+// LookupFn: a hit for keys starting with "hit", at fake_prepare's path.
+std::atomic<int> g_lookups{0};
+bool fake_lookup(const PrepareRequest & req, PrepareResult & out) {
+    ++g_lookups;
+    if (req.key.rfind("hit", 0) != 0) return false;
+    out.artifact_path = req.cache_dir + "/qvac-coreml-v1/artifacts/" + req.key + ".mlmodelc";
+    out.artifact_key = req.key;
+    out.cache_hit = true;
+    return true;
+}
+
 uint64_t fake_mem() { return g_mem.load(); }
 bool fake_low_power() { return g_low_power.load(); }
 
@@ -343,13 +354,15 @@ struct Env {
                                Wait w = Wait::none) const {
         return m->make_slot(spec(fn, u), policy(w));
     }
-    std::shared_ptr<Slot> generated(const std::string & fn, const std::string & key) const {
+    std::shared_ptr<Slot> generated(const std::string & fn, const std::string & key,
+                                    LookupFn lookup = nullptr) const {
         SlotSpec s = spec(fn);
         s.route = Route::generate;
         s.artifact_path.clear();
         s.prepare.key = key;
         s.prepare.cache_dir = cache();
         s.prepare_fn = &fake_prepare;
+        s.lookup_fn = lookup;
         return m->make_slot(s, policy());
     }
 
@@ -627,6 +640,37 @@ void case_prepare_ahead_no_wait() {
     Acquired a = s->acquire(Demand::now, deadline);
     CHECK(!a && a.pending && Clock::now() < deadline);
     release("prepare:p");
+}
+
+void case_cached_adopt_on_demand() {
+    // A generated slot whose cache already holds the artifact (a previous
+    // process prepared it and observed a warm load): decode demand adopts
+    // it before deciding the bounded wait, so the first acquisition waits for
+    // the warm load instead of queueing a preparation and running on ggml.
+    Env e;
+    g_lookups = 0;
+    {
+        auto primer = e.generated("cachedfn", "hit-a", &fake_lookup);
+        primer->request(Priority::prewarm);  // a request never looks up: it prepares
+        CHECK(wait_for([&] { return is_ready(primer); }));
+        CHECK(calls("prepare:hit-a") == 1 && g_lookups == 0);
+        seed_hint(primer, 20);
+    }
+    set_beh("cachedfn", {false, 40});
+    auto s = e.generated("cachedfn", "hit-a", &fake_lookup);
+    CHECK(s->state() == SlotState::idle && s->hint_path().empty());
+    const auto deadline = Clock::now() + 3000ms;
+    Acquired a = s->acquire(Demand::now, deadline);
+    CHECK(a && !a.pending);
+    CHECK(g_lookups == 1);
+    CHECK(calls("prepare:hit-a") == 1);  // no second preparation
+    CHECK(!s->hint_path().empty());
+    CHECK(s->status().route == StatusRoute::cached);
+    // A miss queues the preparation as before; without a hint nothing waits.
+    auto miss = e.generated("missfn", "miss-b", &fake_lookup);
+    Acquired m = miss->acquire(Demand::now, Clock::now() + 3000ms);
+    CHECK(!m && m.pending);
+    CHECK(wait_for([&] { return calls("prepare:miss-b") == 1; }));
 }
 
 void case_groups_construct() {
@@ -2896,6 +2940,7 @@ const Case kCases[] = {
     {"warm-queued-behind-cold", case_warm_queued_behind_cold},
     {"queued-behind-expiry", case_queued_behind_expiry},
     {"prepare-ahead-no-wait", case_prepare_ahead_no_wait},
+    {"cached-adopt-on-demand", case_cached_adopt_on_demand},
     {"groups-construct", case_groups_construct},
     {"nothing-to-prepare", case_nothing_to_prepare},
     {"low-power", case_low_power},
