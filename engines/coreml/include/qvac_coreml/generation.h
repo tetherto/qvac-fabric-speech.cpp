@@ -12,6 +12,7 @@
 #include "qvac_coreml/slot.h"
 
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -69,6 +70,10 @@ struct Candidate {
     std::string sha256_hex;
     std::optional<ComputeUnits> default_units;  // template.json default_compute_units
     TemplateMemory memory;
+    // template.json expected_warm_load_ms per function (positive values only):
+    // the bounded wait's expected warm load before this host observed one
+    // (SlotSpec::expected_warm_load_ms).
+    std::map<std::string, int64_t> expected_warm_load_ms;
 };
 
 // Looks the templates up (embedded, or <resolved.template_dir>/<id> where the

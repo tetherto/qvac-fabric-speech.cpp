@@ -153,6 +153,19 @@ TemplateMemory memory_of(const recipe::Template & t) {
     return m;
 }
 
+std::map<std::string, int64_t> expected_warm_of(const recipe::Template & t) {
+    std::map<std::string, int64_t> out;
+    const recipe::TemplateFile * f = t.file("template.json");
+    const json j = json::parse(std::string(reinterpret_cast<const char *>(f->data), f->size), nullptr, false);
+    if (!j.is_object()) return out;
+    auto w = j.find("expected_warm_load_ms");
+    if (w == j.end() || !w->is_object()) return out;
+    for (auto it = w->begin(); it != w->end(); ++it) {
+        if (it->is_number_integer() && it->get<int64_t>() > 0) out[it.key()] = it->get<int64_t>();
+    }
+    return out;
+}
+
 // Templates found through the development override are parsed per directory
 // and kept for the process, so PrepareRequest::tmpl stays valid like an
 // embedded template's.
@@ -244,6 +257,7 @@ std::vector<Candidate> probe(const std::vector<std::string> & template_ids, cons
         c.sha256_hex = t->sha256_hex();
         c.default_units = parse_compute_units(t->info().default_compute_units);
         c.memory = memory_of(*t);
+        c.expected_warm_load_ms = expected_warm_of(*t);
         if (!opened) {
             src = GgufSource::open(gguf_path, open_error);
             opened = true;
