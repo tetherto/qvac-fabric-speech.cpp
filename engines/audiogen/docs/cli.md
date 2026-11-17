@@ -138,6 +138,10 @@ seconds. Omitting `--coreml-cond` keeps the native conditioner.
 | `--lm-backend NAME` | `auto` | put the LM on this device instead of the placement policy's choice, e.g. `--backend hexagon --lm-backend opencl` |
 | `--backends-dir DIR` | | directory containing staged dynamic ggml backend modules; required by Android and Linux arm64 dynamic-backend builds |
 | `--dump-stages DIR` | | write one `.bin` per stage into an existing directory |
+| `--coreml-cache-dir DIR` | `$QVAC_COREML_CACHE_DIR`, then on macOS `~/Library/Application Support/qvac-speech/coreml` | where the VAE decoder's Core ML sidecar is generated and its warm hint kept (Apple builds with `AUDIOGEN_COREML`; see [backends](backends.md#core-ml-vae-decoder-sidecar)) |
+| `--coreml-wait MODE`, `--coreml-prewarm MODE` | `none`, `predicted` | Core ML waits (`none`, `construct`, `call`) and construction work (`none`, `minimal`, `predicted`, `all`) |
+| `--coreml-units UNITS`, `--coreml-require` | template default (`all`), off | Core ML compute units; fail a decode the sidecar cannot serve instead of falling back |
+| `--coreml-status`, `--repeat N` | off, `1` | print the decoder's status and construction JSON; generate `N` times in one process (the last one is written) |
 | `--out PATH` | `music_out.wav` | output WAV path |
 
 `cover-nofsq` VAE-encodes the source as DiT context and skips the LM and FSQ

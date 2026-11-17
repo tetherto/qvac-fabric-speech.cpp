@@ -108,16 +108,25 @@ when it is installed and falls back to an equivalent stdlib path when it is not.
 `test-acestep-vae-coreml` covers the VAE decoder on the shared Core ML
 runtime. `--self-test` (ctest `test-acestep-vae-coreml-self-test`, every
 build) checks the decode deadline, label merging, option validation, the
-per-phase Core ML fit charge and memory-degrade; `test-acestep-vae-fit-stable`
-checks on a twin of the template's reference manifest that the route and
-envelope are the same with an empty cache and with one holding artifacts and
-fresh or stale warm hints. On macOS with the staged models, `--models DIR
---cache-root DIR --require-coreml` runs the device cases (an encoding starts no
-decoder job; three low-memory `generate()` calls, the first on ggml with a cold
-load completing after the eviction, the second and third warm on Core ML;
-`{prewarm all, wait construct}` with no decoder retained; an eviction cancels
-an unstarted job), and `--vae GGUF --memory-schedule DIR [--late]` the
-overlapped memory schedule behind the template's memory constants.
+per-phase Core ML fit charge, the budget-capped fit verdicts, memory-degrade,
+the memory breakdown of a late schedule and the music-cli cache directory
+default; `test-acestep-vae-fit-stable` checks on a twin of the template's
+reference manifest that the route and envelope are the same with an empty
+cache and with one holding artifacts and fresh or stale warm hints, that the
+route is the one the build and host support (`--host-route`: generated with
+the generator built in on macOS 15 or later, none otherwise), and that route
+none still reports an empty construction group. On macOS with the staged
+models, `--models DIR --cache-root DIR --require-coreml` runs the device cases
+(an encoding starts no decoder job; three low-memory `generate()` calls, the
+first on ggml with its cold load held at completion until after the eviction,
+the second and third warm on Core ML; a second process's first decode on the
+primed cache runs on Core ML; cancelled decodes, pending, ready or waiting,
+end with the slot idle and start no ggml decode; a warm repaint releases the
+decoder before its encode; `{prewarm all, wait construct}` and the
+asynchronous `{prewarm all}` with no decoder retained; an eviction cancels an
+unstarted job; memory-degrade, including the caller's decision for its own
+workload), and `--vae GGUF --memory-schedule DIR [--late]` the overlapped
+memory schedule behind the template's memory constants.
 `test-vae-coreml-parity --cache-dir DIR` is the parity gate of the generated
 decoder.
 

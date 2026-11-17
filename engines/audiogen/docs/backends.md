@@ -273,7 +273,11 @@ sidecar failure. The sidecar loads through the shared Core ML runtime
   GGUF's decoder tensors, compiles the package on the device and publishes it
   in the cache (`AUDIOGEN_COREML_GENERATE`, on by default on macOS, compiles
   the generator in). Later engines, and later processes, find the artifact
-  there. The generated weights match the exporter's within one fp16 ulp per
+  there: a decode adopts the cached artifact and its warm hint before it
+  decides whether to wait, so a new process's first decode reloads warm and
+  runs on Core ML. `music-cli` defaults the cache directory to
+  `~/Library/Application Support/qvac-speech/coreml` on macOS when neither
+  `--coreml-cache-dir` nor `QVAC_COREML_CACHE_DIR` is given. The generated weights match the exporter's within one fp16 ulp per
   element (the template's `real` gate on `vae-BF16.gguf`), and
   `test-vae-coreml-parity --cache-dir` holds the generated decoder to cosine
   0.999 against the ggml decode (measured 0.99999 on an M2).
@@ -298,15 +302,26 @@ Either way the sidecar loads in the background and nothing waits for it:
   generation decodes on ggml while the sidecar is generated and compiled for
   the Neural Engine (tens of seconds, once per host and cache path); a load
   still running when the first generation releases the decoder finishes in the
-  background, records its warm hint and releases its model.
+  background, records its warm hint and releases its model. A cancelled call
+  (a progress callback returning `false`, or `Engine::cancel()`) ends its VAE
+  phase the same way, and a cancel that arrives while a decode waits for the
+  decoder returns without starting a ggml decode. A repaint that re-decodes
+  and re-encodes its source releases the decoder before the encode.
 - `coreml.prewarm = all` with `coreml.wait = construct` is install-time
   preparation: `create()` generates, loads and warms the decoder, then (in
   low-memory mode) releases it again. Without `coreml.wait = construct` the
   same happens in the background: in low-memory mode the decoder is released
   as soon as the construction group has finished, unless a decode has asked
   for it by then. `Engine::coreml_construction()` reports
-  the group's success; `Engine::coreml_status()` and `Engine::coreml_wait()`
-  report and wait for the decoder.
+  the group's success (with no usable route, an empty group with
+  `nothing_to_prepare` and the decoder under `skipped_route_none`);
+  `Engine::coreml_status()` and `Engine::coreml_wait()` report and wait for the
+  decoder.
+- `coreml.memory_budget_bytes` with `coreml.memory_degrade`: pass the budget
+  the memory-fit preflight was assessed against and its decision
+  (`FitResult::coreml.disabled_reason == "memory"`), and `create()` runs the
+  route fit chose for that workload. With a budget and no decision, `create()`
+  assesses fit itself with the default workload (60 s, no source audio).
 - `coreml.use = require` (or `ACESTEP_COREML_STRICT`) makes a decoder that
   cannot serve a decode — none available, a failed generation or load, a
   failed prediction, a latent shorter than one window — fail the decode instead

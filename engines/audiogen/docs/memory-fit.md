@@ -86,7 +86,10 @@ growth during a load, 328.7 MiB on the M4 Max; on the M2 it grew at most
 With `coreml.memory_budget_bytes`, a budget that only the ggml projection
 fits resolves `use = off` instead (memory-degrade): `coreml.disabled_reason`
 is `memory`, the verdict is the ggml one, and an `Engine` created with the
-same options decodes on ggml. `coreml.ggml_only_fits` is always today's
+same budget and `coreml.memory_degrade = true` decodes on ggml. The budget
+caps both verdicts (`coreml.ggml_only_fits` and `coreml.fits`) before either
+is decided, so a budget neither projection fits does not fit and does not
+degrade. Without a generated route `coreml.ggml_only_fits` is today's
 verdict. A prebuilt sidecar keeps today's projection: it is not charged.
 `ANECompilerService`'s memory for a cold Neural Engine compile is not part of
 the projection: it is a separate system process, and the runtime admits a cold

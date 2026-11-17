@@ -757,7 +757,7 @@ void first_decode_on(const std::string & models, const std::string & cache, floa
     const GenerateResult r = engine->generate(short_params(duration));
     const std::string st = engine->coreml_status();
     std::fprintf(stderr, "  first generate: %s pending=%d; slot after: %s\n", r.vae_backend.c_str(),
-                 (int) r.coreml_pending, head(st, 400).c_str());
+                 (int) r.coreml_pending, st.c_str());
     check(!r.pcm.empty() && r.vae_backend.rfind("coreml-", 0) == 0 && !r.coreml_pending,
           "the first decode of a fresh process uses the cached artifact (" + r.vae_backend + ")");
     check(contains(st, "\"route\":\"cached\""), "status route cached");
