@@ -582,7 +582,7 @@ static void print_usage(const char * argv0) {
     fprintf(stderr, "  --coreml-cache-dir DIR  warm-load hints (default ~/Library/Application\n");
     fprintf(stderr, "                          Support/qvac-speech/coreml, or QVAC_COREML_CACHE_DIR)\n");
     fprintf(stderr, "  --coreml-status-json PATH  write the sidecar status (JSON) to PATH on exit;\n");
-    fprintf(stderr, "                          '-' writes to stdout\n");
+    fprintf(stderr, "                          '-' writes to stdout (not with --out -)\n");
     fprintf(stderr, "  --coreml-slow-load-ms N Testing: delay every sidecar function load by N ms\n");
     fprintf(stderr, "  --coreml-fail-stage S   Testing: the first Core ML prediction of stage S\n");
     fprintf(stderr, "                          (encoder, cfm or hift) fails once\n");
@@ -928,6 +928,11 @@ static bool parse_args(int argc, char ** argv, cli_params & params) {
     }
     if (params.debug && params.ref_dir.empty()) {
         fprintf(stderr, "error: --debug requires --ref-dir\n"); return false;
+    }
+    if (params.out_wav == "-" && params.coreml_status_json == "-") {
+        fprintf(stderr, "error: --coreml-status-json - and --out - both write to stdout; "
+                        "give the status JSON a file path\n");
+        return false;
     }
     return true;
 }

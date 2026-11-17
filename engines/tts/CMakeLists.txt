@@ -1583,6 +1583,11 @@ if (TTS_CPP_BUILD_TESTS)
     endif()
     tts_cpp_apply_ccache(test-chatterbox-coreml)
     tts_cpp_register_test(test-chatterbox-coreml LABEL "unit")
+    if (TARGET tts-cli)
+        # The hermetic run also checks tts-cli's Core ML argument validation.
+        set_property(TEST test-chatterbox-coreml APPEND PROPERTY
+                     ENVIRONMENT "CHATTERBOX_COREML_TEST_CLI=$<TARGET_FILE:tts-cli>")
+    endif()
     tts_cpp_register_test(test-chatterbox-coreml-stages
         EXE test-chatterbox-coreml LABEL "fixture" ARGS "--stages-fixture")
     tts_cpp_register_test(test-chatterbox-coreml-shapes

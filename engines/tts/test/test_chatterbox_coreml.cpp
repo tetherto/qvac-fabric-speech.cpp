@@ -62,7 +62,7 @@
 #include <thread>
 #include <vector>
 
-#ifdef TTS_CPP_USE_COREML
+#ifndef _WIN32
 #include <sys/wait.h>
 #endif
 
@@ -187,6 +187,27 @@ void check_empty_group() {
                 json.find("\"nothing_to_prepare\":true") != std::string::npos &&
                 json.find("\"group\":\"prewarm\"") != std::string::npos && json.find("\"slots\":[]") != std::string::npos,
             "an empty group succeeds with nothing to prepare: " + json);
+}
+
+// tts-cli (CHATTERBOX_COREML_TEST_CLI; CTest sets it) refuses two writers of
+// stdout, the raw PCM of --out - and the status JSON of
+// --coreml-status-json -, before it loads anything.
+void check_cli_arguments() {
+#ifndef _WIN32
+    const char * cli = std::getenv("CHATTERBOX_COREML_TEST_CLI");
+    if (!cli || !*cli || !fs::exists(cli)) return;
+    temp_dir dir("cli-arguments");
+    const fs::path log = dir.path / "stderr.log", out = dir.path / "stdout.out";
+    const std::string cmd = "'" + std::string(cli) + "' --model none.gguf --s3gen-gguf none.gguf --text hello " +
+                            "--out - --coreml-status-json - > '" + out.string() + "' 2> '" + log.string() + "'";
+    const int status = std::system(cmd.c_str());
+    const int rc = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    std::ifstream err(log);
+    const std::string text((std::istreambuf_iterator<char>(err)), std::istreambuf_iterator<char>());
+    require(rc != 0 && text.find("--coreml-status-json - and --out -") != std::string::npos &&
+                fs::file_size(out) == 0,
+            "tts-cli rejects --out - with --coreml-status-json -");
+#endif
 }
 
 void check_naming() {
@@ -1502,6 +1523,7 @@ int main(int argc, char ** argv) {
             return engine_fixture(argc > 2 && std::string(argv[2]) == "--slow-load");
         }
         check_options();
+        check_cli_arguments();
         check_empty_group();
         check_naming();
         check_buckets();
