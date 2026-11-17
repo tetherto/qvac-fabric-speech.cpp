@@ -80,7 +80,19 @@ std::vector<Candidate> probe(const std::vector<std::string> & template_ids, cons
 // The stat tuple of `path` with its realpath (PrepareRequest::source).
 bool source_stat(const std::string & path, SourceStat & out);
 
-// The PrepareRequest of route `generate` for a matched candidate.
+// The identity of the file an engine loaded its weights from, for
+// prepare_request. `before` and `after` are source_stat of the path the engine
+// loaded, taken before its first open of it and after its last read; `path`
+// is the path it asks to generate from. When the two stats differ (the file
+// was replaced during the load), either is missing (`ok_*` false) or `path`
+// resolves to another file, the result is marked `changed`, so prepare fails
+// with source_changed rather than generating from weights the engine did not
+// load.
+SourceStat loaded_source(const SourceStat & before, bool ok_before, const SourceStat & after, bool ok_after,
+                         const std::string & path);
+
+// The PrepareRequest of route `generate` for a matched candidate. A source
+// marked `changed` is never deduplicated with another engine's job.
 PrepareRequest prepare_request(const Candidate & c, const SourceStat & source, const Resolved & resolved);
 
 // PrepareFn of route `generate`: the cache pipeline (memo, digest, generate,

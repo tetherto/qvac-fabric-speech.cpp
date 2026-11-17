@@ -9,6 +9,7 @@
 #include "failed.h"
 #include "hints.h"
 
+#include "qvac_coreml/generation.h"
 #include "qvac_coreml/manager.h"
 
 #include <chrono>
@@ -1537,6 +1538,38 @@ void case_toctou() {
     CHECK(ready(o) && !o.cache_hit);
 }
 
+void case_loaded_source() {
+    Env env;
+    const std::string a = env.source("a.gguf");
+    const std::string b = env.source("b.gguf", 2.0f);
+    SourceStat before, after, other;
+    CHECK(generation::source_stat(a, before) && generation::source_stat(a, after) &&
+          generation::source_stat(b, other));
+    // The file the engine loaded, unchanged across its load, asked for by its own path.
+    CHECK(!generation::loaded_source(before, true, after, true, a).changed);
+    // Replaced during the load, a stat missing, or generation asked for another file.
+    CHECK(generation::loaded_source(before, true, other, true, b).changed);
+    CHECK(generation::loaded_source(before, false, after, true, a).changed);
+    CHECK(generation::loaded_source(before, true, after, false, a).changed);
+    CHECK(generation::loaded_source(before, true, after, true, b).changed);
+    // prepare fails a changed source with source_changed and generates nothing,
+    // even when the file at its path still has the recorded identity.
+    cache::PrepareInputs in = env.inputs(a);
+    in.expected.changed = true;
+    PrepareOutcome o = cache::prepare(in);
+    CHECK(o.kind == PrepareOutcome::Kind::failed && o.reason == "source_changed");
+    CHECK(o.error.code == failed::SOURCE_CHANGED && o.error.cls == ErrorClass::transient);
+    CHECK(env.artifacts() == 0 && env.memos() == 0 && g_compiles == 0);
+    // Its request never joins another engine's job for the same file.
+    generation::Candidate c;
+    c.template_id = env.tpl->id();
+    c.sha256_hex = env.tpl->sha256_hex();
+    Resolved r;
+    r.cache_dir = env.cache;
+    CHECK(!generation::prepare_request(c, after, r).key.empty());
+    CHECK(generation::prepare_request(c, generation::loaded_source(before, true, other, true, b), r).key.empty());
+}
+
 void case_preflight() {
     Env env;
     const std::string a = env.source("a.gguf");
@@ -1739,6 +1772,7 @@ int main(int argc, char ** argv) {
                          {"prune-trash", case_prune_trash},
                          {"malformed-records", case_malformed_records},
                          {"toctou", case_toctou},
+                         {"loaded-source", case_loaded_source},
                          {"preflight", case_preflight},
                          {"would-block-requeue", case_would_block_requeue},
                          {"scheduler-hint-pruned", case_scheduler_hint_pruned},
