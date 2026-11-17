@@ -1005,26 +1005,46 @@ std::shared_ptr<S3genCoremlPlan> s3gen_sidecars::acquire(const s3gen_call_shape 
             }
             continue;  // wider than every function, or unusable: ggml
         }
-        pcm::Acquired got = p_->slot(s, exact)->acquire(pcm::Demand::now, deadline, cancel);
+        // The narrowest ready function that covers the call serves it (the
+        // padding is masked) without waiting; the exact one keeps loading at
+        // `now` for later calls. Only when none is ready does the call wait,
+        // as the wait mode allows, for the exact one.
+        auto ready_covering = [&] {
+            for (const auto & [width, slot] : p_->stages[(int) s].slots) {
+                if (width < exact) continue;
+                pcm::Acquired ready;
+                try {
+                    ready = slot->acquire(pcm::Demand::if_ready);
+                } catch (const pcm::CoremlError &) {
+                    continue;  // strict: this one is retired or failed; try the next
+                }
+                if (ready.model) {
+                    out.model = std::move(ready.model);
+                    out.bucket = width;
+                    out.pending = false;
+                    return true;
+                }
+            }
+            return false;
+        };
+        if (ready_covering()) continue;
+        pcm::Acquired got;
+        try {
+            got = p_->slot(s, exact)->acquire(pcm::Demand::now, deadline, cancel);
+        } catch (const pcm::CoremlError &) {
+            // Strict: the exact function cannot serve (retired, failed, at the
+            // resident cap, timed out); a covering one that became ready
+            // meanwhile still can.
+            if (ready_covering()) continue;
+            throw;
+        }
         if (got.model) {
             out.model = std::move(got.model);
             out.bucket = exact;
             continue;
         }
         out.pending = got.pending;
-        if (plan->strict) continue;
-        // A wider function that is ready serves the call (the padding is
-        // masked); the exact one keeps loading for later calls.
-        for (int w : p_->stages[(int) s].widths) {
-            if (w <= exact) continue;
-            pcm::Acquired wider = p_->slot(s, w)->acquire(pcm::Demand::if_ready);
-            if (wider.model) {
-                out.model = std::move(wider.model);
-                out.bucket = w;
-                out.pending = false;
-                break;
-            }
-        }
+        ready_covering();
     }
     return plan;
 }

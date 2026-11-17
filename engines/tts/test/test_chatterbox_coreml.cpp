@@ -943,6 +943,48 @@ int pending_fixture() {
                 "never more live functions than the cap");
         set->end_call();
     }
+
+    // 11. A ready function covers the call: it serves at once. wait = call
+    //     does not wait through the exact function's slow load, and
+    //     use = require does not refuse a call whose exact function retired.
+    {
+        CoremlOptions call_opts = routing_options();
+        call_opts.wait = CoremlOptions::Wait::call;
+        auto set = cb::s3gen_sidecars::create(routing_case(fixture, root.path, "covering-call", all), call_opts);
+        set->predict({shape(16)});
+        settle(*set, "covering-call");
+        hooks.load_delay_ms = 3000;
+        const auto t0 = steady::now();
+        auto plan = set->acquire(shape(8), steady::now() + std::chrono::milliseconds(10));
+        const double took = ms_since(t0);
+        hooks.load_delay_ms = 0;
+        std::printf("[covering] wait = call: frames_%d and tokens_%d in %.0f ms\n", view(plan, S::cfm).bucket,
+                    view(plan, S::encoder).bucket, took);
+        require(view(plan, S::cfm).bucket == 32 && view(plan, S::encoder).bucket == 16 && took < 1000,
+                "wait = call takes a ready covering function instead of waiting for the exact one");
+        settle(*set, "covering-call");
+
+        CoremlOptions require_opts = routing_options();
+        require_opts.use = CoremlOptions::Use::require;
+        auto strict = cb::s3gen_sidecars::create(routing_case(fixture, root.path, "covering-require", all),
+                                                 require_opts);
+        strict->predict({shape(8), shape(12)});
+        settle(*strict, "covering-require");
+        auto held = strict->acquire(shape(8), steady::now());
+        require(view(held, S::cfm).bucket == 16, "use = require holds frames_16");
+        cb::plan_retire(*held, S::cfm, "injected");
+        std::shared_ptr<S3genCoremlPlan> again;
+        std::string error;
+        try {
+            again = strict->acquire(shape(8), steady::now());
+        } catch (const std::exception & e) {
+            error = e.what();
+        }
+        std::printf("[covering] use = require after retirement: %s\n",
+                    again ? ("frames_" + std::to_string(view(again, S::cfm).bucket)).c_str() : error.c_str());
+        require(again && view(again, S::cfm).bucket == 24,
+                "use = require serves a call whose exact function retired from a ready covering one");
+    }
     return 0;
 #endif
 }
@@ -1272,10 +1314,12 @@ int engine_fixture(bool slow_load) {
     // Overlapped synthesis equals the segments synthesized one call at a time
     // (one segment never overlaps) and crossfaded in order, sample for sample:
     // T3 and the CFM noise are seeded per segment, so only order can differ.
-    // wait = call: every sentence waits for its functions, so each one
-    // overlaps.
+    // Every function is loaded at construction (prewarm = all, wait =
+    // construct), so each sentence overlaps and always runs on its exact
+    // widths (a call takes the narrowest ready covering width).
     EngineOptions waited_opts = engine_options(t3, s3gen);
-    waited_opts.coreml.wait = CoremlOptions::Wait::call;
+    waited_opts.coreml.wait = CoremlOptions::Wait::construct;
+    waited_opts.coreml.prewarm = CoremlOptions::Prewarm::all;
     Engine engine(waited_opts);
     const SynthesisResult overlapped = engine.synthesize(OVERLAP_TEXT);
     // Timed again once every function is compiled and loaded, so the cancel
