@@ -1,0 +1,137 @@
+{
+  "schema": 1,
+  "id": "supertonic-vocoder-w64",
+  "family": "supertonic",
+  "stage": "vocoder",
+  "export_kind": "supertonic-vocoder-v1",
+  "exporter": {
+    "path": "engines/tts/scripts/export-supertonic-coreml.py",
+    "sha256": "6d2ceff499e0d84e8c267d7ef8d6b932e56483f9927ab7fad09845dd76296b69",
+    "args": [
+      "--gguf",
+      "{gguf}",
+      "--out",
+      "{out}/supertonic-vocoder.mlpackage",
+      "--window",
+      "64"
+    ]
+  },
+  "min_os": {
+    "macos": "15.0"
+  },
+  "multifunction_ane": false,
+  "default_compute_units": "all",
+  "shareable": true,
+  "pad_safe": false,
+  "state_bytes": 0,
+  "expected_warm_load_ms": {
+    "main": 0
+  },
+  "prefer_ggml_on": [
+    "max",
+    "ultra"
+  ],
+  "match": {
+    "metadata": {
+      "supertonic.latent_channels": 144,
+      "supertonic.latent_dim": 24,
+      "supertonic.base_chunk_size": 512,
+      "supertonic.ttl_chunk_compress_factor": 6
+    }
+  },
+  "names": {
+    "map": [
+      "supertonic.source_names",
+      "supertonic.tensor_names"
+    ],
+    "aliases": [
+      "supertonic.source_aliases",
+      "supertonic.source_alias_targets"
+    ],
+    "fallbacks": [
+      [
+        "vocoder:node:/decoder/embed/net/Conv#1",
+        "vocoder:onnx::Conv_1440"
+      ],
+      [
+        "vocoder:node:/decoder/embed/net/Conv#2",
+        "vocoder:onnx::Conv_1441"
+      ],
+      [
+        "vocoder:node:/decoder/head/act/PRelu#1",
+        "vocoder:onnx::PRelu_1505"
+      ]
+    ]
+  },
+  "literals": [],
+  "provided": [],
+  "toolchain": {
+    "coremltools": "9.0",
+    "torch": "2.7.0",
+    "numpy": "1.26.4"
+  },
+  "functions": [
+    {
+      "name": "main",
+      "inputs": [
+        {
+          "name": "latent",
+          "dtype": "fp16",
+          "shape": [
+            1,
+            144,
+            64
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "wav",
+          "dtype": "fp16",
+          "shape": [
+            1,
+            1,
+            196608
+          ]
+        }
+      ]
+    }
+  ],
+  "stateful": false,
+  "weight_bin_size": 50670336,
+  "patches": [
+    {
+      "spec_offset": 78991,
+      "len": 4,
+      "sentinel_hex": "28388772"
+    }
+  ],
+  "memory": {
+    "runtime_weight_bytes": 50670336,
+    "workspace_bytes": 0,
+    "compile_peak_bytes": 4194304,
+    "ane_compile_reserve_bytes": 169869312,
+    "load_peak_bytes": {
+      "cpu_and_ane": null,
+      "all": 7340032,
+      "cpu_and_gpu": null,
+      "cpu_only": null
+    },
+    "margin": 1.0,
+    "coreml_bound": "measured",
+    "validated_for": [
+      {
+        "units": "all",
+        "os": "27.2.1",
+        "chip": "M2"
+      }
+    ],
+    "measured": {
+      "margin": 1.25,
+      "runs": 6,
+      "resident_bytes": 51493632,
+      "basis": "Each constant is 1.25 x the largest value measured over every overlapped generated-schedule run on the validated_for hosts, rounded up to 1 MiB, so the envelope's own margin is 1.0: the prepare charge (generation_peak_bytes + 8 MiB + compile_peak_bytes) covers the prepare from the start of generation to the end of the compile (largest 23.3 MiB); load_peak_bytes.all the load and warm-up increment (largest 5.3 MiB); the resident part is weight.bin's size plus twice the I/O, which already covers 1.25 x the largest steady state from the load start (5.3 MiB: the Neural Engine keeps the weights outside the process), so workspace_bytes is 0; and ane_compile_reserve_bytes is 1.25 x ANECompilerService's largest absolute size while loading (129.3 MiB), where `all` compiles the program for the Neural Engine. No run found the service clean (it held 74-82 MiB before every load), so its growth (at most 53.0 MiB) would understate a cold compile on a clean host."
+    }
+  },
+  "generation_peak_bytes": 18874368
+}
