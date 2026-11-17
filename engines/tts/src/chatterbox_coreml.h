@@ -333,7 +333,8 @@ int cfm_integrate(std::vector<float> & z, size_t steps, bool on_coreml, const cf
 // ------------------------------------------------------------ test hooks --
 
 // Test-only controls of the sidecar loader and predictions. Production code
-// leaves them at their defaults.
+// leaves them at their defaults. One instance per process, never destroyed:
+// the runtime's load thread may still read it during exit.
 struct coreml_test_hooks {
     // Every sidecar function load sleeps this long first (a slow, cold load).
     std::atomic<int> load_delay_ms{0};
@@ -344,11 +345,13 @@ struct coreml_test_hooks {
     // The next prediction of this stage fails once (-1: none; else an
     // s3gen_stage value).
     std::atomic<int> fail_stage{-1};
-    // Loads started, as "<stage>/<function>", in order.
+    // While `tracing` (below), loads started, as "<stage>/<function>", in
+    // order. Nothing is recorded otherwise.
     std::vector<std::string> loads() const;
     void clear_loads();
     void record_load(const std::string & what);
-    // While `tracing`, the Engine's batch loop records its sentence events
+    // Off in production. While on, the loader records load starts and the
+    // Engine's batch loop records its sentence events
     // in order: "t3 <i>" when T3 of sentence i finished, "handed back <i>"
     // when its S3Gen worker returned S3GEN_RC_COREML_REDO, "replay <i>
     // cfm=<label>" when the dispatching thread starts rendering it again.

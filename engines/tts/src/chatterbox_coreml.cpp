@@ -497,6 +497,7 @@ void coreml_test_hooks::clear_loads() {
 }
 
 void coreml_test_hooks::record_load(const std::string & what) {
+    if (!tracing.load(std::memory_order_relaxed)) return;
     std::lock_guard<std::mutex> lock(mu_);
     loads_.push_back(what);
 }
@@ -518,8 +519,10 @@ void coreml_test_hooks::clear_events() {
 }
 
 coreml_test_hooks & coreml_test() {
-    static coreml_test_hooks hooks;
-    return hooks;
+    // Leaked on purpose, like the runtime's manager: the load thread reads it
+    // and must never see it destroyed by static destruction at exit.
+    static auto * hooks = new coreml_test_hooks;
+    return *hooks;
 }
 
 // ---------------------------------------------------------------- the plan --

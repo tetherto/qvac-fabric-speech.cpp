@@ -210,6 +210,24 @@ void check_cli_arguments() {
 #endif
 }
 
+// The test hooks record nothing unless a test turns tracing on (production
+// loads never grow them).
+void check_hooks_record_only_when_tracing() {
+    auto & hooks = cb::coreml_test();
+    hooks.clear_loads();
+    hooks.clear_events();
+    hooks.record_load("cfm/frames_16");
+    hooks.trace("t3 0");
+    require(hooks.loads().empty() && hooks.events().empty(), "the hooks record nothing by default");
+    hooks.tracing = true;
+    hooks.record_load("cfm/frames_16");
+    hooks.trace("t3 0");
+    hooks.tracing = false;
+    require(hooks.loads().size() == 1 && hooks.events().size() == 1, "the hooks record while tracing");
+    hooks.clear_loads();
+    hooks.clear_events();
+}
+
 void check_naming() {
     require(cb::coreml_stage_path("models/chatterbox-s3gen-q8_0.gguf", cb::COREML_CFM_SUFFIX) ==
                 "models/chatterbox-s3gen-cfm.mlmodelc", "turbo CFM sidecar name");
@@ -768,6 +786,7 @@ int pending_fixture() {
     temp_dir root("pending");
     const std::vector<const char *> all = {cb::COREML_ENCODER_SUFFIX, cb::COREML_CFM_SUFFIX, cb::COREML_HIFT_SUFFIX};
     auto & hooks = cb::coreml_test();
+    hooks.tracing = true;  // the cases below read the loads started
     using S = cb::s3gen_stage;
 
     // 1. A call whose functions are still loading runs every stage on ggml,
@@ -1307,6 +1326,7 @@ void cli_replay_check(const std::string & t3, const std::string & s3gen, const s
 // Engine's construction group still completes.
 void two_engines_check(const std::string & t3, const std::string & s3gen) {
     auto & hooks = cb::coreml_test();
+    hooks.tracing = true;
     hooks.hold_loads = true;
     hooks.clear_loads();
     Engine first(engine_options(t3, s3gen));
@@ -1329,6 +1349,7 @@ void two_engines_check(const std::string & t3, const std::string & s3gen) {
     std::printf("[two engines] loads started before the second Engine was dropped: %zu, after: %zu (%zu widths)\n",
                 before.size(), after.size(), widths);
     require(widths == widths_before, "two engines: the dropped Engine's queued prewarm loads were cancelled");
+    hooks.tracing = false;
 }
 
 // The real CFM latch: a Core ML failure at the second Euler step restores the
@@ -1623,6 +1644,7 @@ int main(int argc, char ** argv) {
         check_cli_arguments();
         check_empty_group();
         check_naming();
+        check_hooks_record_only_when_tracing();
         check_buckets();
         check_windows();
         check_warm_estimates();
