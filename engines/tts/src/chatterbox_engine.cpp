@@ -1108,13 +1108,15 @@ std::string Engine::coreml_status() const {
 }
 
 bool Engine::coreml_wait(int64_t timeout_ms) {
-    if (!pimpl_ || !pimpl_->sidecars) return false;
+    if (!pimpl_) return false;
+    // No sidecar in use: the construction group is empty, which succeeds.
+    if (!pimpl_->sidecars) return true;
     pimpl_->cancel_flag.store(false, std::memory_order_relaxed);
     return pimpl_->sidecars->wait(timeout_ms, &pimpl_->cancel_flag);
 }
 
 std::string Engine::coreml_prewarm(CoremlOptions::Prewarm scope, bool wait) {
-    if (!pimpl_ || !pimpl_->sidecars) return "{}";
+    if (!pimpl_ || !pimpl_->sidecars) return detail::coreml_empty_group_json("prewarm");
     pimpl_->cancel_flag.store(false, std::memory_order_relaxed);
     return pimpl_->sidecars->prewarm(scope, wait, &pimpl_->cancel_flag);
 }

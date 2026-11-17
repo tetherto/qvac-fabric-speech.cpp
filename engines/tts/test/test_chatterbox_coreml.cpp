@@ -167,6 +167,16 @@ void check_options() {
     }
 }
 
+// With no sidecar in use a request group is empty: a success with nothing
+// to prepare, in every build.
+void check_empty_group() {
+    const std::string json = cb::coreml_empty_group_json("prewarm");
+    require(json.find("\"success\":true") != std::string::npos &&
+                json.find("\"nothing_to_prepare\":true") != std::string::npos &&
+                json.find("\"group\":\"prewarm\"") != std::string::npos && json.find("\"slots\":[]") != std::string::npos,
+            "an empty group succeeds with nothing to prepare: " + json);
+}
+
 void check_naming() {
     require(cb::coreml_stage_path("models/chatterbox-s3gen-q8_0.gguf", cb::COREML_CFM_SUFFIX) ==
                 "models/chatterbox-s3gen-cfm.mlmodelc", "turbo CFM sidecar name");
@@ -1117,8 +1127,14 @@ void slow_load_checks(const std::string & t3, const std::string & s3gen, const s
     auto & hooks = cb::coreml_test();
     EngineOptions off_opts = engine_options(t3, s3gen);
     off_opts.coreml.use = CoremlOptions::Use::off;
-    const SynthesisResult reference = Engine(off_opts).synthesize(OVERLAP_TEXT);
+    Engine off_engine(off_opts);
+    const SynthesisResult reference = off_engine.synthesize(OVERLAP_TEXT);
     require(reference.s3gen_backend == cb::GGML_STAGE_BACKEND, "use = off runs on ggml");
+    // Nothing to prepare is a success, not a failure.
+    const std::string off_group = off_engine.coreml_prewarm(CoremlOptions::Prewarm::all, true);
+    require(off_engine.coreml_wait(0) && off_group.find("\"nothing_to_prepare\":true") != std::string::npos &&
+                off_group.find("\"success\":true") != std::string::npos,
+            "use = off: waiting and prewarming succeed with nothing to prepare");
 
     hooks.hold_loads = true;
     EngineOptions slow_opts = engine_options(t3, s3gen);
@@ -1474,6 +1490,7 @@ int main(int argc, char ** argv) {
             return engine_fixture(argc > 2 && std::string(argv[2]) == "--slow-load");
         }
         check_options();
+        check_empty_group();
         check_naming();
         check_buckets();
         check_windows();

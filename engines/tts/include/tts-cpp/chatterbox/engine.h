@@ -427,12 +427,15 @@ public:
 
     // Waits until the construction group (the functions requested at
     // construction) finished; timeout_ms < 0 waits without limit. True when
-    // every one of them is ready. Engine::cancel() interrupts it.
+    // every one of them is ready, and at once when the group is empty (no
+    // sidecar in use, Core ML off or not built: nothing to prepare).
+    // Engine::cancel() interrupts it.
     bool coreml_wait(int64_t timeout_ms = -1);
 
     // Requests another group of functions (scope minimal or predicted: the
     // minimal set; all: every function) and, with `wait`, blocks until it
-    // finished. Returns the group's result as JSON ("{}" without sidecars).
+    // finished. Returns the group's result as JSON; without a sidecar in use
+    // an empty group that succeeded with "nothing_to_prepare": true.
     std::string coreml_prewarm(CoremlOptions::Prewarm scope, bool wait);
 
 private:

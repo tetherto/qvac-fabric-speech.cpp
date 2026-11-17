@@ -711,6 +711,19 @@ std::shared_ptr<const S3genCoremlPlan> replay_plan(std::shared_ptr<const S3genCo
     return plan;
 }
 
+std::string coreml_empty_group_json(const char * group) {
+#ifdef TTS_CPP_USE_COREML
+    pcm::PrewarmResult r;
+    r.group = group;
+    r.success = true;
+    r.nothing_to_prepare = true;
+    return pcm::to_json(r);
+#else
+    return std::string("{\"group\":\"") + group +
+           "\",\"nothing_to_prepare\":true,\"skipped_route_none\":[],\"slots\":[],\"success\":true}";
+#endif
+}
+
 // ----------------------------------------------------------- the sidecars --
 
 #ifdef TTS_CPP_USE_COREML

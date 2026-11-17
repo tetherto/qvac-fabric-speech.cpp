@@ -166,6 +166,12 @@ s3gen_call_shape s3gen_call_shape_for(const s3gen_synthesize_opts & opts, const 
 // clamped at zero. `meanflow` is Turbo; otherwise Multilingual.
 double s3gen_estimate_metal_ms_frames(bool meanflow, int frames);
 
+// The result of a request group with nothing to prepare (no sidecar in use,
+// Core ML off or not built), in the runtime's group JSON: a success with
+// nothing_to_prepare set and no slots. `group` is "construction" or
+// "prewarm".
+std::string coreml_empty_group_json(const char * group);
+
 // ----------------------------------------------------------- the sidecars --
 
 enum class s3gen_stage { encoder = 0, cfm = 1, hift = 2 };
