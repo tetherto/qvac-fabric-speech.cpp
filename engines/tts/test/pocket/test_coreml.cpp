@@ -14,6 +14,19 @@
 //                                       and Mimi, the ggml replay of frames a
 //                                       retired step generated, and the
 //                                       Engine's routing, labels and strict mode
+//   test-pocket-coreml --generated BUNDLE --cache-dir DIR [--memory-schedule DIR]
+//                                       sidecars generated from a bundle's
+//                                       GGUFs (no prebuilt sidecar next to
+//                                       them): routes and fit, a call that
+//                                       runs on ggml while the sidecars are
+//                                       pending (matching Core ML off),
+//                                       readiness at construction, parity of
+//                                       the generated step and decoder against
+//                                       ggml, adoption by a second Engine, fit
+//                                       unchanged by a populated cache, strict
+//                                       mode; with --memory-schedule, the
+//                                       overlapped memory schedule against the
+//                                       templates' constants
 //
 // The shape fixture reads POCKET_COREML_TEST_SHAPES (the directory
 // test/prepare_pocket_coreml_fixture.py writes); the engine fixture reads
@@ -34,9 +47,17 @@
 
 #ifdef TTS_CPP_USE_COREML
 #include "moss/coreml/runner.h"
+#include "memory_probe.h"
 #endif
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <thread>
+
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#endif
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -215,6 +236,76 @@ void check_detection_and_fit() {
     std::string error;
     try { Engine engine(fit.engine); } catch (const std::exception & e) { error = e.what(); }
     require(error.find("coreml_compute_units") != std::string::npos, "Engine rejects invalid compute units: " + error);
+}
+
+// Options, routes and the fit arithmetic of the shared Core ML runtime, with no
+// model: an explicit cpu_and_ane for the step is refused when options are
+// resolved; the environment's or the legacy all-stage cpu_and_ane leaves the
+// step on its default units; the envelope sums the generated stages' resident
+// parts and charges one transient; memory-degrade needs a budget.
+void check_coreml_options() {
+    env_guard units(pd::COREML_UNITS_ENV), disabled(pd::COREML_DISABLE_ENV);
+    unsetenv(pd::COREML_UNITS_ENV);
+    unsetenv(pd::COREML_DISABLE_ENV);
+    pd::CoremlEngineOptions o;
+    o.flow_lm_path = "missing/flow-lm.gguf";
+    o.mimi_path = "missing/mimi.gguf";
+    o.coreml.compute_units = "cpu_and_ane";
+    std::string error;
+    try { pd::coreml_plan_route(pd::CoremlStage::step, o); } catch (const std::invalid_argument & e) { error = e.what(); }
+    require(error.find("cannot run on cpu_and_ane") != std::string::npos, "explicit cpu_and_ane step refused: " + error);
+    require(!throws([&] { pd::coreml_plan_route(pd::CoremlStage::decoder, o); }), "cpu_and_ane decoder accepted");
+    o.coreml.compute_units.reset();
+    o.step_units = "cpu_and_ane";
+    require(throws([&] { pd::coreml_plan_route(pd::CoremlStage::step, o); }), "explicit step units cpu_and_ane refused");
+    o.step_units.clear();
+    o.decoder_units = "gpu_please";
+    error.clear();
+    try { pd::coreml_plan_route(pd::CoremlStage::step, o); } catch (const std::invalid_argument & e) { error = e.what(); }
+    require(error.find("coreml_decoder_units") != std::string::npos, "invalid decoder units named: " + error);
+    o.decoder_units.clear();
+    o.coreml.strict_wait_ms = -1;
+    require(throws([&] { pd::coreml_plan_route(pd::CoremlStage::step, o); }), "negative strict_wait_ms");
+    o.coreml.strict_wait_ms.reset();
+    o.legacy_units = "cpu_and_ane";
+#ifdef TTS_CPP_USE_COREML
+    require(pd::coreml_plan_route(pd::CoremlStage::step, o).compute_units == "cpu_and_gpu",
+            "legacy all-stage cpu_and_ane leaves the step on cpu_and_gpu");
+    require(pd::coreml_plan_route(pd::CoremlStage::decoder, o).compute_units == "cpu_and_ane",
+            "legacy all-stage units reach the decoder");
+    o.legacy_units.clear();
+    setenv(pd::COREML_UNITS_ENV, "cpu_and_ane", 1);
+    require(pd::coreml_plan_route(pd::CoremlStage::step, o).compute_units == "cpu_and_gpu",
+            "POCKET_COREML_COMPUTE_UNITS=cpu_and_ane leaves the step on cpu_and_gpu");
+    unsetenv(pd::COREML_UNITS_ENV);
+    const auto none = pd::coreml_plan_route(pd::CoremlStage::step, o);
+    require(none.route == "none", "no GGUF, no prebuilt sidecar: route none, got " + none.route);
+#endif
+    // Envelope: resident parts summed, one transient, the larger margin.
+    pd::CoremlRoute a, b;
+    a.route = b.route = "generate";
+    a.resident_bytes = 100; a.transient_bytes = 40; a.margin = 1.0;
+    b.resident_bytes = 10; b.transient_bytes = 70; b.margin = 1.0;
+    require(pd::coreml_envelope_bytes(a, b) == 180, "envelope = resident sum + largest transient");
+    b.margin = 1.25;
+    require(pd::coreml_envelope_bytes(a, b) == 225, "envelope with the larger margin");
+    b.route = "none";
+    require(pd::coreml_envelope_bytes(a, b) == 140, "only generated stages are charged");
+    a.route = "prebuilt";
+    require(pd::coreml_envelope_bytes(a, b) == 0, "no generated stage, no envelope");
+    // Verdicts: memory-degrade only with a budget that the ggml projection fits.
+    auto v = pd::decide_coreml_fit(100, 50, true, 120, std::nullopt);
+    require(v.ggml_only_fits && !v.coreml_fits && !v.degraded && !v.fits && v.charged == 150,
+            "without a budget the Core ML-inclusive verdict stands");
+    v = pd::decide_coreml_fit(100, 50, true, 1000, int64_t(120));
+    require(v.degraded && v.fits && v.charged == 100, "a budget only ggml fits degrades");
+    v = pd::decide_coreml_fit(100, 50, true, 120, int64_t(1) << 50);
+    require(v.degraded && v.fits, "degrade is decided on min(free, budget)");
+    v = pd::decide_coreml_fit(100, 50, true, 1000, int64_t(90));
+    require(!v.degraded && v.fits && v.charged == 150, "a budget nothing fits leaves the Core ML verdict");
+    v = pd::decide_coreml_fit(100, 50, false, 120, int64_t(110));
+    require(!v.degraded && v.fits && v.charged == 100, "no generated stage, no degrade");
+    std::puts("[options] Core ML options, routes and fit arithmetic: ok");
 }
 
 std::vector<float> npy_floats(const fs::path & path) {
@@ -403,10 +494,11 @@ EngineOptions bundle_options(const fs::path & dir) {
 }
 
 // The sidecar against ggml F32 FlowLM, teacher-forced on ggml's latents.
-void check_stage_parity(const EngineOptions & opts) {
+void check_stage_parity(const EngineOptions & opts, const std::string & step_path = {}) {
     pd::FlowLM lm(opts.flow_lm_path, 2048, 4);
     const auto voice = lm.read_voice(opts.voice_path);
-    pd::CoremlStep step(pd::coreml_step_path(opts.flow_lm_path), pd::COREML_STEP_DEFAULT_UNITS, lm.config(), lm.source_hash());
+    pd::CoremlStep step(step_path.empty() ? pd::coreml_step_path(opts.flow_lm_path) : step_path,
+                        pd::COREML_STEP_DEFAULT_UNITS, lm.config(), lm.source_hash());
     step.write_rows({0, voice.frames, voice.keys, voice.values});
     lm.restore_voice(voice);
     pd::Frontend frontend(opts.frontend_path);
@@ -462,10 +554,10 @@ void check_replay(const EngineOptions & opts) {
 }
 
 // The real decoder against ggml Mimi on the same streamed latents.
-void check_decoder_parity(const EngineOptions & opts) {
+void check_decoder_parity(const EngineOptions & opts, const std::string & decoder_path = {}) {
     pd::Mimi mimi(opts.mimi_path, 4);
-    pd::CoremlDecoder decoder(pd::coreml_decoder_path(opts.mimi_path), pd::COREML_DECODER_DEFAULT_UNITS,
-                              mimi.source_hash());
+    pd::CoremlDecoder decoder(decoder_path.empty() ? pd::coreml_decoder_path(opts.mimi_path) : decoder_path,
+                              pd::COREML_DECODER_DEFAULT_UNITS, mimi.source_hash());
     std::mt19937 rng(3);
     std::normal_distribution<float> normal(0.0f, 1.0f);
     std::vector<float> latents(size_t(40) * pd::Mimi::latent_dim());
@@ -481,11 +573,15 @@ void check_decoder_parity(const EngineOptions & opts) {
     require(snr > 35, "Core ML Mimi decoder diverges from ggml Mimi");
 }
 
-void check_engine(const EngineOptions & base) {
+void check_engine(const EngineOptions & prebuilt) {
     env_guard units(pd::COREML_UNITS_ENV), strict(pd::COREML_STRICT_ENV), disabled(pd::COREML_DISABLE_ENV);
     unsetenv(pd::COREML_UNITS_ENV);
     unsetenv(pd::COREML_STRICT_ENV);
     unsetenv(pd::COREML_DISABLE_ENV);
+    // The sidecars load in the background: pin readiness so every comparison
+    // below runs on Core ML.
+    EngineOptions base = prebuilt;
+    base.coreml.wait = tts_cpp::CoremlOptions::Wait::construct;
     const std::string text = "The quick brown fox jumps over the lazy dog. It barked twice.";
     Engine coreml(base);
     require(coreml.flow_lm_on_coreml() && coreml.mimi_on_coreml(), "sidecars loaded");
@@ -553,6 +649,401 @@ void check_engine(const EngineOptions & base) {
     require(tts_cpp::pocket::fit_params(fit).reason == "coreml-memory-estimate-unavailable", "fit refuses the sidecar");
 }
 
+#ifdef TTS_CPP_USE_COREML
+using Json = nlohmann::json;
+using CoremlOptions = tts_cpp::CoremlOptions;
+
+double mib(uint64_t bytes) { return bytes / 1048576.0; }
+
+std::string host_chip() {
+    char brand[128] = {};
+    size_t size = sizeof(brand);
+    return sysctlbyname("machdep.cpu.brand_string", brand, &size, nullptr, 0) == 0 ? std::string(brand) : "unknown";
+}
+
+Json status_of(const Engine & e) { return Json::parse(e.coreml_status()); }
+
+const Json & stage_status(const Json & status, const std::string & stage) {
+    for (const Json & s : status.at("stages")) if (s.at("stage") == stage) return s;
+    throw std::runtime_error("no status for stage " + stage + ": " + status.dump());
+}
+
+// The overlapped memory schedule: ggml synthesis runs in a loop on this thread
+// while both sidecars are generated, compiled, loaded and warmed into
+// `cache_dir` in the background, until three calls ran both stages on Core ML.
+// One sampler reads the footprint every 2 ms and the slots' states every
+// 10 ms; another reads ANECompilerService every 20 ms. The runtime runs one
+// Core ML job at a time, so each sample belongs to at most one stage's prepare
+// or load. Held to the templates' constants:
+//   prepare (per stage)    the peak over the footprint just before that
+//                          stage's generation began, against
+//                          generation_peak_bytes + 8 MiB + compile_peak_bytes;
+//   load+warm (per stage)  the peak over the footprint just before its load
+//                          began, against load_peak_bytes for its units;
+//   steady                 both ready, Core ML calls running: the peak over the
+//                          footprint just before the first load, against the
+//                          two resident parts;
+//   whole run              the peak over the baseline, against the envelope;
+//   compiler               ANECompilerService's growth while a stage on the
+//                          Neural Engine loads and warms, against that
+//                          template's ane_compile_reserve_bytes.
+struct stage_mem {
+    uint64_t prepare = 0, load_warm = 0;
+    bool prepared = false, loaded = false;
+};
+
+int stage_phase(const std::string & state) {
+    if (state == "digesting" || state == "generating" || state == "compiling") return 1;
+    if (state == "loading" || state == "warming") return 2;
+    if (state == "ready") return 3;
+    return 0;
+}
+
+void memory_schedule(const EngineOptions & bundle, const std::string & cache_dir) {
+    std::printf("[memory] schedule (cache %s)\n", cache_dir.c_str());
+    EngineOptions opts = bundle;
+    opts.coreml.cache_dir = cache_dir;
+    const auto co = pd::coreml_engine_options(opts);
+    const auto step_route = pd::coreml_plan_route(pd::CoremlStage::step, co);
+    const auto decoder_route = pd::coreml_plan_route(pd::CoremlStage::decoder, co);
+    require(step_route.route == "generate" && decoder_route.route == "generate",
+            "memory schedule: both routes generate (" + step_route.route + " " + step_route.reason + "; " +
+                decoder_route.route + " " + decoder_route.reason + ")");
+    // The Engine's two stages on their own: the ggml FlowLM and Mimi are
+    // loaded and their arenas warmed before the baseline, then the sidecars
+    // are generated, compiled, loaded and warmed in the background (prewarm
+    // predicted requests both at once) while ggml keeps working.
+    pd::FlowLM lm(opts.flow_lm_path, 2048, 4);
+    pd::Mimi mimi(opts.mimi_path, 4);
+    const auto voice = lm.read_voice(opts.voice_path);
+    const auto tokens = pd::Frontend(opts.frontend_path).encode("The quick brown fox jumps over the lazy dog.");
+    constexpr int FRAMES = 16;
+    std::mt19937 rng(5);
+    std::normal_distribution<float> normal(0.0f, 0.5f);
+    std::vector<float> noise(size_t(lm.config().latent_dim));
+    auto ggml_unit = [&] {
+        lm.restore_voice(voice);
+        lm.prefill(lm.text_embeddings(tokens));
+        std::vector<float> previous, latents;
+        for (int f = 0; f < FRAMES; ++f) {
+            for (auto & x : noise) x = normal(rng);
+            const auto condition = lm.advance(previous);
+            previous = lm.sample(condition.hidden, noise, 1);
+            const auto d = lm.denormalize(previous);
+            latents.insert(latents.end(), d.begin(), d.end());
+        }
+        mimi.reset_decoder();
+        const size_t batch = size_t(mimi.max_decode_frames()) * pd::Mimi::latent_dim();
+        for (size_t at = 0; at < latents.size(); at += batch)
+            mimi.decode(std::vector<float>(latents.begin() + at, latents.begin() + std::min(latents.size(), at + batch)));
+    };
+    ggml_unit();
+    ggml_unit();
+    std::atomic<bool> stop{false};
+    std::atomic<int> active{-1};       // 0 step, 1 decoder, -1 none
+    std::atomic<int> active_phase{0};  // stage_phase of the active stage
+    std::atomic<bool> both_ready{false};
+    std::atomic<const pd::CoremlStages *> watched{nullptr};
+    struct sample { uint64_t footprint; int stage, phase; bool ready; };
+    std::vector<sample> samples;
+    samples.reserve(1 << 17);
+    std::vector<qvac_coreml_memory::AneSample> ane_samples;
+    const uint64_t base = qvac_coreml_memory::phys_footprint();
+    std::thread sampler([&] {
+        for (int tick = 0; !stop.load(); ++tick) {
+            const pd::CoremlStages * st_ = watched.load();
+            if (st_ != nullptr && tick % 5 == 0) {
+                const Json st = Json::parse(st_->status_json());
+                int stage = -1, phase = 0, ready = 0;
+                for (const Json & s : st.at("stages")) {
+                    const int p = stage_phase(s.at("state").get<std::string>());
+                    if (p == 3) ++ready;
+                    if (p == 1 || p == 2) {
+                        stage = s.at("stage") == "step" ? 0 : 1;
+                        phase = p;
+                    }
+                }
+                active.store(stage);
+                active_phase.store(phase);
+                both_ready.store(ready == 2);
+            }
+            samples.push_back({qvac_coreml_memory::phys_footprint(), active.load(), active_phase.load(), both_ready.load()});
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+    });
+    std::thread ane_sampler([&] {
+        while (!stop.load()) {
+            // The decoder is the stage the Neural Engine compiles.
+            ane_samples.push_back({qvac_coreml_memory::ane_compiler_rss(), active.load() == 1 && active_phase.load() == 2});
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+    });
+    const auto t0 = std::chrono::steady_clock::now();
+    int ggml_calls = 0, coreml_calls = 0;
+    {
+        auto stages = pd::CoremlStages::create(co, lm.config(), lm.source_hash(), voice.frames + 2, false);
+        watched.store(stages.get());
+        const pd::CacheRows voice_rows{0, voice.frames, voice.keys, voice.values};
+        while (std::chrono::steady_clock::now() - t0 < std::chrono::minutes(5)) {
+            if (!stages->step_ready() || !stages->decoder_ready()) {
+                ggml_unit();
+                ++ggml_calls;
+                continue;
+            }
+            // One unit on both sidecars: the text rows, FRAMES step
+            // predictions, then the frames through the decoder.
+            auto step = stages->acquire_step(FRAMES, nullptr);
+            auto decoder = stages->acquire_decoder(FRAMES, nullptr);
+            require(step.step && decoder.model, "memory schedule: ready sidecars acquired");
+            lm.restore_voice(voice);
+            lm.prefill(lm.text_embeddings(tokens));
+            int position = lm.position();
+            std::vector<float> previous = lm.bos_latent(), hidden, next, latents;
+            {
+                auto lock = step.lock();
+                if (!step.step->primed()) step.step->prime(voice_rows);
+                step.step->write_rows(lm.cache_rows(voice.frames, position - voice.frames));
+                for (int f = 0; f < FRAMES; ++f, ++position) {
+                    for (auto & x : noise) x = normal(rng);
+                    step.step->step(position, previous, noise, hidden, next);
+                    previous = next;
+                    const auto d = lm.denormalize(next);
+                    latents.insert(latents.end(), d.begin(), d.end());
+                }
+            }
+            pd::CoremlDecoder stream(decoder.model, decoder.label);
+            {
+                auto lock = decoder.lock();
+                stream.decode(latents);
+            }
+            if (++coreml_calls >= 3) break;
+        }
+        std::printf("  status: %s\n", stages->status_json().c_str());
+        watched.store(nullptr);
+        stop.store(true);
+        sampler.join();
+        ane_sampler.join();
+    }
+    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+
+    // Attribution: each stage's prepare and load+warm over the footprint just
+    // before that phase began; the steady state over the footprint just before
+    // the first load.
+    stage_mem mem[2];
+    uint64_t prev = base, start = base, steady = 0, total = 0;
+    std::optional<uint64_t> first_load;
+    int last_stage = -1, last_phase = 0;
+    for (const sample & s : samples) {
+        if (s.stage != last_stage || s.phase != last_phase) start = prev;
+        if (s.stage >= 0 && s.phase == 2 && !first_load) first_load = start;
+        const uint64_t inc = s.footprint > start ? s.footprint - start : 0;
+        if (s.stage >= 0 && s.phase == 1) { mem[s.stage].prepared = true; mem[s.stage].prepare = std::max(mem[s.stage].prepare, inc); }
+        if (s.stage >= 0 && s.phase == 2) { mem[s.stage].loaded = true; mem[s.stage].load_warm = std::max(mem[s.stage].load_warm, inc); }
+        if (s.ready && s.stage < 0) {
+            const uint64_t from = first_load.value_or(base);
+            steady = std::max(steady, s.footprint > from ? s.footprint - from : 0);
+        }
+        total = std::max(total, s.footprint > base ? s.footprint - base : 0);
+        prev = s.footprint;
+        last_stage = s.stage;
+        last_phase = s.phase;
+    }
+    const auto ane = qvac_coreml_memory::ane_compiler_growth(ane_samples);
+    const auto baseline = qvac_coreml_memory::ane_compiler_baseline(ane);
+    const uint64_t envelope = pd::coreml_envelope_bytes(step_route, decoder_route);
+    const pd::CoremlRoute * routes[2] = {&step_route, &decoder_route};
+    const char * names[2] = {"step", "mimi"};
+    std::vector<std::string> failures;
+    auto over = [&](const std::string & what, uint64_t got, uint64_t charged) {
+        if (got > charged) failures.push_back(what + ": " + std::to_string(got) + " bytes over the charged " + std::to_string(charged));
+    };
+    std::printf("  memory (MiB; each phase over the footprint just before it began, steady over the footprint just "
+                "before the first load, whole run over the warm ggml baseline %.1f):\n", mib(base));
+    for (int i = 0; i < 2; ++i) {
+        if (!mem[i].prepared) failures.push_back(std::string("the schedule never sampled the ") + names[i] + " prepare");
+        if (!mem[i].loaded) failures.push_back(std::string("the schedule never sampled the ") + names[i] + " load");
+        std::printf("    %-5s prepare %7.1f  charged %7.1f   load+warm %7.1f  charged %7.1f  (%s)\n", names[i],
+                    mib(mem[i].prepare), mib(routes[i]->prepare_peak_bytes), mib(mem[i].load_warm),
+                    mib(routes[i]->load_peak_bytes), routes[i]->compute_units.c_str());
+        over(std::string(names[i]) + " prepare", mem[i].prepare, routes[i]->prepare_peak_bytes);
+        over(std::string(names[i]) + " load and warm-up", mem[i].load_warm, routes[i]->load_peak_bytes);
+    }
+    const uint64_t resident = step_route.resident_bytes + decoder_route.resident_bytes;
+    std::printf("    steady  %7.1f  charged %7.1f (both resident parts)\n", mib(steady), mib(resident));
+    std::printf("    whole   %7.1f  charged %7.1f (envelope)\n", mib(total), mib(envelope));
+    std::printf("    ANECompilerService growth while the decoder loaded %.1f, reserve %.1f (before the load %.1f MiB, a %s baseline; peak %.1f)\n",
+                mib(ane.growth), mib(decoder_route.ane_compile_reserve_bytes), mib(ane.before),
+                qvac_coreml_memory::ane_baseline_name(baseline), mib(ane.peak));
+    over("steady state (resident)", steady, resident);
+    over("whole run (envelope)", total, envelope);
+    if (decoder_route.ane_compile_reserve_bytes > 0) over("ANECompilerService growth (reserve)", ane.growth, decoder_route.ane_compile_reserve_bytes);
+    std::printf("  memory report: {\"chip\":\"%s\",\"base\":%llu,\"step_prepare\":%llu,\"step_load_warm\":%llu,"
+                "\"mimi_prepare\":%llu,\"mimi_load_warm\":%llu,\"steady\":%llu,\"total\":%llu,"
+                "\"ane_compiler_before_load\":%llu,\"ane_compiler_growth\":%llu,\"ane_compiler_peak\":%llu,"
+                "\"ane_compiler_baseline\":\"%s\",\"samples\":%zu,\"ggml_calls\":%d,\"coreml_calls\":%d,\"seconds\":%.1f}\n",
+                host_chip().c_str(), (unsigned long long) base, (unsigned long long) mem[0].prepare,
+                (unsigned long long) mem[0].load_warm, (unsigned long long) mem[1].prepare,
+                (unsigned long long) mem[1].load_warm, (unsigned long long) steady, (unsigned long long) total,
+                (unsigned long long) ane.before, (unsigned long long) ane.growth, (unsigned long long) ane.peak,
+                qvac_coreml_memory::ane_baseline_name(baseline), samples.size(), ggml_calls, coreml_calls, secs);
+    for (const auto & f : failures) std::printf("  [FAIL] memory schedule: %s\n", f.c_str());
+    require(coreml_calls >= 3 && ggml_calls >= 1, "memory schedule: ggml calls while pending, then Core ML calls");
+    require(failures.empty(), "memory schedule: a phase exceeded its charge");
+}
+
+int generated_fixture(const std::string & bundle, const std::string & cache_dir, const std::string & memory_dir) {
+    env_guard units(pd::COREML_UNITS_ENV), strict(pd::COREML_STRICT_ENV), disabled(pd::COREML_DISABLE_ENV);
+    unsetenv(pd::COREML_UNITS_ENV);
+    unsetenv(pd::COREML_STRICT_ENV);
+    unsetenv(pd::COREML_DISABLE_ENV);
+    const EngineOptions plain = bundle_options(bundle);
+    require(!tts_cpp::detail::coreml_sidecar_exists(pd::coreml_step_path(plain.flow_lm_path)) &&
+                !tts_cpp::detail::coreml_sidecar_exists(pd::coreml_decoder_path(plain.mimi_path)),
+            "the bundle must have no prebuilt sidecar (the generated route needs none)");
+    if (!memory_dir.empty()) {
+        memory_schedule(plain, memory_dir);
+        std::puts("test-pocket-coreml --generated --memory-schedule: ok");
+        return 0;
+    }
+    EngineOptions opts = plain;
+    opts.coreml.cache_dir = cache_dir;
+    const auto co = pd::coreml_engine_options(opts);
+    const auto step_route = pd::coreml_plan_route(pd::CoremlStage::step, co);
+    const auto decoder_route = pd::coreml_plan_route(pd::CoremlStage::decoder, co);
+    std::printf("[routes] step %s %s (%s) %s; mimi %s %s (%s) %s\n", step_route.route.c_str(),
+                step_route.compute_units.c_str(), step_route.validated ? "validated" : "unvalidated",
+                step_route.reason.c_str(), decoder_route.route.c_str(), decoder_route.compute_units.c_str(),
+                decoder_route.validated ? "validated" : "unvalidated", decoder_route.reason.c_str());
+    require(step_route.route == "generate" && step_route.validated && step_route.compute_units == "cpu_and_gpu",
+            "step route generate, validated, cpu_and_gpu");
+    require(decoder_route.route == "generate" && decoder_route.validated && decoder_route.compute_units == "cpu_and_ane",
+            "decoder route generate, validated, cpu_and_ane");
+
+    const std::string text = "The quick brown fox jumps over the lazy dog.";
+    tts_cpp::pocket::FitOptions fit;
+    fit.engine = opts;
+    fit.text = text;
+    const auto fit_before = tts_cpp::pocket::fit_params(fit);
+    const uint64_t envelope = pd::coreml_envelope_bytes(step_route, decoder_route);
+    std::printf("[fit] %s, Core ML envelope %llu bytes (%.1f MiB)%s\n", fit_before.reason.c_str(),
+                (unsigned long long) fit_before.coreml.bytes, mib(fit_before.coreml.bytes),
+                fit_before.coreml.validated ? ", validated" : "");
+    require(fit_before.status == tts_cpp::FitStatus::Success && fit_before.coreml.route == "generate" &&
+                fit_before.coreml.bytes == envelope && envelope > 0 && fit_before.coreml.validated &&
+                fit_before.coreml.disabled_reason.empty(),
+            "fit charges the generated envelope: " + fit_before.report);
+
+    // Core ML off: the reference every pending call must equal.
+    EngineOptions off = opts;
+    off.coreml.use = CoremlOptions::Use::off;
+    Engine ggml(off);
+    const auto reference = ggml.synthesize(text);
+    require(reference.flow_lm_backend == "ggml" && reference.mimi_backend == "ggml" && !reference.coreml_pending,
+            "use = off runs ggml");
+
+    // Readiness pinned to "not yet": nothing is requested before the first
+    // call (prewarm none) and a call never waits for an unhinted load (wait
+    // none), so the first single-chunk call runs on ggml and matches Core ML
+    // off.
+    const bool cold = !fs::exists(fs::path(cache_dir) / "qvac-coreml-v1" / "artifacts");
+    if (cold) {
+        EngineOptions pending = opts;
+        pending.coreml.prewarm = CoremlOptions::Prewarm::none;
+        pending.coreml.wait = CoremlOptions::Wait::none;
+        Engine engine(pending);
+        const Json idle = status_of(engine);
+        require(stage_status(idle, "step").at("state") == "idle" && stage_status(idle, "mimi").at("state") == "idle",
+                "prewarm none: both stages idle after construction: " + idle.dump());
+        require(!engine.coreml_wait(0), "nothing ready yet");
+        const auto first = engine.synthesize(text);
+        std::printf("[pending] first call: FlowLM %s, Mimi %s, pending %d\n", first.flow_lm_backend.c_str(),
+                    first.mimi_backend.c_str(), int(first.coreml_pending));
+        require(first.flow_lm_backend == "ggml" && first.mimi_backend == "ggml" && first.coreml_pending,
+                "the first call runs on ggml while the sidecars are pending");
+        // The CPU ggml path differs between processes and instances only in
+        // float rounding (about 2e-7), so "the same as Core ML off" is a
+        // tolerance, far below what one Core ML frame changes.
+        require(first.pcm.size() == reference.pcm.size() && max_error(first.pcm, reference.pcm) < 1e-4,
+                "a pending call matches Core ML off");
+        require(engine.coreml_wait(-1), "the first call's request makes both sidecars ready: " + engine.coreml_status());
+        const Json ready = status_of(engine);
+        require(stage_status(ready, "step").at("route") == "generated" &&
+                    stage_status(ready, "mimi").at("route") == "generated",
+                "a cold cache generates both: " + ready.dump());
+        const auto second = engine.synthesize(text);
+        require(second.flow_lm_backend == "coreml-gpu" && second.mimi_backend == "coreml-ane" && !second.coreml_pending,
+                "once ready, a call runs both stages on Core ML: " + second.flow_lm_backend + " / " + second.mimi_backend);
+    } else {
+        std::puts("[pending] skipped: the cache already holds the artifacts (use a fresh --cache-dir)");
+    }
+
+    // Readiness pinned to "ready" at construction (wait construct): every
+    // call runs on Core ML; a second Engine adopts the cached artifacts.
+    EngineOptions waited = opts;
+    waited.coreml.wait = CoremlOptions::Wait::construct;
+    Engine engine(waited);
+    require(engine.flow_lm_on_coreml() && engine.mimi_on_coreml(), "wait construct: both ready after construction");
+    const Json st = status_of(engine);
+    const std::string step_path = stage_status(st, "step").at("path");
+    const std::string decoder_path = stage_status(st, "mimi").at("path");
+    require(stage_status(st, "step").at("route") == "cached" && stage_status(st, "mimi").at("route") == "cached",
+            "a second Engine adopts the cached artifacts: " + st.dump());
+    const auto batch = engine.synthesize(text);
+    std::printf("[engine] %s / %s: %d frames; ggml %d frames\n", batch.flow_lm_backend.c_str(), batch.mimi_backend.c_str(),
+                batch.generated_frames, reference.generated_frames);
+    require(batch.flow_lm_backend == "coreml-gpu" && batch.mimi_backend == "coreml-ane", "Core ML labels");
+    require(std::abs(batch.generated_frames - reference.generated_frames) <= 4, "Core ML changes the speech length");
+    std::vector<float> streamed;
+    engine.synthesize_stream(text, [&](const float * pcm, size_t n, int) { streamed.insert(streamed.end(), pcm, pcm + n); return true; });
+    require(max_error(streamed, batch.pcm) < 1e-4, "stream and batch differ on the generated sidecars");
+
+    // Parity of the generated artifacts against ggml (the prebuilt sidecars'
+    // gates, on the generated bundles).
+    check_stage_parity(plain, step_path);
+    check_decoder_parity(plain, decoder_path);
+
+    // Fit is the same with a populated cache.
+    const auto fit_after = tts_cpp::pocket::fit_params(fit);
+    require(fit_after.coreml.route == fit_before.coreml.route && fit_after.coreml.bytes == fit_before.coreml.bytes &&
+                fit_after.coreml.validated == fit_before.coreml.validated &&
+                fit_after.device.total_bytes == fit_before.device.total_bytes && fit_after.host_bytes == fit_before.host_bytes,
+            "fit is unchanged by a populated cache");
+
+    // Strict: use = require serves a call on the cached sidecars.
+    EngineOptions strict_opts = opts;
+    strict_opts.coreml.use = CoremlOptions::Use::require;
+    Engine strict_engine(strict_opts);
+    const auto strict_result = strict_engine.synthesize(text);
+    require(strict_result.flow_lm_backend == "coreml-gpu" && strict_result.mimi_backend == "coreml-ane",
+            "strict waits for and runs the sidecars");
+    // Memory-degrade: a budget only the ggml projection fits drops Core ML.
+    EngineOptions degrade = opts;
+    degrade.coreml.wait = CoremlOptions::Wait::construct;
+    {
+        tts_cpp::pocket::FitOptions f = fit;
+        f.engine.coreml.memory_budget_bytes = int64_t(1) << 50;
+        const auto probe = tts_cpp::pocket::fit_params(f);
+        const uint64_t ggml_required = probe.device.total_bytes + (probe.device_shares_host_memory ? probe.host_bytes : 0) +
+                                       f.margin_bytes;
+        // A budget between the ggml projection and the Core ML-inclusive one.
+        f.engine.coreml.memory_budget_bytes = int64_t(ggml_required + probe.coreml.bytes / 2);
+        const auto degraded = tts_cpp::pocket::fit_params(f);
+        std::printf("[degrade] budget %.1f MiB: %s, Core ML %s\n", mib(uint64_t(*f.engine.coreml.memory_budget_bytes)),
+                    degraded.reason.c_str(), degraded.coreml.disabled_reason.c_str());
+        require(degraded.coreml.disabled_reason == "memory" && degraded.fits, "a near budget degrades to ggml in fit");
+        degrade.coreml.memory_budget_bytes = f.engine.coreml.memory_budget_bytes;
+    }
+    Engine degraded_engine(degrade);
+    const Json dst = status_of(degraded_engine);
+    require(stage_status(dst, "step").at("state") == "disabled" && stage_status(dst, "step").at("route") == "none" &&
+                stage_status(dst, "mimi").at("state") == "disabled" && stage_status(dst, "mimi").at("route") == "none",
+            "the Engine resolves use = off under memory-degrade: " + dst.dump());
+    require(degraded_engine.synthesize(text).flow_lm_backend == "ggml", "a degraded Engine runs ggml");
+    std::puts("test-pocket-coreml --generated: ok");
+    return 0;
+}
+#endif
+
 int engine_fixture() {
 #ifndef TTS_CPP_USE_COREML
     std::puts("SKIP: built without Core ML (TTS_CPP_COREML=OFF)");
@@ -581,7 +1072,26 @@ int main(int argc, char ** argv) {
     try {
         if (argc > 1 && std::string(argv[1]) == "--shape-fixture") return shape_fixture();
         if (argc > 1 && std::string(argv[1]) == "--engine-fixture") return engine_fixture();
+        if (argc > 1 && std::string(argv[1]) == "--generated") {
+#ifndef TTS_CPP_USE_COREML
+            std::puts("SKIP: built without Core ML (TTS_CPP_COREML=OFF)");
+            return SKIP;
+#else
+            std::string bundle, cache, memory;
+            for (int i = 2; i < argc; ++i) {
+                const std::string a = argv[i];
+                if (a == "--cache-dir" && i + 1 < argc) cache = argv[++i];
+                else if (a == "--memory-schedule" && i + 1 < argc) memory = argv[++i];
+                else if (bundle.empty()) bundle = a;
+                else throw std::runtime_error("unknown argument " + a);
+            }
+            if (bundle.empty() || (cache.empty() && memory.empty()))
+                throw std::runtime_error("--generated BUNDLE --cache-dir DIR | --memory-schedule DIR");
+            return generated_fixture(bundle, cache, memory);
+#endif
+        }
         check_policy();
+        check_coreml_options();
         check_naming();
         check_rope();
         check_detection_and_fit();
