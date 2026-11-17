@@ -372,6 +372,13 @@ struct ParakeetCtcModel::Impl {
     // streaming paths keep the sequential decoder.
     parakeet_coreml_decoder * ctx_coreml_dec = nullptr;
     std::unique_ptr<CoremlDiarizers> coreml_diarizers;
+    // The GGUF's identity before the first open and after the last read of
+    // its tensor data: a generated diarizer is prepared only from the file
+    // whose weights this model loaded (generation::loaded_source).
+    pcm::SourceStat source_before;
+    pcm::SourceStat source_after;
+    bool source_before_ok = false;
+    bool source_after_ok = false;
 #endif
     // Set when the encoder sidecar loaded before weight allocation and the
     // `encoder.*` tensors were therefore never given memory: the GGUF has no
@@ -2112,7 +2119,10 @@ static void maybe_init_coreml_diarizers(const std::string & gguf_path,
     static const std::vector<CoremlDiarizerTemplate> kNoTemplates;
     const std::vector<CoremlDiarizerTemplate> & templates =
         model.model_type == ParakeetModelType::NEMOTRON_DIARIZATION ? nemotron_diarizer_templates() : kNoTemplates;
-    model.impl->coreml_diarizers = discover_coreml_diarizers(gguf_path, *model.impl->coreml, templates);
+    const ParakeetCtcModel::Impl & impl = *model.impl;
+    const pcm::SourceStat loaded = pcm::generation::loaded_source(impl.source_before, impl.source_before_ok,
+                                                                  impl.source_after, impl.source_after_ok, gguf_path);
+    model.impl->coreml_diarizers = discover_coreml_diarizers(gguf_path, *model.impl->coreml, templates, loaded);
     const std::vector<int> capacities =
         model.impl->coreml_diarizers ? model.impl->coreml_diarizers->capacities() : std::vector<int>();
     if (!capacities.empty()) {
@@ -2658,7 +2668,10 @@ static int load_from_gguf_impl(const std::string & gguf_path,
     auto impl = std::make_shared<ParakeetCtcModel::Impl>();
 #ifdef PARAKEET_USE_COREML
     // Resolved once; a metadata-only load never touches Core ML.
-    if (!measure) impl->coreml = std::make_unique<CoremlSidecars>(coreml, nullptr, memory_degraded);
+    if (!measure) {
+        impl->coreml = std::make_unique<CoremlSidecars>(coreml, nullptr, memory_degraded);
+        impl->source_before_ok = pcm::generation::source_stat(gguf_path, impl->source_before);
+    }
 #else
     (void) coreml;
     (void) memory_degraded;
@@ -2847,6 +2860,9 @@ static int load_from_gguf_impl(const std::string & gguf_path,
             }
             ggml_backend_tensor_set(t, buf.data(), 0, nbytes);
         }
+#ifdef PARAKEET_USE_COREML
+        impl->source_after_ok = pcm::generation::source_stat(gguf_path, impl->source_after);
+#endif
     }
 
     {

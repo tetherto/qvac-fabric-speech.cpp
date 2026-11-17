@@ -38,8 +38,10 @@ struct CoremlDiarizerCallStats {
 class CoremlDiarizers {
 public:
     // Registers one slot per capacity with `sidecars` (DiarizerSlots).
+    // `source`: the identity of the GGUF the model loaded its weights from
+    // (generation::loaded_source); generated capacities prepare only from it.
     CoremlDiarizers(const std::string & gguf_path, std::vector<DiarizerCapacity> capacities,
-                    CoremlSidecars & sidecars);
+                    CoremlSidecars & sidecars, const pcm::SourceStat & source);
     ~CoremlDiarizers();
     CoremlDiarizers(const CoremlDiarizers &) = delete;
     CoremlDiarizers & operator=(const CoremlDiarizers &) = delete;
@@ -86,6 +88,7 @@ const std::vector<CoremlDiarizerTemplate> & nemotron_diarizer_templates();
 // can generate), a status-only slot otherwise. Null when there is none.
 std::unique_ptr<CoremlDiarizers> discover_coreml_diarizers(const std::string & gguf_path,
                                                            CoremlSidecars & sidecars,
-                                                           const std::vector<CoremlDiarizerTemplate> & templates = {});
+                                                           const std::vector<CoremlDiarizerTemplate> & templates,
+                                                           const pcm::SourceStat & source);
 
 }

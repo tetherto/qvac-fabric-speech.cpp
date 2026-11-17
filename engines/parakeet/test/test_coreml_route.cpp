@@ -1410,6 +1410,75 @@ void case_diarizer_capacities() {
     pcm::generation::set_compile_override(nullptr);
     ::unsetenv("QVAC_COREML_TEMPLATE_DIR");
 }
+
+// The diarizers generate only from the file whose weights the model loaded:
+// a GGUF atomically replaced by a same-shape one after the load (here, before
+// the slots are made) yields an identity marked changed, so the prepare job
+// fails with source_changed and nothing is generated from the new file. The
+// identity of an unchanged file generates as before.
+void case_diarizer_loaded_source() {
+    const fs::path dir = make_temp_dir("loaded-source");
+    const fs::path templates = dir / "templates";
+    fs::create_directories(templates);
+    fs::copy(fs::path(QVAC_COREML_TOY_TEMPLATES) / "toy-stateless", templates / "toy-stateless");
+    {
+        std::ifstream in(templates / "toy-stateless" / "template.json");
+        std::string j((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const std::string from = "\"validated_for\": []";
+        const size_t at = j.find(from);
+        CHECK(at != std::string::npos, "the toy template lists validated_for");
+        if (at == std::string::npos) return;
+        j.replace(at, from.size(),
+                  "\"validated_for\": [{\"units\": \"cpu_and_ane\", \"os\": \"test\", \"chip\": \"test\"}]");
+        write_text(templates / "toy-stateless" / "template.json", j);
+    }
+    ::setenv("QVAC_COREML_TEMPLATE_DIR", templates.c_str(), 1);
+    pcm::generation::set_compile_override(&fake_compile);
+    pcm::Config cfg = fast_config();
+    cfg.platform = pcm::Platform::macos;
+    cfg.os = pcm::OsVersion{15, 7, 0};
+    auto m = pcm::Manager::create(cfg);
+    const std::vector<int> template_frames = {358};
+    const std::vector<std::string> ids = {"toy-stateless"};
+
+    const fs::path gguf = dir / "m.gguf";
+    write_toy_gguf(gguf, "stateless", 1.0f);
+    pcm::SourceStat loaded;
+    CHECK(pcm::generation::source_stat(gguf.string(), loaded), "stat of the loaded GGUF");
+    // The same shapes, other weights, renamed over the path.
+    const fs::path replacement = dir / "m.gguf.new";
+    write_toy_gguf(replacement, "stateless", 2.0f);
+    fs::rename(replacement, gguf);
+    pcm::SourceStat now;
+    CHECK(pcm::generation::source_stat(gguf.string(), now), "stat of the replaced GGUF");
+
+    auto run = [&](const pcm::SourceStat & source, const char * cache) {
+        CoremlOptions o;
+        o.cache_dir = (dir / cache).string();
+        o.wait = CoremlOptions::Wait::construct;
+        CoremlSidecars sidecars(o, m);
+        const std::vector<pcm::generation::Candidate> probed =
+            probe_diarizer_templates(sidecars, gguf.string(), ids);
+        const DiarizerSlots slots(gguf.string(), diarizer_capacities({}, template_frames, probed), sidecars,
+                                  &generated_load, source);
+        sidecars.start();
+        return sidecars.slots().empty() ? pcm::SlotStatus{} : sidecars.slots()[0]->status();
+    };
+    const pcm::SlotStatus replaced =
+        run(pcm::generation::loaded_source(loaded, true, now, true, gguf.string()), "cache-replaced");
+    CHECK(replaced.state == pcm::SlotState::failed && replaced.reason.find("source_changed") != std::string::npos,
+          "a GGUF replaced after the load: the prepare job fails with source_changed");
+    CHECK(!fs::exists(dir / "cache-replaced" / "qvac-coreml-v1" / "artifacts") ||
+              fs::is_empty(dir / "cache-replaced" / "qvac-coreml-v1" / "artifacts"),
+          "nothing is generated from the replacement");
+    const pcm::SlotStatus same =
+        run(pcm::generation::loaded_source(now, true, now, true, gguf.string()), "cache-same");
+    CHECK(same.state == pcm::SlotState::ready && same.route == pcm::StatusRoute::generated,
+          "the file the model loaded, unchanged: generated and loaded");
+
+    pcm::generation::set_compile_override(nullptr);
+    ::unsetenv("QVAC_COREML_TEMPLATE_DIR");
+}
 #endif
 
 int main() {
@@ -1429,6 +1498,7 @@ int main() {
 #if defined(QVAC_COREML_HAVE_GGML)
     case_generated_sidecar();
     case_diarizer_capacities();
+    case_diarizer_loaded_source();
 #endif
     std::printf("test-parakeet-coreml-route: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
