@@ -31,6 +31,7 @@
 
 #ifdef TTS_CPP_USE_COREML
 #include "hints.h"
+#include "qvac_coreml/generation.h"
 #include "qvac_coreml/manager.h"
 #endif
 #if defined(__APPLE__)
@@ -154,10 +155,24 @@ constexpr uint64_t DAC_ANE_RESERVE = 1027 * MIB;               // ane_compile_re
 constexpr uint64_t DAC_ENVELOPE = DAC_RESIDENT + DAC_PREPARE;  // margin 1.0: 961 MiB
 
 void template_charges(const parler_dac_route & r) {
+#if defined(TTS_CPP_USE_COREML) && defined(__APPLE__) && TARGET_OS_OSX
+    // A prebuilt-only Core ML build (TTS_CPP_COREML_GENERATE off) or macOS
+    // before 15 generates nothing: the route is none for that reason and the
+    // DAC stays on ggml, so there is no charge to check.
+    const bool generator = pcm::generation::built();
+    const bool os_supported = pcm::os_at_least(pcm::Manager::instance()->os_version(), 15, 0);
+    if (!generator || !os_supported) {
+        const bool fallback = r.route == "none" && (!generator ? r.state == "absent" && r.reason == "no sidecar"
+                                                               : r.state == "unsupported" && r.reason == "os");
+        check(fallback, std::string("template charges: ") + (!generator ? "no generator in this build" : "macOS before 15") +
+                            ", so route none (" + r.route + " " + r.state + ": " + r.reason + ")");
+        return;
+    }
+#endif
     if (r.route != "generate" || r.compute_units != "all") {
 #if defined(TTS_CPP_USE_COREML) && defined(__APPLE__) && TARGET_OS_OSX
-        // A macOS Core ML build generates this GGUF's DAC under `all`, so a
-        // charge it cannot check is a failure, not a skip.
+        // A macOS 15+ build with the generator generates this GGUF's DAC under
+        // `all`, so a charge it cannot check is a failure, not a skip.
         check(false, "template charges: route " + r.route +
                          (r.reason.empty() ? std::string() : " (" + r.state + ": " + r.reason + ")") + ", units " +
                          r.compute_units + "; expected route generate under all");
