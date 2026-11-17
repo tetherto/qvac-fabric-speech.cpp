@@ -469,9 +469,12 @@ GenerateParams short_params(float duration) {
     return p;
 }
 
-// An encoding (ensure_vae(true)) requests no decoder: understand() VAE-encodes
-// its audio and tokenizes it; when the LM stage starts, the decoder slot is
-// still idle and nothing was generated into the cache.
+// An encoding (ensure_vae(true)) requests no decoder. understand() loads the
+// VAE with its encoder and reports the "source" stage before and after the
+// encode, both before free_vae() evicts the decoder slot; an eviction reports
+// the slot idle even while a started job runs, so the slot is read there.
+// After the eviction nothing may reach the cache for longer than a cold
+// generation, compilation and load take.
 void case_encode(const std::string & models, const std::string & root) {
     std::fprintf(stderr, "encode: an encoding starts no decoder job\n");
     const std::string cache = fresh_dir(root, "encode");
@@ -484,23 +487,36 @@ void case_encode(const std::string & models, const std::string & root) {
         up.audio[(size_t) 2 * i] = v;
         up.audio[(size_t) 2 * i + 1] = v;
     }
-    std::string at_lm;
-    bool encoded = false;
+    std::vector<std::string> at_source;
+    bool stopped = false;
     engine->understand(up, [&](const std::string & stage, int, int) {
-        if (stage == "source") encoded = true;
-        if (stage == "understand" && at_lm.empty()) {
-            at_lm = engine->coreml_status();
-            return false;  // the encoding is what this case checks
+        if (stage == "source") at_source.push_back(engine->coreml_status());
+        if (stage == "tok") {
+            stopped = true;
+            return false;  // free_vae() has run; the encoding is what this case checks
         }
         return true;
     });
-    std::fprintf(stderr, "  status after the encoding: %s\n", head(at_lm).c_str());
-    check(encoded && state_of(at_lm) == "idle" && !has_hint(at_lm),
-          "after ensure_vae(true) + encode + free_vae: decoder slot idle, no hint (" + state_of(at_lm) + ")");
-    std::this_thread::sleep_for(std::chrono::seconds(1));
-    const std::string after = engine->coreml_status();
-    check(state_of(after) == "idle" && bundles_under(cache) == 0,
-          "nothing was generated into the cache (" + std::to_string(bundles_under(cache)) + " bundle(s))");
+    bool idle = at_source.size() == 2;
+    for (const std::string & st : at_source) {
+        std::fprintf(stderr, "  status during the encoding: %s\n", head(st).c_str());
+        idle = idle && state_of(st) == "idle" && !has_hint(st);
+    }
+    check(stopped && idle, "with the VAE encoder loaded, before and after the encode (before free_vae): decoder slot "
+                           "idle, no hint (" + std::to_string(at_source.size()) + " samples)");
+    // A started job keeps running after the eviction; it would leave a bundle
+    // or a hint well within this window (a cold generation, compilation and
+    // load take about 12 s on an M2).
+    std::string last;
+    const auto touched = [&](const std::string & st) {
+        return has_hint(st) || bundles_under(cache) > 0 || !artifact_dirs(cache).empty() ||
+               entries_under(fs::path(cache) / "qvac-coreml-v1" / "hints") > 0;
+    };
+    const bool written = poll_until([&] { return engine->coreml_status(); }, touched, std::chrono::seconds(30), &last);
+    check(!written && state_of(last) == "idle",
+          "nothing reached the cache within 30 s of the eviction (" + std::to_string(bundles_under(cache)) +
+              " bundle(s), " + std::to_string(artifact_dirs(cache).size()) + " artifact(s), slot " + state_of(last) +
+              ")");
 }
 
 // Three generate() calls in low-memory mode on a fresh cache. Returns the
