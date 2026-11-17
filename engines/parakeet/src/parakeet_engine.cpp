@@ -830,23 +830,33 @@ static void prewarm_encoder(ParakeetCtcModel & model, float audio_seconds) {
 // fit fails where the ggml-only fit passes resolves use = off ("memory"), so
 // Core ML never turns a working ggml verdict into a refusal. Without a budget
 // (direct engine users, modelFitPolicy 'off') the options apply as given.
+// The verdict comes from the totals the host assessed (EngineOptions::
+// coreml_fit) when it passed them; otherwise from a projection with these
+// options.
 static bool coreml_memory_degraded(const EngineOptions & opts) {
 #ifdef PARAKEET_USE_COREML
     if (!opts.coreml.memory_budget_bytes.has_value() || *opts.coreml.memory_budget_bytes < 0) return false;
-    FitOptions fit;
-    fit.model_gguf_path = opts.model_gguf_path;
-    fit.n_gpu_layers = opts.n_gpu_layers;
-    fit.n_threads = opts.n_threads;
-    fit.backends_dir = opts.backends_dir;
-    fit.long_form_window_frames = opts.long_form_window_frames;
-    fit.long_form_context_frames = opts.long_form_context_frames;
-    fit.backend = opts.backend;
-    fit.coreml = opts.coreml;
-    const FitResult r = fit_params(fit);
-    if (r.status == FitStatus::Error) return false;
+    CoremlFitTotals totals;
+    if (opts.coreml_fit.has_value()) {
+        totals = *opts.coreml_fit;
+    } else {
+        FitOptions fit;
+        fit.model_gguf_path = opts.model_gguf_path;
+        fit.n_gpu_layers = opts.n_gpu_layers;
+        fit.n_threads = opts.n_threads;
+        fit.backends_dir = opts.backends_dir;
+        fit.long_form_window_frames = opts.long_form_window_frames;
+        fit.long_form_context_frames = opts.long_form_context_frames;
+        fit.backend = opts.backend;
+        fit.coreml = opts.coreml;
+        const FitResult r = fit_params(fit);
+        if (r.status == FitStatus::Error) return false;
+        totals.ggml_required_bytes = r.ggml_required_bytes;
+        totals.coreml_bytes = r.coreml.bytes;
+    }
     const uint64_t budget = static_cast<uint64_t>(*opts.coreml.memory_budget_bytes);
-    const bool ggml_fits = r.ggml_required_bytes <= budget;
-    const bool coreml_fits = r.ggml_required_bytes + r.coreml.bytes <= budget;
+    const bool ggml_fits = totals.ggml_required_bytes <= budget;
+    const bool coreml_fits = totals.ggml_required_bytes + totals.coreml_bytes <= budget;
     return ggml_fits && !coreml_fits;
 #else
     (void) opts;

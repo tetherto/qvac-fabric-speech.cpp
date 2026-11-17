@@ -29,6 +29,13 @@
 //                         naming the Core ML error domain; a diarizer bundle
 //                         whose capacity is not the one its name says fails
 //                         as deterministic, a corrupt one as transient
+//   fit-degrade           memory-degrade at construction follows the host's
+//                         fit (EngineOptions::coreml_fit, assessed with a
+//                         nondefault margin and audio length): at the host's
+//                         Core ML-inclusive total the sidecar stays on; one
+//                         byte less it is degraded (encoder slot disabled), although fit
+//                         with the defaults (longer audio, larger margin)
+//                         would not fit ggml there and so would keep it
 //   strict-push-stream    with use = require, stream_start refuses a TDT push
 //                         stream whose windows are longer than the sidecar,
 //                         before any audio; use = automatic still starts it
@@ -72,6 +79,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <memory>
 #include <fstream>
 #include <stdexcept>
 #include <string>
@@ -359,6 +367,49 @@ void case_fit_layouts(const std::string & eu_gguf, const std::string & sortforme
     }
 }
 
+void case_fit_degrade(const std::string & gguf) {
+    parakeet::FitOptions host;  // the host's own assessment
+    host.model_gguf_path = gguf;
+    host.n_gpu_layers = 99;
+    host.audio_seconds = 11.0f;
+    host.margin_bytes = 0;
+    const parakeet::FitResult assessed = parakeet::fit_params(host);
+    parakeet::FitOptions defaults;  // what construction projected without the host's totals
+    defaults.model_gguf_path = gguf;
+    defaults.n_gpu_layers = 99;
+    const parakeet::FitResult projected = parakeet::fit_params(defaults);
+    const uint64_t budget = assessed.ggml_required_bytes + assessed.coreml.bytes;
+    const uint64_t under = budget - 1;
+    std::printf("       host fit: ggml=%llu coreml=%llu; default fit: ggml=%llu coreml=%llu; budget=%llu\n",
+                (unsigned long long) assessed.ggml_required_bytes, (unsigned long long) assessed.coreml.bytes,
+                (unsigned long long) projected.ggml_required_bytes, (unsigned long long) projected.coreml.bytes,
+                (unsigned long long) budget);
+    expect(assessed.coreml.bytes > 0 && assessed.ggml_required_bytes <= under &&
+               !(projected.ggml_required_bytes <= under &&
+                 projected.ggml_required_bytes + projected.coreml.bytes > under),
+           "fit-degrade: one byte under the host's inclusive total, the host's fit degrades and the "
+           "default projection would not");
+
+    auto engine_at = [&](uint64_t b) {
+        CoremlOptions coreml = coreml_ready_options();
+        coreml.memory_budget_bytes = (int64_t) b;
+        parakeet::EngineOptions o = engine_options(gguf, coreml);
+        o.coreml_fit = parakeet::CoremlFitTotals{assessed.ggml_required_bytes, assessed.coreml.bytes};
+        return std::make_unique<parakeet::Engine>(o);
+    };
+    expect(engine_at(budget)->encoder_on_coreml(),
+           "fit-degrade: the host's Core ML-inclusive fit holds, so construction keeps the sidecar");
+    const auto degraded = engine_at(under);
+    const std::string degraded_status = degraded->coreml_status_json();
+    std::printf("       degraded: on_coreml=%d status=%s\n", degraded->encoder_on_coreml() ? 1 : 0,
+                degraded_status.c_str());
+    // Memory-degrade resolves use = off: the encoder slot is disabled, with no route.
+    const std::string encoder = stage_status(degraded_status, "encoder");
+    expect(!degraded->encoder_on_coreml() && has_kv(encoder, "state", "disabled") &&
+               has_kv(encoder, "route", "none"),
+           "fit-degrade: one byte under the host's inclusive total, construction degrades for memory");
+}
+
 void case_diarizer(const std::string & gguf, const std::string & wav) {
     const fs::path cache = fresh_dir("diar-cache");
     parakeet::Engine engine(engine_options(gguf, lazy(cache)));
@@ -566,6 +617,7 @@ int main(int argc, char ** argv) {
             case_capacity_miss(gguf, wav);
             case_coreml_only_full(gguf, wav, reference);
             case_encoder_load_error(gguf);
+            case_fit_degrade(gguf);
         } else if (which == "diarizer") {
             case_diarizer(diar_gguf, wav);
             case_diarizer_load_errors(diar_gguf);

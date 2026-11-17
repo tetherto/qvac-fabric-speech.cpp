@@ -79,6 +79,13 @@
 
 namespace parakeet {
 
+// The totals of a memory-fit projection (FitResult::ggml_required_bytes and
+// FitResult::coreml.bytes from parakeet::fit_params).
+struct CoremlFitTotals {
+    uint64_t ggml_required_bytes = 0;
+    uint64_t coreml_bytes = 0;
+};
+
 struct EngineOptions {
     std::string model_gguf_path;
 
@@ -235,6 +242,15 @@ struct EngineOptions {
     // owns the encoder (a GGUF without encoder weights, or
     // PARAKEET_COREML_ONLY). See coreml_options.h.
     CoremlOptions coreml;
+
+    // The fit the host assessed this model with: the totals fit_params
+    // returned for the host's own audio length, margin and options. With
+    // coreml.memory_budget_bytes set, construction applies memory-degrade
+    // from these totals, so it reaches the host's verdict. Unset, construction
+    // projects fit itself from these options, with the FitOptions defaults
+    // for what EngineOptions does not carry (audio_seconds, margin_bytes,
+    // nemotron_chunk_ms), which can differ from the host's assessment.
+    std::optional<CoremlFitTotals> coreml_fit;
 };
 
 // Resolved compute device the Engine is actually running on, after

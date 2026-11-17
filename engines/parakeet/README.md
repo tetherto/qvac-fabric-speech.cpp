@@ -202,7 +202,7 @@ everything.
 | `compute_units` | the stage's own; `all`, `cpu_and_ane`, `cpu_and_gpu`, `cpu_only` | Also `PARAKEET_COREML_COMPUTE_UNITS`. Applies to the encoder, bypass-encoder, diarizer and TDT decoder sidecars. Unless the field is set, `PARAKEET_COREML_DECODER_COMPUTE_UNITS` overrides it for the TDT decoder. |
 | `cache_dir` | `QVAC_COREML_CACHE_DIR`, else none | Where warm-load hints are kept. Without it no hints are kept. |
 | `strict_wait_ms` | unbounded | Upper bound on the wait under `use = require`. |
-| `memory_budget_bytes` | none | The memory budget the caller checked with `parakeet-fit-params`. When it is set, and the ggml-only fit passes but the fit including the Core ML sidecars does not, the sidecars are disabled for this engine and it runs on ggml. |
+| `memory_budget_bytes` | none | The memory budget the caller checked with `parakeet-fit-params`. When it is set, and the ggml-only fit passes but the fit including the Core ML sidecars does not, the sidecars are disabled for this engine and it runs on ggml. Pass the totals of that check in `EngineOptions::coreml_fit` (`ggml_required_bytes` and `coreml.bytes` from `fit_params`) so the engine applies the same verdict; without them it projects fit itself with the default audio length, margin and streaming chunk. |
 
 The engine reports progress through these methods:
 
