@@ -217,7 +217,7 @@ void self_test() {
     check(!over.fits && !over.coreml_fits && over.ggml_only_fits && !over.degraded,
           "generated, over the free memory, no budget: does not fit (no memory-degrade without a budget)");
     const CoremlFitVerdict near = acestep_decide_coreml_fit(checks(500, 1000), checks(900, 1000), true, 700);
-    check(near.degraded && near.fits && near.coreml_fits,
+    check(near.degraded && near.fits && near.ggml_only_fits && !near.coreml_fits,
           "near the budget (ggml 500 fits 700, ggml + Core ML 900 does not): memory-degrade, the ggml verdict");
     const CoremlFitVerdict room = acestep_decide_coreml_fit(checks(500, 1000), checks(900, 1000), true, 950);
     check(!room.degraded && room.fits, "a budget with room: Core ML kept");
@@ -226,6 +226,15 @@ void self_test() {
           "near the free memory with a huge budget: memory-degrade on the free memory, the fit stands");
     const CoremlFitVerdict neither = acestep_decide_coreml_fit(checks(800, 1000), checks(1200, 1000), true, 700);
     check(!neither.degraded && !neither.fits, "a budget neither fits: no memory-degrade, does not fit");
+    // Both projections fit the free memory but neither fits the budget: the
+    // budget caps both verdicts, so the fit is refused, not reported as fitting.
+    const CoremlFitVerdict under = acestep_decide_coreml_fit(checks(800, 1000), checks(900, 1000), true, 700);
+    check(!under.degraded && !under.fits && !under.ggml_only_fits && !under.coreml_fits,
+          "free 1000, ggml 800, Core ML 900, budget 700: neither fits the budget, no memory-degrade, does not fit");
+    const CoremlFitVerdict no_gen_budget =
+        acestep_decide_coreml_fit(checks(800, 1000), checks(800, 1000), false, 700);
+    check(no_gen_budget.fits && !no_gen_budget.degraded,
+          "no generated route: a budget leaves today's ggml verdict as it is");
 }
 
 // ---- fit stability ------------------------------------------------------------

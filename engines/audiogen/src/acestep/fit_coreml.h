@@ -40,21 +40,27 @@ struct CoremlFitVerdict {
 };
 
 // `ggml` and `coreml` are fit_budget_checks() of the two projections; the
-// first entry is the shared host pool. A budget caps that pool's free bytes.
+// first entry is the shared host pool. With a generated route and a budget,
+// the budget caps that pool's free bytes for both verdicts before either is
+// decided; memory-degrade (use = off) applies only when the capped ggml
+// verdict holds and the capped Core ML-inclusive one does not, and the
+// verdict reported is the one of the projection the engine will run. Without
+// a generated route the ggml verdict is today's, uncapped.
 inline CoremlFitVerdict acestep_decide_coreml_fit(const std::vector<FitBudgetCheck> & ggml,
                                                   const std::vector<FitBudgetCheck> & coreml, bool generate,
                                                   const std::optional<int64_t> & budget) {
-    CoremlFitVerdict v;
-    v.ggml_only_fits = fit_checks_hold(ggml);
-    v.coreml_fits    = generate ? fit_checks_hold(coreml) : v.ggml_only_fits;
-    if (generate && budget.has_value() && !ggml.empty() && !coreml.empty()) {
-        auto capped = [&](std::vector<FitBudgetCheck> checks) {
+    const bool capped = generate && budget.has_value();
+    auto hold = [&](std::vector<FitBudgetCheck> checks) {
+        if (capped && !checks.empty()) {
             checks[0].free_bytes = std::min<uint64_t>(checks[0].free_bytes, (uint64_t) std::max<int64_t>(*budget, 0));
-            return fit_checks_hold(checks);
-        };
-        v.degraded = !capped(coreml) && capped(ggml);
-    }
-    v.fits = generate && !v.degraded ? v.coreml_fits : v.ggml_only_fits;
+        }
+        return fit_checks_hold(checks);
+    };
+    CoremlFitVerdict v;
+    v.ggml_only_fits = hold(ggml);
+    v.coreml_fits    = generate ? hold(coreml) : v.ggml_only_fits;
+    v.degraded       = capped && !v.coreml_fits && v.ggml_only_fits;
+    v.fits           = generate && !v.degraded ? v.coreml_fits : v.ggml_only_fits;
     return v;
 }
 
