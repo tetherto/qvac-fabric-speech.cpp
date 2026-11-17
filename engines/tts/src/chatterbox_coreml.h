@@ -180,11 +180,14 @@ enum class s3gen_stage { encoder = 0, cfm = 1, hift = 2 };
 constexpr int S3GEN_STAGES = 3;
 const char * to_string(s3gen_stage stage);
 
-// The sidecar slots of one S3Gen GGUF under one set of resolved options.
-// Shared through a process-wide table (one set per GGUF and options), dropped
-// with the S3Gen cache (s3gen_unload). Dropping a set never waits: unstarted
-// loads are cancelled, a started one finishes in the background and its
-// model is released.
+// The sidecar slots of one S3Gen GGUF under one set of resolved options, with
+// their resident pools and construction group. Each Engine owns its set
+// (create); direct s3gen_synthesize_to_wav callers and tts-cli share one per
+// GGUF and options through a process-wide table (get), dropped with the
+// S3Gen cache (s3gen_unload). Sets on the same sidecars share loads and
+// models through the runtime. Dropping a set never waits: unstarted loads
+// are cancelled, a started one finishes in the background and its model is
+// released.
 class s3gen_sidecars {
 public:
     // The shared set, or null when Core ML is not built, the options disable
@@ -192,7 +195,7 @@ public:
     // function still makes a set (its stage runs on ggml, or use = require
     // refuses the call).
     static std::shared_ptr<s3gen_sidecars> get(const std::string & s3gen_gguf, const CoremlOptions & options);
-    // An unshared set (tests), or null as for get().
+    // A set of the caller's own (an Engine), or null as for get().
     static std::shared_ptr<s3gen_sidecars> create(const std::string & s3gen_gguf, const CoremlOptions & options);
     // Drops every shared set (the S3Gen cache release).
     static void release_all();

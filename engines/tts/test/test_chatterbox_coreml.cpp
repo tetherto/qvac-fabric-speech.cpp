@@ -1254,6 +1254,36 @@ void cli_replay_check(const std::string & t3, const std::string & s3gen, const s
     require(others == std::set<std::string>{"coreml-ane"}, "tts-cli: the replay keeps the encoder and HiFT models");
 }
 
+// Two live Engines on the same GGUF and options own separate slots: one
+// Engine's prewarm group is its own, and destroying it while its loads are
+// queued cancels them (nothing loads for it afterwards), while the other
+// Engine's construction group still completes.
+void two_engines_check(const std::string & t3, const std::string & s3gen) {
+    auto & hooks = cb::coreml_test();
+    hooks.hold_loads = true;
+    hooks.clear_loads();
+    Engine first(engine_options(t3, s3gen));
+    std::vector<std::string> before;
+    {
+        Engine second(engine_options(t3, s3gen));
+        second.coreml_prewarm(CoremlOptions::Prewarm::all, false);
+        require(wait_for([&] { return !hooks.loads().empty(); }, 5000), "two engines: a load is in flight");
+        before = hooks.loads();
+    }
+    hooks.hold_loads = false;
+    require(first.coreml_wait(120000), "two engines: the remaining Engine's construction group completes");
+    require(wait_for([&] { return engine_settled(first); }, 120000), "two engines: the remaining loads finish");
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    const auto after = hooks.loads();
+    size_t widths = 0;
+    for (const auto & l : after) widths += l.rfind("hift/", 0) != 0;
+    size_t widths_before = 0;
+    for (const auto & l : before) widths_before += l.rfind("hift/", 0) != 0;
+    std::printf("[two engines] loads started before the second Engine was dropped: %zu, after: %zu (%zu widths)\n",
+                before.size(), after.size(), widths);
+    require(widths == widths_before, "two engines: the dropped Engine's queued prewarm loads were cancelled");
+}
+
 // The real CFM latch: a Core ML failure at the second Euler step restores the
 // initial noise and integrates on ggml, so the call equals use = off sample
 // for sample (only the CFM sidecar is present, so the encoder and HiFT run
@@ -1410,6 +1440,7 @@ int engine_fixture(bool slow_load) {
 
     // First, before anything is loaded in this process.
     if (slow_load) slow_load_checks(t3, s3gen, cli_env, root.path);
+    two_engines_check(t3, s3gen);
     if (slow_load) cli_replay_check(t3, s3gen, cli_env, root.path);
 
     // Overlapped synthesis equals the segments synthesized one call at a time

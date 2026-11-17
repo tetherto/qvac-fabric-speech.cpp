@@ -70,9 +70,9 @@ struct Engine::Impl {
     mtl_tokenizer        mtl_tok;
 
     std::atomic<bool>    cancel_flag{false};
-    // Core ML options (the legacy fields folded in) and the S3Gen sidecar
-    // slots they select; null when Core ML is not built, off or absent. The
-    // slots load in the background; dropping them never waits.
+    // Core ML options (the legacy fields folded in) and this Engine's own
+    // S3Gen sidecar slots; null when Core ML is not built, off or absent.
+    // The slots load in the background; dropping them never waits.
     CoremlOptions        coreml;
     std::shared_ptr<detail::s3gen_sidecars> sidecars;
     // S3Gen stage backends reported by every s3gen_synthesize_to_wav call of
@@ -249,7 +249,11 @@ struct Engine::Impl {
         // The construction group: HiFT plus the widths this host loaded most
         // recently (prewarm minimal / predicted), every function (all) or
         // nothing (none). Loads run in the background unless wait = construct.
-        sidecars = detail::s3gen_sidecars::get(opts.s3gen_gguf_path, coreml);
+        // The Engine's own slots, resident pools and construction group: two
+        // Engines never share or clobber each other's requests, predictions
+        // or groups (the runtime still shares their loads and models), and
+        // dropping this Engine cancels its unstarted loads.
+        sidecars = detail::s3gen_sidecars::create(opts.s3gen_gguf_path, coreml);
         if (sidecars) sidecars->start_construction(&cancel_flag);
     }
 
