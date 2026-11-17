@@ -366,7 +366,12 @@ std::shared_ptr<supertonic_vocoder_coreml> supertonic_vocoder_coreml::create(sup
                                      p->plan.route.reason + "); Core ML strict policy is enabled (use = require / " +
                                      STRICT_ENV + ")");
         }
-        return std::shared_ptr<supertonic_vocoder_coreml>(new supertonic_vocoder_coreml(std::move(p)));
+        // Installed on the none route too: every call then takes the
+        // resolved policy from it (no slot: ggml, never strict) instead of
+        // reading the environment.
+        auto out = std::shared_ptr<supertonic_vocoder_coreml>(new supertonic_vocoder_coreml(std::move(p)));
+        model.vocoder_pending = out;
+        return out;
     }
 
     pcm::SlotSpec spec;

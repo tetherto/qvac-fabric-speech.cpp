@@ -981,10 +981,15 @@ int supertonic_coreml_vocoder_context_frames(const supertonic_model & model) {
 
 namespace {
 
-// Test-only: fail instead of falling back to ggml.
+#ifdef TTS_CPP_USE_COREML
+// Test-only, for the sidecar attached at load: fail instead of falling back
+// to ggml. The Engine's Core ML runtime resolves its policy once, at
+// construction (model.vocoder_pending), and builds without Core ML ignore
+// the variable.
 bool coreml_vocoder_strict() {
     return std::getenv("SUPERTONIC_COREML_STRICT") != nullptr;
 }
+#endif
 
 // The sidecar attached at load (load_supertonic_gguf without the Engine's
 // Core ML runtime), as a supertonic_vocoder_sidecar.
@@ -1064,7 +1069,9 @@ bool supertonic_vocoder_forward_ggml(const supertonic_model & model,
     bool strict = false;
     if (model.coreml_vocoder) {
         call.sidecar = std::make_shared<attached_sidecar>(model.coreml_vocoder);
+#ifdef TTS_CPP_USE_COREML
         strict = coreml_vocoder_strict();
+#endif
     } else if (model.vocoder_pending) {
         strict = model.vocoder_pending->strict();
         try {
@@ -1074,13 +1081,16 @@ bool supertonic_vocoder_forward_ggml(const supertonic_model & model,
             return false;
         }
         if (pending) *pending = call.pending;
-    } else if (coreml_vocoder_strict()) {
+    }
+#ifdef TTS_CPP_USE_COREML
+    else if (!model.vocoder_coreml_managed && coreml_vocoder_strict()) {
         if (error) {
             *error = "supertonic: no Core ML vocoder sidecar loaded and "
                      "SUPERTONIC_COREML_STRICT is set";
         }
         return false;
     }
+#endif
     if (call.sidecar) {
         auto profile_coreml = std::chrono::steady_clock::now();
         if (latent_len > 0 && run_vocoder_coreml(model, *call.sidecar, latent, latent_len, wav_out)) {

@@ -261,7 +261,10 @@ skips the sidecar at load; `SUPERTONIC_COREML_COMPUTE_UNITS` in `cpu_only` /
 `SUPERTONIC_COREML_ALLOW_LOW_BIT=1` stages the sidecar on a tier below the
 weight floor anyway (for measuring that substitution);
 `SUPERTONIC_COREML_STRICT=1` (test-only) fails instead of falling back to the
-ggml graph. Any sidecar failure -- missing, malformed, wrong shape, or a
+ggml graph. On the Engine these variables are read once, at construction, and
+an explicit `CoremlOptions` field wins over them; once the vocoder stage has
+resolved to ggml (`use = off`, memory-degrade, no usable route) no call reads
+them again, and builds without Core ML ignore them. Any sidecar failure -- missing, malformed, wrong shape, or a
 prediction error -- falls back to the ggml vocoder for that call; a failed
 prediction also retires the sidecar, so later calls stay on ggml.
 

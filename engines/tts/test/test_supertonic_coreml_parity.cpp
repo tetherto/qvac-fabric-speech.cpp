@@ -378,35 +378,76 @@ void check_engine_generated(const std::string & gguf, const tts_cpp::CoremlOptio
     }
 }
 
+// An Engine whose vocoder resolved to ggml synthesizes on ggml with
+// SUPERTONIC_COREML_STRICT set: the stage's policy is resolved once, at
+// construction, from the explicit options (and memory-degrade), and no call
+// reads the environment again. `o` has no budget for use = off; with one it
+// is the memory-degrade case.
+void check_ggml_route_ignores_strict_env(const std::string & gguf, const tts_cpp::CoremlOptions & o,
+                                         const std::string & what) {
+    using tts_cpp::supertonic::Engine;
+    using tts_cpp::supertonic::EngineOptions;
+    scoped_env strict("SUPERTONIC_COREML_STRICT", "1");
+    try {
+        EngineOptions opts;
+        opts.model_gguf_path = gguf;
+        opts.n_threads = N_THREADS;
+        opts.n_gpu_layers = 99;  // what fit projects
+        opts.coreml = o;
+        Engine engine(opts);
+        const std::string status = engine.coreml_status();
+        expect(status_field(status, "state") == "disabled", what + ": status " + status);
+        auto result = engine.synthesize("The strict variable is ignored here.");
+        expect(result.vocoder_synthesis_backend == "ggml" && !result.pcm.empty(),
+               what + ": vocoder ran on '" + result.vocoder_synthesis_backend + "'");
+        std::fprintf(stderr, "[supertonic-coreml-parity] %s with SUPERTONIC_COREML_STRICT: synthesized on ggml\n",
+                     what.c_str());
+    } catch (const std::exception & e) {
+        fail(what + " with SUPERTONIC_COREML_STRICT: " + e.what());
+    }
+}
+
 // Fit charges the generated route's envelope; with a budget that only the
-// ggml projection fits, it degrades to ggml (use = off) instead of refusing.
-void check_fit(const std::string & gguf, const tts_cpp::CoremlOptions & o, const supertonic_vocoder_route & route) {
+// ggml projection fits, it degrades to ggml (use = off) instead of refusing,
+// and an Engine with that budget synthesizes on ggml. With `required` (the
+// generated route is required on this host) a fit that cannot be projected or
+// a host without the free memory the near-budget case needs fails instead of
+// skipping.
+void check_fit(const std::string & gguf, const tts_cpp::CoremlOptions & o, const supertonic_vocoder_route & route,
+               bool required) {
     tts_cpp::supertonic::FitOptions f;
     f.model_gguf_path = gguf;
     f.n_gpu_layers = 99;  // the fused GPU path is the one fit projects
     f.coreml = o;
     const tts_cpp::FitResult r = tts_cpp::supertonic::fit_params(f);
     if (r.status == tts_cpp::FitStatus::Error) {
-        std::fprintf(stderr, "[supertonic-coreml-parity] fit: %s (not projected on this backend)\n", r.reason.c_str());
+        if (required) fail("fit: " + r.reason);
+        else std::fprintf(stderr, "[supertonic-coreml-parity] fit: %s (not projected on this backend)\n", r.reason.c_str());
         return;
     }
     expect(r.coreml.route == "generate" && r.coreml.bytes == route.envelope_bytes && r.coreml.disabled_reason.empty(),
            "fit: route " + r.coreml.route + ", Core ML " + std::to_string(r.coreml.bytes) + " bytes (envelope " +
                std::to_string(route.envelope_bytes) + ")");
-    uint64_t required = r.device.total_bytes + f.margin_bytes;
-    if (r.device_shares_host_memory) required += r.host_bytes;
-    if (required + r.coreml.bytes / 2 > r.device_free_bytes) {
-        std::fprintf(stderr, "[supertonic-coreml-parity] fit near the budget: not run (free memory too low)\n");
+    uint64_t required_bytes = r.device.total_bytes + f.margin_bytes;
+    if (r.device_shares_host_memory) required_bytes += r.host_bytes;
+    if (required_bytes + r.coreml.bytes / 2 > r.device_free_bytes) {
+        if (required) {
+            fail("fit near the budget: free memory " + std::to_string(r.device_free_bytes) + " is below " +
+                 std::to_string(required_bytes + r.coreml.bytes / 2));
+        } else {
+            std::fprintf(stderr, "[supertonic-coreml-parity] fit near the budget: not run (free memory too low)\n");
+        }
         return;
     }
     tts_cpp::supertonic::FitOptions near = f;
-    near.coreml.memory_budget_bytes = (int64_t) (required + r.coreml.bytes / 2);
+    near.coreml.memory_budget_bytes = (int64_t) (required_bytes + r.coreml.bytes / 2);
     const tts_cpp::FitResult d = tts_cpp::supertonic::fit_params(near);
     expect(d.coreml.disabled_reason == "memory" && d.fits && d.coreml.ggml_only_fits,
            "fit near the budget: disabled_reason '" + d.coreml.disabled_reason + "', fits " +
                std::to_string(d.fits));
     std::fprintf(stderr, "[supertonic-coreml-parity] fit: envelope %.1f MiB, near-budget degrade ok\n",
                  mib(r.coreml.bytes));
+    check_ggml_route_ignores_strict_env(gguf, near.coreml, "memory-degrade");
 }
 
 // A generated sidecar stays off on the device classes the template prefers
@@ -619,7 +660,10 @@ int generated_main(const std::string & gguf, const std::string & cache_dir, doub
     }
 
     check_engine_generated(gguf, o);
-    check_fit(gguf, o, supertonic_vocoder_plan_route(gguf, o));
+    tts_cpp::CoremlOptions off = o;
+    off.use = tts_cpp::CoremlOptions::Use::off;
+    check_ggml_route_ignores_strict_env(gguf, off, "use = off");
+    check_fit(gguf, o, supertonic_vocoder_plan_route(gguf, o), require_coreml);
     check_device_gating(gguf, cache_dir);
 
     if (g_failures == 0) {
