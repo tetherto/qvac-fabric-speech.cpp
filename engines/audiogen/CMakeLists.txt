@@ -381,6 +381,33 @@ if (AUDIOGEN_BUILD_TESTS)
     audiogen_register_test(test-vae-coreml-parity LABEL "integration")
     set_property(TEST test-vae-coreml-parity PROPERTY SKIP_RETURN_CODE 77)
 
+    # The VAE decoder on the shared Core ML runtime. --self-test (every build):
+    # the decode deadline, labels, options, the per-phase Core ML charge and
+    # the fit verdict with memory-degrade. --fit-stable on a twin of the
+    # template's reference manifest: the route and envelope never read the
+    # cache. The device cases and the memory schedule run from CI
+    # (audiogen-ci.yml) on the staged models.
+    add_executable(test-acestep-vae-coreml test/test_acestep_vae_coreml.cpp)
+    audiogen_link_in_tree_binary(test-acestep-vae-coreml)
+    # memory_probe.h: the shared probes of the Core ML memory schedules.
+    target_include_directories(test-acestep-vae-coreml PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/test)
+    if (AUDIOGEN_COREML)
+        target_compile_definitions(test-acestep-vae-coreml PRIVATE AUDIOGEN_USE_COREML)
+    endif()
+    add_test(NAME test-acestep-vae-coreml-self-test COMMAND test-acestep-vae-coreml --self-test)
+    set_property(TEST test-acestep-vae-coreml-self-test PROPERTY LABELS "unit")
+    if (TARGET qvac-coreml-tool)
+        set(_acestep_vae_twin "${CMAKE_CURRENT_BINARY_DIR}/acestep-vae-t64-twin.gguf")
+        add_test(NAME test-acestep-vae-fit-stable-twin
+                 COMMAND qvac-coreml-tool twin
+                         --manifest "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/acestep-vae-t64/reference-gguf.json"
+                         --seed 1 --types bf16 -o "${_acestep_vae_twin}")
+        set_tests_properties(test-acestep-vae-fit-stable-twin PROPERTIES LABELS "unit" FIXTURES_SETUP acestep-vae-twin)
+        add_test(NAME test-acestep-vae-fit-stable
+                 COMMAND test-acestep-vae-coreml --fit-stable --vae "${_acestep_vae_twin}")
+        set_tests_properties(test-acestep-vae-fit-stable PROPERTIES LABELS "unit" FIXTURES_REQUIRED acestep-vae-twin)
+    endif()
+
     # Core ML VAE decode benchmark (ggml GPU vs sidecar, markdown to stdout).
     # Not a ctest: CI runs it directly and appends its table to the job
     # summary; it still fails on parity below 0.999, so a wrong-but-fast

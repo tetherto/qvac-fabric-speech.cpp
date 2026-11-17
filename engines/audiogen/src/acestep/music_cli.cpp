@@ -129,6 +129,23 @@ int main(int argc, char ** argv) {
     // Parity aid: write one .bin per stage so a CPU/GPU divergence can be traced
     // to the stage that introduces it rather than inferred from the final WAV.
     if (arg_val(argc, argv, "--dump-stages")) o.dump_stages_dir = arg_val(argc, argv, "--dump-stages");
+    // The VAE decoder's Core ML sidecar (Apple builds with AUDIOGEN_COREML).
+    if (const char * v = arg_val(argc, argv, "--coreml-cache-dir")) o.coreml.cache_dir = v;
+    if (const char * v = arg_val(argc, argv, "--coreml-units")) o.coreml.compute_units = v;
+    if (const char * v = arg_val(argc, argv, "--coreml-wait")) {
+        const std::string w = v;
+        o.coreml.wait = w == "construct" ? CoremlOptions::Wait::construct
+                      : w == "call"      ? CoremlOptions::Wait::call
+                                         : CoremlOptions::Wait::none;
+    }
+    if (const char * v = arg_val(argc, argv, "--coreml-prewarm")) {
+        const std::string w = v;
+        o.coreml.prewarm = w == "all"     ? CoremlOptions::Prewarm::all
+                         : w == "minimal" ? CoremlOptions::Prewarm::minimal
+                         : w == "none"    ? CoremlOptions::Prewarm::none
+                                          : CoremlOptions::Prewarm::predicted;
+    }
+    if (arg_flag(argc, argv, "--coreml-require")) o.coreml.use = CoremlOptions::Use::require;
 
     if (o.models_dir.empty() && o.dit_model_path.empty()) {
         fprintf(stderr,
@@ -168,7 +185,12 @@ int main(int argc, char ** argv) {
                 "           [--no-phase1]  (values shown are the defaults)\n"
                 "  backend: [--gpu] [--backend auto|cpu|opencl|webgpu|hexagon|xdna|<device>] [--lm-backend <same names>]\n"
                 "           [--threads N] [--backends-dir <dir>]\n"
-                "           [--dump-stages <existing dir>]\n");
+                "           [--dump-stages <existing dir>]\n"
+                "  core ml: [--coreml-cache-dir <dir>]  (generate the VAE decoder sidecar there)\n"
+                "           [--coreml-wait none|construct|call] [--coreml-prewarm none|predicted|all]\n"
+                "           [--coreml-units all|cpu_and_ane|cpu_and_gpu|cpu_only] [--coreml-require]\n"
+                "           [--coreml-status]  (print the decoder's status and construction JSON)\n"
+                "           [--repeat N]  (generate N times in this process; the last one is written)\n");
         return 1;
     }
 
@@ -339,12 +361,23 @@ int main(int argc, char ** argv) {
         return 0;
     }
 
+    const bool coreml_status = arg_flag(argc, argv, "--coreml-status");
+    if (coreml_status) fprintf(stderr, "[music-cli] coreml construction: %s\n", eng->coreml_construction().c_str());
+    const int repeat = arg_val(argc, argv, "--repeat") ? std::max(1, atoi(arg_val(argc, argv, "--repeat"))) : 1;
     GenerateResult r;
-    try {
-        r = eng->generate(p, progress);
-    } catch (const std::exception & e) {
-        fprintf(stderr, "[music-cli] generate failed: %s\n", e.what());
-        return 1;
+    for (int run = 0; run < repeat; ++run) {
+        t_start = std::chrono::steady_clock::now();
+        try {
+            r = eng->generate(p, progress);
+        } catch (const std::exception & e) {
+            fprintf(stderr, "[music-cli] generate failed: %s\n", e.what());
+            return 1;
+        }
+        const double total_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_start).count();
+        fprintf(stderr, "[music-cli] run %d/%d: %.0f ms, vae_backend=%s coreml_pending=%d\n", run + 1, repeat, total_ms,
+                r.vae_backend.c_str(), (int) r.coreml_pending);
+        if (coreml_status) fprintf(stderr, "[music-cli] coreml status: %s\n", eng->coreml_status().c_str());
     }
 
     if (r.pcm.empty()) { fprintf(stderr, "[music-cli] no audio (cancelled?)\n"); return 1; }
