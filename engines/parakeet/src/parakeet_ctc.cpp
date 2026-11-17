@@ -2276,10 +2276,12 @@ static void maybe_init_coreml_encoder(const std::string & gguf_path,
                           model.impl->coreml->resolved().disabled_reason.c_str());
     }
 
-    // A diarizer sidecar is the Sortformer minimal set; otherwise the
-    // encoder is.
+    // A diarizer capacity that can serve a pass is the Sortformer minimal
+    // set; otherwise (no diarizer, or only status-only template capacities)
+    // the encoders are.
     if (supported_sortformer) maybe_init_coreml_diarizers(gguf_path, model, verbose);
-    const bool encoder_minimal = model.impl->coreml_diarizers == nullptr;
+    const bool encoder_minimal = encoder_sidecars_minimal(
+        model.impl->coreml_diarizers ? model.impl->coreml_diarizers->capacities() : std::vector<int>());
 
     const std::string path = coreml_encoder_sidecar_path(gguf_path);
     model.impl->encoder_slot = model.impl->coreml->add(

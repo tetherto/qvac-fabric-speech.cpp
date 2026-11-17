@@ -52,7 +52,9 @@
 //                         listed by the construction group (every capacity
 //                         when generation is off) and, under use = require,
 //                         refuses a pass it covers; a pass longer than every
-//                         capacity still runs on ggml
+//                         capacity still runs on ggml; adjacent encoder and
+//                         bypass-encoder sidecars stay in the construction
+//                         group unless a diarizer capacity serves
 
 #include "coreml/parakeet_coreml_sidecars.h"
 #include "coreml_fit.h"
@@ -1388,6 +1390,60 @@ void case_diarizer_capacities() {
         const std::string group = sidecars.construction_json();
         CHECK(g_fake_loads.load() == loads + 1 && group.find("\"stage\":\"diarizer-745\"") != std::string::npos,
               "the construction group loads the smallest prebuilt capacity above the status-only ones");
+    }
+
+    // A diarization model with one template capacity and adjacent prebuilt
+    // encoder and bypass-encoder bundles. With the capacity status-only (no
+    // cache directory, the library's default) the encoders stay in the
+    // construction group as requests, so they load there as with no diarizer
+    // at all; with a serving capacity the diarizer takes their place.
+    {
+        fs::create_directories(dir / "m-encoder.mlmodelc");
+        fs::create_directories(dir / "m-bypass-encoder.mlmodelc");
+        auto encoder_request = [&](const char * stage, const char * name, bool minimal) {
+            SidecarRequest r;
+            r.stage = stage;
+            r.path = (dir / name).string();
+            r.present = true;
+            r.stage_default = pcm::ComputeUnits::cpu_and_ane;
+            r.load_fn = &fake_load;
+            r.minimal = minimal;
+            return r;
+        };
+        // The group JSON lists `skipped_route_none` before `slots` (sorted
+        // keys): a stage after `"slots":[` is a request of the group.
+        auto requested = [](const std::string & group, const char * stage) {
+            const size_t slots = group.find("\"slots\":[");
+            const size_t at = group.find(std::string("\"stage\":\"") + stage + "\"");
+            return slots != std::string::npos && at != std::string::npos && at > slots;
+        };
+        for (const bool serving : {false, true}) {
+            const std::string what = serving ? "serving diarizer capacity: " : "status-only diarizer capacity: ";
+            CoremlOptions o = base;
+            o.wait = CoremlOptions::Wait::construct;
+            o.prewarm = CoremlOptions::Prewarm::predicted;
+            if (!serving) o.cache_dir = "";
+            CoremlSidecars sidecars(o, m);
+            const std::vector<pcm::generation::Candidate> probed =
+                probe_diarizer_templates(sidecars, gguf.string(), {"toy-stateless"});
+            const DiarizerSlots slots(gguf.string(), diarizer_capacities({}, {410}, probed), sidecars, &fake_load);
+            CHECK(slots.capacities().size() == (serving ? 1u : 0u),
+                  (what + "the template capacity serves only with a cache directory").c_str());
+            const bool minimal = encoder_sidecars_minimal(slots.capacities());
+            CHECK(minimal == !serving, (what + "the encoders are minimal only without a serving capacity").c_str());
+            auto encoder = sidecars.add(encoder_request("encoder", "m-encoder.mlmodelc", minimal));
+            auto bypass = sidecars.add(encoder_request("bypass-encoder", "m-bypass-encoder.mlmodelc", minimal));
+            sidecars.start();
+            const std::string group = sidecars.construction_json();
+            CHECK(requested(group, "encoder") == !serving && requested(group, "bypass-encoder") == !serving,
+                  (what + "the construction group requests the encoder and bypass encoder only "
+                          "without a serving capacity").c_str());
+            CHECK(requested(group, "diarizer-410") == serving,
+                  (what + "the construction group requests the diarizer only when it serves").c_str());
+            const pcm::SlotState encoders = serving ? pcm::SlotState::idle : pcm::SlotState::ready;
+            CHECK(encoder->state() == encoders && bypass->state() == encoders,
+                  (what + "wait = construct returns with the encoders loaded only when they are minimal").c_str());
+        }
     }
 
     pcm::generation::set_compile_override(nullptr);
