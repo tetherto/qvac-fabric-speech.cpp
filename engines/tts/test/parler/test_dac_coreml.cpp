@@ -90,6 +90,7 @@
 #include <thread>
 
 #if defined(__APPLE__)
+#include <sys/clonefile.h>
 #include <sys/sysctl.h>
 #endif
 #include <memory>
@@ -1056,6 +1057,65 @@ std::string status_state(const std::string & status) {
     return status.substr(begin, status.find('"', begin) - begin);
 }
 
+// The GGUF is replaced after the weights were loaded and before the sidecar
+// is made: the model is loaded through a symlink, which is then pointed at a
+// clone of the file (same bytes, another inode). The prepare job must not
+// follow the path to the replacement: it fails with source_changed, nothing
+// is generated, and with use = auto the DAC decodes on ggml.
+void source_changed_gate(const std::string & gguf) {
+    fprintf(stderr, "replaced GGUF gate\n");
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() /
+                         ("parler-dac-replaced-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    const fs::path link = dir / "model.gguf", clone = dir / "clone.gguf", cache = dir / "cache";
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    fs::create_symlink(fs::absolute(gguf), link, ec);
+    if (ec) {
+        check(false, "a symlink to the GGUF: " + ec.message());
+        fs::remove_all(dir, ec);
+        return;
+    }
+    parler_model m;
+    std::string err;
+    if (!parler_load_gguf(link.string(), m, 0, &err)) {
+        check(false, "load through the symlink: " + err);
+        fs::remove_all(dir, ec);
+        return;
+    }
+    bool replaced = ::clonefile(fs::absolute(gguf).c_str(), clone.c_str(), 0) == 0;
+    if (replaced) {
+        fs::remove(link, ec);
+        fs::create_symlink(clone, link, ec);
+        replaced = !ec;
+    }
+    check(replaced, "the GGUF the model was loaded from is replaced by a clone");
+    if (replaced) {
+        tts_cpp::CoremlOptions opts;
+        opts.cache_dir = cache.string();
+        opts.wait = tts_cpp::CoremlOptions::Wait::construct;
+        opts.use = tts_cpp::CoremlOptions::Use::automatic;
+        std::shared_ptr<parler_dac_coreml> dac;
+        try {
+            dac = parler_dac_coreml::create(m, link.string(), opts);
+        } catch (const std::exception & e) {
+            check(false, std::string("create after the replacement: ") + e.what());
+        }
+        if (dac) {
+            const std::string st = dac->status_json();
+            std::vector<float> pcm;
+            std::string backend;
+            const bool decoded = decode(m, random_codes(m.hparams, 8, 7), 8, pcm, nullptr, 0, -1, &backend);
+            check(!dac->wait(0) && contains(st, "source_changed") && decoded && backend == PARLER_DAC_GGML_BACKEND,
+                  "a GGUF replaced after the load is not generated from (DAC on " + backend +
+                      "): " + st.substr(0, std::min<size_t>(st.size(), 300)));
+        }
+        m.dac_pending.reset();
+    }
+    parler_free_model(m);
+    fs::remove_all(dir, ec);
+}
+
 // The Engine's default wait (none) on an empty cache: construction returns
 // at once and the DAC sidecar is generated in the background.
 // Engine::coreml_wait(-1) blocks until it is ready, and Engine::cancel() from
@@ -1173,6 +1233,7 @@ void generated_gates(parler_model & model, const std::string & gguf, const std::
               std::to_string(route.envelope_bytes) + " bytes" + (route.validated ? ", validated" : ""));
     engine_wait_cancel_gate(gguf, cache_dir);
     engine_wait_keeps_cancel_gate(gguf, opts);
+    source_changed_gate(gguf);
     model.dac_sidecar.reset();
     model.dac_pending.reset();
     std::shared_ptr<parler_dac_coreml> dac;

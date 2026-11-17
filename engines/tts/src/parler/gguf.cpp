@@ -223,6 +223,7 @@ ggml_backend_t init_policy_backend(int n_gpu_layers) {
 bool parler_load_gguf_impl(const std::string & path, parler_model & model,
                            int n_gpu_layers, std::string * error,
                            parler_fit_measure * measure, const std::string & requested_backend) {
+    if (!measure) parler_dac_source_before_load(model, path);
     ggml_context * ctx_meta = nullptr;
     gguf_init_params gp = { /*.no_alloc=*/ true, /*.ctx=*/ &ctx_meta };
     gguf_context * g = gguf_init_from_file(path.c_str(), gp);
@@ -448,6 +449,7 @@ bool parler_load_gguf_impl(const std::string & path, parler_model & model,
             }
         }
     }
+    if (!measure) parler_dac_source_after_load(model, path);
 
     // ---- wire named tensors into the typed structs ----
     auto get = [&](const std::string & name, bool required = true) -> ggml_tensor * {
@@ -619,6 +621,7 @@ void parler_free_model(parler_model & model) {
     model.dac_coreml_strict = false;
     model.dac_rvq = {};
     model.dac_pending.reset();
+    model.dac_source.reset();
     if (model.buffer_dac_derived) {
         ggml_backend_buffer_free(model.buffer_dac_derived);
         model.buffer_dac_derived = nullptr;

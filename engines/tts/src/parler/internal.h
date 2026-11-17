@@ -182,6 +182,8 @@ struct parler_model {
     // The DAC on the shared Core ML runtime (parler_dac_coreml) or a test
     // double: acquired once per decode call when no sidecar is attached.
     std::shared_ptr<parler_dac_pending> dac_pending;
+    // The file the weights were loaded from (parler_dac_source_before_load).
+    std::shared_ptr<parler_dac_source> dac_source;
 
     // decoder self-attention KV cache (token-major slab, one per K/V):
     // [d_model, n_ctx] rows per layer, stacked layer-major.

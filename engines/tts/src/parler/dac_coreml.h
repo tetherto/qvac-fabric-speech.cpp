@@ -54,6 +54,14 @@ bool parler_coreml_strict();
 // in, not disabled, and `<stem>-dac.mlmodelc` present.
 bool parler_dac_sidecar_enabled(const std::string & gguf_path);
 
+// The identity of the GGUF parler_load_gguf read the weights from (Core ML
+// builds; nothing elsewhere): its path is stat'ed before the load first opens
+// it and after the last read. parler_dac_coreml::create generates only from
+// that file, so a GGUF replaced since the load is never generated from.
+struct parler_dac_source;
+void parler_dac_source_before_load(parler_model & model, const std::string & path);
+void parler_dac_source_after_load(parler_model & model, const std::string & path);
+
 // One fixed-window DAC decode. Implementations: the Core ML model, and test
 // doubles that exercise the fallback without Core ML.
 class parler_dac_sidecar {

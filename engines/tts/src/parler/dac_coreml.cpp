@@ -526,6 +526,21 @@ parler_dac_route parler_dac_plan_route(const std::string & gguf_path, const Core
     return plan_route(gguf_path, r, adapter_bytes).route;
 }
 
+struct parler_dac_source {
+    pcm::SourceStat before, after;
+    bool ok_before = false, ok_after = false;
+};
+
+void parler_dac_source_before_load(parler_model & model, const std::string & path) {
+    auto s = std::make_shared<parler_dac_source>();
+    s->ok_before = pcm::generation::source_stat(path, s->before);
+    model.dac_source = std::move(s);
+}
+
+void parler_dac_source_after_load(parler_model & model, const std::string & path) {
+    if (model.dac_source) model.dac_source->ok_after = pcm::generation::source_stat(path, model.dac_source->after);
+}
+
 std::shared_ptr<parler_dac_coreml> parler_dac_coreml::create(parler_model & model, const std::string & gguf_path,
                                                              const CoremlOptions & options, bool memory_degrade) {
     validate_options(options);
@@ -584,10 +599,13 @@ std::shared_ptr<parler_dac_coreml> parler_dac_coreml::create(parler_model & mode
                 : 0;
     } else {
         const pcm::generation::Candidate & c = *p->plan.candidate;
-        pcm::SourceStat source;
-        if (!pcm::generation::source_stat(gguf_path, source)) {
-            throw std::runtime_error("parler: cannot stat " + gguf_path);
-        }
+        // The file the weights were loaded from, not whatever `gguf_path`
+        // names now: a GGUF replaced since the load (or another path) fails
+        // the prepare job with source_changed, and the DAC stays on ggml.
+        const parler_dac_source none;
+        const parler_dac_source & ls = model.dac_source ? *model.dac_source : none;
+        const pcm::SourceStat source =
+            pcm::generation::loaded_source(ls.before, ls.ok_before, ls.after, ls.ok_after, gguf_path);
         spec.tmpl = c.tmpl;
         spec.prepare = pcm::generation::prepare_request(c, source, p->resolved);
         spec.prepare_fn = &pcm::generation::prepare;
@@ -698,6 +716,10 @@ parler_dac_route parler_dac_plan_route(const std::string &, const CoremlOptions 
     r.reason = "build";
     return r;
 }
+
+struct parler_dac_source {};
+void parler_dac_source_before_load(parler_model &, const std::string &) {}
+void parler_dac_source_after_load(parler_model &, const std::string &) {}
 
 std::shared_ptr<parler_dac_coreml> parler_dac_coreml::create(parler_model &, const std::string &,
                                                              const CoremlOptions & options, bool) {
