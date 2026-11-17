@@ -267,7 +267,7 @@ jobs:
     needs: [runner_names, coreml_authorize]
     if: needs.coreml_authorize.outputs.allowed == 'true'
     runs-on: ${{ needs.runner_names.outputs.macos_arm64_gpu }}
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
@@ -320,11 +320,41 @@ jobs:
             echo "::error::a diarizer bundle sits beside the staged GGUF"; exit 1
           fi
 
+      # The Sortformer v2.1 q8_0 GGUF (141 MB) the SDK stages, from the QVAC
+      # model registry at a pinned key and sha256, alone in its directory, so
+      # the engine generates the diarizer from the GGUF.
+      - name: Cache the Sortformer v2.1 q8_0 GGUF
+        id: sortformer-cache
+        uses: actions/cache@v4
+        with:
+          path: sortformer-generated
+          key: sortformer-v2.1-q8_0-7fef9f1edf82f9e5c308f89509d017fb85781e03c1dc05447b617e0421f51d90
+
+      - name: Stage the Sortformer v2.1 q8_0 GGUF
+        if: steps.sortformer-cache.outputs.cache-hit != 'true'
+        run: |
+          client="$RUNNER_TEMP/qvac-registry-client"
+          rm -rf "$client"
+          mkdir -p "$client" sortformer-generated
+          echo '{"name": "parakeet-ci-registry-client", "private": true}' > "$client/package.json"
+          npm install --prefix "$client" --silent --no-audit --no-fund --ignore-scripts @qvac/registry-client@0.7.0
+          REGISTRY_CLIENT="$client/node_modules/@qvac/registry-client" \
+            node scripts/benchmarks/desktop-weekly/fetch-registry.js sortformer-generated \
+            parakeet/2026-09-30/diar_streaming_sortformer_4spk-v2.1.q8_0.gguf
+
+      - name: Verify the Sortformer v2.1 q8_0 GGUF
+        run: |
+          echo "7fef9f1edf82f9e5c308f89509d017fb85781e03c1dc05447b617e0421f51d90  sortformer-generated/diar_streaming_sortformer_4spk-v2.1.q8_0.gguf" | shasum -a 256 -c -
+          if ls sortformer-generated | grep -q -- '\.mlmodelc'; then
+            echo "::error::a Core ML bundle sits beside the staged GGUF"; exit 1
+          fi
+
       - name: Configure (PARAKEET_COREML=ON)
         env:
           FIXTURE_ROOT: ${{ inputs.fixture_root }}
         run: |
-          fixture_options=("-DPARAKEET_TEST_NEMOTRON_GENERATED_GGUF=$PWD/nemotron-generated/Nemotron-3-Diarization.q8_0.gguf")
+          fixture_options=("-DPARAKEET_TEST_NEMOTRON_GENERATED_GGUF=$PWD/nemotron-generated/Nemotron-3-Diarization.q8_0.gguf"
+                           "-DPARAKEET_TEST_SORTFORMER_GENERATED_GGUF=$PWD/sortformer-generated/diar_streaming_sortformer_4spk-v2.1.q8_0.gguf")
           if [ -n "$FIXTURE_ROOT" ]; then
             fixture_options+=("-DPARAKEET_TEST_MODEL_DIR=$FIXTURE_ROOT/models"
                               "-DPARAKEET_TEST_AUDIO_DIR=$FIXTURE_ROOT/audio"
@@ -348,20 +378,23 @@ jobs:
             --require test-coreml-scheduler --require test-parakeet-coreml-route \
             --require test-coreml-encoder-owner-stub-tdt
 
-      # The generated diarizers on the device: an empty cache, the staged
-      # GGUF alone, and the Core ML / ggml parity gate on every capacity the
-      # sample covers. The test fails (never skips) unless every diarizer was
-      # generated. The fit test checks the generated charge is the same with
-      # an empty and a full cache, the memory-degrade near the budget, and the
-      # status of compute units the templates were not validated for.
-      - name: Test (generated Nemotron diarizers on the device, no skips)
+      # The generated diarizers on the device (Nemotron 3 Diarization and
+      # Sortformer v2.1): an empty cache, the staged GGUF alone, and the
+      # Core ML / ggml parity gate on every capacity the sample covers. Each
+      # test fails (never skips) unless every diarizer was generated. The fit
+      # tests check the generated charge is the same with an empty and a full
+      # cache, the memory-degrade near the budget, and the status of compute
+      # units the templates were not validated for.
+      - name: Test (generated diarizers on the device, no skips)
         run: |
           ctest --test-dir build-coreml -L coreml-generated --no-tests=error \
             --output-on-failure --timeout 1800 --output-junit coreml-generated-results.xml
           python3 engines/parakeet/scripts/check-ctest-junit.py \
             build-coreml/coreml-generated-results.xml \
             --require test-nemotron-diarization-coreml-generated-parity \
-            --require test-fit-coreml-generated-diarizers
+            --require test-fit-coreml-generated-diarizers \
+            --require test-sortformer-diarizer-coreml-generated-parity \
+            --require test-fit-coreml-generated-sortformer-diarizer
 
       # Real-weights gate: for each Nemotron template, the unchanged exporter on
       # the staged GGUF dequantised by ggml against the C++ generator on the
@@ -386,6 +419,16 @@ jobs:
             --template-dir engines/parakeet/coreml-templates/nemotron-diar-f1125 \
             --json nemotron-real-gate.json
 
+      - name: Real-weights gate (Sortformer template on the staged q8_0)
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          .venv-coreml-templates/bin/python -B engines/coreml/python/coreml_template.py \
+            --tool build-coreml/qvac-coreml-tool real \
+            --gguf sortformer-generated/diar_streaming_sortformer_4spk-v2.1.q8_0.gguf \
+            --template-dir engines/parakeet/coreml-templates/sortformer-diar-f410 \
+            --json sortformer-real-gate.json
+
       # The memory validation behind the Nemotron templates' memory envelope,
       # on this runner's chip: diarizer passes run while the engine generates,
       # compiles, loads and warms every capacity in the background (prewarm
@@ -404,7 +447,7 @@ jobs:
           set -euo pipefail
           sw_vers
           sysctl -n machdep.cpu.brand_string hw.memsize
-          tool=build-coreml/nemotron-diarization-coreml-memory
+          tool=build-coreml/diarizer-coreml-memory
           gguf=nemotron-generated/Nemotron-3-Diarization.q8_0.gguf
           wav=engines/parakeet/test/samples/diarization-sample-16k.wav
           rm -rf nemotron-memory
@@ -433,6 +476,46 @@ jobs:
         with:
           name: nemotron-memory-schedule
           path: nemotron-memory/*.json
+          if-no-files-found: warn
+
+      # The same validation for the Sortformer v2.1 template, on this runner's
+      # chip: AOSC-sized diarizer passes while the engine generates, compiles,
+      # loads and warms its capacity in the background, from a re-signed copy
+      # of the tool and an empty cache each run.
+      - name: Memory schedule (generated Sortformer diarizer, overlapped, this runner)
+        id: sortformer-memory
+        if: ${{ !cancelled() && steps.coreml-build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          sw_vers
+          sysctl -n machdep.cpu.brand_string hw.memsize
+          tool=build-coreml/diarizer-coreml-memory
+          gguf=sortformer-generated/diar_streaming_sortformer_4spk-v2.1.q8_0.gguf
+          wav=engines/parakeet/test/samples/diarization-sample-16k.wav
+          rm -rf sortformer-memory
+          mkdir -p sortformer-memory
+          "$tool" --ggml-only --gguf "$gguf" --wav "$wav" --ggml-passes 60 --json sortformer-memory/ggml.json
+          base=$(python3 -c "import json; print(json.load(open('sortformer-memory/ggml.json'))['peak_footprint'])")
+          status=0
+          for i in 1 2; do
+            id="qvac-memory-$(uuidgen)"
+            cp "$tool" "sortformer-memory/$id"
+            codesign -s - -f -i "$id" "sortformer-memory/$id"
+            "sortformer-memory/$id" --gguf "$gguf" --wav "$wav" --cache-dir "$PWD/sortformer-memory/cache-$i" \
+              --baseline-bytes "$base" --json "sortformer-memory/run-$i.json" || status=1
+            rm -rf "sortformer-memory/cache-$i" "sortformer-memory/$id" "$HOME/Library/Caches/$id"
+          done
+          python3 engines/parakeet/scripts/check-coreml-memory-schedule.py \
+            --template-dir engines/parakeet/coreml-templates/sortformer-diar-f410 \
+            sortformer-memory/run-*.json || status=1
+          exit "$status"
+
+      - name: Upload the Sortformer memory schedule reports
+        if: ${{ !cancelled() && steps.sortformer-memory.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: sortformer-memory-schedule
+          path: sortformer-memory/*.json
           if-no-files-found: warn
 
       - name: Test (background sidecars on the device, no skips)
