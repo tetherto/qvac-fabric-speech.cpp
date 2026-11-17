@@ -225,6 +225,8 @@ struct SlotSpec {
     LoadFn load_fn = nullptr;
     WarmFn warm_fn = nullptr;
     const void * tmpl = nullptr;
+    // What the LoadFn validates. Part of the model's identity: owners of one
+    // artifact share a ready model or a running load only with equal geometry.
     std::vector<int64_t> geometry;
     bool shareable = true;                   // false: stateful template, one model per owner
     uint64_t ane_compile_reserve_bytes = 0;  // memory admission for cold ANE loads; 0 = never deferred

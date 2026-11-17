@@ -426,6 +426,64 @@ void case_dedup_two_owners() {
     CHECK(wait_for([&] { return g_live_models.load() == base; }));
 }
 
+// A loader that accepts only geometry {1, 2, 3} (as Parler's checks the
+// model's {latent_dim, hop, rf_frames}).
+std::atomic<int> g_geometry_loads{0};
+LoadResult geometry_load(const LoadRequest & r) {
+    ++g_geometry_loads;
+    if (r.geometry != std::vector<int64_t>{1, 2, 3}) {
+        LoadResult out;
+        out.error = Error::deterministic("geometry mismatch");
+        return out;
+    }
+    return fake_load(r);
+}
+
+void case_dedup_geometry() {
+    // Two owners of one shareable artifact whose loaders validate different
+    // geometries: the second never adopts the first's model, ready or in
+    // flight. Its own load runs and refuses it.
+    Env e;
+    g_geometry_loads = 0;
+    auto with_geometry = [&](std::vector<int64_t> g) {
+        SlotSpec s = e.spec("geo");
+        s.load_fn = &geometry_load;
+        s.geometry = std::move(g);
+        return e.m->make_slot(s, e.policy());
+    };
+    // Ready reuse.
+    auto a = with_geometry({1, 2, 3});
+    a->request(Priority::minimal);
+    CHECK(wait_for([&] { return is_ready(a); }));
+    auto b = with_geometry({1, 2, 4});
+    b->request(Priority::minimal);
+    CHECK(wait_for([&] { return is_terminal(b->state()); }));
+    CHECK(!is_ready(b) && g_geometry_loads.load() == 2);
+    // Same geometry: still one shared model.
+    auto c = with_geometry({1, 2, 3});
+    c->request(Priority::minimal);
+    CHECK(wait_for([&] { return is_ready(c); }));
+    CHECK(g_geometry_loads.load() == 2);
+    {
+        Acquired ha = a->acquire(Demand::if_ready);
+        Acquired hc = c->acquire(Demand::if_ready);
+        CHECK(ha && hc && ha.model.get() == hc.model.get());
+    }
+    a.reset();
+    b.reset();
+    c.reset();
+    // In flight: the second owner does not join the first's running load.
+    set_beh("geo", {true});
+    auto d = with_geometry({1, 2, 3});
+    d->request(Priority::minimal);
+    CHECK(wait_for([&] { return calls("geo") >= 2; }));  // d's load is running (blocked)
+    auto f = with_geometry({9, 9, 9});
+    f->request(Priority::minimal);  // queued behind d's load, not joined to it
+    release("geo");
+    CHECK(wait_for([&] { return is_ready(d) && is_terminal(f->state()); }));
+    CHECK(!is_ready(f) && g_geometry_loads.load() == 4);
+}
+
 void case_cancel_when_owners_drop() {
     Env e;
     set_beh("blocker", {true});
@@ -2887,6 +2945,7 @@ struct Case {
 const Case kCases[] = {
     {"priority-order", case_priority_order},
     {"dedup-two-owners", case_dedup_two_owners},
+    {"dedup-geometry", case_dedup_geometry},
     {"cancel-when-owners-drop", case_cancel_when_owners_drop},
     {"admission-gate", case_admission_gate},
     {"current-outranks-minimal", case_current_outranks_minimal},
