@@ -104,6 +104,7 @@ struct Behaviour {
     int would_block = 0;      // first N calls report a busy key lock (after the wait, with `block`)
     bool warm_block = false;  // WarmFn waits for release("warm:<fn>")
     bool warm_fail = false;
+    int gone = 0;              // first N load calls find their generated artifact gone
 };
 
 struct World {
@@ -231,6 +232,11 @@ LoadResult fake_load(const LoadRequest & r) {
     }
     if (b.delay_ms > 0) std::this_thread::sleep_for(milliseconds(b.delay_ms));
     leave(key);
+    if (n <= b.gone) {
+        out.artifact_gone = true;
+        out.error = Error::transient("fake artifact gone");
+        return out;
+    }
     if (b.fail) {
         out.error = Error{b.cls, "test", 7, "fake load failure"};
         return out;
@@ -2022,6 +2028,47 @@ void case_key_lock_requeue() {
     CHECK(max_active() == 1);
 }
 
+// A generated artifact that vanished between its publication and the load
+// (a prune, a cleared cache) sends the slot back to preparation, which
+// regenerates it. The retry is bounded; a prebuilt slot just fails.
+void case_artifact_gone_regenerates() {
+    Env e;
+    Behaviour once;
+    once.gone = 1;
+    set_beh("regen", once);
+    auto gen = e.generated("regen", "rk");
+    gen->request(Priority::now);
+    CHECK(wait_for([&] { return is_ready(gen); }));
+    CHECK(calls("prepare:rk") == 2);
+    CHECK(calls("regen") == 2);
+    CHECK(gen->status().error_class == ErrorClass::none);
+
+    Behaviour always;
+    always.gone = 1000;
+    set_beh("lost", always);
+    auto lost = e.generated("lost", "lk");
+    lost->request(Priority::now);
+    CHECK(wait_for([&] { return lost->state() == SlotState::failed; }));
+    CHECK(calls("prepare:lk") == 3);  // the preparation and two regenerations
+    CHECK(calls("lost") == 3);
+    CHECK(lost->status().error == "fake artifact gone");
+
+    set_beh("pregone", always);
+    auto pre = e.slot("pregone");
+    pre->request(Priority::now);
+    CHECK(wait_for([&] { return pre->state() == SlotState::failed; }));
+    CHECK(calls("pregone") == 1);
+
+    // The bound counts consecutive losses: a load that succeeded resets it.
+    Behaviour twice;
+    twice.gone = 2;
+    set_beh("again", twice);
+    auto again = e.generated("again", "ak");
+    again->request(Priority::now);
+    CHECK(wait_for([&] { return is_ready(again); }));
+    CHECK(calls("prepare:ak") == 3);
+}
+
 void case_memory_admission() {
     Env e;
     g_mem = 1 << 20;  // 1 MiB available
@@ -2916,6 +2963,7 @@ const Case kCases[] = {
     {"resident-cap-shared-release", case_resident_cap_shared_release},
     {"call-wait-pins-nothing", case_call_wait_pins_nothing},
     {"key-lock-requeue", case_key_lock_requeue},
+    {"artifact-gone-regenerates", case_artifact_gone_regenerates},
     {"memory-admission", case_memory_admission},
     {"memory-behind-gate", case_memory_behind_gate},
     {"evicted-after-ready-group", case_evicted_after_ready_group},

@@ -8,6 +8,10 @@
 #include "digest.h"
 #include "failed.h"
 #include "hints.h"
+#if defined(QVAC_COREML_HAVE_GGML)
+#include "generation_internal.h"
+#include "qvac_coreml/generation.h"
+#endif
 
 #include "qvac_coreml/manager.h"
 
@@ -1699,6 +1703,89 @@ void case_scheduler_hint_pruned() {
     CHECK(!fs::exists(hint_path));
 }
 
+#if defined(QVAC_COREML_HAVE_GGML)
+// ---- the generation glue through the scheduler ---------------------------------------------
+
+std::function<void()> g_before_glue_load;
+
+PrepareResult glue_prepare(const PrepareRequest &, PrepareContext & ctx) {
+    PrepareOutcome o = cache::prepare(g_sched_inputs, &ctx);
+    return generation::internal::result_of(o);
+}
+
+// Loads like an engine's LoadFn: under the lease the glue's begin_load takes.
+LoadResult glue_load(const LoadRequest & req) {
+    if (g_before_glue_load) g_before_glue_load();
+    LoadResult r;
+    if (!generation::begin_load(req, r)) return r;
+    r.model = std::make_shared<int>(1);
+    generation::end_load(req, r);
+    return r;
+}
+
+std::shared_ptr<Slot> glue_slot(const std::shared_ptr<Manager> & mgr, const Env & env, const std::string & a) {
+    SlotSpec gen;
+    gen.engine = "toy";
+    gen.stage = "dac";
+    gen.units = ComputeUnits::cpu_only;
+    gen.route = Route::generate;
+    gen.tmpl = env.tpl.get();
+    gen.prepare.key = "toy-dac:" + a;
+    gen.prepare.template_id = "toy-dac";
+    gen.prepare_fn = glue_prepare;
+    gen.load_fn = glue_load;
+    SlotPolicy pol;
+    pol.cache_dir = env.cache;
+    return mgr->make_slot(gen, pol);
+}
+
+std::shared_ptr<Manager> glue_manager() {
+    Config cfg;
+    cfg.backoff_initial = 20ms;
+    cfg.backoff_max = 100ms;
+    cfg.pin_image = false;
+    cfg.available_memory = [] { return uint64_t{1} << 40; };
+    return Manager::create(cfg);
+}
+
+// A prune between the artifact's publication and its load (the preparation
+// released its lease) deletes it; the load reports it gone and the slot goes
+// back to preparation, which regenerates it, instead of failing.
+void case_generated_artifact_pruned_before_load() {
+    Env env;
+    const std::string a = env.source("a.gguf");
+    g_sched_inputs = env.inputs(a);
+    int pruned = 0;
+    g_before_glue_load = [&] {
+        if (pruned++ == 0) {
+            CHECK(cache::prune(env.cache, cache::PrunePolicy::all(), env.catalog()).deleted_artifacts.size() == 1);
+        }
+    };
+    {
+        auto mgr = glue_manager();
+        auto s = glue_slot(mgr, env, a);
+        s->request(Priority::now);
+        CHECK_MSG(wait_state(s, SlotState::ready), s->status().error);
+        CHECK(g_compiles == 2);  // generated, pruned, generated again
+        CHECK(env.artifacts() == 1 && env.memos() == 1);
+    }
+    g_before_glue_load = nullptr;
+
+    // An artifact that went incomplete is likewise prepared again.
+    const std::string b = env.source("b.gguf", 2.0f);
+    PrepareOutcome o = env.prepare(b);
+    CHECK(ready(o));
+    o.lease.release();
+    LoadRequest req;
+    req.tmpl = env.tpl.get();
+    req.artifact_path = o.model_path;
+    fs::remove_all(o.model_path);
+    LoadResult r;
+    CHECK(!generation::begin_load(req, r));
+    CHECK(r.artifact_gone && r.lease_fd < 0 && !r.error.ok());
+}
+#endif
+
 }  // namespace
 
 int main(int argc, char ** argv) {
@@ -1742,6 +1829,9 @@ int main(int argc, char ** argv) {
                          {"preflight", case_preflight},
                          {"would-block-requeue", case_would_block_requeue},
                          {"scheduler-hint-pruned", case_scheduler_hint_pruned},
+#if defined(QVAC_COREML_HAVE_GGML)
+                         {"generated-artifact-pruned-before-load", case_generated_artifact_pruned_before_load},
+#endif
                      },
                      "test-coreml-cache");
 }

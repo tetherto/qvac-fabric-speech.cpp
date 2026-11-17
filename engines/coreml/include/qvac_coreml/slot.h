@@ -76,6 +76,10 @@ struct LoadResult {
     Error error;
     bool would_block = false;  // a key lock was busy: re-queue with backoff
     int lease_fd = -1;         // shared lease from adoption; closed with the model
+    // A generated artifact was gone or incomplete when the load took its lease
+    // (e.g. pruned after its preparation published it): the slot returns to
+    // preparation, which regenerates it, instead of failing.
+    bool artifact_gone = false;
 };
 
 using LoadFn = LoadResult (*)(const LoadRequest & req);

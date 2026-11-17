@@ -11,6 +11,7 @@
 #include "cache.h"
 #include "device.h"
 #include "digest.h"
+#include "generation_internal.h"
 #include "gguf_source.h"
 #include "templates.h"
 
@@ -294,6 +295,13 @@ PrepareResult prepare(const PrepareRequest & req, PrepareContext & ctx) {
         return GgufSource::open(path, err);
     };
     cache::PrepareOutcome o = cache::prepare(in, &ctx);
+    return internal::result_of(o);
+}
+
+namespace internal {
+
+PrepareResult result_of(cache::PrepareOutcome & o) {
+    PrepareResult r;
     switch (o.kind) {
         case cache::PrepareOutcome::Kind::ready:
             r.artifact_path = o.model_path;
@@ -311,6 +319,8 @@ PrepareResult prepare(const PrepareRequest & req, PrepareContext & ctx) {
     return r;
 }
 
+}  // namespace internal
+
 bool begin_load(const LoadRequest & req, LoadResult & out) {
     if (req.tmpl == nullptr) return true;  // prebuilt
     std::string cache_dir, template_id, key32;
@@ -321,9 +331,11 @@ bool begin_load(const LoadRequest & req, LoadResult & out) {
         case cache::Adoption::Kind::adopted: out.lease_fd = a.lease.release_fd(); return true;
         case cache::Adoption::Kind::would_block: out.would_block = true; return false;
         case cache::Adoption::Kind::missing:
+            out.artifact_gone = true;  // the scheduler prepares it again
             out.error = Error::transient("the generated artifact " + req.artifact_path + " is gone");
             return false;
         case cache::Adoption::Kind::invalid:
+            out.artifact_gone = true;  // preparation quarantines and regenerates it
             out.error = Error::transient("the generated artifact " + req.artifact_path + " is incomplete");
             return false;
         case cache::Adoption::Kind::error: out.error = a.error; return false;

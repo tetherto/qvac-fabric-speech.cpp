@@ -42,6 +42,9 @@ int64_t * timing_slot(Timings & t, SlotState phase) {
 }
 
 constexpr int64_t kStaleSeconds = 24 * 60 * 60;
+// Consecutive regenerations of a slot whose generated artifact vanished before
+// its load; then the slot fails.
+constexpr int kMaxRegenerations = 2;
 
 #ifdef QVAC_COREML_TEST_HOOKS
 #define QVAC_COREML_TEST_HOOK(name)                              \
@@ -911,6 +914,38 @@ void Runtime::fail_locked(const std::shared_ptr<Job> & j, const Error & e, SlotS
     bump_locked();
 }
 
+void Runtime::regenerate(const std::shared_ptr<Job> & j, const Error & e) {
+    Graveyard gy;
+    std::lock_guard<std::mutex> lk(mu);
+    j->done = true;
+    gy.keep(j->adopt);  // released outside mu
+    j->adopt.reset();
+    if (auto f = inflight_.find(j->dedup_key); f != inflight_.end() && f->second == j) inflight_.erase(f);
+    ++stats_.load_failures;
+    event_locked("gone:" + j->load.stage + "/" + j->load.function + ":" + e.message);
+    for (const Sub & s : j->subs) {
+        std::shared_ptr<SlotCore> c = live_core(s, *j, gy);
+        if (!c) continue;
+        c->job.reset();
+        if (c->spec.route != Route::generate || c->spec.prepare_fn == nullptr ||
+            c->regenerations >= kMaxRegenerations || stopping_ || exiting()) {
+            c->state = SlotState::failed;
+            c->error = e;
+            c->reason = e.message;
+            continue;
+        }
+        // Back to step 2 of the pipeline: the prepare job regenerates (or
+        // adopts what another process published meanwhile).
+        ++c->regenerations;
+        c->artifact_path.clear();
+        c->artifact_key.clear();
+        c->hint_path.clear();
+        subscribe_prepare_locked(c, s.prio, s.non_deferrable);
+    }
+    ensure_threads_locked();
+    bump_locked();
+}
+
 void Runtime::requeue(const std::shared_ptr<Job> & j) {
     Graveyard gy;
     std::lock_guard<std::mutex> lk(mu);
@@ -1001,6 +1036,11 @@ void Runtime::run_load(const std::shared_ptr<Job> & j) {
     if (!j->load_fn) r.error = Error::deterministic("no LoadFn");
     if (r.would_block) {
         requeue(j);
+        return;
+    }
+    if (r.artifact_gone && !r.model) {
+        if (r.lease_fd >= 0) ::close(r.lease_fd);
+        regenerate(j, r.error.ok() ? Error::transient("the generated artifact is gone") : r.error);
         return;
     }
     if (!r.error.ok() || !r.model) {
@@ -1149,6 +1189,7 @@ void Runtime::publish(const std::shared_ptr<Job> & j, const std::shared_ptr<Shar
         c->model = m;
         c->job.reset();
         c->state = SlotState::ready;
+        c->regenerations = 0;
         c->reason.clear();
         c->error = Error{};
         c->queued_behind = false;

@@ -89,7 +89,8 @@ PrepareResult prepare(const PrepareRequest & req, PrepareContext & ctx);
 // For LoadFns. A generated artifact (LoadRequest::tmpl set) loads under the
 // shared lease of its cache entry: begin_load takes it and returns false
 // when the load must not start (`out` then carries would_block, or the
-// error when the artifact is gone). end_load, after the engine's load,
+// error with artifact_gone when the artifact is gone or incomplete, which
+// returns the slot to preparation). end_load, after the engine's load,
 // touches used/<key> on success and releases the lease on failure. Both do
 // nothing for a prebuilt artifact.
 bool begin_load(const LoadRequest & req, LoadResult & out);
