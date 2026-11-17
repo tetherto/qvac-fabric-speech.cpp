@@ -366,6 +366,20 @@ bool same_fit(const tts_cpp::FitResult & a, const tts_cpp::FitResult & b) {
            a.device_name == b.device_name && a.report == b.report;
 }
 
+// The same projection: variant, device and every projected byte count (the
+// free-memory reading, and so the verdict text, may differ between calls).
+bool same_projection(const tts_cpp::FitResult & a, const tts_cpp::FitResult & b) {
+    return a.model_variant == b.model_variant && a.device_name == b.device_name &&
+           a.device.weights_bytes == b.device.weights_bytes && a.device.state_bytes == b.device.state_bytes &&
+           a.device.lm_compute_bytes == b.device.lm_compute_bytes &&
+           a.device.codec_compute_bytes == b.device.codec_compute_bytes &&
+           a.device.total_bytes == b.device.total_bytes && a.host_bytes == b.host_bytes;
+}
+
+bool projected(const tts_cpp::FitResult & r) {
+    return (r.reason == "fits" || r.reason == "does-not-fit") && r.device.total_bytes > 0;
+}
+
 void check_fit_and_detection() {
     env_guard disabled(cb::COREML_DISABLE_ENV);
     unsetenv(cb::COREML_DISABLE_ENV);
@@ -387,19 +401,18 @@ void check_fit_and_detection() {
         require(result.status == tts_cpp::FitStatus::Error && !result.fits &&
                     result.reason == "coreml-memory-estimate-unavailable" && !result.report.empty(),
                 std::string("fit refuses with an enabled ") + suffix + " sidecar");
-        // The verdict depends on presence and options only, never on loads.
-        require(same_fit(tts_cpp::chatterbox::fit_params(options), result), "fit is stable");
 #else
         require(result.reason != "coreml-memory-estimate-unavailable", "no Core ML refusal without Core ML");
 #endif
-        // use = off: exactly the fit without any sidecar.
+        // use = off and the kill switch skip the refusal (the projections
+        // themselves are compared on real GGUFs by the engine fixture).
         auto off = options;
         off.coreml.use = CoremlOptions::Use::off;
-        require(same_fit(tts_cpp::chatterbox::fit_params(off), plain), "fit with use = off is unchanged");
-        auto legacy = options;
+        require(tts_cpp::chatterbox::fit_params(off).reason != "coreml-memory-estimate-unavailable",
+                "fit with use = off does not refuse");
         setenv(cb::COREML_DISABLE_ENV, "1", 1);
-        require(same_fit(tts_cpp::chatterbox::fit_params(legacy), plain),
-                "CHATTERBOX_COREML_DISABLE restores the native projection");
+        require(tts_cpp::chatterbox::fit_params(options).reason != "coreml-memory-estimate-unavailable",
+                "CHATTERBOX_COREML_DISABLE does not refuse");
         unsetenv(cb::COREML_DISABLE_ENV);
         fs::remove(sidecar);
     }
@@ -1206,6 +1219,40 @@ void slow_load_checks(const std::string & t3, const std::string & s3gen, const s
     require(warm_labels == std::set<std::string>{"coreml-ane"}, "tts-cli runs every stage on Core ML once loaded");
 }
 
+// Fit on the real GGUFs: with no sidecar a projection succeeds; with the
+// sidecars present, use = off and CHATTERBOX_COREML_DISABLE give exactly that
+// projection, and the enabled verdict (the prebuilt route refuses) depends on
+// presence and options only: `loaded` false before any function loaded, true
+// after the Engine loaded them.
+tts_cpp::FitResult fit_check(const std::string & t3, const std::string & s3gen, const fs::path & root, bool loaded,
+                             const tts_cpp::FitResult * before) {
+    tts_cpp::chatterbox::FitOptions options;
+    options.t3_gguf_path = t3;
+    options.s3gen_gguf_path = (stage_dir(root, s3gen, {}, loaded ? "fit-plain-loaded" : "fit-plain") /
+                               fs::path(s3gen).filename()).string();
+    options.n_gpu_layers = 99;
+    const auto plain = tts_cpp::chatterbox::fit_params(options);
+    require(projected(plain), "fit: a projection without sidecars succeeds (" + plain.reason + ")");
+    options.s3gen_gguf_path = s3gen;
+    auto off = options;
+    off.coreml.use = CoremlOptions::Use::off;
+    const auto off_fit = tts_cpp::chatterbox::fit_params(off);
+    require(projected(off_fit) && same_projection(off_fit, plain), "fit: use = off projects exactly the plain fit");
+    setenv(cb::COREML_DISABLE_ENV, "1", 1);
+    const auto killed = tts_cpp::chatterbox::fit_params(options);
+    unsetenv(cb::COREML_DISABLE_ENV);
+    require(projected(killed) && same_projection(killed, plain),
+            "fit: CHATTERBOX_COREML_DISABLE projects exactly the plain fit");
+    const auto enabled = tts_cpp::chatterbox::fit_params(options);
+    require(enabled.reason == "coreml-memory-estimate-unavailable", "fit: the prebuilt route refuses");
+    if (before) require(same_fit(enabled, *before), "fit: the enabled verdict is the same after the loads");
+    std::printf("[fit %s] plain %s, %.1f MiB on %s; use = off identical; enabled: %s\n",
+                loaded ? "after loads" : "before loads", plain.reason.c_str(),
+                (double) plain.device.total_bytes / (1024.0 * 1024.0), plain.device_name.c_str(),
+                enabled.reason.c_str());
+    return enabled;
+}
+
 // tts-cli's sentence loop with a CFM prediction failure on an overlapped
 // sentence: the call hands the sentence back instead of starting ggml while
 // T3 of the next sentence may hold the GPU; the CLI lets that T3 finish, then
@@ -1439,6 +1486,7 @@ int engine_fixture(bool slow_load) {
     require(segments.size() == 3, "the overlap text splits into three segments");
 
     // First, before anything is loaded in this process.
+    const tts_cpp::FitResult fit_before = fit_check(t3, s3gen, root.path, false, nullptr);
     if (slow_load) slow_load_checks(t3, s3gen, cli_env, root.path);
     two_engines_check(t3, s3gen);
     if (slow_load) cli_replay_check(t3, s3gen, cli_env, root.path);
@@ -1453,6 +1501,8 @@ int engine_fixture(bool slow_load) {
     waited_opts.coreml.wait = CoremlOptions::Wait::construct;
     waited_opts.coreml.prewarm = CoremlOptions::Prewarm::all;
     Engine engine(waited_opts);
+    require(engine.coreml_wait(0), "every function is loaded at construction");
+    fit_check(t3, s3gen, root.path, true, &fit_before);
     const SynthesisResult overlapped = engine.synthesize(OVERLAP_TEXT);
     // Timed again once every function is compiled and loaded, so the cancel
     // points below fall inside a warm request.
