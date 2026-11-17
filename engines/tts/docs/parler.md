@@ -383,7 +383,10 @@ runner is an Apple M4 Max,
 a chip with a recorded floor under `all` (below), so CI holds `all` to 50 dB
 and the same artifact under `cpu_and_ane` to 54 dB. The 54 dB gate under
 `all` on the M2 comes from the device run of the same command, not from CI.
-A one-frame decode is held to 45 dB. With `--ref-dir` (the `case0_*.npy`
+A one-frame decode (512 samples of mostly masked context, an ill-conditioned
+fp16 SNR) is held to 53 dB on the M2 only, for the generated sidecar under
+`all`, which measures 53.3 dB there; every other chip, the units sweep and
+the prebuilt sidecars hold it to `--min-snr` like the longer cases. With `--ref-dir` (the `case0_*.npy`
 fixtures `scripts/parler/dump-reference.py` writes from the Hugging Face
 checkpoint), the HF reference check uses `--min-speech-snr` (default 45 dB).
 It runs only on a device with the fixtures, not in CI; the M2 (macOS 27.2.1)
@@ -391,7 +394,10 @@ measures 49.7 dB.
 
 `--units-sweep` also prints the same artifact's SNR for every compute-unit
 policy. The rows are reported only, except that on a chip with a floor the
-`cpu_and_ane` row is held to `--min-snr`. Random codes, 265 / 42 / 1 frames,
+`cpu_and_ane` row is held to `--min-snr` in every case. A case holds only
+when the reference decoded on ggml and the sidecar under test decoded it (a
+fallback to ggml would compare ggml with itself); on such a chip a sweep
+that cannot find, link or load the artifact fails. Random codes, 265 / 42 / 1 frames,
 vs ggml CPU:
 
 | Host | `cpu_only` | `cpu_and_gpu` | `cpu_and_ane` | `all` |

@@ -210,16 +210,6 @@ void waveform_quality_gates() {
           "quiet gate: nonfinite PCM and reference rejected");
 }
 
-// A one-frame decode is 512 samples of mostly masked context: its fp16 SNR
-// is ill-conditioned (53.3 dB on the mini DAC, whose generated weights are
-// byte-identical to the exporter's) and is held to the default gate; every
-// longer case is held to --min-snr.
-constexpr double SINGLE_FRAME_MIN_SNR = 45.0;
-
-double gate_for(int n_frames, double min_snr) {
-    return n_frames > 1 ? min_snr : std::min(min_snr, SINGLE_FRAME_MIN_SNR);
-}
-
 // Measured parity floors of the generated sidecar under the template's
 // default compute units (`all`, label coreml-all), per chip. Core ML
 // partitions the program between the GPU and the Neural Engine with its own
@@ -266,6 +256,34 @@ double generated_min_snr(const std::string & label, const std::string & chip, do
     return min_snr;
 }
 
+// A one-frame decode is 512 samples of mostly masked context, so its fp16 SNR
+// is ill-conditioned. On the M2 the generated sidecar under `all` (all on the
+// Neural Engine; the generated weight.bin is byte-identical to the
+// exporter's) measures 53.3 dB there on macOS 15.7.3 and 27.2.1, against
+// 56.2 / 56.4 dB at 265 / 42 frames. That chip and placement alone hold the
+// one-frame case to 53 dB; every other chip, placement, the prebuilt sidecars
+// and the units sweep hold it to the multi-frame gate (the M4 Max measures
+// 51.8 dB under `all`, within its 50 dB floor, and 54.2 dB under
+// `cpu_and_ane`).
+struct one_frame_floor {
+    const char * chip;  // sysctl machdep.cpu.brand_string
+    const char * label; // the sidecar's backend label
+    double min_snr;
+};
+constexpr one_frame_floor GENERATED_ONE_FRAME_FLOORS[] = {{"Apple M2", "coreml-all", 53.0}};
+static_assert(std::size(GENERATED_ONE_FRAME_FLOORS) == 1, "every one-frame row is a recorded measurement");
+
+// The gate of the generated sidecar's parity case of `n_frames`: the chip's
+// floor under `all`, lowered for one frame only where a row above records it.
+double generated_gate(int n_frames, const std::string & label, const std::string & chip, double min_snr) {
+    const double gate = generated_min_snr(label, chip, min_snr);
+    if (n_frames != 1) return gate;
+    for (const one_frame_floor & f : GENERATED_ONE_FRAME_FLOORS) {
+        if (chip == f.chip && label == f.label) return std::min(gate, f.min_snr);
+    }
+    return gate;
+}
+
 // A floor expires once its chip no longer needs it: true when a floor
 // applies (host_min_snr below --min-snr) and every multi-frame case reaches
 // --min-snr, so the row must be removed.
@@ -309,6 +327,13 @@ void parity_floor_gates() {
     for (const parity_floor & floor : GENERATED_ALL_UNITS_FLOORS) {
         check(floor.min_snr < 54, std::string("parity floor: the ") + floor.chip + " row is below 54 dB");
     }
+    check(generated_gate(1, "coreml-all", "Apple M2", 54) == 53 && generated_gate(42, "coreml-all", "Apple M2", 54) == 54,
+          "one-frame floor: the M2's generated sidecar under all holds one frame to 53 dB, longer cases to --min-snr");
+    check(generated_gate(1, "coreml-ane", "Apple M2", 54) == 54 && generated_gate(1, "coreml-all", "Apple M4 Max", 54) == 50 &&
+              generated_gate(1, "coreml-ane", "Apple M4 Max", 54) == 54 && generated_gate(1, "coreml-all", "", 54) == 54 &&
+              generated_gate(1, "coreml-all", "Apple M2 Pro", 54) == 54,
+          "one-frame floor: no other chip or placement lowers the one-frame gate");
+    check(generated_gate(1, "coreml-all", "Apple M2", 45) == 45, "one-frame floor: never raises --min-snr");
     check(floor_expired(50, 54, {54.0, 56.4}), "parity floor: expires when every multi-frame case reaches --min-snr");
     check(!floor_expired(50, 54, {51.3, 56.4}) && !floor_expired(50, 54, {NAN, 56.4}),
           "parity floor: still needed while a multi-frame case is below --min-snr");
@@ -843,7 +868,7 @@ void coreml_gates(parler_model & model, const std::string & gguf, const std::str
         const bool ok = decode(model, codes, n_frames, pcm, nullptr, 0, -1, &backend);
         double max_abs = 0;
         const double snr = ok && pcm.size() == ref.size() ? snr_db(pcm, ref, max_abs) : NAN;
-        check(ok && backend == label && snr >= gate_for(n_frames, min_snr),
+        check(ok && backend == label && snr >= min_snr,
               std::to_string(n_frames) + " frames vs ggml: SNR " + std::to_string(snr) +
               " dB, max_abs " + std::to_string(max_abs));
         if (n_frames > keep) {
@@ -950,7 +975,7 @@ void pending_parity_gates(parler_model & model, const std::string & ref_dir, dou
         double max_abs = 0;
         const double snr = ok && pcm.size() == ref.size() ? snr_db(pcm, ref, max_abs) : NAN;
         if (n_frames > 1) multi_frame_snrs.push_back(snr);
-        check(ok && backend == label && snr >= gate_for(n_frames, host_min_snr),
+        check(ok && backend == label && snr >= generated_gate(n_frames, label, chip, min_snr),
               std::to_string(n_frames) + " frames vs ggml: SNR " + std::to_string(snr) + " dB, max_abs " +
                   std::to_string(max_abs));
     }
@@ -1047,7 +1072,7 @@ void units_sweep(parler_model & model, const std::string & cache_dir, double min
             const bool ok = decode(model, codes, n_frames, pcm, nullptr, 0, -1, &backend);
             double max_abs = 0;
             const double snr = ref_ok && ok && pcm.size() == ref.size() ? snr_db(pcm, ref, max_abs) : NAN;
-            if (!sweep_case_holds(ref_ok, ref_backend, ok, backend, label, snr, gate_for(n_frames, min_snr))) {
+            if (!sweep_case_holds(ref_ok, ref_backend, ok, backend, label, snr, min_snr)) {
                 row_holds = false;
             }
             char buf[160];
