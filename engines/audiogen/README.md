@@ -23,8 +23,13 @@ existing behavior. See [backend selection](docs/backends.md#backends).
 | ACE-Step v15 turbo / sft / base | text-to-music, source-conditioned covers, editing, LRC timestamps; base-only lego stems | 48 kHz stereo | `f32`, `f16`, `bf16`, `q8_0`; turbo also `q4_k_m` | CPU, Vulkan, Metal, OpenCL (Adreno 700+), CUDA, Hexagon (turbo `q8_0` DiT; K-quant GGUFs are refused at load); AMD XDNA (turbo BF16 DiT, remaining stages on CPU); optional Core ML VAE-decoder sidecar |
 | MiniMax-Music3 | text-to-music | 44.1 kHz stereo | `f16`, `q8_0`; LM, DiT and depth decoder also `q4_k_m` | desktop CPU + GPU (CUDA, Vulkan, Metal); optional conditioner or full-network Core ML on Apple |
 
-Apple builds can optionally use a Core ML sidecar for the ACE-Step VAE decoder.
-Export, placement and fallback contracts are in
+Apple builds can optionally use a Core ML sidecar for the ACE-Step VAE decoder,
+either exported next to the VAE GGUF or, with `EngineOptions::coreml.cache_dir`
+set on macOS 15 or later, generated from the VAE GGUF itself into that cache.
+It loads in the background (the decode runs on ggml until it is ready) and is
+released with the other stages in low-memory mode while its warm hint keeps the
+next reload fast. Generation, options, low-memory behaviour, export, placement
+and fallback contracts are in
 [docs/backends.md](docs/backends.md#core-ml-vae-decoder-sidecar).
 MiniMax-Music3 can explicitly use a [Core ML conditioner projection](docs/backends.md#minimax-core-ml-conditioner)
 with its remaining stages on the configured native backend. MiniMax is unavailable on mobile.

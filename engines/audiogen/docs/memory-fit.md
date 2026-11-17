@@ -39,6 +39,41 @@ projection could be made. Inspect `fits`, `reason`, and `report` before loading.
 Device naming and shared-memory semantics follow the
 [repository contract](../../../README.md#memory-fit-results).
 
+### Core ML VAE decoder
+
+`FitOptions::coreml` mirrors `EngineOptions::coreml`, and `FitResult::coreml`
+reports the decoder's route (`prebuilt`, `generate` or `none`), decided from
+the options, the `ACESTEP_COREML_*` environment, the OS, the build, the
+template match and the presence of a prebuilt sidecar, never from the cache:
+a projection is the same before and after the first generation, with or
+without warm hints (`test-acestep-vae-fit-stable`).
+
+A **generated** decoder adds the template's Core ML envelope to host memory
+(`coreml.bytes`; `coreml.validated` when it was measured for the resolved
+compute units), and `fits` is the Core ML-inclusive verdict; the ggml VAE
+stays charged too, since it decodes until the sidecar is ready. The envelope
+has two parts with their own residency:
+
+- the **transient** (generation and on-device compile, or the load and
+  warm-up, whichever is larger) is charged in every phase, because a load
+  started in the VAE phase can finish during the next phase or the next
+  `generate()`;
+- the **resident** decoder (weights, input and output buffers, prediction
+  workspace) only in the VAE decode phase, which is the only phase that holds
+  it in low-memory mode. With `keep_stages`, or with `coreml.prewarm = all`
+  and no `coreml.wait = construct` (a construction load may finish in any
+  phase and is kept until the next VAE stage boundary), it is charged in every
+  phase.
+
+With `coreml.memory_budget_bytes`, a budget that only the ggml projection
+fits resolves `use = off` instead (memory-degrade): `coreml.disabled_reason`
+is `memory`, the verdict is the ggml one, and an `Engine` created with the
+same options decodes on ggml. `coreml.ggml_only_fits` is always today's
+verdict. A prebuilt sidecar keeps today's projection: it is not charged.
+`ANECompilerService`'s memory for a cold Neural Engine compile is not part of
+the projection: it is a separate system process, and the runtime admits a cold
+load only while enough memory is free (`ane_compile_reserve_bytes`).
+
 The [CLI reference](cli.md#acestep-fit-params) documents equivalent flags,
 JSON output, and exit codes.
 
