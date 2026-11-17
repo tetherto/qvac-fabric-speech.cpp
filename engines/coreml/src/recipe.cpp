@@ -15,6 +15,7 @@
 #include <limits>
 #include <locale>
 #include <map>
+#include <mutex>
 #include <set>
 #include <sstream>
 
@@ -44,11 +45,78 @@ const Source * Recipe::find_source(std::string_view name) const {
     return nullptr;
 }
 
+const Meta * Recipe::find_meta(std::string_view key) const {
+    for (const Meta & m : meta) {
+        if (m.key == key) return &m;
+    }
+    return nullptr;
+}
+
 const Literal * Recipe::find_literal(std::string_view id) const {
     for (const Literal & l : literals) {
         if (l.id == id) return &l;
     }
     return nullptr;
+}
+
+const ProvidedDecl * Recipe::find_provided(std::string_view key) const {
+    for (const ProvidedDecl & p : provided) {
+        if (p.key == key) return &p;
+    }
+    return nullptr;
+}
+
+namespace {
+
+void provided_keys_of(const Expr & e, std::set<std::string> & out) {
+    if (e.kind == Expr::Kind::call && e.text == "provided" && !e.args.empty() &&
+        e.args[0]->kind == Expr::Kind::string) {
+        out.insert(e.args[0]->text);
+    }
+    for (const ExprP & a : e.args) provided_keys_of(*a, out);
+}
+
+}  // namespace
+
+std::vector<std::string> Recipe::provided_keys() const {
+    std::set<std::string> keys;
+    for (const Item & it : items) {
+        if (it.expr) provided_keys_of(*it.expr, keys);
+    }
+    return std::vector<std::string>(keys.begin(), keys.end());
+}
+
+// ---- provided() registry ------------------------------------------------------
+
+namespace {
+
+std::mutex & provided_mu() {
+    static std::mutex mu;
+    return mu;
+}
+
+// Leaked on purpose: an embedded template may be evaluated from exit-time
+// code paths, after static destructors would have run.
+std::map<std::string, ProvidedFn> & provided_table() {
+    static auto * table = new std::map<std::string, ProvidedFn>();
+    return *table;
+}
+
+}  // namespace
+
+void register_provided(const std::string & key, ProvidedFn fn) {
+    if (key.empty() || fn == nullptr) throw std::logic_error("register_provided: empty key or null function");
+    std::lock_guard<std::mutex> lock(provided_mu());
+    auto [it, inserted] = provided_table().emplace(key, fn);
+    if (!inserted && it->second != fn) {
+        throw std::logic_error("register_provided: \"" + key + "\" is already registered with another function");
+    }
+}
+
+ProvidedFn find_provided_fn(std::string_view key) {
+    std::lock_guard<std::mutex> lock(provided_mu());
+    auto it = provided_table().find(std::string(key));
+    return it == provided_table().end() ? nullptr : it->second;
 }
 
 size_t Recipe::patch_count() const {
@@ -110,6 +178,8 @@ namespace {
 
 // The largest value Cursor::uint() accepts (19 decimal digits).
 constexpr uint64_t MAX_UINT_LITERAL = 9999999999999999999ull;
+// The longest fixed-length string a patch str line rewrites.
+constexpr uint64_t MAX_PATCH_STR = 4096;
 
 struct Line {
     std::string text;
@@ -341,10 +411,11 @@ ExprP parse_expr(Cursor & c, int depth = 0) {
 
 // Ops of this generator version. Later generator versions add more.
 const std::set<std::string> kOps = {"t",    "f32",   "f64",  "f16",  "add",   "mul", "div",   "recip", "clip",
-                                    "reshape", "permute", "take", "concat", "slice", "neg", "zeros", "ones", "lit"};
+                                    "reshape", "permute", "take", "concat", "slice", "neg", "zeros", "ones", "lit",
+                                    "meta_f", "meta_s", "provided"};
 // Ops that exist in the language but belong to a later generator version.
 const std::set<std::string> kLaterOps = {"sub", "sqrt", "full",   "tile",   "exp",
-                                         "sin", "cos",  "l2norm", "matmul", "meta_f", "meta_s", "provided"};
+                                         "sin", "cos",  "l2norm", "matmul"};
 
 std::string shape_str(const std::vector<int64_t> & s) {
     std::string o = "[";
@@ -680,9 +751,80 @@ private:
             e.shape = l->shape;
             return;
         }
+        if (op == "meta_f") {
+            const Meta * m = meta_arg(e);
+            if (m->mtype != "u32" && m->mtype != "i32" && m->mtype != "f32" && m->mtype != "f64" &&
+                m->mtype != "bool") {
+                throw RecipeError(e.line, "meta_f(\"" + m->key + "\") needs a numeric meta line, not " + m->mtype);
+            }
+            e.dtype = DType::weak;
+            e.shape.clear();
+            return;
+        }
+        if (op == "meta_s") {
+            throw RecipeError(e.line, "meta_s() is only the value of a patch str line or a provided() dependency");
+        }
+        if (op == "provided") {
+            if (e.args.size() != 2) throw RecipeError(e.line, "provided() takes a key and a list of dependencies");
+            const Expr & k = *e.args[0];
+            if (k.kind != Expr::Kind::string) throw RecipeError(e.line, "provided() takes a key string");
+            const ProvidedDecl * d = r_.find_provided(k.text);
+            if (!d) {
+                throw RecipeError(e.line, "provided(\"" + k.text + "\") is not declared in template.json provided");
+            }
+            const Expr & deps = *e.args[1];
+            if (deps.kind != Expr::Kind::list) throw RecipeError(e.line, "provided() dependencies must be a list");
+            std::set<std::string> seen;
+            for (const ExprP & dp : deps.args) {
+                const Expr & dep = *dp;
+                const bool ok = dep.kind == Expr::Kind::call &&
+                                (dep.text == "t" || dep.text == "meta_f" || dep.text == "meta_s") &&
+                                dep.args.size() == 1 && dep.args[0]->kind == Expr::Kind::string;
+                if (!ok) {
+                    throw RecipeError(e.line, "a provided() dependency is t(\"name\"), meta_f(\"key\") or "
+                                              "meta_s(\"key\")");
+                }
+                if (dep.text == "t") {
+                    if (!r_.find_source(dep.args[0]->text)) {
+                        throw RecipeError(e.line, "t(\"" + dep.args[0]->text + "\") has no source line");
+                    }
+                } else {
+                    (void) meta_arg(dep);
+                }
+                if (!seen.insert(dep.text + ":" + dep.args[0]->text).second) {
+                    throw RecipeError(e.line, "provided() lists " + dep.text + "(\"" + dep.args[0]->text +
+                                                  "\") twice");
+                }
+            }
+            e.dtype = DType::f32;
+            e.shape = d->shape;
+            e.ulp = true;
+            return;
+        }
         throw RecipeError(e.line, "unknown op " + op + "()");  // unreachable: kOps is exhaustive
     }
 
+    // The declared meta line a meta_f/meta_s call names.
+    const Meta * meta_arg(const Expr & e) const {
+        if (e.args.size() != 1 || e.args[0]->kind != Expr::Kind::string) {
+            throw RecipeError(e.line, e.text + "() takes a metadata key string");
+        }
+        const Meta * m = r_.find_meta(e.args[0]->text);
+        if (!m) throw RecipeError(e.line, e.text + "(\"" + e.args[0]->text + "\") has no meta line");
+        return m;
+    }
+
+public:
+    // The value of a patch str line: meta_s("key") of a str meta line.
+    void str_value(const Expr & e) const {
+        if (e.kind != Expr::Kind::call || e.text != "meta_s") {
+            throw RecipeError(e.line, "a patch str line's value is meta_s(\"key\")");
+        }
+        const Meta * m = meta_arg(e);
+        if (m->mtype != "str") throw RecipeError(e.line, "meta_s(\"" + m->key + "\") needs a str meta line");
+    }
+
+private:
     const Recipe & r_;
     std::map<std::string, ExprP> lets_;
 };
@@ -733,6 +875,18 @@ Recipe parse(std::string_view text, const ParseContext & ctx) {
             if (!detail::element_count(l.shape)) throw RecipeError(0, "literal \"" + l.id + "\" " + too_many_elements(l.shape));
         }
         r.literals = ctx.literals;
+        std::set<std::string> keys;
+        for (const ProvidedDecl & p : ctx.provided) {
+            if (p.key.empty() || !keys.insert(p.key).second) {
+                throw RecipeError(0, "empty or duplicate provided key \"" + p.key + "\"");
+            }
+            if (p.shape.empty()) throw RecipeError(0, "provided \"" + p.key + "\" has no shape");
+            for (int64_t d : p.shape) {
+                if (d <= 0) throw RecipeError(0, "provided \"" + p.key + "\" dims must be positive");
+            }
+            if (!detail::element_count(p.shape)) throw RecipeError(0, "provided \"" + p.key + "\" " + too_many_elements(p.shape));
+        }
+        r.provided = ctx.provided;
     }
     size_t i = 0;
     auto header = [&](const char * key) -> Cursor {
@@ -920,25 +1074,32 @@ Recipe parse(std::string_view text, const ParseContext & ctx) {
             } else if (dt == "fp32") {
                 it.dtype = BlobType::fp32;
             } else if (dt == "str") {
-                c.fail("patch str lines are not in generator version " + std::to_string(GENERATOR_VERSION) +
-                       " (a later version adds them)");
+                it.str = true;
             } else {
-                c.fail("patch dtype must be fp16 or fp32, got '" + dt + "'");
+                c.fail("patch dtype must be fp16 or fp32 (str for a string), got '" + dt + "'");
             }
             c.sp();
             it.count = c.uint();
             c.sp();
             it.expr = parse_expr(c);
             c.end();
-            checker.blob_top(*it.expr, it.dtype);
-            it.ulp = it.expr->ulp;
-            const int64_t n = elements(it.expr->shape, it.line);
-            if (static_cast<uint64_t>(n) != it.count) {
-                c.fail("patch declares " + std::to_string(it.count) + " elements, its expression has " +
-                       std::to_string(n) + " " + shape_str(it.expr->shape));
+            if (it.str) {
+                if (it.count == 0 || it.count > MAX_PATCH_STR) {
+                    c.fail("patch str length must be 1.." + std::to_string(MAX_PATCH_STR));
+                }
+                checker.str_value(*it.expr);
+            } else {
+                checker.blob_top(*it.expr, it.dtype);
+                it.ulp = it.expr->ulp;
+                const int64_t n = elements(it.expr->shape, it.line);
+                if (static_cast<uint64_t>(n) != it.count) {
+                    c.fail("patch declares " + std::to_string(it.count) + " elements, its expression has " +
+                           std::to_string(n) + " " + shape_str(it.expr->shape));
+                }
             }
-            // count is a bounded element count, offset a literal of at most 19 digits: no wrap.
-            const uint64_t len = it.count * blob_type_size(it.dtype);
+            // count is a bounded element count (or string length), offset a
+            // literal of at most 19 digits: no wrap.
+            const uint64_t len = it.str ? it.count : it.count * blob_type_size(it.dtype);
             if (any_patch && it.offset < patch_end) {
                 c.fail("patch at spec offset " + std::to_string(it.offset) +
                        " overlaps or precedes the previous patch (patch lines come in spec offset order)");
@@ -1103,12 +1264,26 @@ void Template::init(bool hash_files) {
             info_.match_metadata_json = m->dump();
         }
     }
-    if (auto it = j.find("provided"); it != j.end() && !(it->is_array() && it->empty())) {
-        throw std::runtime_error("template.json: provided is not supported by generator version " +
-                                 std::to_string(GENERATOR_VERSION));
-    }
     const TemplateFile * spec = file("model.mlmodel");
     ParseContext ctx;
+    if (auto it = j.find("provided"); it != j.end()) {
+        if (!it->is_array()) throw std::runtime_error("template.json: provided must be an array");
+        for (const auto & p : *it) {
+            if (!p.is_object() || !p.contains("key") || !p["key"].is_string() || !p.contains("shape") ||
+                !p["shape"].is_array()) {
+                throw std::runtime_error("template.json: a provided entry needs key and shape");
+            }
+            ProvidedDecl d;
+            d.key = p["key"].get<std::string>();
+            for (const auto & dim : p["shape"]) {
+                if (!dim.is_number_unsigned() || dim.get<uint64_t>() == 0 || dim.get<uint64_t>() > detail::MAX_ELEMENTS) {
+                    throw std::runtime_error("template.json: provided " + d.key + " dims must be positive integers");
+                }
+                d.shape.push_back(static_cast<int64_t>(dim.get<uint64_t>()));
+            }
+            ctx.provided.push_back(std::move(d));
+        }
+    }
     ctx.spec = spec->data;
     ctx.spec_size = spec->size;
     if (auto it = j.find("patches"); it != j.end()) {
@@ -1239,6 +1414,12 @@ MatchResult match(const Template & t, const TensorSource & src) {
         const uint32_t want = *gguf_type_of_mtype(me.mtype, &want_elem);
         if (ty != want || (want == GGUF_ARRAY && elem != want_elem)) {
             m.reason = "metadata " + me.key + " is not " + me.mtype;
+            return m;
+        }
+    }
+    for (const std::string & k : t.recipe().provided_keys()) {
+        if (find_provided_fn(k) == nullptr) {
+            m.reason = "provided(\"" + k + "\") has no implementation in this library";
             return m;
         }
     }

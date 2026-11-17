@@ -308,6 +308,90 @@ struct Buf {
 };
 using V = std::shared_ptr<Buf>;
 
+// A GGUF metadata scalar's canonical bytes (TensorSource::meta_canonical) as a double.
+std::optional<double> meta_number(uint32_t type, const std::vector<uint8_t> & b) {
+    auto get = [&](auto v) -> std::optional<double> {
+        if (b.size() != sizeof(v)) return std::nullopt;
+        std::memcpy(&v, b.data(), sizeof(v));
+        return static_cast<double>(v);
+    };
+    switch (type) {
+        case GGUF_U8: return get(uint8_t{});
+        case GGUF_I8: return get(int8_t{});
+        case GGUF_U16: return get(uint16_t{});
+        case GGUF_I16: return get(int16_t{});
+        case GGUF_U32: return get(uint32_t{});
+        case GGUF_I32: return get(int32_t{});
+        case GGUF_U64: return get(uint64_t{});
+        case GGUF_I64: return get(int64_t{});
+        case GGUF_F32: return get(float{});
+        case GGUF_F64: return get(double{});
+        case GGUF_BOOL: {
+            if (b.size() != 1) return std::nullopt;
+            return b[0] != 0 ? 1.0 : 0.0;
+        }
+        default: return std::nullopt;
+    }
+}
+
+// A GGUF metadata string's canonical bytes (u32le length, then the bytes).
+std::optional<std::string> meta_string(uint32_t type, const std::vector<uint8_t> & b) {
+    if (type != GGUF_STRING || b.size() < 4) return std::nullopt;
+    uint32_t n = 0;
+    std::memcpy(&n, b.data(), 4);
+    if (b.size() - 4 != n) return std::nullopt;
+    return std::string(reinterpret_cast<const char *>(b.data()) + 4, n);
+}
+
+// What a ProvidedFn reads: only the call's dependencies, through the job's
+// source; each completed tensor read is reported to the observer like t().
+class DependencySource final : public TensorSource {
+public:
+    DependencySource(TensorSource & src, const ProvidedCall & call, const ReadObserver & obs)
+        : src_(src), call_(call), obs_(obs) {}
+
+    const TensorInfo * tensor(const std::string & name) const override {
+        return is_tensor(name) ? src_.tensor(name) : nullptr;
+    }
+    Error read_raw(const std::string & name, const std::function<bool(const uint8_t *, size_t)> & sink) override {
+        if (!is_tensor(name)) return undeclared(name);
+        return src_.read_raw(name, sink);
+    }
+    Error read_f32(const std::string & name, std::vector<float> & out, const RawTap & tap) override {
+        if (!is_tensor(name)) return undeclared(name);
+        detail::Sha256 h;
+        Error e = src_.read_f32(name, out, [&](const uint8_t * p, size_t n) {
+            if (obs_) h.update(p, n);
+            if (tap) tap(p, n);
+        });
+        if (e.ok() && obs_) e = obs_(name, h.finish());
+        return e;
+    }
+    bool meta_canonical(const std::string & key, uint32_t & gguf_type, std::vector<uint8_t> & bytes,
+                        uint32_t * array_elem_type) const override {
+        return is_meta(key) && src_.meta_canonical(key, gguf_type, bytes, array_elem_type);
+    }
+    std::string meta_json(const std::string & key) const override {
+        return is_meta(key) ? src_.meta_json(key) : std::string();
+    }
+
+private:
+    bool is_tensor(const std::string & n) const {
+        return std::find(call_.tensors.begin(), call_.tensors.end(), n) != call_.tensors.end();
+    }
+    bool is_meta(const std::string & k) const {
+        return std::find(call_.meta.begin(), call_.meta.end(), k) != call_.meta.end();
+    }
+    Error undeclared(const std::string & name) const {
+        return Error::deterministic("recipe:" + std::to_string(call_.line) + ": provided(\"" + call_.key +
+                                    "\") read tensor " + name + ", which it does not list as a dependency");
+    }
+
+    TensorSource & src_;
+    const ProvidedCall & call_;
+    const ReadObserver & obs_;
+};
+
 std::vector<size_t> strides_of(const std::vector<int64_t> & shape) {
     std::vector<size_t> s(shape.size(), 1);
     for (size_t i = shape.size(); i-- > 1;) s[i - 1] = count_of(shape, i);
@@ -765,8 +849,73 @@ private:
             }
             return o;
         }
+        if (op == "meta_f") {
+            const std::string & key = e.args[0]->text;
+            uint32_t type = 0;
+            std::vector<uint8_t> bytes;
+            std::optional<double> v;
+            if (src_.meta_canonical(key, type, bytes)) v = meta_number(type, bytes);
+            if (!v) {
+                throw EvalError(Error::deterministic("recipe:" + std::to_string(e.line) + ": metadata " + key +
+                                                     " is absent or not a number"));
+            }
+            V o = fresh();
+            o->weak = *v;
+            return o;
+        }
+        if (op == "provided") return provided(e);
         throw EvalError(Error::deterministic("recipe: op " + op + "() cannot be evaluated"));
     }
+
+    V provided(const Expr & e) {
+        ProvidedCall call;
+        call.key = e.args[0]->text;
+        call.shape = e.shape;
+        call.line = e.line;
+        for (const ExprP & d : e.args[1]->args) {
+            (d->text == "t" ? call.tensors : call.meta).push_back(d->args[0]->text);
+        }
+        const ProvidedFn fn = find_provided_fn(call.key);
+        if (fn == nullptr) {
+            throw EvalError(Error::deterministic("recipe:" + std::to_string(e.line) + ": provided(\"" + call.key +
+                                                 "\") has no implementation in this library"));
+        }
+        V o = fresh();
+        o->dt = DType::f32;
+        o->shape = e.shape;
+        DependencySource deps(src_, call, obs_);
+        Error err = fn(deps, call, o->f);
+        if (!err.ok()) throw EvalError(err);
+        o->account(o->f.size() * sizeof(float));
+        if (o->f.size() != count_of(e.shape)) {
+            throw EvalError(Error::deterministic("recipe:" + std::to_string(e.line) + ": provided(\"" + call.key +
+                                                 "\") returned " + std::to_string(o->f.size()) + " values, its shape has " +
+                                                 std::to_string(count_of(e.shape))));
+        }
+        return o;
+    }
+
+public:
+    // A patch str line's bytes: meta_s(key), exactly `count` bytes long.
+    std::vector<uint8_t> str_bytes(const Item & it) {
+        const std::string & key = it.expr->args[0]->text;
+        uint32_t type = 0;
+        std::vector<uint8_t> bytes;
+        std::optional<std::string> v;
+        if (src_.meta_canonical(key, type, bytes)) v = meta_string(type, bytes);
+        if (!v) {
+            throw EvalError(Error::deterministic("recipe:" + std::to_string(it.line) + ": metadata " + key +
+                                                 " is absent or not a string"));
+        }
+        if (v->size() != it.count) {
+            throw EvalError(Error::deterministic("recipe:" + std::to_string(it.line) + ": meta_s(\"" + key + "\") is " +
+                                                 std::to_string(v->size()) + " bytes, the patch holds " +
+                                                 std::to_string(it.count)));
+        }
+        return std::vector<uint8_t>(v->begin(), v->end());
+    }
+
+private:
 
     const Recipe & r_;
     TensorSource & src_;
@@ -826,10 +975,12 @@ Error evaluate_patches(const Recipe & r, TensorSource & src, const std::function
     try {
         for (const Item & it : r.items) {
             if (it.kind != Item::Kind::patch) continue;
-            std::vector<uint8_t> bytes = in.blob_bytes(it, in.tracker);
+            std::vector<uint8_t> bytes = it.str ? in.str_bytes(it) : in.blob_bytes(it, in.tracker);
+            if (it.str) in.tracker.alloc(bytes.size());
             PatchOut out;
             out.offset = it.offset;
             out.dtype = it.dtype;
+            out.str = it.str;
             out.count = it.count;
             out.data = bytes.data();
             out.bytes = bytes.size();
