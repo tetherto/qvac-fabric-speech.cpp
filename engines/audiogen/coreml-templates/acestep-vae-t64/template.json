@@ -1,0 +1,88 @@
+{
+  "schema": 1,
+  "id": "acestep-vae-t64",
+  "family": "acestep",
+  "stage": "vae",
+  "export_kind": "acestep-vae-v1",
+  "exporter": {
+    "path": "engines/audiogen/scripts/export-vae-coreml.py",
+    "sha256": "5b2675b307aff2bba36a397fa128a8488e178d42676bb62f7f337e3726a72c46",
+    "args": [
+      "--gguf",
+      "{gguf}",
+      "--out",
+      "{out}/vae-decoder.mlpackage",
+      "--t-latent",
+      "64"
+    ]
+  },
+  "min_os": {
+    "macos": "15.0"
+  },
+  "multifunction_ane": false,
+  "default_compute_units": "all",
+  "shareable": true,
+  "pad_safe": false,
+  "state_bytes": 0,
+  "expected_warm_load_ms": {
+    "main": 0
+  },
+  "memory": {
+    "runtime_weight_bytes": 0,
+    "workspace_bytes": 0,
+    "compile_peak_bytes": null,
+    "ane_compile_reserve_bytes": null,
+    "load_peak_bytes": {
+      "cpu_and_ane": null,
+      "all": null,
+      "cpu_and_gpu": null,
+      "cpu_only": null
+    },
+    "margin": 1.25,
+    "coreml_bound": "conservative",
+    "validated_for": []
+  },
+  "patches": [],
+  "prefer_ggml_on": [],
+  "match": {
+    "architecture": "acestep-vae",
+    "metadata": {}
+  },
+  "literals": [],
+  "provided": [],
+  "toolchain": {
+    "coremltools": "9.0",
+    "torch": "2.7.0",
+    "numpy": "1.26.4"
+  },
+  "functions": [
+    {
+      "name": "main",
+      "inputs": [
+        {
+          "name": "latent",
+          "dtype": "fp16",
+          "shape": [
+            1,
+            64,
+            64
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "pcm",
+          "dtype": "fp16",
+          "shape": [
+            1,
+            2,
+            122880
+          ]
+        }
+      ]
+    }
+  ],
+  "stateful": false,
+  "weight_bin_size": 170113920,
+  "generation_peak_bytes": 419430400
+}
