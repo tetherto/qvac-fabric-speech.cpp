@@ -349,12 +349,23 @@ void end_load(const LoadRequest & req, LoadResult & out) {
     if (req.tmpl == nullptr) return;
     std::string cache_dir, template_id, key32;
     if (!split_artifact_path(req.artifact_path, cache_dir, template_id, key32)) return;
+    const cache::Layout l(cache_dir);
     if (out.model) {
-        cache::touch_used(cache::Layout(cache_dir), key32);
-    } else if (out.lease_fd >= 0) {
+        cache::touch_used(l, key32);
+        return;
+    }
+    if (out.lease_fd >= 0) {
         ::close(out.lease_fd);
         out.lease_fd = -1;
     }
+    // The engine rejected an artifact that passed the inventory check (an
+    // invalid model, the wrong geometry): move it to quarantine/ under the
+    // key's exclusive lock and send the slot back to preparation, which
+    // regenerates it at the same key (the scheduler bounds the retries). A
+    // transient failure keeps the artifact, and so does one another holder
+    // of a lease is using.
+    if (out.error.cls != ErrorClass::deterministic) return;
+    if (cache::quarantine(l, template_id, key32, nullptr) == cache::KeyLock::Result::ok) out.artifact_gone = true;
 }
 
 #else  // !QVAC_COREML_GENERATE

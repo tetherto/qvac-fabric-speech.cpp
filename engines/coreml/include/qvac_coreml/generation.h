@@ -92,8 +92,11 @@ PrepareResult prepare(const PrepareRequest & req, PrepareContext & ctx);
 // when the load must not start (`out` then carries would_block, or the
 // error with artifact_gone when the artifact is gone or incomplete, which
 // returns the slot to preparation). end_load, after the engine's load,
-// touches used/<key> on success and releases the lease on failure. Both do
-// nothing for a prebuilt artifact.
+// touches used/<key> on success and releases the lease on failure; after a
+// deterministic failure (the engine rejected the model) it also moves the
+// artifact to quarantine/ under the key's exclusive lock and sets
+// artifact_gone, so the slot regenerates it. Both do nothing for a prebuilt
+// artifact.
 bool begin_load(const LoadRequest & req, LoadResult & out);
 void end_load(const LoadRequest & req, LoadResult & out);
 

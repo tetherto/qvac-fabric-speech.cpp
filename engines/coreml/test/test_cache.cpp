@@ -1755,7 +1755,26 @@ LoadResult glue_load(const LoadRequest & req) {
     return r;
 }
 
-std::shared_ptr<Slot> glue_slot(const std::shared_ptr<Manager> & mgr, const Env & env, const std::string & a) {
+// The engine rejects the first `g_glue_rejects` loads with an error of
+// class `g_glue_reject_class` (an invalid model, or a resource failure).
+std::atomic<int> g_glue_rejects{0};
+std::atomic<int> g_glue_loads{0};
+ErrorClass g_glue_reject_class = ErrorClass::deterministic;
+
+LoadResult glue_load_rejecting(const LoadRequest & req) {
+    LoadResult r;
+    if (!generation::begin_load(req, r)) return r;
+    if (g_glue_loads++ < g_glue_rejects) {
+        r.error = Error{g_glue_reject_class, "test", 9, "the engine rejected the model"};
+    } else {
+        r.model = std::make_shared<int>(1);
+    }
+    generation::end_load(req, r);
+    return r;
+}
+
+std::shared_ptr<Slot> glue_slot(const std::shared_ptr<Manager> & mgr, const Env & env, const std::string & a,
+                                LoadFn load = glue_load) {
     SlotSpec gen;
     gen.engine = "toy";
     gen.stage = "dac";
@@ -1765,7 +1784,7 @@ std::shared_ptr<Slot> glue_slot(const std::shared_ptr<Manager> & mgr, const Env 
     gen.prepare.key = "toy-dac:" + a;
     gen.prepare.template_id = "toy-dac";
     gen.prepare_fn = glue_prepare;
-    gen.load_fn = glue_load;
+    gen.load_fn = load;
     SlotPolicy pol;
     pol.cache_dir = env.cache;
     return mgr->make_slot(gen, pol);
@@ -1815,6 +1834,55 @@ void case_generated_artifact_pruned_before_load() {
     LoadResult r;
     CHECK(!generation::begin_load(req, r));
     CHECK(r.artifact_gone && r.lease_fd < 0 && !r.error.ok());
+}
+
+// A cached artifact the engine rejects (it passed the inventory check) is
+// quarantined under EX and regenerated at the same key; a rejection that
+// repeats ends in failed after the scheduler's bound; a transient failure
+// keeps the artifact.
+void case_generated_rejected_hit_quarantined() {
+    Env env;
+    const std::string a = env.source("a.gguf");
+    g_sched_inputs = env.inputs(a);
+    { CHECK(ready(env.prepare(a))); }  // a cache hit for the slot below
+    CHECK(g_compiles == 1);
+    const cache::Layout l = env.layout();
+    {
+        g_glue_rejects = 1;
+        g_glue_loads = 0;
+        g_glue_reject_class = ErrorClass::deterministic;
+        auto mgr = glue_manager();
+        auto s = glue_slot(mgr, env, a, &glue_load_rejecting);
+        s->request(Priority::now);
+        CHECK_MSG(wait_state(s, SlotState::ready), s->status().error);
+        CHECK(g_compiles == 2 && g_glue_loads == 2);
+        CHECK(count_files(l.quarantine) == 1);  // the rejected copy, for prune
+        CHECK(env.artifacts() == 1);
+    }
+    {
+        g_glue_rejects = 100;
+        g_glue_loads = 0;
+        auto mgr = glue_manager();
+        auto s = glue_slot(mgr, env, a, &glue_load_rejecting);
+        s->request(Priority::now);
+        CHECK(wait_state(s, SlotState::failed));
+        CHECK(g_glue_loads == 3 && g_compiles == 4);  // two regenerations, then failed
+        CHECK(s->status().error == "the engine rejected the model");
+    }
+    {
+        g_glue_rejects = 1;
+        g_glue_loads = 0;
+        g_glue_reject_class = ErrorClass::transient;
+        { CHECK(ready(env.prepare(a))); }  // the last rejection left nothing to hit
+        const int compiles = g_compiles;
+        const size_t quarantined = count_files(l.quarantine);
+        auto mgr = glue_manager();
+        auto s = glue_slot(mgr, env, a, &glue_load_rejecting);
+        s->request(Priority::now);
+        CHECK(wait_state(s, SlotState::failed));
+        CHECK(g_compiles == compiles && count_files(l.quarantine) == quarantined && g_glue_loads == 1);
+    }
+    g_glue_rejects = 0;
 }
 
 // An unsupported cache volume: the slot is unsupported(cache_fs), not failed.
@@ -1886,6 +1954,7 @@ int main(int argc, char ** argv) {
 #if defined(QVAC_COREML_HAVE_GGML)
                          {"generated-artifact-pruned-before-load", case_generated_artifact_pruned_before_load},
                          {"generated-unsupported-cache-fs", case_generated_unsupported_cache_fs},
+                         {"generated-rejected-hit-quarantined", case_generated_rejected_hit_quarantined},
 #endif
                      },
                      "test-coreml-cache");
