@@ -12,6 +12,8 @@
 #include "qvac_coreml/manager.h"
 
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <thread>
 
 #include <poll.h>
@@ -554,6 +556,67 @@ void case_tmp_outputs() {
     CHECK(cache::prune(env.cache, env.routine(2 * 3600), env.catalog()).tmp == 1 && !fs::exists(out));
     for (const std::string & d : other) CHECK(fs::exists(d));
     CHECK(fs::exists(host_out));
+}
+
+// Core ML compiles <dir>/<stem>.mlpackage into <user temp>/<stem>.mlmodelc, a
+// path every process and every cache directory shares. Two prepares of the
+// same weights into two cache roots hold different key locks and compile at
+// the same time (both threads of one process here, so the pid alone cannot
+// tell them apart): each must hand the compile its own package stem. The
+// stem keeps the qvac-coreml-<key> prefix, so routine prune still sweeps the
+// leftover of a compile that was killed.
+void case_package_stem_per_invocation() {
+    Env env;
+    const std::string a = env.source("a.gguf");
+    std::mutex mu;
+    std::condition_variable cv;
+    int arrived = 0;
+    bool together = true;
+    std::vector<std::string> pkgs;
+    auto compile = [&](const std::string & pkg, const std::string & out) {
+        {
+            std::unique_lock<std::mutex> lk(mu);
+            pkgs.push_back(pkg);
+            ++arrived;
+            cv.notify_all();
+            // Both are compiling at once: neither prepare waits for the other's lock.
+            together &= cv.wait_for(lk, 10s, [&] { return arrived == 2; });
+        }
+        return fake_compile(pkg, out);
+    };
+    PrepareOutcome o[2];
+    std::thread th[2];
+    for (int i = 0; i < 2; ++i) {
+        cache::PrepareInputs in = env.inputs(a);
+        in.cache_dir = env.td / ("cache-" + std::to_string(i));
+        in.compile = compile;
+        th[i] = std::thread([&o, i, in] { o[i] = cache::prepare(in); });
+    }
+    for (std::thread & t : th) t.join();
+    CHECK(together);
+    CHECK_MSG(ready(o[0]) && ready(o[1]), o[0].error.message + " / " + o[1].error.message);
+    CHECK(o[0].key32 == o[1].key32 && o[0].artifact_dir != o[1].artifact_dir);
+    for (const PrepareOutcome & x : o) CHECK(cache::validate(x.artifact_dir) == cache::Validity::ok);
+    CHECK(pkgs.size() == 2);
+    if (pkgs.size() != 2) return;
+    auto stem = [](const std::string & pkg) { return fs::path(pkg).stem().string(); };
+    CHECK_MSG(stem(pkgs[0]) != stem(pkgs[1]), "both compiles used the package stem " + stem(pkgs[0]));
+    for (const std::string & p : pkgs) {
+        CHECK(fs::path(p).extension() == ".mlpackage");
+        CHECK_MSG(stem(p).rfind("qvac-coreml-" + o[0].key32, 0) == 0, p);
+    }
+
+    // The bundle a killed compile leaves at <user temp>/<stem>.mlmodelc,
+    // including the _<UUID> name Core ML picks when that path is taken.
+    const std::string tmp = env.td / "tmp";
+    const std::string uuid = "0F9E1D2C-3B4A-5968-7766-554433221100";
+    const std::vector<std::string> left = {tmp + "/" + stem(pkgs[0]) + ".mlmodelc",
+                                           tmp + "/" + stem(pkgs[1]) + "_" + uuid + ".mlmodelc"};
+    for (const std::string & d : left) write_bytes(d + "/coremldata.bin", "x");
+    fs::create_directories(env.layout().root);
+    CHECK(cache::prune(env.cache, env.routine(), env.catalog()).tmp == 0);  // in flight
+    CHECK(cache::prune(env.cache, env.routine(2 * 3600), env.catalog()).tmp == 2);
+    for (const std::string & d : left) CHECK(!fs::exists(d));
 }
 
 void case_used_age() {
@@ -1170,6 +1233,68 @@ void case_process_token_first_use() {
     CHECK(failed::process_token() == parent);
 }
 
+// An I/O error around the compile (the CompileFn reports stage prepare: a
+// missing package, a failed move or copy) stays transient however often other
+// processes repeat it; a compiler rejection still promotes.
+void case_compile_io_failure_stays_transient() {
+    Env env;
+    const std::string a = env.source("a.gguf");
+    const cache::Layout l = env.layout();
+    const std::pair<std::string, int64_t> io_errors[] = {{"NSPOSIXErrorDomain", EACCES}, {"NSCocoaErrorDomain", 513}};
+    for (const auto & [domain, code] : io_errors) {
+        g_compile_override = [domain = domain, code = code] {
+            cache::CompileResult r;
+            r.error = Error::transient("move the compiled bundle: permission denied", domain, code);
+            r.stage = failed::Stage::prepare;
+            return r;
+        };
+        g_compiles = 0;
+        PrepareOutcome o = env.prepare(a);
+        CHECK(o.kind == PrepareOutcome::Kind::failed && o.error.code == code);
+        const std::string rec_path = failed::record_path(l.failed, o.key32);
+        auto rec = failed::read(rec_path);
+        CHECK_MSG(rec && rec->cls == ErrorClass::transient && rec->attempts == 1, domain);
+        // A second process hits the same error: still transient, attempts 2.
+        pid_t kid = spawn([&] {
+            PrepareOutcome k = env.prepare(a);
+            CHECK(k.kind == PrepareOutcome::Kind::failed && k.error.cls == ErrorClass::transient && g_compiles == 2);
+            return 0;
+        });
+        CHECK(reap(kid) == 0);
+        rec = failed::read(rec_path);
+        CHECK_MSG(rec && rec->cls == ErrorClass::transient && rec->attempts == 2 && rec->domain == domain &&
+                      rec->code == code,
+                  domain);
+        // The next process retries; with the environment repaired it generates.
+        kid = spawn([&] {
+            g_compile_override = nullptr;
+            PrepareOutcome k = env.prepare(a);
+            CHECK(ready(k) && !k.cache_hit && g_compiles == 2);
+            return 0;
+        });
+        CHECK(reap(kid) == 0);
+        CHECK(!fs::exists(rec_path));
+        cache::prune(env.cache, cache::PrunePolicy::all(), env.catalog());
+        CHECK(env.artifacts() == 0);
+    }
+    // A Core ML rejection (stage compile, the default) from two processes promotes.
+    g_compile_override = [] {
+        cache::CompileResult r;
+        r.error = Error::transient("compiler rejected the model", "com.apple.CoreML", 3);
+        return r;
+    };
+    PrepareOutcome o = env.prepare(a);
+    CHECK(o.kind == PrepareOutcome::Kind::failed);
+    pid_t kid = spawn([&] {
+        CHECK(env.prepare(a).kind == PrepareOutcome::Kind::failed);
+        return 0;
+    });
+    CHECK(reap(kid) == 0);
+    auto rec = failed::read(failed::record_path(l.failed, o.key32));
+    CHECK(rec && rec->cls == ErrorClass::deterministic && rec->attempts == 2);
+    g_compile_override = nullptr;
+}
+
 void case_resource_codes_never_promote() {
     TempDir td;
     const std::string dir = td / "failed";
@@ -1592,6 +1717,7 @@ int main(int argc, char ** argv) {
                          {"relocation", case_relocation},
                          {"scope", case_scope},
                          {"tmp-outputs", case_tmp_outputs},
+                         {"package-stem-per-invocation", case_package_stem_per_invocation},
                          {"used-age", case_used_age},
                          {"superseded-and-retired", case_superseded_and_retired},
                          {"dead-memos-of-kept-artifacts", case_dead_memos_of_kept_artifacts},
@@ -1603,6 +1729,7 @@ int main(int argc, char ** argv) {
                          {"failure-records", case_failure_records},
                          {"success-clears-failure", case_success_clears_failure},
                          {"failure-publication-race", case_failure_publication_race},
+                         {"compile-io-failure-stays-transient", case_compile_io_failure_stays_transient},
                          {"prune-vs-fresh-failure-record", case_prune_vs_fresh_failure_record},
                          {"process-token-first-use", case_process_token_first_use},
                          {"resource-codes-never-promote", case_resource_codes_never_promote},

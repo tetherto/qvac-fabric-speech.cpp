@@ -865,14 +865,21 @@ std::shared_ptr<const Template> Template::from_dir(const std::string & dir) {
         t->owned_.push_back(bytes);
         t->files_.push_back(f);
     }
-    t->init();
+    t->init(true);
     return t;
 }
 
 std::shared_ptr<const Template> Template::from_files(std::vector<TemplateFile> files) {
     std::shared_ptr<Template> t(new Template());
     t->files_ = std::move(files);
-    t->init();
+    t->init(true);
+    return t;
+}
+
+std::shared_ptr<const Template> Template::from_embedded(std::vector<TemplateFile> files) {
+    std::shared_ptr<Template> t(new Template());
+    t->files_ = std::move(files);
+    t->init(false);
     return t;
 }
 
@@ -885,8 +892,10 @@ const TemplateFile * Template::file(std::string_view name) const {
 
 std::string Template::sha256_hex() const { return to_hex(sha256_); }
 
-void Template::init() {
-    for (TemplateFile & f : files_) f.sha256 = detail::sha256(f.data, f.size);
+void Template::init(bool hash_files) {
+    if (hash_files) {
+        for (TemplateFile & f : files_) f.sha256 = detail::sha256(f.data, f.size);
+    }
     for (const std::string & n : required_files()) {
         if (!file(n)) throw std::runtime_error("template: missing " + n);
     }
