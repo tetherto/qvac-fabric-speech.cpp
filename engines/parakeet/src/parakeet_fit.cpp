@@ -196,22 +196,27 @@ uint64_t coreml_diarizer_bytes(const std::string & gguf_path,
 #endif
 }
 
-// The Nemotron diarizer capacities the engine would generate (route generate
-// from plan(): a matching template, a cache directory, generate != never,
-// macOS 15, validated units; never the cache's contents), chosen by the same
+// The diarizer capacities the engine would generate for `model` (Nemotron 3
+// Diarization, Sortformer v2.1; route generate from plan(): a matching
+// template, a cache directory, generate != never, macOS 15, validated units;
+// never the cache's contents), chosen by the same diarizer_templates_for() +
 // diarizer_capacities() + plan() as discovery and charged at their templates'
 // Core ML envelope: the resident part of every capacity the ranges can load
 // (every generated capacity under prewarm = all) plus one transient, with
 // the templates' margin.
-uint64_t coreml_generated_diarizer_bytes(const FitOptions & opts, const std::vector<CoremlFrameRange> & ranges) {
+uint64_t coreml_generated_diarizer_bytes(const ParakeetCtcModel & model, const FitOptions & opts,
+                                         const std::vector<CoremlFrameRange> & ranges) {
 #ifdef PARAKEET_USE_COREML
     if (coreml_diarizers_disabled()) return 0;
+    const std::vector<CoremlDiarizerTemplate> & templates =
+        diarizer_templates_for(model.model_type, model.model_variant);
+    if (templates.empty()) return 0;
     CoremlSidecars sidecars(opts.coreml);
     // No capacity can route to generate (the probe would be wasted).
     if (!sidecars.generation_status().supported) return 0;
     std::vector<int> template_frames;
     std::vector<std::string> template_ids;
-    for (const CoremlDiarizerTemplate & t : nemotron_diarizer_templates()) {
+    for (const CoremlDiarizerTemplate & t : templates) {
         template_frames.push_back(t.frames);
         template_ids.emplace_back(t.template_id);
     }
@@ -226,6 +231,7 @@ uint64_t coreml_generated_diarizer_bytes(const FitOptions & opts, const std::vec
     return coreml_generated_diarizer_envelope(charges, ranges,
                                               sidecars.resolved().prewarm == pcm::Prewarm::all);
 #else
+    (void) model;
     (void) opts;
     (void) ranges;
     return 0;
@@ -411,7 +417,7 @@ void project_nemotron_diarization(const ParakeetCtcModel & model, const GgufLoad
     std::string disabled_reason;
     const bool enabled = coreml_fit_enabled(opts, disabled_reason);
     apply_coreml_verdicts(r, required, enabled, disabled_reason, /*encoder_prebuilt=*/false, 0,
-                          coreml_generated_diarizer_bytes(opts, ranges));
+                          coreml_generated_diarizer_bytes(model, opts, ranges));
     r.report = model_device_report(r) + nemotron_diarization_report(graphs, long_form) +
                device_projection_report(r, opts.margin_bytes, required,
                                         "every diarization graph shares one buffer") +
@@ -735,9 +741,16 @@ FitResult fit_params(const FitOptions & opts) {
         }
         r.host_bytes = host;
     }
+    // Sortformer v2.1 diarizer capacities on route generate: the one the
+    // offline input uses, and the smallest one, which construction loads (the
+    // minimal set) and every AOSC step up to its capacity uses, so it is
+    // charged whatever the input's length.
+    uint64_t generated_diarizers = 0;
     if (model.model_type == ParakeetModelType::SORTFORMER) {
         r.coreml_bytes = coreml_diarizer_bytes(opts.model_gguf_path,
                                                {CoremlFrameRange{total_enc, total_enc}});
+        generated_diarizers = coreml_generated_diarizer_bytes(
+            model, opts, {CoremlFrameRange{total_enc, total_enc}, CoremlFrameRange{1, 1}});
     }
 
     r.device.weights_bytes         = lm.weights_bytes + lm.repack_bytes;
@@ -755,7 +768,8 @@ FitResult fit_params(const FitOptions & opts) {
         bool encoder_prebuilt = false;
         const uint64_t envelope = coreml_encoder_fit_bytes(model, opts, enabled, window_mel,
                                                            window_enc, encoder_prebuilt);
-        apply_coreml_verdicts(r, required, enabled, disabled_reason, encoder_prebuilt, envelope);
+        apply_coreml_verdicts(r, required, enabled, disabled_reason, encoder_prebuilt, envelope,
+                              generated_diarizers);
     }
 
     // ── Report ─────────────────────────────────────────────────────────────

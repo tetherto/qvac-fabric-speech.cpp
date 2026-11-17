@@ -509,6 +509,21 @@ const std::vector<CoremlDiarizerTemplate> & nemotron_diarizer_templates() {
     return templates;
 }
 
+const std::vector<CoremlDiarizerTemplate> & sortformer_diarizer_templates() {
+    static const std::vector<CoremlDiarizerTemplate> templates = {{410, "sortformer-diar-f410"}};
+    return templates;
+}
+
+const std::vector<CoremlDiarizerTemplate> & diarizer_templates_for(ParakeetModelType type,
+                                                                   const std::string & variant) {
+    static const std::vector<CoremlDiarizerTemplate> none;
+    if (type == ParakeetModelType::NEMOTRON_DIARIZATION) return nemotron_diarizer_templates();
+    if (type == ParakeetModelType::SORTFORMER && variant == "sortformer-streaming-v2.1-aosc") {
+        return sortformer_diarizer_templates();
+    }
+    return none;
+}
+
 std::unique_ptr<CoremlDiarizers> discover_coreml_diarizers(const std::string & gguf_path,
                                                            CoremlSidecars & sidecars,
                                                            const std::vector<CoremlDiarizerTemplate> & templates) {

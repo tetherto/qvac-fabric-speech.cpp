@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Checks overlapped memory schedules against the templates' memory envelope.
 
-Reads the JSON reports of nemotron-diarization-coreml-memory (one per run,
+Reads the JSON reports of diarizer-coreml-memory (one per run,
 generated schedule) and the templates they exercised, prints one table row per
 run plus the maxima over the runs, and fails when a measurement exceeds what
 the envelope charges:

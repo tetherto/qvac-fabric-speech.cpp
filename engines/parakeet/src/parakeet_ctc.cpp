@@ -2073,11 +2073,11 @@ static void maybe_init_coreml_diarizers(const std::string & gguf_path,
                                         ParakeetCtcModel  & model,
                                         bool                verbose) {
     if (std::getenv(kCoremlDiarizerDisableEnv) != nullptr) return;
-    // Nemotron 3 Diarization capacities without an adjacent bundle are
-    // generated from the library's templates (when this instance can).
-    static const std::vector<CoremlDiarizerTemplate> kNoTemplates;
+    // Nemotron 3 Diarization and Sortformer v2.1 capacities without an
+    // adjacent bundle are generated from the library's templates (when this
+    // instance can).
     const std::vector<CoremlDiarizerTemplate> & templates =
-        model.model_type == ParakeetModelType::NEMOTRON_DIARIZATION ? nemotron_diarizer_templates() : kNoTemplates;
+        diarizer_templates_for(model.model_type, model.model_variant);
     model.impl->coreml_diarizers = discover_coreml_diarizers(gguf_path, *model.impl->coreml, templates);
     const std::vector<int> capacities =
         model.impl->coreml_diarizers ? model.impl->coreml_diarizers->capacities() : std::vector<int>();
