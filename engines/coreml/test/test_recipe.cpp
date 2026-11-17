@@ -791,10 +791,11 @@ void case_op_sub_sqrt() {
                                 blob("fp32", 6, "f32(sub(t(\"a\"), t(\"a\")))"),
                                 blob("fp32", 6, "f32(sqrt(t(\"a\")))"),
                                 blob("fp32", 6, "f32(sqrt(f64(t(\"a\"))))"),
-                                blob("fp32", 1, "f32(add(sqrt(4), zeros([1])))")}),
+                                blob("fp32", 1, "f32(add(sqrt(4), zeros([1])))"),
+                                blob("fp32", 6, "f32(sub(sqrt(f64(t(\"a\"))), 1.4142135))")}),
                    s);
-    CHECK(out.size() == 7);
-    if (out.size() != 7) return;
+    CHECK(out.size() == 8);
+    if (out.size() != 8) return;
     CHECK(f32s(out[0]) == std::vector<float>({0.5f, -8, 4, 3.5f, -5, 7}));  // numpy broadcasting
     CHECK(f32s(out[1]) == std::vector<float>({0, 1, 2, 3, 4, 5}));
     CHECK(f32s(out[2]) == std::vector<float>({1, 0, -1, -2, -3, -4}));       // operand order kept
@@ -806,6 +807,12 @@ void case_op_sub_sqrt() {
     for (int i = 0; i < 6; ++i) CHECK(bits(r32[i]) == bits(std::sqrt(static_cast<float>(i + 1))));
     CHECK(f32s(out[5]) == r32);
     CHECK(f32s(out[6]) == std::vector<float>({2.0f}));
+    // sqrt in f64 stays f64: subtracting a constant close to sqrt(2) before the
+    // output cast keeps the digits an f32 sqrt would have rounded away
+    // (6.2373e-8 here; an f32 sqrt gives 3.8170e-8).
+    const auto r64 = f32s(out[7]);
+    for (int i = 0; i < 6; ++i) CHECK(bits(r64[i]) == bits(static_cast<float>(std::sqrt(double(i + 1)) - 1.4142135)));
+    CHECK(bits(r64[1]) != bits(static_cast<float>(double(std::sqrt(2.0f)) - 1.4142135)));
 
     // The BatchNorm fold: scale = gamma / sqrt(var + eps), shift = beta - mean * scale, in f32.
     const std::vector<float> g = {0.75f, -1.25f, 2.0f}, v = {0.1f, 3.0f, 1e-6f}, m = {0.2f, -0.3f, 5.0f},
