@@ -382,6 +382,59 @@ class ToyExtractTest(unittest.TestCase):
         self.assertEqual((self.tmp / "layout.state").read_text(), "2")  # both twins were exported
         self.assertEqual(snapshot(self.tdir), before)
 
+    def make_spec_stale(self):
+        # A model.mlmodel the exporter no longer writes, so a passing
+        # extraction would replace it: a rejection must leave it in place.
+        from coremltools.proto import Model_pb2
+
+        spec = Model_pb2.Model()
+        spec.ParseFromString((self.tdir / "model.mlmodel").read_bytes())
+        spec.description.metadata.userDefined["qvac.toy.stale"] = "1"
+        (self.tdir / "model.mlmodel").write_bytes(spec.SerializeToString(deterministic=True))
+
+    def edit_recipe(self, edit):
+        recipe = self.tdir / "recipe.txt"
+        recipe.write_text(edit(recipe.read_text()))
+
+    @NEEDS_TOY
+    def test_manifest_elsewhere_with_a_rejected_extraction_writes_nothing(self):
+        # --manifest outside the template directory would be copied in as
+        # reference-gguf.json, but only by an extraction that passes.
+        other = json.loads((self.tdir / "reference-gguf.json").read_text())
+        other["review_probe"] = True
+        (self.tmp / "other.json").write_text(json.dumps(other))
+        script = self.tmp / "export_variant.py"
+        script.write_text(VARIANT_EXPORTER)
+        args = [TOY_DIR, "spec", "{gguf}", "{out}", self.tmp / "spec.state"]
+        before = snapshot(self.tdir)
+        p = run_ctpl("extract", "--template-dir", self.tdir, "--manifest", self.tmp / "other.json",
+                     "--exporter", script, *exporter_args(args))
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertIn("spec differs between twin A and twin B", p.stderr)
+        self.assertEqual(snapshot(self.tdir), before)
+
+    @NEEDS_TOY
+    def test_recipe_header_without_blobs_writes_nothing(self):
+        self.make_spec_stale()
+        self.edit_recipe(lambda t: "".join(l for l in t.splitlines(True) if not l.startswith("blobs ")))
+        before = snapshot(self.tdir)
+        p = run_ctpl("extract", "--template-dir", self.tdir)
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertIn("header lacks blobs", p.stderr)
+        self.assertEqual(snapshot(self.tdir), before)
+
+    @NEEDS_TOY
+    def test_recipe_that_fails_to_generate_writes_nothing(self):
+        # The recipe body names a tensor the GGUF lacks, so the twin-A
+        # generate fails after every twin check passed.
+        self.make_spec_stale()
+        self.edit_recipe(lambda t: t.replace("toy.w1", "toy.nope", 1))
+        before = snapshot(self.tdir)
+        p = run_ctpl("extract", "--template-dir", self.tdir)
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertIn("generate (twin A) failed", p.stderr)
+        self.assertEqual(snapshot(self.tdir), before)
+
     @NEEDS_TOY
     def test_unchanged_reextraction_keeps_template_bytes(self):
         from coremltools.proto import Model_pb2

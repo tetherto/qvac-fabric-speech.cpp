@@ -578,14 +578,20 @@ def _export_twin(tool, tdir_manifest, exporter, seed, types, work, python, root,
     return twin, pkg
 
 
+def _promote(out, writes):
+    """Writes the staged template files into `out`, each through a temporary file and a rename."""
+    out.mkdir(parents=True, exist_ok=True)
+    for name, data in writes.items():
+        tmp = out / f".{name}.extract-tmp"
+        tmp.write_bytes(data)
+        os.replace(tmp, out / name)
+
+
 def cmd_extract(a):
     tool = find_tool(a.tool)
     out = Path(a.template_dir)
-    out.mkdir(parents=True, exist_ok=True)
     manifest_path = Path(a.manifest) if a.manifest else out / "reference-gguf.json"
     manifest = load_manifest(manifest_path)
-    if manifest_path.resolve() != (out / "reference-gguf.json").resolve():
-        shutil.copyfile(manifest_path, out / "reference-gguf.json")
     existing = json.loads((out / "template.json").read_text()) if (out / "template.json").is_file() else {}
     exporter = exporter_from_args(a) if a.exporter else existing.get("exporter")
     if not exporter or "path" not in exporter:
@@ -594,6 +600,19 @@ def cmd_extract(a):
     template_id = a.id or existing.get("id") or out.name
     with tempfile.TemporaryDirectory(prefix="qvac-coreml-extract-") as tmp:
         work = Path(tmp)
+        # Every output is staged first: `writes` holds the files to replace,
+        # `stage` the template as it will be once they are written (the
+        # twin-A generate runs on it). The template directory is written only
+        # after every check has passed, so a rejected extraction leaves its
+        # files as they were.
+        writes = {}
+        stage = work / "stage" / (out.name or "template")
+        if out.is_dir():
+            shutil.copytree(out, stage)
+        else:
+            stage.mkdir(parents=True)
+        if manifest_path.resolve() != (out / "reference-gguf.json").resolve():
+            writes["reference-gguf.json"] = manifest_path.read_bytes()
         _, pkg_a = _export_twin(tool, manifest_path, exporter, SEED_A, "f32", work, a.python, root, "a")
         _, pkg_b = _export_twin(tool, manifest_path, exporter, SEED_B, "f32", work, a.python, root, "b")
         pa, pb = package_parts(pkg_a), package_parts(pkg_b)
@@ -616,11 +635,11 @@ def cmd_extract(a):
         if old_spec.is_file() and not spec_diff(load_spec(old_spec), spec_a):
             spec_bytes = old_spec.read_bytes()
         else:
-            old_spec.write_bytes(spec_bytes)
+            writes["model.mlmodel"] = spec_bytes
         new_manifest = pa["manifest"].read_text()
         old_manifest = out / "Manifest.json"
         if not (old_manifest.is_file() and manifest_equivalent(old_manifest.read_text(), new_manifest)):
-            old_manifest.write_text(new_manifest)
+            writes["Manifest.json"] = new_manifest.encode()
         functions, stateful = spec_summary(spec_a)
         spec_sha = hashlib.sha256(spec_bytes).hexdigest()
         script = Path(exporter["path"])
@@ -631,19 +650,25 @@ def cmd_extract(a):
                     "toolchain": toolchain_versions(), "functions": functions, "stateful": stateful,
                     "weight_bin_size": len(wa)}
         recipe = out / "recipe.txt"
+        recipe_text = None
         if recipe.is_file():
-            recipe.write_text(refresh_recipe_header(recipe.read_text(), template_id, spec_sha, len(wa), len(la)))
+            recipe_text = refresh_recipe_header(recipe.read_text(), template_id, spec_sha, len(wa), len(la))
+            writes["recipe.txt"] = recipe_text.encode()
         j = merge_template_json(existing, computed, manifest)
         j.setdefault("generation_peak_bytes", 0)
-        (out / "template.json").write_text(json.dumps(j, indent=2) + "\n")
-        if recipe.is_file():
-            # Generate from twin A once: the recipe must parse and match; the
-            # generator's peak memory goes into template.json.
-            gen = json.loads(run([tool, "generate", "--template", out, "--gguf", work / "twin-a.gguf",
+        writes["template.json"] = (json.dumps(j, indent=2) + "\n").encode()
+        for name, data in writes.items():
+            (stage / name).write_bytes(data)
+        if recipe_text is not None:
+            # Generate from twin A once, on the staged template: the recipe must
+            # parse and match; the generator's peak memory goes into template.json.
+            gen = json.loads(run([tool, "generate", "--template", stage, "--gguf", work / "twin-a.gguf",
                                   "-o", work / "gen-a.mlpackage"], "generate (twin A)"))
             j["generation_peak_bytes"] = int(gen["generation_peak_bytes"])
-            (out / "template.json").write_text(json.dumps(j, indent=2) + "\n")
-        else:
+            writes["template.json"] = (json.dumps(j, indent=2) + "\n").encode()
+        # Every check has passed: write the template.
+        _promote(out, writes)
+        if recipe_text is None:
             print(f"extract: no recipe.txt in {out}; run `suggest`, complete it, then extract again",
                   file=sys.stderr)
     print(f"extract: {template_id}: spec {spec_sha[:16]}, {len(la)} blobs, weight.bin {len(wa)} bytes -> {out}",
