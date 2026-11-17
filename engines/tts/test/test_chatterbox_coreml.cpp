@@ -826,6 +826,33 @@ int pending_fixture() {
         std::printf("[retire] frames_16 retired; the replay runs CFM on ggml, a later call on frames_24\n");
     }
 
+    // 5b. The only sidecar present cannot serve (a CFM package without
+    //     frames_* functions): use = require refuses the call, otherwise the
+    //     stage runs on ggml.
+    {
+        const fs::path dir = root.path / "lone-broken";
+        fs::create_directories(dir);
+        fs::create_directory_symlink(fs::absolute(fixture / "routing-s3gen-hift.mlmodelc"),
+                                     dir / "routing-s3gen-cfm.mlmodelc");
+        const std::string gguf = (dir / "routing-s3gen.gguf").string();
+        CoremlOptions require_opts = routing_options();
+        require_opts.use = CoremlOptions::Use::require;
+        auto strict = cb::s3gen_sidecars::create(gguf, require_opts);
+        require(strict != nullptr && !strict->has(S::cfm), "a lone unusable CFM sidecar still makes a set");
+        std::string error;
+        try {
+            strict->acquire(shape(8), steady::now());
+        } catch (const std::exception & e) {
+            error = e.what();
+        }
+        require(error.find("cannot serve") != std::string::npos, "use = require refuses a lone unusable sidecar");
+        auto lenient = cb::s3gen_sidecars::create(gguf, routing_options());
+        auto plan = lenient->acquire(shape(8), steady::now());
+        require(view(plan, S::cfm).present && !view(plan, S::cfm).model && !cb::plan_pending(*plan),
+                "without require the unusable stage runs on ggml");
+        std::printf("[lone-broken] require: %s\n", error.c_str());
+    }
+
     // 6. Dropping the sidecars while a load is in flight returns at once.
     {
         auto set = cb::s3gen_sidecars::create(routing_case(fixture, root.path, "destroy", all), routing_options());

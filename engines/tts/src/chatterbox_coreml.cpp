@@ -895,9 +895,12 @@ std::shared_ptr<s3gen_sidecars> s3gen_sidecars::create(const std::string & s3gen
             st.slots.emplace(width, p->manager->make_slot(std::move(spec), policy));
         }
     }
-    bool slots = false;
-    for (const auto & st : p->stages) slots = slots || !st.slots.empty();
-    if (!slots) return nullptr;
+    // A present sidecar that lists no usable function keeps the set: its
+    // stage stays in every plan, so use = require refuses the call (cannot
+    // serve) instead of silently running on ggml.
+    bool present = false;
+    for (const auto & st : p->stages) present = present || st.present;
+    if (!present) return nullptr;
     return std::shared_ptr<s3gen_sidecars>(new s3gen_sidecars(std::move(p)));
 }
 
