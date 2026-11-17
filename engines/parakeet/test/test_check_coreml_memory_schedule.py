@@ -170,6 +170,18 @@ class CheckerTest(unittest.TestCase):
         del r["ane_compiler_before_loads"]
         self.assertFails(r, "no ane_compiler_before_loads")
 
+    def test_each_row_labels_the_compiler_baseline(self):
+        dirty, clean = run_report(), run_report()
+        dirty["ane_compiler_baseline"] = "dirty"
+        clean["ane_compiler_baseline"] = "clean"
+        rc, out = self.check(dirty, clean, run_report())
+        self.assertEqual(rc, 0, out)
+        rows = [line for line in out.splitlines() if line.startswith("| run-")]
+        self.assertEqual(len(rows), 3, out)
+        self.assertIn("dirty baseline", rows[0])
+        self.assertIn("clean baseline", rows[1])
+        self.assertIn("unknown baseline", rows[2])  # a report without the label
+
     def test_a_resident_step_over_the_charge_fails(self):
         r = run_report()
         r["segments"][-1]["resident_increment"] = RESIDENT + 1

@@ -19,7 +19,10 @@ the envelope charges:
     run's steady growth over ggml against the sum of those parts;
   - ANECompilerService's growth during the loads (its peak less its size when
     the first load started), against ane_compile_reserve_bytes (the runtime's
-    cold-load memory admission).
+    cold-load memory admission). Each row labels that baseline clean (the
+    service held at most 32 MiB), dirty (it already held more, so its growth
+    understates a cold compile on a clean host) or unknown (no sample before
+    the load, or a report without the label).
 
 Every template stage must show a generate and a load segment in every run, or
 the stage checks would pass without measuring anything; a stage seen more than
@@ -152,6 +155,7 @@ def check_run(path, r, templates):
         failures.append(f"{path}: no ane_compiler_before_loads (an older tool's report)")
     growth = max(0, peak - int(r.get("ane_compiler_before_loads", 0)))
     row["ane_growth"], row["ane_peak"] = growth, peak
+    row["ane_baseline"] = r.get("ane_compiler_baseline", "unknown")
     if row["reserve_lim"] is not None and growth > row["reserve_lim"]:
         failures.append(f"{path}: ANECompilerService grew {mib(growth)} MiB during the loads, over the reserve "
                         f"{mib(row['reserve_lim'])} MiB")
@@ -200,7 +204,8 @@ def main(argv=None):
         print(f"| {Path(path).name} | {row['units']} | {mib(row['increment'])} | {mib(row['envelope'])} | "
               f"{mib(row['prepare'])} | {mib(row['prepare_lim'] or 0)} | {mib(row['load'])} | "
               f"{mib(row['load_lim'] or 0)} | {mib(row['resident'])} | {mib(row['resident_lim'] or 0)} | "
-              f"{mib(row['steady'])} | {mib(row['ane_growth'])} (peak {mib(row['ane_peak'])}) | "
+              f"{mib(row['steady'])} | {mib(row['ane_growth'])} (peak {mib(row['ane_peak'])}, "
+              f"{row['ane_baseline']} baseline) | "
               f"{mib(row['reserve_lim'] or 0)} |")
     if rows:
         worst = {k: max(r[k] for r in rows) for k in ("increment", "prepare", "load", "resident", "steady",

@@ -17,7 +17,7 @@
 // capacity ready before it, or less the ggml-only run's peak for the first.
 // The steps add up to the run's steady growth over ggml. It also records
 // ANECompilerService's growth during the loads (its peak less its size when
-// the first load starts), and compares the run's peak footprint with the
+// the first load starts, that baseline labelled clean, dirty or unknown), and compares the run's peak footprint with the
 // Core ML bytes fit charges for the same options, as an increment over a
 // ggml-only run of the same passes (--baseline-bytes, from --ggml-only).
 //
@@ -61,6 +61,11 @@ constexpr int kThreads = 4;
 constexpr int kGpuLayers = 99;
 constexpr double kMiB = 1048576.0;
 constexpr double kTraceSeconds = 0.1;  // the bucket of the report's footprint trace
+// ANECompilerService at or below this size before the first load counts as a
+// clean start: its growth then stands for a cold compile on a clean host. A
+// service that already holds more (a dirty start) reuses some of it, so its
+// growth understates one.
+constexpr uint64_t kAneCompilerCleanBytes = 32ull * 1024 * 1024;
 
 uint64_t footprint_now() {
     task_vm_info_data_t info{};
@@ -451,10 +456,17 @@ int main(int argc, char ** argv) {
         if (seg.phase == "load" && (first_load < 0 || seg.t0 < first_load)) first_load = seg.t0;
     }
     uint64_t ane_before_loads = 0;
+    bool ane_sampled_before = false;
     for (const AneSample & s : ane) {
         if (first_load < 0 || s.t > first_load) break;
         ane_before_loads = s.rss;
+        ane_sampled_before = true;
     }
+    // The baseline the growth is measured from: clean, dirty, or unknown (no
+    // sample at or before the first load).
+    const char * ane_baseline = !ane_sampled_before                         ? "unknown"
+                                : ane_before_loads <= kAneCompilerCleanBytes ? "clean"
+                                                                             : "dirty";
     // Resident steps, in the order the loads end (a capacity is ready).
     std::vector<size_t> ready;
     for (size_t i = 0; i < segments.size(); ++i) {
@@ -522,11 +534,12 @@ int main(int argc, char ** argv) {
                   "],\"max_generate_increment\":%llu,\"max_compile_increment\":%llu,\"max_load_increment\":%llu,"
                   "\"max_resident_increment\":%llu,\"steady_increment_over_baseline\":%llu,"
                   "\"ane_compiler_peak_during_load\":%llu,\"ane_compiler_before_loads\":%llu,"
-                  "\"ane_compiler_growth\":%llu,\"peak_increment_over_baseline\":%llu,\"trace\":[",
+                  "\"ane_compiler_baseline\":\"%s\",\"ane_compiler_growth\":%llu,"
+                  "\"peak_increment_over_baseline\":%llu,\"trace\":[",
                   (unsigned long long) generate_inc, (unsigned long long) compile_inc,
                   (unsigned long long) load_inc, (unsigned long long) resident_max,
                   (unsigned long long) steady_increment, (unsigned long long) ane_load_peak,
-                  (unsigned long long) ane_before_loads, (unsigned long long) ane_growth,
+                  (unsigned long long) ane_before_loads, ane_baseline, (unsigned long long) ane_growth,
                   (unsigned long long) increment);
     json += buf;
     // The footprint in kTraceSeconds buckets: [start, min, max].
@@ -559,10 +572,10 @@ int main(int argc, char ** argv) {
     if (!ggml_only) {
         std::printf("increments: generate %.1f MiB, compile %.1f MiB, load+warm %.1f MiB, largest resident step "
                     "%.1f MiB (steady %.1f MiB over ggml); ANECompilerService peak %.1f MiB (min %.1f), %.1f MiB "
-                    "before the loads, growth %.1f MiB\n",
+                    "before the loads (%s baseline), growth %.1f MiB\n",
                     generate_inc / kMiB, compile_inc / kMiB, load_inc / kMiB, resident_max / kMiB,
                     steady_increment / kMiB, ane_peak / kMiB, ane_min / kMiB, ane_before_loads / kMiB,
-                    ane_growth / kMiB);
+                    ane_baseline, ane_growth / kMiB);
         std::printf("peak increment over the ggml-only baseline %.1f MiB, envelope %.1f MiB: %s\n",
                     increment / kMiB, fr.coreml.bytes / kMiB,
                     baseline == 0 ? "no baseline" : (increment <= fr.coreml.bytes ? "WITHIN" : "OVER"));
