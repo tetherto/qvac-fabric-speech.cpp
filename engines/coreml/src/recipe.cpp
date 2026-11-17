@@ -340,11 +340,11 @@ ExprP parse_expr(Cursor & c, int depth = 0) {
 }
 
 // Ops of this generator version. Later generator versions add more.
-const std::set<std::string> kOps = {"t",    "f32",   "f64",  "f16",  "add",   "mul", "div",   "recip", "clip",
-                                    "reshape", "permute", "take", "concat", "slice", "neg", "zeros", "ones", "lit"};
+const std::set<std::string> kOps = {"t",     "f32",     "f64",  "f16",    "add",   "mul", "div",
+                                    "recip", "clip",    "reshape", "permute", "take", "concat", "slice",
+                                    "neg",   "zeros",   "ones", "lit",    "tile",  "exp", "l2norm"};
 // Ops that exist in the language but belong to a later generator version.
-const std::set<std::string> kLaterOps = {"sub", "sqrt", "full",   "tile",   "exp",
-                                         "sin", "cos",  "l2norm", "matmul", "meta_f", "meta_s", "provided"};
+const std::set<std::string> kLaterOps = {"sub", "sqrt", "full", "sin", "cos", "matmul", "meta_f", "meta_s", "provided"};
 
 std::string shape_str(const std::vector<int64_t> & s) {
     std::string o = "[";
@@ -678,6 +678,51 @@ private:
             if (!l) throw RecipeError(e.line, "lit(\"" + a.text + "\") is not declared in template.json literals");
             e.dtype = DType::f32;
             e.shape = l->shape;
+            return;
+        }
+        if (op == "tile") {
+            arity(e, 3);
+            array(*e.args[0], "tile");
+            const std::vector<int64_t> & in = e.args[0]->shape;
+            const int64_t axis = integer(*e.args[1], "tile axis");
+            const int64_t n = integer(*e.args[2], "tile count");
+            if (axis < 0 || axis >= static_cast<int64_t>(in.size())) throw RecipeError(e.line, "tile() axis out of range");
+            if (n < 1) throw RecipeError(e.line, "tile() count must be at least 1");
+            const std::optional<uint64_t> len =
+                detail::mul_elements(static_cast<uint64_t>(in[axis]), static_cast<uint64_t>(n));
+            if (!len) throw RecipeError(e.line, "tile() axis length overflows");
+            e.shape = in;
+            e.shape[axis] = static_cast<int64_t>(*len);
+            e.dtype = e.args[0]->dtype;
+            e.ulp = e.args[0]->ulp;
+            return;
+        }
+        if (op == "exp") {
+            arity(e, 1);
+            value(*e.args[0]);
+            e.dtype = e.args[0]->dtype;
+            e.shape = e.args[0]->shape;
+            e.ulp = true;  // a transcendental: libm may differ from the exporter's in the last place
+            return;
+        }
+        if (op == "l2norm") {
+            arity(e, 2);
+            array(*e.args[0], "l2norm");
+            const std::vector<int64_t> axes = int_list(*e.args[1], "l2norm axes");
+            const std::vector<int64_t> & in = e.args[0]->shape;
+            if (axes.empty()) throw RecipeError(e.line, "l2norm() needs at least one axis");
+            std::vector<bool> seen(in.size(), false);
+            e.shape = in;
+            for (int64_t a : axes) {
+                if (a < 0 || a >= static_cast<int64_t>(in.size()) || seen[a]) {
+                    throw RecipeError(e.line, "l2norm() axes must be distinct axes of 0.." +
+                                                  std::to_string(in.size() - 1));
+                }
+                seen[a] = true;
+                e.shape[a] = 1;  // reduced dims are kept, with size 1
+            }
+            e.dtype = e.args[0]->dtype;
+            e.ulp = true;  // a reduction: the exporter may sum in another order or precision
             return;
         }
         throw RecipeError(e.line, "unknown op " + op + "()");  // unreachable: kOps is exhaustive

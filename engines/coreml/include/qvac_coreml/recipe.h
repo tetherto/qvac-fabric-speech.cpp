@@ -10,15 +10,16 @@
 // evaluate_patches() the spec patches. The op vocabulary grows with its
 // consumers; this generator version knows:
 //   t f32 f64 f16 add mul div recip clip reshape permute take concat (+ let)
-//   slice neg zeros ones lit
+//   slice neg zeros ones lit tile exp l2norm
 // and `patch` lines of dtype fp16 and fp32, which rewrite inline constants of
 // the spec (model.mlmodel) in place. `patch ... str`, provided() and
 // meta_f/meta_s belong to later generator versions; the parser rejects them.
 //
 // Arithmetic is IEEE in the operand dtype with no FMA contraction (the
-// interpreter is compiled with -ffp-contract=off). No op of this vocabulary is
-// a reduction, a transcendental or provided(), so every blob is `exact`;
-// compare_blob() already implements the `ulp` rule later ops flag into.
+// interpreter is compiled with -ffp-contract=off). A blob whose expression
+// contains a transcendental (exp) or a reduction (l2norm) is `ulp`: it may
+// differ from the exporter's in the last place, and compare_blob() applies
+// the `ulp` rule to it. Every other blob is `exact`.
 
 #include "qvac_coreml/slot.h"
 
