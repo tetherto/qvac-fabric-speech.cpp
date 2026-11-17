@@ -1401,7 +1401,7 @@ void cfm_replay_check(const std::string & s3gen, const fs::path & root) {
     CoremlOptions waited;
     waited.wait = CoremlOptions::Wait::call;
     waited.compute_units = "cpu_only";
-    waited.prewarm = CoremlOptions::Prewarm::none;
+    waited.prewarm = CoremlOptions::Prewarm::predicted;  // predict() below loads the two widths
     auto sidecars = cb::s3gen_sidecars::get(gguf, waited);
     require(sidecars != nullptr, "replay: the CFM sidecar is found");
     const std::vector<int> widths = sidecars->buckets(cb::s3gen_stage::cfm);
