@@ -16,7 +16,8 @@
 //   test-acestep-vae-coreml --models DIR --cache-root DIR [--cases LIST]
 //       [--duration S] [--require-coreml]
 //       Device cases (AUDIOGEN_COREML, macOS 15), each on a fresh cache under
-//       --cache-root (LIST: encode,lowmem,cached,prewarm,evict,degrade; default all):
+//       --cache-root (LIST: encode,lowmem,cached,cancel,prewarm,evict,degrade;
+//       default all):
 //       encode   an encoding (ensure_vae(true)) starts no decoder job;
 //       lowmem   three generate() calls in low-memory mode: the first decodes
 //                on ggml while the cold load completes after its eviction (no
@@ -25,6 +26,10 @@
 //       cached   (after lowmem) a second process on the primed cache: its
 //                first decode, with the default wait settings, adopts the
 //                cached artifact and decodes on Core ML;
+//       cancel   cancelled VAE phases (ggml decode with the decoder pending,
+//                Core ML decode, an acquisition waiting for the loading
+//                decoder, also strict) end at the stage boundary with the slot
+//                idle and never start a ggml decode they were not asked for;
 //       prewarm  {prewarm all, wait construct} succeeds with no decoder
 //                retained, and the next generate() decodes on Core ML;
 //       evict    an eviction while a job is unstarted cancels it;
@@ -644,6 +649,102 @@ void case_cached(const std::string & self, const std::string & models, const std
     check(rc == 0, "the child process's first decode ran on Core ML (exit " + std::to_string(rc) + ")");
 }
 
+// Cancellation never bypasses the low-memory stage boundary and never starts a
+// ggml decode it was not asked for:
+//  - a ggml decode (the decoder pending) cancelled from its progress: the
+//    slot is evicted when generate() returns;
+//  - a Core ML decode (the decoder ready, on the primed cache) cancelled after
+//    its first window: the decoder is released when generate() returns;
+//  - an acquisition that waits for a loading decoder (wait call), cancelled
+//    with Engine::cancel(): generate() returns without any ggml decode, also
+//    under use = require, and the slot is idle afterwards.
+void case_cancel(const std::string & models, const std::string & root, const std::string & primed, float duration) {
+    std::fprintf(stderr, "cancel: cancelled VAE phases end at the stage boundary\n");
+    {
+        const std::string cache = fresh_dir(root, "cancel-pending");
+        std::unique_ptr<Engine> engine = Engine::create(engine_options(models, cache));
+        std::string during;
+        const GenerateResult r = engine->generate(short_params(duration), [&](const std::string & stage, int step, int) {
+            if (stage == "vae" && step > 0) {
+                during = engine->coreml_status();
+                return false;
+            }
+            return true;
+        });
+        const std::string after = engine->coreml_status();
+        std::fprintf(stderr, "  pending decode: slot during %s, after %s\n", state_of(during).c_str(),
+                     state_of(after).c_str());
+        check(r.pcm.empty() && !during.empty() && state_of(during) != "idle" && state_of(after) == "idle",
+              "a cancelled ggml decode with the decoder pending: the slot is evicted when generate() returns (" +
+                  state_of(during) + " -> " + state_of(after) + ")");
+    }
+    if (!primed.empty()) {
+        EngineOptions o = engine_options(models, primed);
+        o.coreml.wait = CoremlOptions::Wait::call;
+        std::unique_ptr<Engine> engine = Engine::create(o);
+        std::string during;
+        const GenerateResult r = engine->generate(short_params(duration), [&](const std::string & stage, int step, int) {
+            if (stage == "vae" && step > 0) {
+                during = engine->coreml_status();
+                return false;
+            }
+            return true;
+        });
+        const std::string after = engine->coreml_status();
+        std::fprintf(stderr, "  ready decode: slot during %s, after %s\n", state_of(during).c_str(),
+                     state_of(after).c_str());
+        check(r.pcm.empty() && state_of(during) == "ready" && state_of(after) == "idle",
+              "a cancelled Core ML decode: the decoder is released when generate() returns (" + state_of(during) +
+                  " -> " + state_of(after) + ")");
+    } else {
+        std::fprintf(stderr, "  ready decode: needs the lowmem case's primed cache, not run\n");
+    }
+    const std::string cache = fresh_dir(root, "cancel-loading");
+    for (const bool strict : {false, true}) {
+        EngineOptions o = engine_options(models, cache);
+        o.coreml.wait = CoremlOptions::Wait::call;
+        if (strict) o.coreml.use = CoremlOptions::Use::require;
+        std::unique_ptr<Engine> engine = Engine::create(o);
+        std::atomic<bool> done{false};
+        std::atomic<int> vae_steps{0};
+        std::string at_cancel;
+        std::thread canceller([&] {
+            poll_until([&] { return engine->coreml_status(); },
+                       [&](const std::string & st) {
+                           const std::string s = state_of(st);
+                           return done.load() || (s != "idle" && s != "ready");
+                       },
+                       std::chrono::seconds(600), &at_cancel);
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            engine->cancel();
+        });
+        GenerateResult r;
+        bool threw = false;
+        Clock::time_point returned;
+        try {
+            r = engine->generate(short_params(duration), [&](const std::string & stage, int step, int) {
+                if (stage == "vae" && step > 0) ++vae_steps;
+                return true;
+            });
+        } catch (const std::exception & e) {
+            threw = true;
+            std::fprintf(stderr, "  generate threw: %s\n", e.what());
+        }
+        returned = Clock::now();
+        done.store(true);
+        canceller.join();
+        const std::string after = engine->coreml_status();
+        std::fprintf(stderr, "  %s acquisition: slot at cancel %s, after %s, %d VAE progress report(s)\n",
+                     strict ? "strict" : "waiting", state_of(at_cancel).c_str(), state_of(after).c_str(),
+                     vae_steps.load());
+        (void) returned;
+        check(!threw && r.pcm.empty() && vae_steps.load() == 0 && state_of(after) == "idle",
+              std::string(strict ? "use = require: " : "wait call: ") +
+                  "cancelling an acquisition that waits for the loading decoder runs no ggml decode and leaves "
+                  "the slot idle (" + state_of(at_cancel) + ")");
+    }
+}
+
 // Install-time preparation: {prewarm all, wait construct} in low-memory mode.
 void case_prewarm(const std::string & models, const std::string & root, float duration) {
     std::fprintf(stderr, "prewarm: {prewarm all, wait construct}\n");
@@ -955,7 +1056,7 @@ void memory_schedule(const std::string & vae, const std::string & cache, bool la
 
 int main(int argc, char ** argv) {
     bool self = false, fit = false, require = false, late = false;
-    std::string models, vae, cache_root, memory_dir, first_decode, cases = "encode,lowmem,cached,prewarm,evict,degrade";
+    std::string models, vae, cache_root, memory_dir, first_decode, cases = "encode,lowmem,cached,cancel,prewarm,evict,degrade";
     float duration = 20.0f;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -1012,6 +1113,7 @@ int main(int argc, char ** argv) {
             std::string lowmem_cache;
             if (contains(cases, "lowmem")) lowmem_cache = case_lowmem(models, cache_root, duration);
             if (contains(cases, "cached") && !lowmem_cache.empty()) case_cached(argv[0], models, lowmem_cache, duration);
+            if (contains(cases, "cancel")) case_cancel(models, cache_root, lowmem_cache, duration);
             if (contains(cases, "prewarm")) case_prewarm(models, cache_root, duration);
             if (contains(cases, "evict")) case_evict(vae, cache_root);
             if (contains(cases, "degrade")) case_degrade(models, cache_root);

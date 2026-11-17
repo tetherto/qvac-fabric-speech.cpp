@@ -586,6 +586,29 @@ static constexpr const char * EDIT_TASK_TYPE_SUFFIX = "'";
 
 using StageReporter = std::function<bool(const char *, int, int)>;
 
+// A low-memory VAE phase: from the VAE load to the stage boundary. The VAE is
+// released (and the Core ML decoder evicted) on every exit of the phase:
+// completion, cancellation, a failed decode or an exception. release() ends
+// the phase early, where the pipeline continues after it.
+template <typename EngineImpl>
+class LowMemoryVaePhase {
+public:
+    LowMemoryVaePhase(EngineImpl & engine, bool low_memory) : engine_(engine), armed_(low_memory) {}
+    ~LowMemoryVaePhase() { release(); }
+    LowMemoryVaePhase(const LowMemoryVaePhase &) = delete;
+    LowMemoryVaePhase & operator=(const LowMemoryVaePhase &) = delete;
+    void release() {
+        if (!armed_) return;
+        armed_ = false;
+        if (engine_.vae && engine_.opts.verbose) fprintf(stderr, "[acestep-engine] freeing VAE (low-mem)\n");
+        engine_.free_vae();
+    }
+
+private:
+    EngineImpl & engine_;
+    bool armed_;
+};
+
 static long long resolve_seed(long long seed) {
     if (seed >= 0) return seed;
     std::random_device random;
@@ -778,6 +801,7 @@ static bool prepare_audio_conditioning(EngineImpl & engine, const GenerateParams
     if (!state.plan.encode_source && !state.plan.encode_reference) return true;
 
     engine.ensure_vae(true);
+    LowMemoryVaePhase<EngineImpl> vae_phase(engine, state.low_memory);
     const AudioEncoder encode =
         [&](const std::vector<float> & pcm, const char * stage, EncodedAudio & output) {
             return encode_audio(*engine.vae, pcm, stage, resolve_conditioning_dump_name(stage),
@@ -790,7 +814,6 @@ static bool prepare_audio_conditioning(EngineImpl & engine, const GenerateParams
         state.latent_frames = state.conditioning.source.frames;
         state.prompt.duration = (float) state.latent_frames / AUDIO_LATENT_RATE;
     }
-    if (state.low_memory) engine.free_vae();
     return true;
 }
 
@@ -1421,6 +1444,7 @@ static bool decode_audio(EngineImpl & engine, const std::vector<float> & latent,
                          const StageReporter & report, StageDump & dump,
                          StageTimes & timing, GenerateResult & result) {
     engine.ensure_vae();
+    LowMemoryVaePhase<EngineImpl> vae_phase(engine, low_memory);
     if (!report("vae", 0, 1)) return false;
 
     bool completed = true;
@@ -1429,7 +1453,9 @@ static bool decode_audio(EngineImpl & engine, const std::vector<float> & latent,
         return completed;
     });
     engine.note_vae_decode();
-    if (!completed) {
+    // A cancel that interrupted the decoder's acquisition returns no PCM
+    // without a progress report.
+    if (!completed || (result.pcm.empty() && engine.cancel_flag.load())) {
         result.pcm.clear();
         return false;
     }
@@ -1438,11 +1464,6 @@ static bool decode_audio(EngineImpl & engine, const std::vector<float> & latent,
     timing.mark("vae");
     dump.write("09_vae_pcm", result.pcm, (int) (result.pcm.size() / AUDIO_CHANNELS), AUDIO_CHANNELS);
     if (engine.opts.verbose) timing.dump(stderr);
-
-    if (low_memory) {
-        if (engine.vae && engine.opts.verbose) fprintf(stderr, "[acestep-engine] freeing VAE (low-mem)\n");
-        engine.free_vae();
-    }
     return true;
 }
 
@@ -1644,6 +1665,7 @@ static bool encode_edit_plan_inputs(EngineImpl & engine, const GenerateParams & 
                                     StageDump & dump, StageTimes & timing,
                                     AudioEditArtifact & artifact) {
     engine.ensure_vae(true);
+    LowMemoryVaePhase<EngineImpl> vae_phase(engine, state.generation.low_memory);
     EncodedAudio source;
     if (!encode_audio(*engine.vae, params.source_audio, EDIT_STAGE_SOURCE,
                       EDIT_DUMP_SOURCE_LATENT, report, engine.opts.verbose,
@@ -1656,7 +1678,7 @@ static bool encode_edit_plan_inputs(EngineImpl & engine, const GenerateParams & 
                       dump, timing, state.generation.conditioning.reference)) {
         return false;
     }
-    if (state.generation.low_memory) engine.free_vae();
+    vae_phase.release();
     artifact.latent = std::move(source.latent);
     artifact.latent_frames = source.frames;
     artifact.pcm = params.source_audio;
@@ -1669,6 +1691,7 @@ static void materialize_repaint_source(EngineImpl & engine, const EditPlanState 
                                        AudioEditArtifact & artifact,
                                        const StageReporter & report) {
     engine.ensure_vae(true);
+    LowMemoryVaePhase<EngineImpl> vae_phase(engine, state.generation.low_memory);
     bool completed = true;
     std::vector<float> materialized = engine.vae->decode(
         artifact.latent, artifact.latent_frames, [&](int done, int total) {
@@ -1676,7 +1699,7 @@ static void materialize_repaint_source(EngineImpl & engine, const EditPlanState 
             return completed;
         });
     engine.note_vae_decode();
-    if (!completed) return;
+    if (!completed || (materialized.empty() && engine.cancel_flag.load())) return;
     if (materialized.empty()) {
         throw std::runtime_error(EDIT_ERROR_INTERMEDIATE_DECODE);
     }
@@ -1700,7 +1723,6 @@ static void materialize_repaint_source(EngineImpl & engine, const EditPlanState 
     if (artifact.latent.empty() || artifact.latent_frames <= 0) {
         throw std::runtime_error(EDIT_ERROR_INTERMEDIATE_ENCODE);
     }
-    if (state.generation.low_memory) engine.free_vae();
 }
 
 static RepaintRange resolve_repaint_operation_range(const RepaintParams & edit,
@@ -2031,6 +2053,7 @@ static GenerateResult decode_edit_plan_result(
     result.sample_rate = engine.sr;
     result.channels = AUDIO_CHANNELS;
     engine.ensure_vae();
+    LowMemoryVaePhase<EngineImpl> vae_phase(engine, state.generation.low_memory);
     if (!report(EDIT_STAGE_VAE, EDIT_PROGRESS_START, EDIT_PROGRESS_TOTAL)) {
         return result;
     }
@@ -2041,7 +2064,7 @@ static GenerateResult decode_edit_plan_result(
           return completed;
         });
     engine.note_vae_decode();
-    if (!completed) {
+    if (!completed || (result.pcm.empty() && engine.cancel_flag.load())) {
         result.pcm.clear();
         return result;
     }
@@ -2054,7 +2077,7 @@ static GenerateResult decode_edit_plan_result(
         result.pcm.size(), (size_t) state.output_samples * AUDIO_CHANNELS));
     apply_pending_waveform_splice(artifact, result.pcm);
     report(EDIT_STAGE_VAE, EDIT_PROGRESS_COMPLETE, EDIT_PROGRESS_TOTAL);
-    if (state.generation.low_memory) engine.free_vae();
+    vae_phase.release();
     populate_metadata(state.generation, result);
     return result;
 }
@@ -2194,12 +2217,13 @@ UnderstandResult Engine::understand(const UnderstandParams & params, const Progr
     StageDump  dump(engine.opts.dump_stages_dir, engine.opts.verbose);
 
     engine.ensure_vae(true);
+    LowMemoryVaePhase<Engine::Impl> vae_phase(engine, low_memory);
     EncodedAudio source;
     if (!encode_audio(*engine.vae, params.audio, "source", "00_source_latent", report,
                       engine.opts.verbose, dump, timing, source)) {
         return result;
     }
-    if (low_memory) engine.free_vae();
+    vae_phase.release();
 
     if (!report("tok", 0, 1)) return result;
     engine.ensure_tok();

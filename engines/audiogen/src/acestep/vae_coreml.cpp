@@ -361,7 +361,21 @@ vae_coreml_call vae_coreml_stage::acquire(int T_latent) {
         throw_strict(std::string("the Core ML VAE decoder cannot serve this decode (") + e.what() + ")");
     }
     call.pending = got.pending;
-    if (!got.model) return call;
+    if (!got.model) {
+        if (p_->cancel && p_->cancel->load()) {
+            call.cancelled = true;
+            call.pending   = false;
+            return call;
+        }
+        // A strict acquisition the runtime returned unserved without a
+        // CoremlError (evicted meanwhile, shutting down) still cannot run on
+        // ggml.
+        if (p_->resolved.strict()) {
+            throw_strict("the Core ML VAE decoder cannot serve this decode (" +
+                         rt::state_label(got.state, std::string()) + ")");
+        }
+        return call;
+    }
     auto decoder = std::make_shared<handle_decoder>(std::move(got.model));
     call.retire  = [decoder](const std::string & reason) { decoder->retire(reason); };
     call.decoder = std::move(decoder);

@@ -88,8 +88,11 @@ public:
 
 // What one decode runs on, acquired once at its start.
 struct vae_coreml_call {
-    std::shared_ptr<vae_coreml_decoder> decoder;  // null: this decode runs on ggml
+    std::shared_ptr<vae_coreml_decoder> decoder;  // null: this decode runs on ggml (unless cancelled)
     bool pending = false;  // on ggml only because the sidecar was not ready yet
+    // The stage's cancel flag interrupted the acquisition: the decode returns
+    // at once, on neither backend.
+    bool cancelled = false;
     // A prediction failed: retire the sidecar (for every owner of it). The
     // decode is then redone on ggml, or fails under strict.
     std::function<void(const std::string & reason)> retire;
@@ -116,9 +119,10 @@ public:
     vae_coreml_stage & operator=(const vae_coreml_stage &) = delete;
 
     // Once per decode of `T_latent` frames: requests the decoder and acquires
-    // it with a deadline of vae_ggml_decode_estimate_ms(T_latent). Throws
-    // std::runtime_error when use = require and the sidecar cannot serve the
-    // decode (failed, retired, timed out, deferred for memory).
+    // it with a deadline of vae_ggml_decode_estimate_ms(T_latent). A set
+    // cancel flag returns `cancelled`. Throws std::runtime_error when use =
+    // require and the sidecar cannot serve the decode (failed, retired, timed
+    // out, deferred for memory, evicted or shut down while waiting).
     vae_coreml_call acquire(int T_latent);
     // Releases the loaded decoder and cancels unstarted jobs; a started load
     // runs on, writes its hint and never repopulates the slot.

@@ -152,6 +152,7 @@ std::vector<float> Vae::decode(const std::vector<float> & latent, int T_latent,
             return finish({});
         }
         pending = call.pending;
+        if (call.cancelled) return finish({});  // neither backend: the caller cancelled
         if (call.decoder) {
             const bool strict = impl_->coreml->strict();
             std::vector<float> pcm;
