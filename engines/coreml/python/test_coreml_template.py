@@ -363,6 +363,68 @@ TOY_ARGS = ["--kind", "stateless", "--gguf", "{gguf}", "--output", "{out}"]
 NEEDS_TOY = needs(HAVE_CT and HAVE_GGUF and TOOL and Path(TOOL).is_file(), "coremltools, gguf and $QVAC_COREML_TOOL")
 
 
+NEEDS_TOOL = needs(HAVE_GGUF and TOOL and Path(TOOL).is_file(), "gguf and $QVAC_COREML_TOOL")
+
+
+def write_gguf(path, tensors):
+    import gguf
+
+    w = gguf.GGUFWriter(str(path), "toy")
+    for name, arr in tensors.items():
+        w.add_tensor(name, np.asarray(arr, dtype=np.float32))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+
+
+def with_constant_stats(manifest, values):
+    """A copy of `manifest` whose tensors in `values` record that one value
+    for every element (as a scalar bias or a constant vector does)."""
+    m = json.loads(Path(manifest).read_text())
+    for t in m["tensors"]:
+        if t["name"] in values:
+            v = values[t["name"]]
+            t["stats"] = {"min": v, "max": v, "mean": v, "std": 0.0}
+    return m
+
+
+class TwinTest(unittest.TestCase):
+    """Twins differ on every tensor, and the extraction gates refuse twins
+    that hold the same values for a tensor."""
+
+    @NEEDS_TOOL
+    def test_constant_tensors_differ_between_seeds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            man = tmp / "reference-gguf.json"
+            man.write_text(json.dumps(with_constant_stats(TOY_STATELESS / "reference-gguf.json",
+                                                          {"toy.b1": 0.25, "toy.w1": 0.0})))
+            twins = []
+            for seed in (1, 2):
+                out = tmp / f"twin-{seed}.gguf"
+                subprocess.run([TOOL, "twin", "--manifest", man, "--seed", str(seed), "--types", "f32", "-o", out],
+                               check=True, capture_output=True)
+                twins.append(out)
+            self.assertEqual(ctpl.coinciding_tensors(*twins), [])
+            for twin in twins:
+                t = ctpl.gguf_tensors(twin)
+                b1, w1 = t["toy.b1"][1], t["toy.w1"][1]
+                self.assertTrue(np.all((b1 >= 0.1875) & (b1 <= 0.3125)), b1)  # within 25%, sign kept
+                self.assertTrue(np.all(np.abs(w1) <= 0.00025), w1)
+                self.assertGreater(np.ptp(b1), 0.0)
+
+    @needs(HAVE_GGUF, "gguf")
+    def test_equal_tensors_are_named(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a, b = Path(tmp) / "a.gguf", Path(tmp) / "b.gguf"
+            write_gguf(a, {"same": [0.5], "other": [1.0, 2.0]})
+            write_gguf(b, {"same": [0.5], "other": [1.0, 2.5]})
+            self.assertEqual(ctpl.coinciding_tensors(a, b), ["same"])
+            with self.assertRaisesRegex(ctpl.TemplateError, r"same values for 1 tensor\(s\).*: same"):
+                ctpl.check_twins_differ(a, b, "extract")
+
+
 def run_ctpl(*args):
     return subprocess.run([sys.executable, str(HERE / "coreml_template.py"), "--tool", TOOL] + [str(a) for a in args],
                           capture_output=True, text=True)
@@ -602,6 +664,21 @@ class ToyExtractTest(unittest.TestCase):
         self.assertIn("patch sites", p.stderr)
         self.assertIn("no `end` line", p.stderr)
         self.assertEqual(snapshot(self.tdir), before)
+
+    @NEEDS_TOY
+    def test_constant_tensor_folded_into_the_program_becomes_a_patch_site(self):
+        # toy.b1 recorded as one repeated value, as a scalar bias is. The
+        # `patch` exporter folds -b1 into the program, so it must still become
+        # a patch site, which it can only when the twins differ on it.
+        man = with_constant_stats(self.tdir / "reference-gguf.json", {"toy.b1": 0.25})
+        (self.tdir / "reference-gguf.json").write_text(json.dumps(man, indent=1) + "\n")
+        p = self.extract_variant("patch")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("1 weight-dependent inline constant(s) become patch sites", p.stderr)
+        self.assertEqual(len(json.loads((self.tdir / "template.json").read_text())["patches"]), 1)
+        patch_lines = [l for l in (self.tdir / "recipe.txt").read_text().splitlines() if l.startswith("patch ")]
+        self.assertEqual(len(patch_lines), 1)
+        self.assertIn('t("toy.b1")', patch_lines[0])
 
     @NEEDS_TOY
     def test_unchanged_reextraction_keeps_template_bytes(self):

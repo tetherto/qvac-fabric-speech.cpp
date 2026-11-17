@@ -409,7 +409,11 @@ qvac-coreml-tool twin --manifest <manifest.json> --seed <N> --types <type[,type.
 
 Writes a random GGUF with the same metadata and tensor geometry as the
 manifest. Each tensor's values are drawn from a normal distribution with the
-recorded mean and standard deviation, clamped to the recorded range. Tensors
+recorded mean and standard deviation, clamped to the recorded range. A tensor
+whose recorded values are all equal (a scalar bias, a constant vector) is drawn
+within ±25% of that value (±0.00025 around zero) instead, so every tensor
+differs between seeds and `extract` can see any value the exporter folds into
+the program. Tensors
 that are not f32 in the original (quantised, f16, bf16) take the `--types`
 entries in turn, quantised with ggml's own quantisers, when their row length is
 a multiple of that type's block size; the rest stay f32. `--set` sets a string

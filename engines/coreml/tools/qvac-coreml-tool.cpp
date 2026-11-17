@@ -8,7 +8,8 @@
 //   twin     --manifest <reference-gguf.json> --seed <S> --types <t[,t...]> -o <out.gguf>
 //            [--set key=value ...]
 //            A production-geometry random GGUF: values per tensor inside the
-//            recorded range; tensors that are quantised (or f16/bf16) in the
+//            recorded range (around the recorded value when the range is a
+//            single value, so every tensor differs between seeds); tensors that are quantised (or f16/bf16) in the
 //            reference take the listed types in turn, the rest stay f32.
 //            Quantised with ggml's own quantizers; --types takes only types
 //            ggml can both write and read back (twin_writes()). --set
@@ -560,6 +561,16 @@ int cmd_twin(const Args & a) {
         p.hi = t["stats"]["max"];
         p.mean = t["stats"]["mean"];
         p.sd = t["stats"]["std"];
+        if (!(p.hi > p.lo)) {
+            // Every recorded value is the same (a scalar bias, a constant vector). Drawn with
+            // no spread it would be equal in every twin, and extraction could not see whether
+            // the exporter folds it into the program. Draw it around the recorded value
+            // instead, keeping its sign: a different value per seed.
+            const double r = std::max(std::fabs(p.mean), 1e-3) * 0.25;
+            p.lo = p.mean - r;
+            p.hi = p.mean + r;
+            p.sd = r / 3.0;
+        }
         p.type = GGML_TYPE_F32;
         const bool low_precision = ref && *ref != GGML_TYPE_F32;
         if (low_precision) {
