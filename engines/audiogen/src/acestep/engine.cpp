@@ -385,11 +385,16 @@ std::unique_ptr<Engine> Engine::create(const EngineOptions & opts_in) {
     // The VAE decoder's Core ML stage. Nothing is requested here unless
     // coreml.prewarm is all; in low-memory mode a waited construction load is
     // released again once it is ready. With a memory budget, fit's
-    // memory-degrade decides first whether only the ggml projection fits.
+    // memory-degrade decides first whether only the ggml projection fits:
+    // the caller's decision (coreml.memory_degrade) when it passes one,
+    // otherwise fit with the default workload.
     {
         bool degrade = false;
 #ifdef AUDIOGEN_USE_COREML
-        if (opts.coreml.memory_budget_bytes) {
+        if (opts.coreml.memory_budget_bytes && opts.coreml.memory_degrade) {
+            // The caller's fit decided for its own workload and margin.
+            degrade = *opts.coreml.memory_degrade;
+        } else if (opts.coreml.memory_budget_bytes) {
             FitOptions fit;
             fit.text_enc_model_path = opts.text_enc_model_path;
             fit.lm_model_path       = opts.lm_model_path;

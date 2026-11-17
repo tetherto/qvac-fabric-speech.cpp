@@ -904,6 +904,28 @@ void case_degrade(const std::string & models, const std::string & root) {
     o.coreml.memory_budget_bytes = roomy.coreml.memory_budget_bytes;
     std::unique_ptr<Engine> room = Engine::create(o);
     check(state_of(room->coreml_status()) == "idle", "Engine with room: decoder " + state_of(room->coreml_status()));
+
+    // The caller's decision is the one construction applies: a budget the
+    // assessed workload (20 s) degrades at, while the default workload
+    // (60 s), whose ggml projection alone exceeds it, would keep Core ML.
+    FitOptions assessed = f;
+    assessed.coreml.memory_budget_bytes =
+        (int64_t) (need_without + f.margin_bytes + std::min<uint64_t>(delta / 2, 64ull << 20));
+    FitOptions dflt = assessed;
+    dflt.duration_seconds = FitOptions{}.duration_seconds;
+    const FitResult a = fit_params(assessed);
+    const FitResult d = fit_params(dflt);
+    std::fprintf(stderr, "  budget %.1f MiB: assessed (%.0f s) '%s', default workload (%.0f s) '%s'\n",
+                 mib((uint64_t) *assessed.coreml.memory_budget_bytes), assessed.duration_seconds,
+                 a.coreml.disabled_reason.c_str(), dflt.duration_seconds, d.coreml.disabled_reason.c_str());
+    check(a.coreml.disabled_reason == "memory" && d.coreml.disabled_reason.empty(),
+          "the assessed and the default workload choose different routes at this budget");
+    EngineOptions decided = engine_options(models, cache);
+    decided.coreml.memory_budget_bytes = assessed.coreml.memory_budget_bytes;
+    decided.coreml.memory_degrade = a.coreml.disabled_reason == "memory";
+    std::unique_ptr<Engine> e = Engine::create(decided);
+    check(state_of(e->coreml_status()) == "disabled",
+          "Engine with the caller's memory-degrade decision: decoder " + state_of(e->coreml_status()));
 }
 
 // ---- memory schedule ----------------------------------------------------------

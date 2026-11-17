@@ -119,7 +119,9 @@ std::unique_ptr<Vae> Vae::load(const std::string & gguf_path, const VaeOptions &
     // weights load. A standalone Vae has no low-memory mode, so a construction
     // load is kept.
     std::shared_ptr<detail::vae_coreml_stage> stage =
-        detail::vae_coreml_stage::create(gguf_path, opts.coreml, /*memory_degrade=*/false,
+        detail::vae_coreml_stage::create(gguf_path, opts.coreml,
+                                         /*memory_degrade=*/opts.coreml.memory_budget_bytes.has_value() &&
+                                             opts.coreml.memory_degrade.value_or(false),
                                          /*release_after_construction=*/false);
     std::unique_ptr<Vae> v = detail::VaeAccess::load(gguf_path, opts, stage);
     if (opts.verbose && stage) {

@@ -14,7 +14,7 @@
 // iOS, prewarm predicted (which requests nothing at construction for ACE-Step:
 // the decoder is requested by the first decode), no cache directory (no
 // generation and no warm hints), the template's compute units (all), strict
-// waits unbounded, no memory budget.
+// waits unbounded, no memory budget (and no memory-degrade decision).
 //
 // Builds without AUDIOGEN_COREML accept these options; an explicit invalid
 // compute_units still throws there, and everything else is ignored.
@@ -64,6 +64,13 @@ struct CoremlOptions {
     std::optional<int64_t> strict_wait_ms;
     // Bytes fit was assessed against; unset -> no memory-degrade.
     std::optional<int64_t> memory_budget_bytes;
+    // With a budget: the memory-degrade decision of the fit the caller
+    // assessed against it (FitResult::coreml.disabled_reason == "memory"),
+    // applied as is at construction, so the Engine runs the route that fit
+    // chose for the caller's workload and margin. Unset with a budget, the
+    // Engine assesses fit itself with FitOptions' default workload (60 s, no
+    // source audio, default margin). Ignored without a budget.
+    std::optional<bool> memory_degrade;
 };
 
 }  // namespace tts_cpp::acestep
