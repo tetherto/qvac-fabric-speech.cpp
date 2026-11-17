@@ -299,7 +299,6 @@ if (PARAKEET_BUILD_LIBRARY)
             $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
         PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src
-            ${CMAKE_CURRENT_SOURCE_DIR}/ggml/include
     )
     target_link_libraries(qvac-parakeet PUBLIC ggml)
 
@@ -1683,7 +1682,8 @@ if (PARAKEET_BUILD_TESTS)
         foreach(script IN ITEMS test_converter_args test_dump_nemotron_reference
                                 test_dump_unified_reference test_inspect_nemotron_checkpoint
                                 test_fixture_coverage test_verify_gguf_roundtrip
-                                test_transcribepsy_eu_skip_guard test_strip_encoder_gguf)
+                                test_transcribepsy_eu_skip_guard test_strip_encoder_gguf
+                                test_eu_shared_coreml)
             add_test(NAME ${script}
                 COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test/${script}.py")
             set_tests_properties(${script} PROPERTIES LABELS "unit"
@@ -1707,6 +1707,15 @@ if (PARAKEET_BUILD_TESTS)
             set_tests_properties(test-transcribepsy-eu PROPERTIES
                 LABELS "fixture" SKIP_RETURN_CODE 77)
             if (PARAKEET_COREML)
+                add_test(NAME test-eu-shared-engine
+                    COMMAND ${Python3_EXECUTABLE}
+                        "${CMAKE_CURRENT_SOURCE_DIR}/test/test_eu_shared_engine.py"
+                        --binary "$<TARGET_FILE:parakeet-cli>"
+                        --model "${_qvp_transcribepsy_eu_gguf}"
+                        --shared "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-shared.mlmodelc"
+                        --english "${_qvp_jfk_wav}" --french "${_qvp_fr_multipiece_wav}")
+                set_tests_properties(test-eu-shared-engine PROPERTIES
+                    LABELS "fixture;coreml" SKIP_RETURN_CODE 77)
                 add_test(NAME test-transcribepsy-eu-coreml-cli
                     COMMAND ${Python3_EXECUTABLE}
                         "${CMAKE_CURRENT_SOURCE_DIR}/test/test_transcribepsy_eu.py"

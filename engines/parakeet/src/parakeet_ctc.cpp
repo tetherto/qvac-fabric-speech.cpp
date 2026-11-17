@@ -1987,7 +1987,35 @@ enum class EuCoremlKind { FixedAne, FlexibleCpu, PreciseGpu };
 // placement from them instead of reading the environment.
 static parakeet_coreml_context * load_eu_coreml_encoder(
         const std::string & path, const char * route, int layers, const char * units,
-        EuCoremlKind kind = EuCoremlKind::FixedAne, int expected_mel_frames = 0);
+        EuCoremlKind kind = EuCoremlKind::FixedAne, int expected_mel_frames = 0,
+        bool shared = false);
+
+static parakeet_coreml_context * load_eu_shared_encoders(
+        const std::string & gguf_path, int layers, int gate_layers, int mels,
+        int gate_mel_frames, const char * units, ParakeetCtcModel::Impl * impl,
+        bool load_auxiliaries = true) {
+    const auto path = coreml_eu_shared_sidecar_path(gguf_path);
+    if (!path_is_directory(path)) return nullptr;
+    auto * english = load_eu_coreml_encoder(path, "en", layers, units, EuCoremlKind::FixedAne, 0, true);
+    // Precise policies only need the English capacity/seam metadata. Ownership
+    // and fixed ANE inference require all routes to validate together.
+    if (!load_auxiliaries) return english;
+    auto * other = load_eu_coreml_encoder(path, "other", layers, units, EuCoremlKind::FixedAne, 0, true);
+    auto * gate = load_eu_coreml_encoder(path, "gate", gate_layers, units, EuCoremlKind::FixedAne, 0, true);
+    const auto capacity = parakeet_coreml_fixed_mel_frames(english, mels);
+    if (!english || !other || !gate || capacity < gate_mel_frames ||
+        capacity != parakeet_coreml_fixed_mel_frames(other, mels) ||
+        capacity != parakeet_coreml_fixed_mel_frames(gate, mels)) {
+        parakeet_coreml_free(english);
+        parakeet_coreml_free(other);
+        parakeet_coreml_free(gate);
+        PARAKEET_LOG_WARN("parakeet: incompatible full-EU shared encoder; trying separate sidecars\n");
+        return nullptr;
+    }
+    impl->ctx_coreml_eu_other = other;
+    impl->ctx_coreml_eu_gate = gate;
+    return english;
+}
 
 static parakeet_coreml_context * init_eu_coreml_owner(
         const gguf_context * g, const std::string & gguf_path, const char * units,
@@ -1996,6 +2024,12 @@ static parakeet_coreml_context * init_eu_coreml_owner(
     const int rate = (int) require_u32(g, "parakeet.preproc.sample_rate");
     const int hop = (int) require_u32(g, "parakeet.preproc.hop_length");
     const int layers = (int) get_u32(g, "parakeet.encoder.n_layers", 0);
+    if (hop > 0) {
+        auto * shared = load_eu_shared_encoders(gguf_path, layers,
+            (int) get_u32(g, "parakeet.eu.gate_layer", 0) + 1, mels,
+            1 + kTranscribePsyEuGateSeconds * rate / hop, units, impl);
+        if (shared) return shared;
+    }
     auto * english = load_eu_coreml_encoder(coreml_encoder_sidecar_path(gguf_path), "en", layers, units);
     auto * other = load_eu_coreml_encoder(coreml_eu_other_sidecar_path(gguf_path), "other", layers, units);
     auto * gate = load_eu_coreml_encoder(coreml_eu_gate_sidecar_path(gguf_path), "gate",
@@ -2087,13 +2121,14 @@ static void maybe_init_coreml_diarizers(const std::string & gguf_path,
 
 static parakeet_coreml_context * load_eu_coreml_encoder(
         const std::string & path, const char * route, int layers, const char * units,
-        EuCoremlKind kind, int expected_mel_frames) {
+        EuCoremlKind kind, int expected_mel_frames, bool shared) {
     if (!path_is_directory(path)) return nullptr;
     const auto started = std::chrono::steady_clock::now();
     const bool flexible = kind == EuCoremlKind::FlexibleCpu;
     const bool fixed_cpu = kind == EuCoremlKind::FixedAne &&
         !parakeet::coreml_eu_loads_fixed_auxiliaries(units);
-    auto * ctx = (flexible || fixed_cpu) ? parakeet_coreml_init_cpu(path.c_str()) :
+    auto * ctx = shared ? parakeet_coreml_init_eu_function(path.c_str(), route, fixed_cpu) :
+        (flexible || fixed_cpu) ? parakeet_coreml_init_cpu(path.c_str()) :
         kind == EuCoremlKind::PreciseGpu ? parakeet_coreml_init_gpu(path.c_str()) :
                                          parakeet_coreml_init_ane(path.c_str());
     if (!ctx) return nullptr;
@@ -2113,11 +2148,19 @@ static parakeet_coreml_context * load_eu_coreml_encoder(
 }
 
 // TranscribePsy EU's fixed programs load synchronously here, not as runtime
-// slots: the English one, then (unless the units exclude the Neural Engine)
-// the other-language and gate programs.
+// slots: the shared multifunction program when one sits next to the GGUF;
+// otherwise the English one, then (unless the units exclude the Neural
+// Engine) the other-language and gate programs.
 static void init_eu_coreml_encoders(const std::string & path, ParakeetCtcModel & model) {
     auto & impl = *model.impl;
     const char * units = loader_units(impl.coreml->resolved());
+    if (model.mel_cfg.hop_length > 0) {
+        impl.ctx_coreml = load_eu_shared_encoders(path, model.encoder_cfg.n_layers,
+            model.eu_gate.layer + 1, model.mel_cfg.n_mels,
+            1 + kTranscribePsyEuGateSeconds * model.mel_cfg.sample_rate / model.mel_cfg.hop_length, units, &impl,
+            parakeet::coreml_eu_loads_fixed_auxiliaries(units));
+        if (impl.ctx_coreml) return;
+    }
     impl.ctx_coreml = load_eu_coreml_encoder(
         coreml_encoder_sidecar_path(path), "en", model.encoder_cfg.n_layers, units);
     // Keep the English handle's shape/seam metadata. Policies excluding ANE

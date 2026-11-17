@@ -107,11 +107,12 @@ for export commands, actual dispatch reporting, startup cost and CPU/Metal/Core 
 Export from an F16 GGUF on macOS with Xcode; the guide includes its conversion
 command. The recommended full-EU baseline uses explicit FP16 encoders and decoder;
 six-bit encoders reduce deployment size with the documented quality trade-off.
-Fixed ANE routes currently load eagerly and duplicate trunk weights; the guide
-also describes possible size and startup optimizations.
+The Engine supports a [shared-weight multifunction bundle](docs/transcribepsy-eu-coreml.md#shared-weight-runtime-deployment)
+in place of the three fixed ANE encoder bundles, including Core ML-only loading.
+Routes still load eagerly; disk sharing does not imply lower resident memory or startup time.
 An [experimental export harness](docs/transcribepsy-eu-coreml.md#trying-route-sharing-exports)
 compares loading subsets, shared-weight multifunction packages and a route-input
-encoder; these prototypes are separate from runtime sidecar support.
+encoder; publish runtime bundles with the production merger described in the guide.
 The [harness regression tests](examples/ios-coreml-bench/README.md#route-harness-regression-tests)
 cover reporting fixtures and native prediction/loading without ASR checkpoints,
 including malformed manifests and duplicate WAV stems.
