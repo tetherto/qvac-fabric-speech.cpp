@@ -18,8 +18,9 @@ namespace parakeet {
 // unit-tested without Apple frameworks or a model.
 std::string coreml_encoder_sidecar_path(const std::string & gguf_path);
 
-// Full TranscribePsy EU keeps the adapted encoder and gate tap separate from
-// its English encoder. Quantized GGUF variants share the same sidecars.
+// Full TranscribePsy EU supports either one shared-weight multifunction bundle
+// or separate route bundles. Quantized GGUF variants share the same sidecars.
+std::string coreml_eu_shared_sidecar_path(const std::string & gguf_path);
 std::string coreml_eu_other_sidecar_path(const std::string & gguf_path);
 std::string coreml_eu_gate_sidecar_path(const std::string & gguf_path);
 std::string coreml_eu_precise_sidecar_path(const std::string & gguf_path, bool adapters, int mel_frames);
