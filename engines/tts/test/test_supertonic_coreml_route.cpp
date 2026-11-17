@@ -22,6 +22,7 @@
 #include "supertonic_vocoder_coreml.h"
 #include "tts-cpp/supertonic/fit.h"
 
+#include "../test/test_env_portable.h"
 #include "fit_stable_cache.h"
 
 #if defined(__APPLE__)
