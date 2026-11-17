@@ -903,7 +903,8 @@ bool resolve_transcribepsy_eu_route(ParakeetCtcModel & model,
                                     int cropped_mel_frames = 0,
                                     int audio_samples = 0,
                                     bool * encoder_used_coreml = nullptr,
-                                    bool prefer_precise_eu = false);
+                                    bool prefer_precise_eu = false,
+                                    EncoderBackendTally * gate_tally = nullptr);
 
 // The ggml encoder keeps one compiled graph per input shape, least recently
 // used first out, up to a limit of 3 by default. Each graph holds a compute

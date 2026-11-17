@@ -402,6 +402,32 @@ void case_call_label() {
     CHECK(coreml_call_label(EncoderRoute::ggml(), "coreml-cpu-gpu") == "coreml-cpu-gpu",
           "a per-dispatch program without a held route is still reported");
     CHECK(coreml_call_label(EncoderRoute::ggml()) == "coreml", "the label is never empty");
+
+    // One tally per call, every dispatch in it: a ggml language gate merged
+    // with a Core ML main pass is mixed and not all Core ML.
+    EncoderBackendTally gate;
+    gate.add(false, "");
+    EncoderBackendTally main_pass;
+    main_pass.add(true, "coreml-ane");
+    main_pass.add(true, "coreml-ane");
+    main_pass.merge(gate);
+    CHECK(main_pass.label() == "mixed" && !main_pass.all_coreml(),
+          "a ggml gate with a Core ML main pass is mixed and not all Core ML");
+    // A call whose dispatches all ran on Core ML, on two programs (the EU
+    // gate's, then the main pass's), is all Core ML and names the last.
+    EncoderBackendTally programs;
+    programs.add(true, "coreml-ane");
+    EncoderBackendTally precise;
+    precise.add(true, "coreml-cpu-gpu");
+    programs.merge(precise);
+    CHECK(programs.all_coreml() && programs.label() == "coreml-cpu-gpu",
+          "an all-Core ML call on two programs names the main pass's program");
+    EncoderBackendTally one;
+    one.add(true, "coreml-cpu-gpu");
+    EncoderBackendTally empty_gate;
+    one.merge(empty_gate);
+    CHECK(one.label() == "coreml-cpu-gpu" && one.all_coreml(),
+          "a call whose gate did not run reports its dispatch's program");
 }
 
 void case_owner_route() {

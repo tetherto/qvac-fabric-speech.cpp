@@ -220,6 +220,24 @@ void set_encoder_backend(Result & result, const ParakeetCtcModel & model,
     set_encoder_backend(result, model, route, used_coreml ? 1 : 0, used_coreml ? 0 : 1);
 }
 
+// The Core ML program one encoder dispatch ran on: TranscribePsy EU picks its
+// program per dispatch (English, other-language, gate, flexible or precise
+// GPU), every other model runs the held route's program.
+std::string dispatch_coreml_label(const ParakeetCtcModel & model, const EncoderRoute & route) {
+    if (model.model_variant == "transcribepsy-250m-eu") return model_encoder_backend_name(model);
+    return route.coreml_label();
+}
+
+// Both public encoder fields from one tally of every dispatch of the call
+// (the EU gate included): encoder_backend is its label, encoder_used_coreml
+// is true only when every dispatch ran on Core ML.
+void set_encoder_backend(EngineResult & result, const EncoderBackendTally & tally,
+                         const EncoderRoute & route) {
+    result.encoder_backend = tally.label();
+    result.encoder_used_coreml = tally.all_coreml();
+    result.coreml_pending = route.pending() || tally.pending;
+}
+
 // ── Long-form offline encoder windowing ───────────────────────────────────
 // See EngineOptions::long_form_window_frames and src/long_form.h. The window
 // policy itself (constants + LongFormPlan + the pure resolver) lives in
@@ -351,6 +369,7 @@ int run_encoder_windowed(ParakeetCtcModel & model,
             } else {
                 ++stats.ggml_windows;
             }
+            stats.tally.add(win_out.used_coreml, dispatch_coreml_label(model, route));
             encoded = &w;
         }
 
@@ -473,7 +492,7 @@ bool encode_segments(ParakeetCtcModel & model, const EncoderRoute & route,
         }
         outcome.encoder_ms += ms_since(t_enc);
         if (seg.used_coreml) ++coreml_segments;
-        outcome.tally.add(seg.used_coreml, route.coreml_label());
+        outcome.tally.add(seg.used_coreml, dispatch_coreml_label(model, route));
 
         const auto t_asm = clock::now();
         if (out.d_model == 0) {
@@ -702,7 +721,7 @@ EngineResult segments_result(IndependentSegmentsOutcome && seg, double preproces
     result.sample_rate     = sample_rate;
     result.mel_frames      = n_mel_frames;
     result.encoder_frames  = seg.encoder_frames;
-    result.encoder_used_coreml = seg.used_coreml;
+    result.encoder_used_coreml = seg.tally.all_coreml();
     result.encoder_backend = seg.tally.label();
     result.decoder_used_coreml = seg.decoder_used_coreml;
     return result;
@@ -1148,12 +1167,13 @@ EngineResult Engine::transcribe_mel_impl(PrecomputedMel && precomputed, double p
     const double preprocess_ms = precomputed.preprocess_ms;
 
     const auto t_gate = clock::now();
-    bool gate_used_coreml = true;
+    EncoderBackendTally tally;  // every encoder dispatch of the call, the EU gate first
     resolve_transcribepsy_eu_route(pimpl_->model, pimpl_->opts.language,
                                    mel.data(), n_mel_frames,
                                    pimpl_->model.mel_cfg.n_mels, nullptr,
                                    precomputed.eu_gate_mel.data(),
-                                   precomputed.eu_gate_frames, n_samples, &gate_used_coreml);
+                                   precomputed.eu_gate_frames, n_samples, nullptr,
+                                   /*prefer_precise_eu=*/false, &tally);
     const double gate_ms = ms_since(t_gate);
 
     // One encoder route for the whole call, acquired at its start:
@@ -1173,7 +1193,8 @@ EngineResult Engine::transcribe_mel_impl(PrecomputedMel && precomputed, double p
                                             n_mel_frames, pimpl_->model.mel_cfg.n_mels,
                                             pimpl_->opts.verbose, pimpl_->cancel_flag, seg)) {
             seg.encoder_ms += gate_ms;
-            seg.used_coreml = seg.used_coreml && gate_used_coreml;
+            tally.merge(seg.tally);  // the gate first: the main pass names the program
+            seg.tally = tally;
             EngineResult result = segments_result(std::move(seg), preprocess_ms,
                                                   prior_ms + ms_since(t_total), n_samples,
                                                   sample_rate, n_mel_frames);
@@ -1251,8 +1272,6 @@ EngineResult Engine::transcribe_mel_impl(PrecomputedMel && precomputed, double p
         return result;
     }
 
-    int coreml_dispatches = 0;
-    int ggml_dispatches = 0;
     if (lf.enabled) {
         // Long input: window the encoder over the (global-CMVN) mel so the
         // O(T_enc^2) attention never allocates the full-length score tensor.
@@ -1266,8 +1285,7 @@ EngineResult Engine::transcribe_mel_impl(PrecomputedMel && precomputed, double p
                                      std::to_string(rc) + ")");
         }
         encoder_ms += wstats.encoder_ms;
-        coreml_dispatches = wstats.coreml_windows;
-        ggml_dispatches = wstats.ggml_windows;
+        tally.merge(wstats.tally);
     } else {
         const auto t_enc = clock::now();
         if (int rc = run_encoder(pimpl_->model, mel.data(), n_mel_frames,
@@ -1279,7 +1297,7 @@ EngineResult Engine::transcribe_mel_impl(PrecomputedMel && precomputed, double p
                                      std::to_string(rc) + ")");
         }
         encoder_ms += ms_since(t_enc) - device_decode_ms;
-        (enc_out.used_coreml ? coreml_dispatches : ggml_dispatches) = 1;
+        tally.add(enc_out.used_coreml, dispatch_coreml_label(pimpl_->model, route));
     }
 
     // A cancel() during the windowed encoder loop can leave no committed
@@ -1293,8 +1311,7 @@ EngineResult Engine::transcribe_mel_impl(PrecomputedMel && precomputed, double p
         result.sample_rate    = sample_rate;
         result.mel_frames     = n_mel_frames;
         result.encoder_frames = 0;
-        result.encoder_used_coreml = enc_out.used_coreml;
-        set_encoder_backend(result, pimpl_->model, route, coreml_dispatches, ggml_dispatches);
+        set_encoder_backend(result, tally, route);
         return result;
     }
 
@@ -1393,9 +1410,8 @@ EngineResult Engine::transcribe_mel_impl(PrecomputedMel && precomputed, double p
     result.sample_rate    = sample_rate;
     result.mel_frames     = n_mel_frames;
     result.encoder_frames = enc_out.n_enc_frames;
-    result.encoder_used_coreml = enc_out.used_coreml && gate_used_coreml;
     result.decoder_used_coreml = decoder_used_coreml;
-    set_encoder_backend(result, pimpl_->model, route, coreml_dispatches, ggml_dispatches);
+    set_encoder_backend(result, tally, route);
     return result;
 }
 
@@ -1516,18 +1532,18 @@ EngineResult Engine::transcribe_samples_stream(const float * samples,
 
     const auto t_gate = clock::now();
     bool gate_used_coreml = true;
+    EncoderBackendTally tally;  // every encoder dispatch of the call, the EU gate first
     resolve_transcribepsy_eu_route(pimpl_->model, pimpl_->opts.language,
                                    mel.data(), n_mel_frames,
                                    pimpl_->model.mel_cfg.n_mels, nullptr,
-                                   eu_gate_mel.data(), eu_gate_frames, n_samples, &gate_used_coreml, true);
+                                   eu_gate_mel.data(), eu_gate_frames, n_samples, &gate_used_coreml, true,
+                                   &tally);
     const double gate_ms = ms_since(t_gate);
 
     // One route for the whole call.
     const EncoderRoute route = acquire_encoder_route(pimpl_->model, &pimpl_->cancel_flag);
     double encoder_ms = gate_ms;
     EncoderOutputs enc_out;
-    int coreml_dispatches = 0;
-    int ggml_dispatches = 0;
     const LongFormPlan lf =
         resolve_long_form_plan(pimpl_->model, pimpl_->opts, n_mel_frames, route, true);
     if (lf.enabled) {
@@ -1543,8 +1559,7 @@ EngineResult Engine::transcribe_samples_stream(const float * samples,
                                      std::to_string(rc) + ")");
         }
         encoder_ms += wstats.encoder_ms;
-        coreml_dispatches = wstats.coreml_windows;
-        ggml_dispatches = wstats.ggml_windows;
+        tally.merge(wstats.tally);
     } else {
         const auto t_enc = clock::now();
         if (int rc = run_encoder(pimpl_->model, mel.data(), n_mel_frames,
@@ -1556,7 +1571,7 @@ EngineResult Engine::transcribe_samples_stream(const float * samples,
                                      std::to_string(rc) + ")");
         }
         encoder_ms += ms_since(t_enc);
-        (enc_out.used_coreml ? coreml_dispatches : ggml_dispatches) = 1;
+        tally.add(enc_out.used_coreml, dispatch_coreml_label(pimpl_->model, route));
     }
 
     const int T_enc = enc_out.n_enc_frames;
@@ -1576,8 +1591,7 @@ EngineResult Engine::transcribe_samples_stream(const float * samples,
     result.sample_rate    = sample_rate;
     result.mel_frames     = n_mel_frames;
     result.encoder_frames = T_enc;
-    result.encoder_used_coreml = enc_out.used_coreml && gate_used_coreml;
-    set_encoder_backend(result, pimpl_->model, route, coreml_dispatches, ggml_dispatches);
+    set_encoder_backend(result, tally, route);
 
     const auto t_dec = clock::now();
 

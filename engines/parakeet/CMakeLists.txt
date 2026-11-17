@@ -3127,6 +3127,13 @@ if (PARAKEET_BUILD_TESTS)
             EXE      test-parakeet-coreml-runtime
             ARGS     "--case" "diarizer" "--diar-gguf" "${_qvp_nd_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
             REQUIRES "${_qvp_nd_q8_gguf}" "${_qvp_nd_diarizer}" "${_qvp_jfk_wav}")
+        parakeet_register_test(test-parakeet-coreml-runtime-eu-labels
+            LABEL    "fixture;coreml"
+            EXE      test-parakeet-coreml-runtime
+            ARGS     "--case" "eu-labels" "--eu-gguf" "${_qvp_transcribepsy_eu_gguf}" "--wav" "${_qvp_jfk_wav}"
+            REQUIRES "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-flexible.mlmodelc")
         parakeet_register_test(test-parakeet-coreml-runtime-encoderless
             LABEL    "fixture;coreml"
             EXE      test-parakeet-coreml-runtime

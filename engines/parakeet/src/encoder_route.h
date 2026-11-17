@@ -245,8 +245,11 @@ inline std::string strict_stream_window_refusal(const EncoderRoute & route,
            "where the model allows it, or use = automatic";
 }
 
-// Per-call backend label: "ggml" when nothing ran on Core ML, the Core ML
-// label when everything did, "mixed" otherwise.
+// Per-call backend label: "ggml" when nothing ran on Core ML, "mixed" when
+// some dispatches ran on ggml and some on Core ML, otherwise the Core ML
+// program of the call's last Core ML dispatch (a model that picks its program
+// per dispatch, such as TranscribePsy EU after its language gate, reports the
+// program of its main pass, as Engine::encoder_backend() does).
 struct EncoderBackendTally {
     int coreml = 0;
     int ggml = 0;
@@ -256,13 +259,19 @@ struct EncoderBackendTally {
     void add(bool used_coreml, const std::string & label) {
         if (used_coreml) {
             ++coreml;
-            if (coreml_label.empty()) coreml_label = label;
-            else if (coreml_label != label) coreml_label = "mixed";
+            if (!label.empty()) coreml_label = label;
         } else {
             ++ggml;
         }
     }
     void add_route(const EncoderRoute & route) { pending = pending || route.pending(); }
+    // A later part of the same call (a windowed pass after the EU gate).
+    void merge(const EncoderBackendTally & later) {
+        coreml += later.coreml;
+        ggml += later.ggml;
+        if (!later.coreml_label.empty()) coreml_label = later.coreml_label;
+        pending = pending || later.pending;
+    }
 
     std::string label() const {
         if (coreml == 0) return "ggml";

@@ -6,7 +6,10 @@
 //                  the two that follow
 //   diarizer       --diar-gguf D.gguf (with its `-diarizer-<frames>.mlmodelc`
 //                  sidecars) --wav W.wav: diarizer-pending
-//   encoderless    --encoderless-gguf E.gguf: encoderless-use-off
+//   encoderless    --encoderless-gguf E.gguf: encoderless-use-off,
+//                  owner-push-stream
+//   eu-labels      --eu-gguf EU.gguf (with its Core ML programs) --wav W.wav
+//                  (longer than the 20 s language gate): eu-labels
 //
 //   ggml-unchanged        a call whose sidecar is still loading runs on ggml
 //                         (coreml_pending) and its transcript equals use = off
@@ -36,6 +39,12 @@
 //                         use = off
 //   encoderless-use-off   an encoder-less GGUF with use = off fails to load
 //                         with kGgufLoadNoEncoderWeights (rc=17), as today
+//   eu-labels             TranscribePsy EU reports the program each dispatch
+//                         ran on: with the gate programs removed the gate runs
+//                         on ggml and the main pass on Core ML, so the call is
+//                         "mixed" and not encoder_used_coreml; with only the
+//                         flexible programs the label names that program, not
+//                         the held route's
 //   owner-push-stream     on that GGUF with its fixed-capacity sidecar owning
 //                         the encoder, stream_start refuses windows longer
 //                         than the capacity under use = require and under
@@ -243,6 +252,57 @@ void case_diarizer_load_errors(const std::string & gguf) {
     fs::remove_all(dir, ec);
 }
 
+// A directory holding the EU GGUF and the named sidecars next to it.
+fs::path stage_eu(const std::string & gguf, const char * tag, const std::vector<std::string> & sidecars) {
+    const fs::path dir = fresh_dir(tag);
+    const fs::path source = fs::absolute(gguf).parent_path();
+    const std::string base = fs::path(gguf).stem().string().substr(0, fs::path(gguf).stem().string().find('.'));
+    fs::create_symlink(fs::canonical(gguf), dir / (base + ".gguf"));
+    for (const std::string & suffix : sidecars) {
+        const fs::path bundle = source / (base + suffix);
+        if (fs::exists(bundle)) fs::create_directory_symlink(fs::canonical(bundle), dir / (base + suffix));
+    }
+    return dir / (base + ".gguf");
+}
+
+void case_eu_labels(const std::string & gguf, const std::string & wav) {
+    std::vector<float> source;
+    int rate = 0;
+    expect(parakeet_test::load_wav_pcm16le_mono(wav, source, rate) && !source.empty(), "eu-labels: the wav loads");
+    if (source.empty()) return;
+    std::vector<float> audio;  // over the 20 s language gate
+    while (audio.size() < (size_t) rate * 25) audio.insert(audio.end(), source.begin(), source.end());
+
+    {
+        const fs::path staged = stage_eu(gguf, "eu-no-gate", {"-encoder.mlmodelc", "-encoder-other.mlmodelc",
+                                                             "-encoder-flexible.mlmodelc",
+                                                             "-encoder-other-flexible.mlmodelc"});
+        parakeet::EngineOptions o = engine_options(staged.string(), coreml_ready_options());
+        o.language = "auto";
+        parakeet::Engine engine(o);
+        const parakeet::EngineResult r = engine.transcribe_samples(audio.data(), (int) audio.size(), rate);
+        std::printf("       gate on ggml: backend=%s used_coreml=%d\n", r.encoder_backend.c_str(),
+                    r.encoder_used_coreml ? 1 : 0);
+        expect(r.encoder_backend == "mixed" && !r.encoder_used_coreml,
+               "eu-labels: a ggml gate with a Core ML main pass reports mixed, not encoder_used_coreml");
+        std::error_code ec;
+        fs::remove_all(staged.parent_path(), ec);
+    }
+    {
+        const fs::path staged = stage_eu(gguf, "eu-flexible", {"-encoder-flexible.mlmodelc"});
+        parakeet::EngineOptions o = engine_options(staged.string(), coreml_ready_options());
+        o.language = "en";
+        parakeet::Engine engine(o);
+        const parakeet::EngineResult r = engine.transcribe_samples(audio.data(), (int) audio.size(), rate);
+        std::printf("       flexible only: backend=%s used_coreml=%d\n", r.encoder_backend.c_str(),
+                    r.encoder_used_coreml ? 1 : 0);
+        expect(r.encoder_used_coreml && r.encoder_backend.rfind("coreml-", 0) == 0,
+               "eu-labels: a call on a program other than the route's is labelled with that program");
+        std::error_code ec;
+        fs::remove_all(staged.parent_path(), ec);
+    }
+}
+
 void case_diarizer(const std::string & gguf, const std::string & wav) {
     const fs::path cache = fresh_dir("diar-cache");
     parakeet::Engine engine(engine_options(gguf, lazy(cache)));
@@ -414,7 +474,7 @@ void case_capacity_miss(const std::string & gguf, const std::string & wav) {
 }
 
 int main(int argc, char ** argv) {
-    std::string which = "transcription", gguf, wav, diar_gguf, encoderless;
+    std::string which = "transcription", gguf, wav, diar_gguf, encoderless, eu_gguf;
     for (int i = 1; i + 1 < argc; i += 2) {
         const std::string a = argv[i];
         if (a == "--case") which = argv[i + 1];
@@ -422,6 +482,7 @@ int main(int argc, char ** argv) {
         else if (a == "--wav") wav = argv[i + 1];
         else if (a == "--diar-gguf") diar_gguf = argv[i + 1];
         else if (a == "--encoderless-gguf") encoderless = argv[i + 1];
+        else if (a == "--eu-gguf") eu_gguf = argv[i + 1];
         else {
             std::fprintf(stderr, "unknown argument %s\n", a.c_str());
             return 2;
@@ -429,12 +490,14 @@ int main(int argc, char ** argv) {
     }
     const bool ok_args = (which == "transcription" && !gguf.empty() && !wav.empty()) ||
                          (which == "diarizer" && !diar_gguf.empty() && !wav.empty()) ||
-                         (which == "encoderless" && !encoderless.empty());
+                         (which == "encoderless" && !encoderless.empty()) ||
+                         (which == "eu-labels" && !eu_gguf.empty() && !wav.empty());
     if (!ok_args) {
         std::fprintf(stderr, "usage: %s [--case transcription] --gguf TDT.gguf --wav W.wav\n"
                              "       %s --case diarizer --diar-gguf D.gguf --wav W.wav\n"
-                             "       %s --case encoderless --encoderless-gguf E.gguf\n",
-                     argv[0], argv[0], argv[0]);
+                             "       %s --case encoderless --encoderless-gguf E.gguf\n"
+                             "       %s --case eu-labels --eu-gguf EU.gguf --wav W.wav\n",
+                     argv[0], argv[0], argv[0], argv[0]);
         return 2;
     }
     try {
@@ -447,6 +510,8 @@ int main(int argc, char ** argv) {
         } else if (which == "diarizer") {
             case_diarizer(diar_gguf, wav);
             case_diarizer_load_errors(diar_gguf);
+        } else if (which == "eu-labels") {
+            case_eu_labels(eu_gguf, wav);
         } else {
             case_encoderless(encoderless);
         }

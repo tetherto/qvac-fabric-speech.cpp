@@ -6179,7 +6179,8 @@ bool resolve_transcribepsy_eu_route(ParakeetCtcModel & model,
                                     const float * cropped_mel,
                                     int cropped_mel_frames,
                                     int audio_samples,
-                                    bool * encoder_used_coreml, bool prefer_precise_eu) {
+                                    bool * encoder_used_coreml, bool prefer_precise_eu,
+                                    EncoderBackendTally * gate_tally) {
     if (encoder_used_coreml) *encoder_used_coreml = true;
     if (model.model_variant != "transcribepsy-250m-eu") return false;
     model.eu_use_adapters = false;
@@ -6216,6 +6217,9 @@ bool resolve_transcribepsy_eu_route(ParakeetCtcModel & model,
         tap.n_enc_frames);
     const float probability = eu_gate_head(gate, eu_gate_pool(gate, tap.encoder_out, frames, dim));
     if (encoder_used_coreml) *encoder_used_coreml = tap.used_coreml;
+    // The gate is one dispatch of the call; its program is the EU dispatch
+    // label run_encoder just recorded.
+    if (gate_tally) gate_tally->add(tap.used_coreml, tap.used_coreml ? model_encoder_backend_name(model) : std::string());
     PARAKEET_LOG_INFO("TranscribePsy EU gate encoder: %s\n", tap.used_coreml ? "coreml" : "ggml");
     if (p_non_english) *p_non_english = probability;
     model.eu_use_adapters = probability >= gate.threshold;
