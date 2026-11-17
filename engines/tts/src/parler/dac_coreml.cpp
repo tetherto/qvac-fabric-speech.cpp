@@ -4,6 +4,7 @@
 #include "../coreml_sidecar_path.h"
 
 #ifdef TTS_CPP_USE_COREML
+#include "dac_source.h"
 #include "../moss/coreml/runner.h"
 
 #include "qvac_coreml/generation.h"
@@ -526,21 +527,6 @@ parler_dac_route parler_dac_plan_route(const std::string & gguf_path, const Core
     return plan_route(gguf_path, r, adapter_bytes).route;
 }
 
-struct parler_dac_source {
-    pcm::SourceStat before, after;
-    bool ok_before = false, ok_after = false;
-};
-
-void parler_dac_source_before_load(parler_model & model, const std::string & path) {
-    auto s = std::make_shared<parler_dac_source>();
-    s->ok_before = pcm::generation::source_stat(path, s->before);
-    model.dac_source = std::move(s);
-}
-
-void parler_dac_source_after_load(parler_model & model, const std::string & path) {
-    if (model.dac_source) model.dac_source->ok_after = pcm::generation::source_stat(path, model.dac_source->after);
-}
-
 std::shared_ptr<parler_dac_coreml> parler_dac_coreml::create(parler_model & model, const std::string & gguf_path,
                                                              const CoremlOptions & options, bool memory_degrade) {
     validate_options(options);
@@ -716,10 +702,6 @@ parler_dac_route parler_dac_plan_route(const std::string &, const CoremlOptions 
     r.reason = "build";
     return r;
 }
-
-struct parler_dac_source {};
-void parler_dac_source_before_load(parler_model &, const std::string &) {}
-void parler_dac_source_after_load(parler_model &, const std::string &) {}
 
 std::shared_ptr<parler_dac_coreml> parler_dac_coreml::create(parler_model &, const std::string &,
                                                              const CoremlOptions & options, bool) {
