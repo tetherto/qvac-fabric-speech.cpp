@@ -2180,6 +2180,14 @@ if (PARAKEET_BUILD_TESTS)
                     "${CMAKE_CURRENT_SOURCE_DIR}/test/test_export_coreml_ane.py")
         set_property(TEST test-export-coreml-ane PROPERTY LABELS "unit")
         set_property(TEST test-export-coreml-ane PROPERTY SKIP_REGULAR_EXPRESSION "SKIP: ")
+        foreach(route_test IN ITEMS test_route_experiments test_route_probe_runtime)
+            add_test(NAME ${route_test}
+                COMMAND ${Python3_EXECUTABLE}
+                        "${CMAKE_CURRENT_SOURCE_DIR}/test/${route_test}.py")
+            set_property(TEST ${route_test} PROPERTY LABELS "unit;coreml")
+            set_property(TEST ${route_test} PROPERTY SKIP_REGULAR_EXPRESSION "SKIP: ")
+        endforeach()
+        set_property(TEST test_route_probe_runtime PROPERTY SKIP_RETURN_CODE 77)
         add_test(
             NAME test-export-moss-transcribe-coreml
             COMMAND ${Python3_EXECUTABLE}
