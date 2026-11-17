@@ -91,6 +91,7 @@
 #include <thread>
 
 #if defined(__APPLE__)
+#include <sys/clonefile.h>
 #include <sys/sysctl.h>
 #endif
 #include <memory>
@@ -210,16 +211,6 @@ void waveform_quality_gates() {
           "quiet gate: nonfinite PCM and reference rejected");
 }
 
-// A one-frame decode is 512 samples of mostly masked context: its fp16 SNR
-// is ill-conditioned (53.3 dB on the mini DAC, whose generated weights are
-// byte-identical to the exporter's) and is held to the default gate; every
-// longer case is held to --min-snr.
-constexpr double SINGLE_FRAME_MIN_SNR = 45.0;
-
-double gate_for(int n_frames, double min_snr) {
-    return n_frames > 1 ? min_snr : std::min(min_snr, SINGLE_FRAME_MIN_SNR);
-}
-
 // Measured parity floors of the generated sidecar under the template's
 // default compute units (`all`, label coreml-all), per chip. Core ML
 // partitions the program between the GPU and the Neural Engine with its own
@@ -266,6 +257,34 @@ double generated_min_snr(const std::string & label, const std::string & chip, do
     return min_snr;
 }
 
+// A one-frame decode is 512 samples of mostly masked context, so its fp16 SNR
+// is ill-conditioned. On the M2 the generated sidecar under `all` (all on the
+// Neural Engine; the generated weight.bin is byte-identical to the
+// exporter's) measures 53.3 dB there on macOS 15.7.3 and 27.2.1, against
+// 56.2 / 56.4 dB at 265 / 42 frames. That chip and placement alone hold the
+// one-frame case to 53 dB; every other chip, placement, the prebuilt sidecars
+// and the units sweep hold it to the multi-frame gate (the M4 Max measures
+// 51.8 dB under `all`, within its 50 dB floor, and 54.2 dB under
+// `cpu_and_ane`).
+struct one_frame_floor {
+    const char * chip;  // sysctl machdep.cpu.brand_string
+    const char * label; // the sidecar's backend label
+    double min_snr;
+};
+constexpr one_frame_floor GENERATED_ONE_FRAME_FLOORS[] = {{"Apple M2", "coreml-all", 53.0}};
+static_assert(std::size(GENERATED_ONE_FRAME_FLOORS) == 1, "every one-frame row is a recorded measurement");
+
+// The gate of the generated sidecar's parity case of `n_frames`: the chip's
+// floor under `all`, lowered for one frame only where a row above records it.
+double generated_gate(int n_frames, const std::string & label, const std::string & chip, double min_snr) {
+    const double gate = generated_min_snr(label, chip, min_snr);
+    if (n_frames != 1) return gate;
+    for (const one_frame_floor & f : GENERATED_ONE_FRAME_FLOORS) {
+        if (chip == f.chip && label == f.label) return std::min(gate, f.min_snr);
+    }
+    return gate;
+}
+
 // A floor expires once its chip no longer needs it: true when a floor
 // applies (host_min_snr below --min-snr) and every multi-frame case reaches
 // --min-snr, so the row must be removed.
@@ -282,6 +301,21 @@ bool sweep_row_gated(const std::string & units, const std::string & chip, double
     return units == "cpu_and_ane" && generated_min_snr("coreml-all", chip, min_snr) < min_snr;
 }
 
+// One parity case of a --units-sweep row holds when both decodes ran, the
+// reference on ggml and the candidate on the sidecar under test (a fallback
+// to ggml would compare ggml with itself and report an infinite SNR), and
+// the SNR reaches the gate.
+bool sweep_case_holds(bool ref_ok, const std::string & ref_backend, bool ok, const std::string & backend,
+                      const std::string & label, double snr, double gate) {
+    return ref_ok && ref_backend == PARLER_DAC_GGML_BACKEND && ok && backend == label && snr >= gate;
+}
+
+// A chip with a gated row needs the sweep: a sweep that cannot find, link or
+// load the artifact fails there instead of reporting nothing.
+bool sweep_required(const std::string & chip, double min_snr) {
+    return sweep_row_gated("cpu_and_ane", chip, min_snr);
+}
+
 void parity_floor_gates() {
     check(generated_min_snr("coreml-all", "Apple M4 Max", 54) == 50, "parity floor: M4 Max under all is 50 dB");
     check(generated_min_snr("coreml-all", "Apple M2", 54) == 54, "parity floor: an unlisted chip keeps --min-snr");
@@ -294,11 +328,29 @@ void parity_floor_gates() {
     for (const parity_floor & floor : GENERATED_ALL_UNITS_FLOORS) {
         check(floor.min_snr < 54, std::string("parity floor: the ") + floor.chip + " row is below 54 dB");
     }
+    check(generated_gate(1, "coreml-all", "Apple M2", 54) == 53 && generated_gate(42, "coreml-all", "Apple M2", 54) == 54,
+          "one-frame floor: the M2's generated sidecar under all holds one frame to 53 dB, longer cases to --min-snr");
+    check(generated_gate(1, "coreml-ane", "Apple M2", 54) == 54 && generated_gate(1, "coreml-all", "Apple M4 Max", 54) == 50 &&
+              generated_gate(1, "coreml-ane", "Apple M4 Max", 54) == 54 && generated_gate(1, "coreml-all", "", 54) == 54 &&
+              generated_gate(1, "coreml-all", "Apple M2 Pro", 54) == 54,
+          "one-frame floor: no other chip or placement lowers the one-frame gate");
+    check(generated_gate(1, "coreml-all", "Apple M2", 45) == 45, "one-frame floor: never raises --min-snr");
     check(floor_expired(50, 54, {54.0, 56.4}), "parity floor: expires when every multi-frame case reaches --min-snr");
     check(!floor_expired(50, 54, {51.3, 56.4}) && !floor_expired(50, 54, {NAN, 56.4}),
           "parity floor: still needed while a multi-frame case is below --min-snr");
     check(!floor_expired(54, 54, {56.2, 56.4}) && !floor_expired(50, 54, {}),
           "parity floor: nothing expires without a floor or a case");
+    check(sweep_case_holds(true, "ggml", true, "coreml-ane", "coreml-ane", 54.2, 54),
+          "units sweep: a case decoded by the sidecar at the gate holds");
+    check(!sweep_case_holds(true, "ggml", true, "ggml", "coreml-ane", INFINITY, 54) &&
+              !sweep_case_holds(true, "ggml", true, "coreml-all", "coreml-ane", 60, 54) &&
+              !sweep_case_holds(false, "ggml", true, "coreml-ane", "coreml-ane", 60, 54) &&
+              !sweep_case_holds(true, "coreml-ane", true, "coreml-ane", "coreml-ane", INFINITY, 54) &&
+              !sweep_case_holds(true, "ggml", false, "coreml-ane", "coreml-ane", 60, 54) &&
+              !sweep_case_holds(true, "ggml", true, "coreml-ane", "coreml-ane", 53.9, 54),
+          "units sweep: a fallback to ggml, another sidecar, a failed decode or a low SNR fails the case");
+    check(sweep_required("Apple M4 Max", 54) && !sweep_required("Apple M2", 54) && !sweep_required("Apple M4 Max", 45),
+          "units sweep: required where a row is gated");
     check(sweep_row_gated("cpu_and_ane", "Apple M4 Max", 54) && !sweep_row_gated("all", "Apple M4 Max", 54) &&
               !sweep_row_gated("cpu_and_gpu", "Apple M4 Max", 54) &&
               !sweep_row_gated("cpu_and_ane", "Apple M2", 54) &&
@@ -311,9 +363,11 @@ using qvac_coreml_memory::mem_breakdown;
 using qvac_coreml_memory::mem_breakdown_of;
 using qvac_coreml_memory::mem_charges;
 using qvac_coreml_memory::mem_failures;
+using qvac_coreml_memory::MEASURED_MARGIN;
 using qvac_coreml_memory::mem_phase;
 using qvac_coreml_memory::mem_phase_of;
 using qvac_coreml_memory::mem_sample;
+using qvac_coreml_memory::probe_failures;
 
 void memory_schedule_gates() {
     check(mem_phase_of("digesting") == mem_phase::generate && mem_phase_of("generating") == mem_phase::generate &&
@@ -336,7 +390,7 @@ void memory_schedule_gates() {
           "memory schedule: steady state over the load start, whole run over the baseline");
     check(b.generated && b.compiled && b.loaded && b.warmed && b.ready, "memory schedule: every state sampled");
     const mem_charges exact{70, 98, 93, 400, 100};
-    check(mem_failures(b, 400, exact).empty(), "memory schedule: a run at every charge passes");
+    check(mem_failures(b, 400, exact, 1.0).empty(), "memory schedule: a run at every charge passes (no margin)");
     const struct {
         mem_charges c;
         uint64_t ane;
@@ -347,11 +401,31 @@ void memory_schedule_gates() {
         {{70, 98, 93, 400, 100}, 401, "ANECompilerService"},
     };
     for (const auto & o : over) {
-        const std::vector<std::string> f = mem_failures(b, o.ane, o.c);
+        const std::vector<std::string> f = mem_failures(b, o.ane, o.c, 1.0);
         check(f.size() == 1 && f[0].find(o.stage) != std::string::npos,
               std::string("memory schedule: one byte over the ") + o.stage + " charge fails");
     }
-    check(mem_failures(b, 999, {70, 98, 93, 0, 100}).empty(), "memory schedule: no compiler check without the Neural Engine");
+    check(mem_failures(b, 999, {70, 98, 93, 0, 100}, 1.0).empty(),
+          "memory schedule: no compiler check without the Neural Engine");
+    // With the template's 1.25 margin each phase needs 1.25 x its measurement
+    // (rounded up); the whole run is held to the envelope as measured.
+    const mem_charges margined{88, 123, 117, 500, 100};  // 87.5, 122.5, 116.25, 500 rounded up
+    check(mem_failures(b, 400, margined).empty(), "memory schedule: a run at 1.25 x every phase passes");
+    check(mem_failures(b, 400, exact).size() == 4,
+          "memory schedule: a run that reaches a charge without the 1.25 margin fails each margined phase");
+    const struct {
+        mem_charges c;
+        uint64_t ane;
+        const char * stage;
+    } short_of_margin[] = {
+        {{87, 123, 117, 500, 100}, 400, "prepare"},      {{88, 122, 117, 500, 100}, 400, "load and warm-up"},
+        {{88, 123, 116, 500, 100}, 400, "steady state"}, {{88, 123, 117, 499, 100}, 400, "ANECompilerService"},
+    };
+    for (const auto & o : short_of_margin) {
+        const std::vector<std::string> f = mem_failures(b, o.ane, o.c);
+        check(f.size() == 1 && f[0].find(o.stage) != std::string::npos,
+              std::string("memory schedule: one byte short of 1.25 x the ") + o.stage + " fails");
+    }
     // Generation memory the allocator still holds when the load begins (the
     // M4 Max runner's 3.5 s schedule) belongs to the prepare transient; the
     // steady state charges only what the load and warm-up leave.
@@ -369,6 +443,21 @@ void memory_schedule_gates() {
           "memory schedule: ANECompilerService growth without a sample before the load is its peak");
     check(growth({{800, false}, {700, true}}).growth == 0 && growth({}).growth == 0,
           "memory schedule: ANECompilerService shrinking or never sampled grows 0");
+    {
+        const auto f = growth({{700, false, true}, {0, false, false}, {900, true, true}, {0, true, false}});
+        check(f.before == 700 && f.peak == 900 && f.growth == 200 && f.loading_samples == 1 && f.failed_samples == 2 &&
+                  qvac_coreml_memory::ane_compiler_measured(f),
+              "memory schedule: a failed ANECompilerService query is skipped, not read as 0");
+        const auto none = growth({{700, false, true}, {0, true, false}, {0, true, false}});
+        check(!qvac_coreml_memory::ane_compiler_measured(none) && !qvac_coreml_memory::ane_compiler_measured(growth({})),
+              "memory schedule: no successful query while loading is no compiler measurement");
+        check(probe_failures(true, 0, true, f).size() == 1 && probe_failures(true, 0, false, f).empty() &&
+                  probe_failures(true, 0, true, growth({{700, false}, {900, true}})).empty(),
+              "memory schedule: failed compiler queries fail a Neural Engine run");
+        check(probe_failures(false, 0, false, none).size() == 1 && probe_failures(true, 3, false, none).size() == 1 &&
+                  probe_failures(true, 0, true, none).size() == 2,
+              "memory schedule: a failed baseline, failed footprint samples or an unmeasured compiler fail the run");
+    }
     const uint64_t clean = qvac_coreml_memory::ANE_COMPILER_CLEAN_BYTES;
     using qvac_coreml_memory::AneBaseline;
     const auto baseline = [&](const std::vector<AneSample> & s) {
@@ -672,7 +761,7 @@ void coreml_gates(parler_model & model, const std::string & gguf, const std::str
         const bool ok = decode(model, codes, n_frames, pcm, nullptr, 0, -1, &backend);
         double max_abs = 0;
         const double snr = ok && pcm.size() == ref.size() ? snr_db(pcm, ref, max_abs) : NAN;
-        check(ok && backend == label && snr >= gate_for(n_frames, min_snr),
+        check(ok && backend == label && snr >= min_snr,
               std::to_string(n_frames) + " frames vs ggml: SNR " + std::to_string(snr) +
               " dB, max_abs " + std::to_string(max_abs));
         if (n_frames > keep) {
@@ -779,7 +868,7 @@ void pending_parity_gates(parler_model & model, const std::string & ref_dir, dou
         double max_abs = 0;
         const double snr = ok && pcm.size() == ref.size() ? snr_db(pcm, ref, max_abs) : NAN;
         if (n_frames > 1) multi_frame_snrs.push_back(snr);
-        check(ok && backend == label && snr >= gate_for(n_frames, host_min_snr),
+        check(ok && backend == label && snr >= generated_gate(n_frames, label, chip, min_snr),
               std::to_string(n_frames) + " frames vs ggml: SNR " + std::to_string(snr) + " dB, max_abs " +
                   std::to_string(max_abs));
     }
@@ -827,8 +916,14 @@ void units_sweep(parler_model & model, const std::string & cache_dir, double min
             break;
         }
     }
+    // On a chip with a gated row a setup failure is a failure, not a silent skip.
+    const bool required = sweep_required(chip, min_snr);
+    const auto setup_failed = [&](const std::string & what) {
+        fprintf(stderr, "  %s\n", what.c_str());
+        if (required) check(false, "units sweep on " + chip + ": " + what);
+    };
     if (artifact.empty()) {
-        fprintf(stderr, "  no generated artifact under %s\n", cache_dir.c_str());
+        setup_failed("no generated artifact under " + cache_dir);
         return;
     }
     const fs::path dir = fs::temp_directory_path() /
@@ -837,7 +932,8 @@ void units_sweep(parler_model & model, const std::string & cache_dir, double min
     const std::string fake_gguf = (dir / "parler-sweep.gguf").string();
     fs::create_directory_symlink(artifact, parler_dac_sidecar_path(fake_gguf), ec);
     if (ec) {
-        fprintf(stderr, "  cannot link %s: %s\n", artifact.c_str(), ec.message().c_str());
+        setup_failed("cannot link " + artifact + ": " + ec.message());
+        fs::remove_all(dir, ec);
         return;
     }
     fprintf(stderr, "  artifact %s\n", artifact.c_str());
@@ -856,27 +952,32 @@ void units_sweep(parler_model & model, const std::string & cache_dir, double min
         }
         const int window = sidecar->window();
         const int keep = window - 2 * parler_dac_rf_frames(model);
+        const std::string label = sidecar->label();
         std::string line;
         bool row_holds = true;
         for (const int n_frames : {2 * keep + keep / 2, window / 3, 1}) {
             const std::vector<int32_t> codes = random_codes(hp, n_frames, 100 + n_frames);
             model.dac_sidecar.reset();
             std::vector<float> ref, pcm;
-            decode(model, codes, n_frames, ref);
+            std::string ref_backend, backend;
+            const bool ref_ok = decode(model, codes, n_frames, ref, nullptr, 0, -1, &ref_backend);
             model.dac_sidecar = sidecar;
-            std::string backend;
             const bool ok = decode(model, codes, n_frames, pcm, nullptr, 0, -1, &backend);
             double max_abs = 0;
-            const double snr = ok && pcm.size() == ref.size() ? snr_db(pcm, ref, max_abs) : NAN;
-            if (!(snr >= gate_for(n_frames, min_snr))) row_holds = false;
-            char buf[96];
-            snprintf(buf, sizeof buf, "  %d frames %.2f dB (max_abs %.2e)", n_frames, snr, max_abs);
+            const double snr = ref_ok && ok && pcm.size() == ref.size() ? snr_db(pcm, ref, max_abs) : NAN;
+            if (!sweep_case_holds(ref_ok, ref_backend, ok, backend, label, snr, min_snr)) {
+                row_holds = false;
+            }
+            char buf[160];
+            snprintf(buf, sizeof buf, "  %d frames %.2f dB (max_abs %.2e%s%s)", n_frames, snr, max_abs,
+                     backend == label ? "" : ", decoded on ", backend == label ? "" : backend.c_str());
             line += buf;
         }
         fprintf(stderr, "  units %-11s:%s\n", units, line.c_str());
         if (gated) {
-            check(row_holds, std::string("units ") + units + " on " + chip + " holds --min-snr " +
-                                 std::to_string(min_snr) + " dB (the gate `all` has a floor for)");
+            check(row_holds, std::string("units ") + units + " on " + chip + " decodes every case on " + label +
+                                 " and holds --min-snr " + std::to_string(min_snr) +
+                                 " dB (the gate `all` has a floor for)");
         }
         parler_attach_dac_sidecar(model, std::shared_ptr<parler_dac_sidecar>{}, policy);
     }
@@ -946,6 +1047,65 @@ std::string status_state(const std::string & status) {
     return status.substr(begin, status.find('"', begin) - begin);
 }
 
+// The GGUF is replaced after the weights were loaded and before the sidecar
+// is made: the model is loaded through a symlink, which is then pointed at a
+// clone of the file (same bytes, another inode). The prepare job must not
+// follow the path to the replacement: it fails with source_changed, nothing
+// is generated, and with use = auto the DAC decodes on ggml.
+void source_changed_gate(const std::string & gguf) {
+    fprintf(stderr, "replaced GGUF gate\n");
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() /
+                         ("parler-dac-replaced-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    const fs::path link = dir / "model.gguf", clone = dir / "clone.gguf", cache = dir / "cache";
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    fs::create_symlink(fs::absolute(gguf), link, ec);
+    if (ec) {
+        check(false, "a symlink to the GGUF: " + ec.message());
+        fs::remove_all(dir, ec);
+        return;
+    }
+    parler_model m;
+    std::string err;
+    if (!parler_load_gguf(link.string(), m, 0, &err)) {
+        check(false, "load through the symlink: " + err);
+        fs::remove_all(dir, ec);
+        return;
+    }
+    bool replaced = ::clonefile(fs::absolute(gguf).c_str(), clone.c_str(), 0) == 0;
+    if (replaced) {
+        fs::remove(link, ec);
+        fs::create_symlink(clone, link, ec);
+        replaced = !ec;
+    }
+    check(replaced, "the GGUF the model was loaded from is replaced by a clone");
+    if (replaced) {
+        tts_cpp::CoremlOptions opts;
+        opts.cache_dir = cache.string();
+        opts.wait = tts_cpp::CoremlOptions::Wait::construct;
+        opts.use = tts_cpp::CoremlOptions::Use::automatic;
+        std::shared_ptr<parler_dac_coreml> dac;
+        try {
+            dac = parler_dac_coreml::create(m, link.string(), opts);
+        } catch (const std::exception & e) {
+            check(false, std::string("create after the replacement: ") + e.what());
+        }
+        if (dac) {
+            const std::string st = dac->status_json();
+            std::vector<float> pcm;
+            std::string backend;
+            const bool decoded = decode(m, random_codes(m.hparams, 8, 7), 8, pcm, nullptr, 0, -1, &backend);
+            check(!dac->wait(0) && contains(st, "source_changed") && decoded && backend == PARLER_DAC_GGML_BACKEND,
+                  "a GGUF replaced after the load is not generated from (DAC on " + backend +
+                      "): " + st.substr(0, std::min<size_t>(st.size(), 300)));
+        }
+        m.dac_pending.reset();
+    }
+    parler_free_model(m);
+    fs::remove_all(dir, ec);
+}
+
 // The Engine's default wait (none) on an empty cache: construction returns
 // at once and the DAC sidecar is generated in the background.
 // Engine::coreml_wait(-1) blocks until it is ready, and Engine::cancel() from
@@ -978,6 +1138,36 @@ void engine_wait_cancel_gate(const std::string & gguf, const std::string & cache
     check(!ready && ms >= CANCEL_AFTER_MS - 20 && ms < 2000 && state != "ready",
           "Engine::cancel() ends coreml_wait(-1) after " + std::to_string((int) ms) + " ms (sidecar " + state +
               (ready ? ", wait returned ready" : "") + ")");
+    {
+        // Two blocking waits: a cancel() ends the one running, and a wait
+        // started right after it neither swallows that cancel nor ends by it.
+        std::atomic<bool> a_done{false}, b_done{false}, a_ready{false};
+        std::thread a([&] {
+            a_ready = engine.coreml_wait(-1);
+            a_done = true;
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        const auto cancelled_at = std::chrono::steady_clock::now();
+        engine.cancel();
+        std::thread b([&] {
+            engine.coreml_wait(-1);
+            b_done = true;
+        });
+        while (!a_done && std::chrono::steady_clock::now() - cancelled_at < std::chrono::seconds(30)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        const double a_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - cancelled_at).count();
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        const bool b_waiting = !b_done || status_state(engine.coreml_status()) == "ready";
+        engine.cancel();  // ends b
+        a.join();
+        b.join();
+        check(a_done && !a_ready && a_ms < 1500 && b_waiting,
+              "a cancel() ends the running coreml_wait(-1) after " + std::to_string((int) a_ms) +
+                  " ms although another wait starts right after it" + (a_ready ? " (it returned ready)" : "") +
+                  (b_waiting ? "; the later wait kept waiting" : "; the later wait ended on the earlier cancel"));
+    }
     const bool done = engine.coreml_wait(-1);
     const std::string st = engine.coreml_status();
     check(done && contains(st, "\"route\":\"generated\""),
@@ -1063,6 +1253,7 @@ void generated_gates(parler_model & model, const std::string & gguf, const std::
               std::to_string(route.envelope_bytes) + " bytes" + (route.validated ? ", validated" : ""));
     engine_wait_cancel_gate(gguf, cache_dir);
     engine_wait_keeps_cancel_gate(gguf, opts);
+    source_changed_gate(gguf);
     model.dac_sidecar.reset();
     model.dac_pending.reset();
     std::shared_ptr<parler_dac_coreml> dac;
@@ -1156,6 +1347,32 @@ void generated_gates(parler_model & model, const std::string & gguf, const std::
               "Engine under a near budget: DAC on ggml (" + whole.dac_backend + "), " +
                   st.substr(0, std::min<size_t>(st.size(), 200)));
     }
+    {
+        // A fit assessed with a larger headroom than the default: the budget
+        // holds ggml + Core ML with the default 256 MiB margin, but only ggml
+        // with this one. The Engine, given the same workload and margin, must
+        // reach the same verdict (memory-degrade) as that fit.
+        tts_cpp::parler::FitOptions wide = fit;
+        wide.margin_bytes = fit.margin_bytes + fr.coreml.bytes;
+        wide.coreml.memory_budget_bytes = (int64_t) (ggml_need + fr.coreml.bytes + (64ull << 20));
+        const tts_cpp::FitResult assessed = tts_cpp::parler::fit_params(wide);
+        tts_cpp::parler::FitOptions as_default = wide;
+        as_default.margin_bytes = fit.margin_bytes;
+        const tts_cpp::FitResult by_default = tts_cpp::parler::fit_params(as_default);
+        check(assessed.coreml.disabled_reason == "memory" && by_default.coreml.disabled_reason.empty(),
+              "a budget only the larger margin degrades: '" + assessed.coreml.disabled_reason + "' with it, '" +
+                  by_default.coreml.disabled_reason + "' with the default");
+        tts_cpp::parler::EngineOptions low = eo;
+        low.coreml.use = tts_cpp::CoremlOptions::Use::automatic;
+        low.coreml.memory_budget_bytes = wide.coreml.memory_budget_bytes;
+        low.fit_margin_bytes = wide.margin_bytes;
+        tts_cpp::parler::Engine engine(low);
+        const std::string st = engine.coreml_status();
+        const auto whole = engine.synthesize("a b");
+        check(contains(st, "\"state\":\"disabled\"") && whole.dac_backend == "ggml",
+              "Engine with the fit's nondefault margin: memory-degrade as that fit (DAC on " + whole.dac_backend +
+                  "), " + st.substr(0, std::min<size_t>(st.size(), 200)));
+    }
     model.dac_pending.reset();
 }
 
@@ -1183,7 +1400,9 @@ void memory_schedule(parler_model & model, const std::string & gguf, const std::
     model.dac_pending.reset();
     std::vector<float> pcm;
     for (int i = 0; i < 2; ++i) decode(model, codes, n_frames, pcm);  // warm the ggml arena
-    const uint64_t base = qvac_coreml_memory::phys_footprint();
+    uint64_t base = 0;
+    const bool base_ok = qvac_coreml_memory::phys_footprint(base);
+    size_t footprint_failures = 0;
     std::atomic<bool> stop{false};
     std::atomic<int> phase{(int) mem_phase::ggml};
     std::atomic<const parler_dac_coreml *> watched{nullptr};
@@ -1194,15 +1413,21 @@ void memory_schedule(parler_model & model, const std::string & gguf, const std::
         for (int tick = 0; !stop.load(); ++tick) {
             const parler_dac_coreml * d = watched.load();
             if (d != nullptr && tick % 5 == 0) phase.store((int) mem_phase_of(status_state(d->status_json())));
-            samples.push_back({qvac_coreml_memory::phys_footprint(), (mem_phase) phase.load()});
+            uint64_t fp = 0;
+            if (qvac_coreml_memory::phys_footprint(fp)) {
+                samples.push_back({fp, (mem_phase) phase.load()});
+            } else {
+                ++footprint_failures;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
     });
     std::thread ane_sampler([&] {
         while (!stop.load()) {
-            const uint64_t a = qvac_coreml_memory::ane_compiler_rss();
+            uint64_t a = 0;
+            const bool ok = qvac_coreml_memory::ane_compiler_rss(a);
             const auto p = (mem_phase) phase.load();
-            ane_samples.push_back({a, p == mem_phase::load || p == mem_phase::warm});
+            ane_samples.push_back({a, p == mem_phase::load || p == mem_phase::warm, ok});
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
     });
@@ -1246,17 +1471,19 @@ void memory_schedule(parler_model & model, const std::string & gguf, const std::
     const uint64_t workspace = b.steady > other_resident ? b.steady - other_resident : 0;
     fprintf(stderr,
             "  memory (MiB; each phase over the footprint just before it began, steady over the footprint just "
-            "before the load, whole run over the warm ggml baseline %.1f):\n"
-            "    prepare    %7.1f  charged %7.1f  (generate %.1f, compile %.1f)\n"
-            "    load+warm  %7.1f  charged %7.1f  (load %.1f, warm-up %.1f)\n"
-            "    steady     %7.1f  charged %7.1f  (workspace %.1f, charged %.1f; over the baseline %.1f)\n"
-            "    whole run  %7.1f  charged %7.1f  (envelope, margin included)\n"
-            "    ANECompilerService growth while loading and warming %.1f, reserve %.1f (%s; peak while loading "
-            "%.1f, whole run %.1f)\n",
-            mib(base), mib(b.prepare), mib(c.prepare), mib(b.generate), mib(b.compile), mib(b.load_warm),
-            mib(c.load), mib(b.load), mib(b.warm), mib(b.steady), mib(c.resident), mib(workspace),
-            mib(route.workspace_bytes), mib(b.steady_over_base), mib(b.total), mib(c.envelope), mib(ane.growth),
-            mib(c.ane_reserve), before_load, mib(ane.peak), mib(ane_peak));
+            "before the load, whole run over the warm ggml baseline %.1f; a phase needs x%.2f its measurement):\n"
+            "    prepare    %7.1f  needs %7.1f  charged %7.1f  (generate %.1f, compile %.1f)\n"
+            "    load+warm  %7.1f  needs %7.1f  charged %7.1f  (load %.1f, warm-up %.1f)\n"
+            "    steady     %7.1f  needs %7.1f  charged %7.1f  (workspace %.1f, charged %.1f; over the baseline %.1f)\n"
+            "    whole run  %7.1f  needs %7.1f  charged %7.1f  (the envelope: margined phases)\n"
+            "    ANECompilerService size while loading and warming %.1f, needs %.1f, reserve %.1f (growth %.1f, %s; "
+            "whole run %.1f)\n",
+            mib(base), MEASURED_MARGIN, mib(b.prepare), MEASURED_MARGIN * mib(b.prepare), mib(c.prepare),
+            mib(b.generate), mib(b.compile), mib(b.load_warm), MEASURED_MARGIN * mib(b.load_warm), mib(c.load),
+            mib(b.load), mib(b.warm), mib(b.steady), MEASURED_MARGIN * mib(b.steady), mib(c.resident),
+            mib(workspace), mib(route.workspace_bytes), mib(b.steady_over_base), mib(b.total), mib(b.total),
+            mib(c.envelope), mib(ane.peak), MEASURED_MARGIN * mib(ane.peak), mib(c.ane_reserve), mib(ane.growth),
+            before_load, mib(ane_peak));
     if (baseline == qvac_coreml_memory::AneBaseline::dirty) {
         fprintf(stderr,
                 "    note: ANECompilerService held %.1f MiB before the load, so it reused memory of earlier compiles "
@@ -1278,14 +1505,17 @@ void memory_schedule(parler_model & model, const std::string & gguf, const std::
             (unsigned long long) b.steady, (unsigned long long) b.steady_over_base, (unsigned long long) workspace, (unsigned long long) b.total,
             (unsigned long long) ane.peak, (unsigned long long) ane.before, (unsigned long long) ane.growth,
             (unsigned long long) ane_peak, baseline_name, samples.size());
-    for (const std::string & f : mem_failures(b, ane.growth, c)) check(false, "memory schedule: " + f);
+    const bool ane_units = route.compute_units == "all" || route.compute_units == "cpu_and_ane";
+    std::vector<std::string> failures = probe_failures(base_ok, footprint_failures, ane_units, ane);
+    for (const std::string & f : mem_failures(b, ane.peak, c)) failures.push_back(f);
+    for (const std::string & f : failures) check(false, "memory schedule: " + f);
     char line[512];
     std::snprintf(line, sizeof(line),
                   "overlapped schedule: %d ggml + %d Core ML calls in %.1f s; footprint base %.1f MiB, peak +%.1f MiB "
-                  "(envelope %.1f MiB, units %s); ANECompilerService grew %.1f MiB (%s; peak %.1f MiB)",
+                  "(envelope %.1f MiB, units %s); ANECompilerService %.1f MiB while loading, grew %.1f MiB (%s)",
                   ggml_calls, coreml_calls, secs, mib(base), mib(b.total), mib(route.envelope_bytes),
-                  route.compute_units.c_str(), mib(ane.growth), before_load, mib(ane_peak));
-    check(coreml_calls >= 5 && ggml_calls >= 1 && mem_failures(b, ane.growth, c).empty(), line);
+                  route.compute_units.c_str(), mib(ane.peak), mib(ane.growth), before_load);
+    check(coreml_calls >= 5 && ggml_calls >= 1 && failures.empty(), line);
     model.dac_pending.reset();
 }
 #endif

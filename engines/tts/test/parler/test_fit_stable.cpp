@@ -32,6 +32,7 @@
 
 #ifdef TTS_CPP_USE_COREML
 #include "hints.h"
+#include "qvac_coreml/generation.h"
 #include "qvac_coreml/manager.h"
 #endif
 #if defined(__APPLE__)
@@ -75,6 +76,7 @@ std::string describe(const tts_cpp::FitResult & f) {
 using qvac_coreml_fit_stable::artifact_dirs;
 using qvac_coreml_fit_stable::write_file;
 #ifdef TTS_CPP_USE_COREML
+namespace pcm = QVAC_COREML_NS;
 using qvac_coreml_fit_stable::runtime_hint_path;
 using qvac_coreml_fit_stable::write_hints;
 #endif
@@ -84,28 +86,42 @@ using qvac_coreml_fit_stable::write_hints;
 // copy. Each charge is 1.25 x the largest value measured over every
 // overlapped generated-schedule run on the validated hosts, rounded up to
 // 1 MiB, so the envelope's own margin is 1.0 (template.json memory.measured):
-// prepare 1.25 x 441.6 MiB and the compiler reserve 1.25 x 505.7 MiB, the
-// largest absolute size of ANECompilerService while loading (M2, macOS
-// 27.2.1; no run found the service clean, so its growth would understate a
-// clean host); load and warm-up 1.25 x 323.5 MiB and the resident part
-// (weights, 2 x I/O and workspace) 1.25 x 323.7 MiB of steady state (M4 Max,
+// prepare 1.25 x 441.6 MiB (M2, macOS 27.2.1); the compiler reserve 1.25 x
+// 821.2 MiB, the largest absolute size of ANECompilerService while loading on
+// any host (M4 Max; no run found the service clean, so its growth would
+// understate a clean host); load and warm-up 1.25 x 326.4 MiB and the resident part
+// (weights, 2 x I/O and workspace) 1.25 x 326.7 MiB of steady state (M4 Max,
 // macOS 26.7.2, where `all` runs on the GPU). A change of the template's
 // memory changes these on purpose.
 constexpr uint64_t MIB = 1ull << 20;
 constexpr uint64_t DAC_WEIGHTS = 108316032;                    // weight.bin
 constexpr uint64_t DAC_IO = 2 * 393472;                        // latent, valid and pcm, twice
 constexpr uint64_t DAC_PREPARE = 552 * MIB;                    // generation_peak 216 + 8 + compile_peak 328
-constexpr uint64_t DAC_LOAD = 405 * MIB;                       // load_peak_bytes.all
-constexpr uint64_t DAC_RESIDENT = 405 * MIB;                   // runtime weights + 2 x I/O + workspace
+constexpr uint64_t DAC_LOAD = 409 * MIB;                       // load_peak_bytes.all
+constexpr uint64_t DAC_RESIDENT = 409 * MIB;                   // runtime weights + 2 x I/O + workspace
 constexpr uint64_t DAC_WORKSPACE = DAC_RESIDENT - DAC_WEIGHTS - DAC_IO;
-constexpr uint64_t DAC_ANE_RESERVE = 633 * MIB;                // ane_compile_reserve_bytes
-constexpr uint64_t DAC_ENVELOPE = DAC_RESIDENT + DAC_PREPARE;  // margin 1.0: 957 MiB
+constexpr uint64_t DAC_ANE_RESERVE = 1027 * MIB;               // ane_compile_reserve_bytes
+constexpr uint64_t DAC_ENVELOPE = DAC_RESIDENT + DAC_PREPARE;  // margin 1.0: 961 MiB
 
 void template_charges(const parler_dac_route & r) {
+#if defined(TTS_CPP_USE_COREML) && defined(__APPLE__) && TARGET_OS_OSX
+    // A prebuilt-only Core ML build (TTS_CPP_COREML_GENERATE off) or macOS
+    // before 15 generates nothing: the route is none for that reason and the
+    // DAC stays on ggml, so there is no charge to check.
+    const bool generator = pcm::generation::built();
+    const bool os_supported = pcm::os_at_least(pcm::Manager::instance()->os_version(), 15, 0);
+    if (!generator || !os_supported) {
+        const bool fallback = r.route == "none" && (!generator ? r.state == "absent" && r.reason == "no sidecar"
+                                                               : r.state == "unsupported" && r.reason == "os");
+        check(fallback, std::string("template charges: ") + (!generator ? "no generator in this build" : "macOS before 15") +
+                            ", so route none (" + r.route + " " + r.state + ": " + r.reason + ")");
+        return;
+    }
+#endif
     if (r.route != "generate" || r.compute_units != "all") {
 #if defined(TTS_CPP_USE_COREML) && defined(__APPLE__) && TARGET_OS_OSX
-        // A macOS Core ML build generates this GGUF's DAC under `all`, so a
-        // charge it cannot check is a failure, not a skip.
+        // A macOS 15+ build with the generator generates this GGUF's DAC under
+        // `all`, so a charge it cannot check is a failure, not a skip.
         check(false, "template charges: route " + r.route +
                          (r.reason.empty() ? std::string() : " (" + r.state + ": " + r.reason + ")") + ", units " +
                          r.compute_units + "; expected route generate under all");

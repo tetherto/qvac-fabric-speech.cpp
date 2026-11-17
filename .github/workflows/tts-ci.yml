@@ -711,21 +711,20 @@ jobs:
       # while the sidecar is generated, compiled, loaded and warmed in the
       # background, three times, each from a re-signed copy of the test and an
       # empty cache, so every Neural Engine load is cold. Each run prints its
-      # per-phase table and fails when the prepare, the load and warm-up, the
-      # steady state, the whole run or ANECompilerService's growth during the
-      # load (not its absolute size, which includes what other jobs on this
-      # runner's Mac compiled) exceeds the template constant that charges it.
-      # Each run also prints the service's size before the load and labels
-      # that baseline clean, dirty or unknown: on a dirty baseline the growth
-      # understates a cold compile on a clean host, so the reserve comes from
-      # the largest absolute size on the M2 (docs/parler.md). Runs whenever the
-      # generated-sidecar step ran, so a parity failure does not hide it.
-      # Known failure mode: the growth sums every ANECompilerService instance
-      # on the Mac, and a pull request starts several build-test-macos jobs at
-      # once (tts, audiogen), so a job on a co-hosted runner that compiles for
-      # the Neural Engine during this load counts as growth and can turn the
-      # step red. It shows as one run growing far more than the others (about
-      # 2 MiB each on the M4 Max); rerun the job.
+      # per-phase table and fails unless 1.25 x each phase it measured (the
+      # prepare, the load and warm-up, the steady state, ANECompilerService's
+      # absolute size while loading) fits the template constant that charges
+      # it, and the whole run fits the envelope: the constants are 1.25 x the
+      # largest value of every run on every validated host, so a run that sets
+      # a new maximum fails until they are recomputed (docs/parler.md). Each
+      # run also prints the service's growth and its size before the load,
+      # labelled clean, dirty or unknown. Runs whenever the generated-sidecar
+      # step ran, so a parity failure does not hide it. Known failure mode: the
+      # service's size sums every instance on the Mac, and a pull request
+      # starts several build-test-macos jobs at once (tts, audiogen), so a job
+      # on a co-hosted runner that compiles for the Neural Engine during this
+      # load counts too: a run above 821.6 MiB fails the 1,027 MiB reserve and,
+      # by the rule above, raises it.
       - name: Memory schedule (generated Parler DAC, overlapped, this runner)
         if: >-
           !cancelled() && runner.os == 'macOS' &&

@@ -118,6 +118,16 @@ struct EngineOptions {
     // fall back to coreml_compute_units / coreml_strict above, then to the
     // PARLER_COREML_* environment. Parler's minimal set is the DAC.
     CoremlOptions coreml;
+
+    // The workload and headroom of the fit_params call that assessed this
+    // engine (the FitOptions fields of the same names; the defaults are
+    // FitOptions'). With coreml.memory_budget_bytes set, the constructor
+    // repeats that fit to decide memory-degrade (Core ML off when only the
+    // ggml projection fits the budget), so these must match the assessment,
+    // or the engine can keep Core ML where that fit dropped it.
+    int fit_description_tokens = 50;
+    int fit_prompt_tokens = 128;
+    uint64_t fit_margin_bytes = 256ull * 1024 * 1024;
 };
 
 struct SynthesisResult {
@@ -199,10 +209,10 @@ public:
     // passes (< 0: no limit), or cancel() is called from another thread.
     // True when it is ready. Returns false at once while nothing has
     // requested the sidecar (prewarm none before the first synthesis) or it
-    // waits for memory (deferred). A wait never clears a cancel() meant for
-    // a synthesis on another thread; coreml_wait(0) only polls. Blocking
-    // waits share one flag that each clears as it starts, so a cancel() made
-    // just before a second wait begins may not end one already running.
+    // waits for memory (deferred). A blocking wait ends on any cancel() made
+    // after it started and clears nothing, so concurrent waits and a
+    // synthesis on another thread each see the cancels meant for them;
+    // coreml_wait(0) only polls.
     bool coreml_wait(int64_t timeout_ms = -1) const;
 
 private:

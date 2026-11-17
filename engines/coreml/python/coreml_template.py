@@ -16,7 +16,9 @@ compares is written by the C++ interpreter through `qvac-coreml-tool`).
             structurally equal and that their weight.bin layouts agree, then
             writes model.mlmodel (deterministic serialisation of A's spec),
             Manifest.json and template.json, and refreshes the header of an
-            existing recipe.txt. Inline spec constants whose values differ
+            existing recipe.txt. Every tensor must differ between A and B
+            (one equal in both would hide whether the exporter folds it into
+            the program). Inline spec constants whose values differ
             between A and B (weights folded into the spec) become patch sites:
             model.mlmodel holds a sentinel there and template.json `patches`
             records it; the recipe's patch lines compute the values. Literals
@@ -436,6 +438,28 @@ def gguf_tensors(path):
     return out
 
 
+def coinciding_tensors(twin_a, twin_b):
+    """Names of the tensors whose bytes are the same in two twins. Extraction
+    finds the weights an exporter folds into its program by the differences
+    between twins A and B, so a tensor equal in both is a blind spot: a
+    program constant computed from it would be taken for a fixed one."""
+    import gguf
+
+    def raw(path):
+        return {t.name: np.asarray(t.data).tobytes() for t in gguf.GGUFReader(str(path)).tensors}
+
+    a, b = raw(twin_a), raw(twin_b)
+    return sorted(n for n in a if n in b and a[n] == b[n])
+
+
+def check_twins_differ(twin_a, twin_b, what):
+    same = coinciding_tensors(twin_a, twin_b)
+    if same:
+        raise TemplateError(f"{what}: twin A and twin B hold the same values for {len(same)} tensor(s), so the "
+                            "exporter's use of them cannot be checked: " + ", ".join(same[:20]) +
+                            (" ..." if len(same) > 20 else ""))
+
+
 # ---- the exporter ---------------------------------------------------------------------------
 
 
@@ -829,8 +853,9 @@ def cmd_extract(a):
             stage.mkdir(parents=True)
         if manifest_path.resolve() != (out / "reference-gguf.json").resolve():
             writes["reference-gguf.json"] = manifest_path.read_bytes()
-        _, pkg_a = _export_twin(tool, manifest_path, exporter, SEED_A, "f32", work, a.python, root, "a")
-        _, pkg_b = _export_twin(tool, manifest_path, exporter, SEED_B, "f32", work, a.python, root, "b")
+        twin_a, pkg_a = _export_twin(tool, manifest_path, exporter, SEED_A, "f32", work, a.python, root, "a")
+        twin_b, pkg_b = _export_twin(tool, manifest_path, exporter, SEED_B, "f32", work, a.python, root, "b")
+        check_twins_differ(twin_a, twin_b, "extract")
         pa, pb = package_parts(pkg_a), package_parts(pkg_b)
         spec_a, spec_b = load_spec(pa["spec"]), load_spec(pb["spec"])
         # Weight-dependent inline constants become patch sites (sentinels in
@@ -931,11 +956,18 @@ def check_template(tool, tdir, python=None, root=None, quant_types="q8_0", work=
     owned = work is None
     work = Path(work or tempfile.mkdtemp(prefix="qvac-coreml-report-"))
     try:
+        twins = {}
         for label, seed, types in cases:
             r = {"template": tj.get("id", tdir.name), "twin": label, "seed": seed, "types": types}
             twin, pkg = _export_twin(tool, tdir / "reference-gguf.json", exporter, seed, types, work, python, root,
                                      label.lower())
+            twins[label] = twin
             r.update(compare_packages(tool, tdir, twin, pkg, work, label.lower()))
+            if label == "B":
+                # A tensor equal in twins A and B is one these gates cannot
+                # check (the exporter may fold it into the program).
+                r["coinciding"] = coinciding_tensors(twins["A"], twin)
+                r["pass"] = r["pass"] and not r["coinciding"]
             results.append(r)
     finally:
         if owned:
@@ -1023,6 +1055,8 @@ def cmd_report(a):
             ok &= r["pass"]
             status = "PASS" if r["pass"] else "FAIL"
             extra = r.get("error") or (f"spec differs at {r['spec_diff'][:3]}" if r.get("spec_diff") else
+                                       f"tensors equal in twins A and B: {r['coinciding'][:5]}"
+                                       if r.get("coinciding") else
                                        (r["verify"][-1] if r.get("verify") else r.get("verify_stderr", "")))
             print(f"{status} {r['template']} twin {r['twin']} ({r.get('types', '-')}): {extra}")
             if not r["pass"] and r.get("verify"):

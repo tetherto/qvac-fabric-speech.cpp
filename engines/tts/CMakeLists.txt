@@ -361,6 +361,7 @@ set(TTS_CPP_LIB_SOURCES
     src/parler/dac.cpp
     src/parler/dac_accel.cpp
     src/parler/dac_coreml.cpp
+    src/parler/dac_source.cpp
     src/parler/engine.cpp
     # Audio8 engine (DualAR semantic LM + DAC-style codec with in-process cloning).
     src/audio8/unicode.cpp
@@ -2647,6 +2648,7 @@ if (TTS_CPP_BUILD_TESTS)
     # ---- Parler-TTS tests (fixtures from scripts/parler/dump-reference.py) ----
     set(_tcb_parler_core_srcs
         src/parler/gguf.cpp
+        src/parler/dac_source.cpp
         src/backend_selection.cpp
         src/sched_dispatch.cpp
         src/log.cpp)

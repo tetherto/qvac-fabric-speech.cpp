@@ -4,6 +4,7 @@
 #include "../coreml_sidecar_path.h"
 
 #ifdef TTS_CPP_USE_COREML
+#include "dac_source.h"
 #include "../moss/coreml/runner.h"
 
 #include "qvac_coreml/generation.h"
@@ -584,10 +585,13 @@ std::shared_ptr<parler_dac_coreml> parler_dac_coreml::create(parler_model & mode
                 : 0;
     } else {
         const pcm::generation::Candidate & c = *p->plan.candidate;
-        pcm::SourceStat source;
-        if (!pcm::generation::source_stat(gguf_path, source)) {
-            throw std::runtime_error("parler: cannot stat " + gguf_path);
-        }
+        // The file the weights were loaded from, not whatever `gguf_path`
+        // names now: a GGUF replaced since the load (or another path) fails
+        // the prepare job with source_changed, and the DAC stays on ggml.
+        const parler_dac_source none;
+        const parler_dac_source & ls = model.dac_source ? *model.dac_source : none;
+        const pcm::SourceStat source =
+            pcm::generation::loaded_source(ls.before, ls.ok_before, ls.after, ls.ok_after, gguf_path);
         spec.tmpl = c.tmpl;
         spec.prepare = pcm::generation::prepare_request(c, source, p->resolved);
         spec.prepare_fn = &pcm::generation::prepare;
@@ -668,7 +672,7 @@ std::string parler_dac_coreml::construction_json() const {
     return p_->construction ? pcm::to_json(p_->construction->result()) : std::string("{}");
 }
 
-bool parler_dac_coreml::wait(int64_t timeout_ms, const std::atomic<bool> * cancel) const {
+bool parler_dac_coreml::wait(int64_t timeout_ms, const std::atomic<uint64_t> * cancels, uint64_t since) const {
     if (!p_->slot) return false;
     const auto start = pcm::Clock::now();
     for (;;) {
@@ -679,7 +683,7 @@ bool parler_dac_coreml::wait(int64_t timeout_ms, const std::atomic<bool> * cance
         if (pcm::is_terminal(st) || st == pcm::SlotState::idle || st == pcm::SlotState::deferred_memory) {
             return false;
         }
-        if (cancel && cancel->load()) return false;
+        if (cancels && cancels->load() != since) return false;
         if (timeout_ms >= 0 && pcm::Clock::now() - start >= std::chrono::milliseconds(timeout_ms)) return false;
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
@@ -713,7 +717,7 @@ const parler_dac_route & parler_dac_coreml::route() const { return p_->route; }
 bool parler_dac_coreml::active() const { return false; }
 std::string parler_dac_coreml::status_json() const { return "{}"; }
 std::string parler_dac_coreml::construction_json() const { return "{}"; }
-bool parler_dac_coreml::wait(int64_t, const std::atomic<bool> *) const { return false; }
+bool parler_dac_coreml::wait(int64_t, const std::atomic<uint64_t> *, uint64_t) const { return false; }
 
 #endif
 

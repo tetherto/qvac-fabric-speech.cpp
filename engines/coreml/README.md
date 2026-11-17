@@ -89,10 +89,17 @@ route `generate`:
    `generate` is not `never`, the OS is macOS 15 or later and the resolved
    units are validated.
 3. The slot's `SlotSpec` gets `prepare = generation::prepare_request(...)`
-   (the template, the GGUF's stat tuple from `generation::source_stat`, the
-   cache directory), `prepare_fn = generation::prepare` (the cache pipeline
-   with the on-device compile) and `tmpl`. Its `artifact_path` stays empty:
-   the prepare job supplies the published bundle.
+   (the template, the identity of the GGUF the engine loaded its weights
+   from, the cache directory), `prepare_fn = generation::prepare` (the cache
+   pipeline with the on-device compile) and `tmpl`. Its `artifact_path` stays
+   empty: the prepare job supplies the published bundle. The identity comes
+   from `generation::loaded_source`: `generation::source_stat` of the path
+   taken before the engine first opens the GGUF and again after its last
+   read of it. When the two differ (the file was replaced during the load)
+   or the engine asks to generate from another path, the identity is marked
+   `changed`, and the prepare job fails with `source_changed` instead of
+   generating from weights the engine did not load; the stage stays on ggml.
+   A stat taken only when the slot is made would follow a replacement.
 4. The stage's `LoadFn` calls `generation::begin_load` before loading and
    `generation::end_load` after: a generated bundle loads under the shared
    lease of its cache entry, and `used/<key>` is touched after a successful
@@ -137,6 +144,10 @@ Supertonic vocoder's; both attribute each sample to a phase with
     already cover it, as on the Neural Engine, which keeps the weights
     outside the process;
   - `ane_compile_reserve_bytes`: below.
+- A schedule run passes only when 1.25 times each phase it measured fits the
+  constant that charges it, so a run that sets a new maximum fails until the
+  constants are recomputed. The whole run is held to the envelope as
+  measured, since the envelope adds phases that each carry the margin.
 - Each constant carries its own 1.25, so the envelope adds none: `margin` 1.0
   and `coreml_bound: "measured"`. The runtime reads `margin`; `coreml_bound`
   and `measured` are records.
@@ -156,20 +167,22 @@ admission: a cold Neural Engine load waits until that much memory is free.
 schedule measures it in two ways:
 
 - its **growth** during the load: its peak while loading, less its size just
-  before the first load. The schedule holds the growth to the reserve, since
-  on a shared host the absolute size includes what other processes compiled.
-  The size is summed over every instance of the service, so another process
-  that compiles for the Neural Engine during the load counts as growth;
-- its **absolute** size while loading.
+  before the first load;
+- its **absolute** size while loading. On a shared host it includes what
+  other processes compiled, before the load or during it.
 
-A service that already holds memory from earlier compiles reuses it, so on
-such a dirty baseline the growth understates a cold compile on a clean host,
-where the growth is the whole size. The reserve is therefore 1.25 times the
-largest growth measured from a clean start (at most 32 MiB before the load,
-`ANE_COMPILER_CLEAN_BYTES` in `test/memory_probe.h`). Without clean starts,
-it is 1.25 times the largest absolute size on a host whose placement compiles
-the stage for the Neural Engine. Each run report prints the size before the
-load and labels that baseline clean, dirty or unknown (no sample before the
+Both sum every instance of the service, so another process that compiles
+for the Neural Engine during the load counts in both. A service that
+already holds memory from earlier compiles reuses it, so on such a dirty
+baseline the growth understates a cold compile on a clean host, where the
+growth is the whole size. The reserve is therefore 1.25 times the largest
+growth measured from a clean start (at most 32 MiB before the load,
+`ANE_COMPILER_CLEAN_BYTES` in `test/memory_probe.h`) on every validated
+host, when every host has such runs. Otherwise it is 1.25 times the largest
+absolute size while loading on any validated host, a conservative basis
+that compares across placements, and the schedule holds 1.25 times the
+absolute size to it. Each run report prints both, the size before the load,
+and labels that baseline clean, dirty or unknown (no sample before the
 load, in which case the growth is the whole size while loading).
 
 ## Building the tests and the tool
@@ -454,7 +467,11 @@ qvac-coreml-tool twin --manifest <manifest.json> --seed <N> --types <type[,type.
 
 Writes a random GGUF with the same metadata and tensor geometry as the
 manifest. Each tensor's values are drawn from a normal distribution with the
-recorded mean and standard deviation, clamped to the recorded range. Tensors
+recorded mean and standard deviation, clamped to the recorded range. A tensor
+whose recorded values are all equal (a scalar bias, a constant vector) is drawn
+within ±25% of that value (±0.00025 around zero) instead, so every tensor
+differs between seeds and `extract` can see any value the exporter folds into
+the program. Tensors
 that are not f32 in the original (quantised, f16, bf16) take the `--types`
 entries in turn, quantised with ggml's own quantisers, when their row length is
 a multiple of that type's block size; the rest stay f32. `--set` sets a string
