@@ -1,9 +1,12 @@
 // fit_params must charge the Core ML diarizer sidecars beside a Nemotron 3
-// Diarization or Sortformer v2.1 GGUF: a short offline input loads only the
-// smallest bundle, a long Nemotron input reaches every bundle up to the one
-// covering its long-form block, a long Sortformer input exceeds them all and
-// runs on ggml, the charge decides the verdict on unified memory, and
-// PARAKEET_COREML_DIARIZER_DISABLE removes it. parakeet-fit-params --json
+// Diarization or Sortformer v2.1 GGUF: the bundles construction loads (the
+// smallest for the default prewarm, every one for prewarm all) together with
+// the ones the workload can load, plus the largest load transient once. A
+// short offline input loads only the smallest bundle, a long Nemotron input
+// reaches every bundle up to the one covering its long-form block, a long
+// Sortformer input exceeds them all and runs on ggml (only the construction
+// bundle stays charged), the charge decides the verdict on unified memory,
+// and PARAKEET_COREML_DIARIZER_DISABLE removes it. parakeet-fit-params --json
 // reports the same figure. Exits 77 without sidecars.
 
 #include "parakeet/cli.h"
@@ -44,18 +47,27 @@ void check(bool condition, const char * label) {
     g_passed = g_passed && condition;
 }
 
-parakeet::FitResult project(const std::string & gguf, float seconds, uint64_t margin) {
+parakeet::FitResult project(const std::string & gguf, float seconds, uint64_t margin,
+                            parakeet::CoremlOptions::Prewarm prewarm = parakeet::CoremlOptions::Prewarm::unset) {
     parakeet::FitOptions opts;
     opts.model_gguf_path = gguf;
     opts.audio_seconds = seconds;
     opts.n_gpu_layers = kGpuLayers;
     opts.margin_bytes = margin;
+    opts.coreml.prewarm = prewarm;
     return parakeet::fit_params(opts);
 }
 
+// The charge of the bundles resident together: their resident bytes plus
+// the largest one's load transient (a quarter of its weights on the default
+// CPU and Neural Engine units).
 uint64_t charge(const std::vector<parakeet::CoremlDiarizerBundle> & bundles,
                 int frames = kAllFrames) {
-    return parakeet::coreml_diarizer_resident_bytes(bundles, {{1, frames}});
+    uint64_t transient = 0;
+    for (const auto & b : parakeet::coreml_diarizer_loaded_bundles(bundles, {{1, frames}})) {
+        transient = std::max(transient, b.weights_bytes / 4);
+    }
+    return parakeet::coreml_diarizer_resident_bytes(bundles, {{1, frames}}) + transient;
 }
 
 bool reports_sidecars(const parakeet::FitResult & result) {
@@ -109,9 +121,15 @@ void check_workloads(const std::string & gguf,
     check_cli_json(gguf, offline.coreml_bytes);
     const parakeet::FitResult long_input = project(gguf, kLongSeconds, kDefaultMargin);
     const bool nemotron = long_input.model_type == kNemotronType;
-    check(long_input.coreml_bytes == (nemotron ? charge(bundles, kLongFormBlockFrames) : 0),
+    check(long_input.coreml_bytes == (nemotron ? charge(bundles, kLongFormBlockFrames) : charge({bundles.front()})),
           nemotron ? "long-form input charges every bundle up to its block"
-                   : "input above every bundle charges none");
+                   : "input above every bundle charges only the construction bundle");
+    // prewarm all loads every capacity at construction, whatever the input.
+    const parakeet::FitResult all = project(gguf, kShortSeconds, kDefaultMargin, parakeet::CoremlOptions::Prewarm::all);
+    check(all.coreml_bytes == charge(bundles), "prewarm all charges every bundle for a short input");
+    const parakeet::FitResult none = project(gguf, kLongSeconds, kDefaultMargin, parakeet::CoremlOptions::Prewarm::none);
+    check(none.coreml_bytes == (nemotron ? charge(bundles, kLongFormBlockFrames) : 0),
+          "prewarm none charges only what the workload loads");
 }
 
 void check_verdict(const std::string & gguf) {

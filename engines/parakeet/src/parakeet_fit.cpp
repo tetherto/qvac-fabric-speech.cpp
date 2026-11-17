@@ -229,14 +229,35 @@ uint64_t largest_eu_precise_bytes(const std::string & gguf_path) {
 }
 #endif
 
+// The diarizer sidecars' charge: the bundles construction loads for the
+// resolved prewarm scope (prewarm all loads every capacity) together with
+// the ones the workload's calls can load, resident together, plus the
+// largest of their load transients once (the runtime loads one at a time).
 uint64_t coreml_diarizer_bytes(const std::string & gguf_path,
-                               const std::vector<CoremlFrameRange> & ranges) {
+                               std::vector<CoremlFrameRange> ranges, const FitOptions & opts) {
 #ifdef PARAKEET_USE_COREML
     if (coreml_diarizers_disabled()) return 0;
-    return coreml_diarizer_resident_bytes(list_coreml_diarizer_bundles(gguf_path), ranges);
+    const auto resolved = resolve_parakeet_coreml(opts.coreml);
+    const std::vector<CoremlDiarizerBundle> bundles = list_coreml_diarizer_bundles(gguf_path);
+    if (resolved.enabled()) {
+        const CoremlDiarizerPrewarm prewarm =
+            resolved.prewarm == pcm::Prewarm::all ? CoremlDiarizerPrewarm::all
+            : resolved.prewarm == pcm::Prewarm::none ? CoremlDiarizerPrewarm::none
+                                                     : CoremlDiarizerPrewarm::minimal;
+        for (const CoremlFrameRange & r : coreml_diarizer_construction_ranges(prewarm)) ranges.push_back(r);
+    }
+    const uint64_t resident = coreml_diarizer_resident_bytes(bundles, ranges);
+    if (resident == 0) return 0;
+    const CoremlFitUnits units = fit_units(resolved.units_or(pcm::ComputeUnits::cpu_and_ane));
+    uint64_t transient = 0;
+    for (const CoremlDiarizerBundle & b : coreml_diarizer_loaded_bundles(bundles, ranges)) {
+        transient = std::max(transient, coreml_encoder_load_transient_bytes(b.weights_bytes, units));
+    }
+    return sat_add(resident, transient);
 #else
     (void) gguf_path;
     (void) ranges;
+    (void) opts;
     return 0;
 #endif
 }
@@ -492,7 +513,7 @@ void project_nemotron_diarization(const ParakeetCtcModel & model, const GgufLoad
     r.host_bytes = nemotron_diarization_host_bytes(
         model, opts, total_mel, offline_frames, largest_host_input_bytes(graphs));
     r.coreml_bytes = coreml_diarizer_bytes(opts.model_gguf_path,
-                                           nemotron_coreml_ranges(graphs, long_form));
+                                           nemotron_coreml_ranges(graphs, long_form), opts);
     const uint64_t required = apply_fit_verdict(r, opts.margin_bytes);
     std::string disabled_reason;
     const bool enabled = coreml_fit_enabled(opts, disabled_reason);
@@ -822,7 +843,7 @@ FitResult fit_params(const FitOptions & opts) {
     }
     if (model.model_type == ParakeetModelType::SORTFORMER) {
         r.coreml_bytes = coreml_diarizer_bytes(opts.model_gguf_path,
-                                               {CoremlFrameRange{total_enc, total_enc}});
+                                               {CoremlFrameRange{total_enc, total_enc}}, opts);
     }
 
     r.device.weights_bytes         = lm.weights_bytes + lm.repack_bytes;

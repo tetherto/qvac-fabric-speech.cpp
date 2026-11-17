@@ -1,6 +1,7 @@
 #include "parakeet_coreml_path.h"
 
 #include <algorithm>
+#include <iterator>
 #include <array>
 #include <cctype>
 #include <cstddef>
@@ -174,6 +175,24 @@ uint64_t coreml_diarizer_resident_bytes(const std::vector<CoremlDiarizerBundle> 
                                         const std::vector<CoremlFrameRange> & ranges) {
     const LoadedWeights loaded = loaded_weights(bundles, ranges);
     return loaded.bundles == 0 ? 0 : kAneWeightCopies * loaded.bytes + kCoremlRuntimeBytes;
+}
+
+std::vector<CoremlDiarizerBundle> coreml_diarizer_loaded_bundles(
+        const std::vector<CoremlDiarizerBundle> & bundles, const std::vector<CoremlFrameRange> & ranges) {
+    const std::vector<int> capacities = bundle_capacities(bundles);
+    std::vector<CoremlDiarizerBundle> loaded;
+    std::copy_if(bundles.begin(), bundles.end(), std::back_inserter(loaded),
+                 [&](const CoremlDiarizerBundle & b) { return bundle_loaded(ranges, capacities, b.capacity); });
+    return loaded;
+}
+
+std::vector<CoremlFrameRange> coreml_diarizer_construction_ranges(CoremlDiarizerPrewarm prewarm) {
+    switch (prewarm) {
+        case CoremlDiarizerPrewarm::none: return {};
+        case CoremlDiarizerPrewarm::minimal: return {CoremlFrameRange{1, 1}};
+        case CoremlDiarizerPrewarm::all: return {CoremlFrameRange{1, INT32_MAX}};
+    }
+    return {};
 }
 
 }  // namespace parakeet
