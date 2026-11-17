@@ -18,10 +18,25 @@
 // histories, the attention window) as explicit inputs and outputs kept here,
 // so it runs on the Neural Engine. Either stage runs on ggml once a missing
 // or retired sidecar leaves it.
+//
+// The Engine loads both through the shared Core ML runtime (CoremlStages
+// below): a prebuilt sidecar next to its GGUF loads in the background; without
+// one, and with a cache directory, the sidecar is generated from the GGUF
+// (templates pocket-step-c1024 and pocket-mimi) on macOS 15 or later. Until a
+// sidecar is ready its stage runs on ggml. Each chunk takes each stage's
+// backend once, at its start (the step on the producer thread, the decoder on
+// the calling thread), so a chunk never switches backend except after a
+// failed prediction.
 
 #include "pocket/flow_lm.h"
+#include "tts-cpp/coreml_options.h"
+#include "tts-cpp/pocket/engine.h"
 
+#include <atomic>
 #include <cstdint>
+#include <functional>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -86,14 +101,16 @@ public:
     // for the model's life, and the shared runner copies by the declared
     // shapes), its schema and that it was exported from the checkpoint
     // `source_hash` names; then runs one warm-up prediction at position 0,
-    // which also fails for a sidecar with any further feature. Throws
-    // std::runtime_error.
+    // which also fails for a sidecar with any further feature (unless
+    // `warm` is false; warm_up() then runs it). Throws std::runtime_error.
     CoremlStep(const std::string & path, const std::string & compute_units, const FlowConfig & config,
-               const std::string & source_hash);
+               const std::string & source_hash, bool warm = true);
     ~CoremlStep();
     CoremlStep(const CoremlStep &) = delete;
     CoremlStep & operator=(const CoremlStep &) = delete;
 
+    // The warm-up prediction at position 0 (the constructor's, by default).
+    void warm_up();
     // Positions the state holds (voice + text + generated frames).
     int context() const { return context_; }
     const std::string & label() const { return label_; }
@@ -105,6 +122,10 @@ public:
     // in any row, and neither a later blend (0 * NaN) nor the attention mask
     // clears them.
     void reset(const CacheRows & rows);
+    // reset(voice) for the first chunk of the Engine that owns this model (the
+    // voice rows never change and no frame writes below them).
+    void prime(const CacheRows & voice) { reset(voice); primed_ = true; }
+    bool primed() const { return primed_; }
 
     // One frame at `position` (the cache holds every earlier one): latent
     // (bos_latent() for a chunk's first frame) and noise [latent_dim] ->
@@ -121,6 +142,7 @@ private:
     std::vector<float> cos_, sin_, mask_, write_mask_, staging_;
     int masked_from_ = 0;  // mask_ is 0 before this position, MASKED from it
     int written_ = -1;     // position write_mask_ marks
+    bool primed_ = false;
 };
 
 // Mimi decoder geometry; must match scripts/pocket_coreml_mimi.py.
@@ -139,6 +161,9 @@ public:
     // `source_hash` names, then runs one warm-up prediction (a sidecar with
     // any further feature fails it) and resets. Throws std::runtime_error.
     CoremlDecoder(const std::string & path, const std::string & compute_units, const std::string & source_hash);
+    // A stream on a decoder model loaded and checked elsewhere (load_decoder_model;
+    // not owned). The caller serializes predictions on a shared model.
+    CoremlDecoder(moss_coreml_model * borrowed, std::string label);
     ~CoremlDecoder();
     CoremlDecoder(const CoremlDecoder &) = delete;
     CoremlDecoder & operator=(const CoremlDecoder &) = delete;
@@ -155,10 +180,146 @@ private:
     void predict(const float * latent, float * pcm);
 
     moss_coreml_model * model_ = nullptr;
+    bool owned_ = true;
     std::string label_ = "coreml";
     int64_t position_ = 0;
     std::vector<float> keys_, values_, cos_, sin_, mask_, row_cos_, row_sin_;
     std::vector<std::vector<float>> histories_;
+};
+
+// Loads a decoder model and checks it as the CoremlDecoder constructor does
+// (shapes, schema, source hash), without a warm-up. Throws std::runtime_error.
+// The caller frees it with moss_coreml_free.
+moss_coreml_model * load_decoder_model(const std::string & path, const std::string & compute_units,
+                                       const std::string & source_hash);
+
+// ---- the sidecars on the shared Core ML runtime ----------------------------------
+
+enum class CoremlStage { step, decoder };
+
+// One stage's route, decided from options, OS, build, template match and the
+// presence of a prebuilt sidecar, never from the cache, so it is the same
+// before and after the first generation. For the generated route it carries
+// the Core ML memory envelope fit charges.
+struct CoremlRoute {
+    std::string route = "none";  // prebuilt | generate | none
+    std::string state;           // when none: unsupported | disabled | absent | no_template
+    std::string reason;
+    std::string compute_units;   // resolved
+    bool strict = false;
+    bool validated = false;      // generate: the envelope is validated for compute_units
+    // generate: the envelope's parts before the margin, from the template.
+    uint64_t resident_bytes = 0;      // weights, 2 x I/O, state and workspace
+    uint64_t workspace_bytes = 0;     // the prediction workspace (included in resident_bytes)
+    uint64_t prepare_peak_bytes = 0;  // generation and compile transient
+    uint64_t load_peak_bytes = 0;     // load and warm-up transient for compute_units
+    uint64_t transient_bytes = 0;     // max(prepare peak, load peak)
+    double margin = 1.25;
+    // generate: the free memory a cold Neural Engine load waits for (runtime
+    // admission; fit does not charge it). 0 when compute_units has no ANE.
+    uint64_t ane_compile_reserve_bytes = 0;
+};
+
+// The Core ML options of one stage: EngineOptions::coreml, with the stage's
+// own compute units (coreml_step_units / coreml_decoder_units) and the legacy
+// coreml_compute_units / coreml_strict as fallbacks for its unset fields.
+CoremlOptions coreml_stage_options(const struct CoremlEngineOptions & opts, CoremlStage stage);
+
+// What the Engine passes: the options and paths of both stages.
+struct CoremlEngineOptions {
+    std::string flow_lm_path, mimi_path;
+    CoremlOptions coreml;
+    std::string step_units, decoder_units, legacy_units;
+    std::optional<bool> legacy_strict;
+};
+
+// From the Engine's options (EngineOptions::coreml, coreml_step_units,
+// coreml_decoder_units, coreml_compute_units, coreml_strict).
+CoremlEngineOptions coreml_engine_options(const EngineOptions & opts);
+
+// Plans one stage. Throws std::invalid_argument for invalid explicit options,
+// including an explicit cpu_and_ane for the step (Core ML state cannot be
+// placed on the Neural Engine, so that load would fail after seconds).
+CoremlRoute coreml_plan_route(CoremlStage stage, const CoremlEngineOptions & opts);
+
+// The Core ML envelope of the generated stages of `routes`: their resident
+// parts summed plus the largest transient (one Core ML job runs at a time per
+// library), with the larger margin. 0 when no route is generate.
+uint64_t coreml_envelope_bytes(const CoremlRoute & step, const CoremlRoute & decoder);
+
+// Fit's two verdicts for a projection `required` against `free` bytes: the
+// ggml-only one and the Core ML-inclusive one (plus `coreml_bytes` when a stage
+// is generated). With a budget (CoremlOptions::memory_budget_bytes), a
+// Core ML-inclusive projection over min(free, budget) that the ggml one fits
+// degrades to ggml (use = off).
+struct CoremlFitVerdict {
+    bool ggml_only_fits = true;
+    bool coreml_fits = true;
+    bool degraded = false;
+    bool fits = true;
+    uint64_t charged = 0;
+};
+CoremlFitVerdict decide_coreml_fit(uint64_t required, uint64_t coreml_bytes, bool generate, uint64_t free,
+                                   const std::optional<int64_t> & budget);
+
+// One chunk's step, acquired once at the chunk's start on the producer thread.
+struct CoremlStepUse {
+    std::shared_ptr<void> hold;  // the runtime handle: keeps the model for the chunk
+    CoremlStep * step = nullptr; // null: this chunk's FlowLM runs on ggml
+    const void * identity = nullptr;  // the model instance; a new one needs the voice rows
+    bool pending = false;        // ggml only because the step was not ready yet
+    std::string label;
+    std::function<std::unique_lock<std::mutex>()> lock;   // held across each prediction
+    std::function<void(const std::string &)> retire;      // after a failed prediction
+};
+
+// One chunk's Mimi decoder, acquired once at the chunk's start on the calling thread.
+struct CoremlDecoderUse {
+    std::shared_ptr<void> hold;
+    moss_coreml_model * model = nullptr;  // null: this chunk's Mimi runs on ggml
+    bool pending = false;
+    std::string label;
+    std::function<std::unique_lock<std::mutex>()> lock;
+    std::function<void(const std::string &)> retire;
+};
+
+// Both stages of one Engine on the shared Core ML runtime.
+class CoremlStages {
+public:
+    // Resolves each stage's options (with the POCKET_COREML_* environment),
+    // plans its route, creates its slot and issues the construction group
+    // (prewarm none: nothing until the first chunk), waiting for it with wait
+    // = construct. `degrade` resolves use = off for both stages (fit's
+    // memory-degrade). `min_step_context` is the step context the voice needs
+    // (its frames plus one token and one frame); a smaller step fails to load.
+    // Returns null in builds without TTS_CPP_COREML. Throws
+    // std::invalid_argument for invalid options and std::runtime_error when
+    // use = require cannot be met at construction.
+    static std::unique_ptr<CoremlStages> create(const CoremlEngineOptions & opts, const FlowConfig & config,
+                                                const std::string & source_hash, int min_step_context, bool degrade);
+    ~CoremlStages();
+
+    CoremlStepUse acquire_step(int frames, const std::atomic<bool> * cancel);
+    CoremlDecoderUse acquire_decoder(int frames, const std::atomic<bool> * cancel);
+    bool step_strict() const;
+    bool decoder_strict() const;
+    const CoremlRoute & step_route() const;
+    const CoremlRoute & decoder_route() const;
+    // Whether the stage's sidecar is loaded and not retired.
+    bool step_ready() const;
+    bool decoder_ready() const;
+    // Status JSON (schema 1: engine, cache_dir, generation, stages).
+    std::string status_json() const;
+    // Blocks until both requested stages are ready or terminal, `timeout_ms`
+    // passes (< 0: no limit) or `cancel` is set. True when every stage with a
+    // route is ready. Returns false at once while a stage is idle (nothing
+    // requested it yet) or deferred(memory).
+    bool wait(int64_t timeout_ms, const std::atomic<bool> * cancel) const;
+
+    struct impl;
+private:
+    explicit CoremlStages(std::unique_ptr<impl> p);
+    std::unique_ptr<impl> p_;
 };
 
 } // namespace tts_cpp::pocket::detail

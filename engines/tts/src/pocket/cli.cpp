@@ -39,7 +39,9 @@ Arguments parse_arguments(int argc, char ** argv) {
     Arguments args;
     const std::set<std::string> accepted = {"--model-dir","--flow-lm","--mimi","--frontend","--voice","--reference-audio",
         "--text","--output","--threads","--steps","--temperature","--seed","--runs","--report","--context","--max-tokens",
-        "--frames-after-eos","--fit-budget-mib","--fit-margin-mib","--backends-dir","--backend"};
+        "--frames-after-eos","--fit-budget-mib","--fit-margin-mib","--backends-dir","--backend",
+        "--coreml-cache-dir","--coreml-wait","--coreml-prewarm","--coreml-step-units","--coreml-decoder-units",
+        "--coreml-status-json"};
     for (int i = 1; i < argc; ++i) {
         const std::string key = argv[i];
         if (key == "--help") { args.values[key] = "true"; return args; }
@@ -65,6 +67,10 @@ void print_help() {
               "DIR contains flow-lm.gguf, mimi.gguf, frontend.json, voice.gguf. Individual asset paths can override DIR.\n"
               "--runs greater than 1 includes one untimed warmup and records each warm run.\n"
               "--fit estimates memory on the selected backend without loading weights; optional --fit-budget-mib and --fit-margin-mib.\n"
+              "--coreml-cache-dir DIR generates the Core ML sidecars from the GGUFs into DIR when none is prebuilt (macOS 15+);\n"
+              "  --coreml-wait none|construct|call, --coreml-prewarm none|minimal|predicted|all,\n"
+              "  --coreml-step-units / --coreml-decoder-units all|cpu_and_ane|cpu_and_gpu|cpu_only,\n"
+              "  --coreml-status-json FILE writes the Core ML status after the runs.\n"
               "Fit exit status: 0 fits, 1 does not fit, 2 measurement error.");
 }
 EngineOptions engine_options(const Arguments & args) {
@@ -81,6 +87,24 @@ EngineOptions engine_options(const Arguments & args) {
     opts.n_threads = args.integer("--threads", opts.n_threads); opts.steps = args.integer("--steps", opts.steps);
     opts.context = args.integer("--context", opts.context); opts.max_tokens = args.integer("--max-tokens", opts.max_tokens);
     opts.frames_after_eos = args.integer("--frames-after-eos", opts.frames_after_eos);
+    if (args.has("--coreml-cache-dir")) opts.coreml.cache_dir = args.get("--coreml-cache-dir", "");
+    if (args.has("--coreml-wait")) {
+        const auto w = args.get("--coreml-wait", "");
+        if (w == "none") opts.coreml.wait = tts_cpp::CoremlOptions::Wait::none;
+        else if (w == "construct") opts.coreml.wait = tts_cpp::CoremlOptions::Wait::construct;
+        else if (w == "call") opts.coreml.wait = tts_cpp::CoremlOptions::Wait::call;
+        else throw std::runtime_error("--coreml-wait must be none, construct or call");
+    }
+    if (args.has("--coreml-prewarm")) {
+        const auto w = args.get("--coreml-prewarm", "");
+        if (w == "none") opts.coreml.prewarm = tts_cpp::CoremlOptions::Prewarm::none;
+        else if (w == "minimal") opts.coreml.prewarm = tts_cpp::CoremlOptions::Prewarm::minimal;
+        else if (w == "predicted") opts.coreml.prewarm = tts_cpp::CoremlOptions::Prewarm::predicted;
+        else if (w == "all") opts.coreml.prewarm = tts_cpp::CoremlOptions::Prewarm::all;
+        else throw std::runtime_error("--coreml-prewarm must be none, minimal, predicted or all");
+    }
+    opts.coreml_step_units = args.get("--coreml-step-units", "");
+    opts.coreml_decoder_units = args.get("--coreml-decoder-units", "");
     const int seed = args.integer("--seed", opts.seed);
     if (seed < 0) throw std::runtime_error("seed must be nonnegative");
     opts.seed = seed;
@@ -134,7 +158,8 @@ Json benchmark_once(Engine & engine, const std::string & text, const std::string
     const double duration = double(result.pcm.size())/result.sample_rate;
     Json measurement = {{"seconds",elapsed},{"first_audio_seconds",first_audio},
                         {"audio_seconds",duration},{"real_time_factor",elapsed/duration},
-                        {"flow_lm_backend",result.flow_lm_backend},{"mimi_backend",result.mimi_backend}};
+                        {"flow_lm_backend",result.flow_lm_backend},{"mimi_backend",result.mimi_backend},
+                        {"coreml_pending",result.coreml_pending}};
     std::puts(measurement.dump().c_str());
     if (!output.empty()) write_wav(output, result);
     return measurement;
@@ -164,7 +189,13 @@ int run_synthesis(const Arguments & args, const EngineOptions & opts, const std:
         {"source_sha256",engine.model_source_sha256()},{"sample_rate",engine.sample_rate()},
         {"compute_precision",engine.flow_lm_on_coreml() || engine.mimi_on_coreml() ?
             "float32 (Core ML sidecars: float16)" : "float32"},{"rng","Fabric MT19937 Box-Muller (not PyTorch seed-equivalent)"},
-        {"assets",{{"flow_lm",opts.flow_lm_path},{"mimi",opts.mimi_path},{"frontend",opts.frontend_path},{"voice",opts.voice_path}}}});
+        {"assets",{{"flow_lm",opts.flow_lm_path},{"mimi",opts.mimi_path},{"frontend",opts.frontend_path},{"voice",opts.voice_path}}},
+        {"coreml_status",Json::parse(engine.coreml_status())}});
+    const auto status_path = args.get("--coreml-status-json", "");
+    if (!status_path.empty()) {
+        std::ofstream file(status_path); file << engine.coreml_status() << '\n';
+        if (!file) throw std::runtime_error("cannot write the Core ML status");
+    }
     return 0;
 }
 } // namespace

@@ -4,15 +4,29 @@
 
 #ifdef TTS_CPP_USE_COREML
 #include "moss/coreml/runner.h"
+
+#include "qvac_coreml/generation.h"
+#include "qvac_coreml/manager.h"
+#include "qvac_coreml/options.h"
+#include "qvac_coreml/slot.h"
+#include "qvac_coreml/status.h"
+
+#include <sys/stat.h>
+#ifdef QVAC_COREML_GENERATE
+#include "../../coreml-provided/pocket.h"
+#endif
 #endif
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 
 namespace tts_cpp::pocket::detail {
 namespace {
@@ -160,7 +174,7 @@ void coreml_rope(int position, int head_dim, float base, std::vector<float> & co
 
 #ifdef TTS_CPP_USE_COREML
 CoremlStep::CoremlStep(const std::string & path, const std::string & compute_units, const FlowConfig & config,
-                       const std::string & source_hash) : config_(config) {
+                       const std::string & source_hash, bool warm) : config_(config) {
     model_ = moss_coreml_load(path.c_str(), compute_units.c_str());
     if (model_ == nullptr) {
         fail("cannot load " + path + " on " + compute_units +
@@ -190,18 +204,23 @@ CoremlStep::CoremlStep(const std::string & path, const std::string & compute_uni
     label_ = moss_coreml_label(model_);
     mask_.assign(size_t(context_), COREML_MASKED);
     write_mask_.assign(size_t(context_), 0.0f);
-    // One prediction at position 0 (the caller then writes the voice rows over
-    // it): a sidecar declaring inputs or outputs beyond the checked ones fails
-    // here rather than mid-synthesis, and the first frame skips Core ML's
-    // first-prediction setup.
+    if (!warm) return;
     try {
-        std::vector<float> zeros(size_t(config.latent_dim)), hidden, next;
-        step(0, zeros, zeros, hidden, next);
+        warm_up();
     } catch (...) {
         moss_coreml_free(model_);
         model_ = nullptr;
         throw;
     }
+}
+
+// One prediction at position 0 (the caller then writes the voice rows over
+// it): a sidecar declaring inputs or outputs beyond the checked ones fails
+// here rather than mid-synthesis, and the first frame skips Core ML's
+// first-prediction setup.
+void CoremlStep::warm_up() {
+    std::vector<float> zeros(size_t(config_.latent_dim)), hidden, next;
+    step(0, zeros, zeros, hidden, next);
 }
 
 CoremlStep::~CoremlStep() {
@@ -263,13 +282,13 @@ void CoremlStep::step(int position, const std::vector<float> & latent, const std
     require_finite(hidden, "hidden output");
     require_finite(next_latent, "latent output");
 }
-CoremlDecoder::CoremlDecoder(const std::string & path, const std::string & compute_units,
-                             const std::string & source_hash) {
-    model_ = moss_coreml_load(path.c_str(), compute_units.c_str());
-    if (model_ == nullptr) fail("cannot load " + path + " on " + compute_units);
+moss_coreml_model * load_decoder_model(const std::string & path, const std::string & compute_units,
+                                       const std::string & source_hash) {
+    moss_coreml_model * model = moss_coreml_load(path.c_str(), compute_units.c_str());
+    if (model == nullptr) fail("cannot load " + path + " on " + compute_units);
     try {
-        if (moss_coreml_has_state(model_)) fail(path + " declares Core ML state; re-export it");
-        require_stamp(model_, path, source_hash);
+        if (moss_coreml_has_state(model)) fail(path + " declares Core ML state; re-export it");
+        require_stamp(model, path, source_hash);
         const std::vector<int64_t> kv = {Geometry::layers, Geometry::heads, Geometry::keep, Geometry::head_dim};
         std::vector<expected_feature> expected = {
             {"latents", false, {Geometry::frames, Geometry::latent}},
@@ -282,7 +301,18 @@ CoremlDecoder::CoremlDecoder(const std::string & path, const std::string & compu
             expected.push_back({h.name, false, {h.channels, h.length}});
             expected.push_back({h.output, false, {h.channels, h.length}});
         }
-        require_features(model_, path, expected);
+        require_features(model, path, expected);
+    } catch (...) {
+        moss_coreml_free(model);
+        throw;
+    }
+    return model;
+}
+
+CoremlDecoder::CoremlDecoder(const std::string & path, const std::string & compute_units,
+                             const std::string & source_hash) {
+    model_ = load_decoder_model(path, compute_units, source_hash);
+    try {
         label_ = moss_coreml_label(model_);
         reset();
         decode(std::vector<float>(size_t(Geometry::frames) * Geometry::latent));
@@ -294,8 +324,13 @@ CoremlDecoder::CoremlDecoder(const std::string & path, const std::string & compu
     }
 }
 
+CoremlDecoder::CoremlDecoder(moss_coreml_model * borrowed, std::string label)
+    : model_(borrowed), owned_(false), label_(std::move(label)) {
+    reset();
+}
+
 CoremlDecoder::~CoremlDecoder() {
-    if (model_ != nullptr) moss_coreml_free(model_);
+    if (model_ != nullptr && owned_) moss_coreml_free(model_);
 }
 
 void CoremlDecoder::reset() {
@@ -352,11 +387,12 @@ std::vector<float> CoremlDecoder::decode(const std::vector<float> & latents) {
     return pcm;
 }
 #else
-CoremlStep::CoremlStep(const std::string &, const std::string &, const FlowConfig & config, const std::string &)
+CoremlStep::CoremlStep(const std::string &, const std::string &, const FlowConfig & config, const std::string &, bool)
     : config_(config) {
     fail("this build has no Core ML (TTS_CPP_COREML=OFF)");
 }
 CoremlStep::~CoremlStep() = default;
+void CoremlStep::warm_up() { fail("this build has no Core ML"); }
 void CoremlStep::write_rows(const CacheRows &) { fail("this build has no Core ML"); }
 void CoremlStep::reset(const CacheRows &) { fail("this build has no Core ML"); }
 void CoremlStep::step(int, const std::vector<float> &, const std::vector<float> &, std::vector<float> &,
@@ -366,10 +402,627 @@ void CoremlStep::step(int, const std::vector<float> &, const std::vector<float> 
 CoremlDecoder::CoremlDecoder(const std::string &, const std::string &, const std::string &) {
     fail("this build has no Core ML (TTS_CPP_COREML=OFF)");
 }
+CoremlDecoder::CoremlDecoder(moss_coreml_model *, std::string) { fail("this build has no Core ML"); }
 CoremlDecoder::~CoremlDecoder() = default;
+moss_coreml_model * load_decoder_model(const std::string &, const std::string &, const std::string &) {
+    fail("this build has no Core ML (TTS_CPP_COREML=OFF)");
+}
 void CoremlDecoder::reset() {}
 void CoremlDecoder::predict(const float *, float *) { fail("this build has no Core ML"); }
 std::vector<float> CoremlDecoder::decode(const std::vector<float> &) { fail("this build has no Core ML"); }
+#endif
+
+// ---- the sidecars on the shared Core ML runtime ----------------------------------
+
+namespace {
+
+constexpr const char * ENGINE_NAME = "pocket";
+constexpr const char * ENV_PREFIX = "POCKET";
+constexpr const char * STEP_TEMPLATE_ID = "pocket-step-c1024";
+constexpr const char * DECODER_TEMPLATE_ID = "pocket-mimi";
+constexpr const char * STEP_STAGE = "step";
+constexpr const char * DECODER_STAGE = "mimi";
+
+const char * stage_name(CoremlStage s) { return s == CoremlStage::step ? STEP_STAGE : DECODER_STAGE; }
+
+void validate_units(const std::string & field, const std::string & value) {
+    if (!value.empty() && !coreml_valid_units(value)) {
+        throw std::invalid_argument("Pocket TTS: invalid " + field + "='" + value +
+                                    "' (expected all, cpu_and_ane, cpu_and_gpu or cpu_only)");
+    }
+}
+
+void validate_fields(const CoremlEngineOptions & opts) {
+    validate_units("coreml.compute_units", opts.coreml.compute_units.value_or(""));
+    if (opts.coreml.compute_units && opts.coreml.compute_units->empty()) {
+        throw std::invalid_argument("Pocket TTS: coreml.compute_units is empty");
+    }
+    validate_units("coreml_step_units", opts.step_units);
+    validate_units("coreml_decoder_units", opts.decoder_units);
+    validate_units("coreml_compute_units", opts.legacy_units);
+}
+
+void validate_options(const CoremlOptions & o, CoremlStage stage, bool units_explicit) {
+    if (stage == CoremlStage::step && units_explicit && o.compute_units && *o.compute_units == "cpu_and_ane") {
+        throw std::invalid_argument("Pocket TTS: the Core ML step cannot run on cpu_and_ane (its KV cache is Core ML "
+                                    "state, which the Neural Engine cannot hold); use cpu_and_gpu, all or cpu_only");
+    }
+    if (o.strict_wait_ms && *o.strict_wait_ms < 0) {
+        throw std::invalid_argument("Pocket TTS: coreml.strict_wait_ms must not be negative");
+    }
+    if (o.memory_budget_bytes && *o.memory_budget_bytes < 0) {
+        throw std::invalid_argument("Pocket TTS: coreml.memory_budget_bytes must not be negative");
+    }
+}
+
+} // namespace
+
+CoremlOptions coreml_stage_options(const CoremlEngineOptions & opts, CoremlStage stage) {
+    CoremlOptions o = opts.coreml;
+    const std::string & own = stage == CoremlStage::step ? opts.step_units : opts.decoder_units;
+    if (!own.empty()) o.compute_units = own;
+    if (!o.compute_units && !opts.legacy_units.empty()) o.compute_units = opts.legacy_units;
+    if (o.use == CoremlOptions::Use::unset && opts.legacy_strict.has_value()) {
+        o.use = *opts.legacy_strict ? CoremlOptions::Use::require : CoremlOptions::Use::automatic;
+    }
+    return o;
+}
+
+CoremlEngineOptions coreml_engine_options(const EngineOptions & o) {
+    CoremlEngineOptions c;
+    c.flow_lm_path = o.flow_lm_path;
+    c.mimi_path = o.mimi_path;
+    c.coreml = o.coreml;
+    c.step_units = o.coreml_step_units;
+    c.decoder_units = o.coreml_decoder_units;
+    c.legacy_units = o.coreml_compute_units;
+    c.legacy_strict = o.coreml_strict;
+    return c;
+}
+
+uint64_t coreml_envelope_bytes(const CoremlRoute & step, const CoremlRoute & decoder) {
+    uint64_t resident = 0, transient = 0;
+    double margin = 0;
+    for (const CoremlRoute * r : {&step, &decoder}) {
+        if (r->route != "generate") continue;
+        resident += r->resident_bytes;
+        transient = std::max(transient, r->transient_bytes);
+        margin = std::max(margin, r->margin);
+    }
+    if (margin <= 0) return 0;
+    return uint64_t(std::ceil(double(resident + transient) * margin));
+}
+
+#ifdef TTS_CPP_USE_COREML
+
+namespace pcm = QVAC_COREML_NS;
+
+namespace {
+
+template <class E, class F> F map_enum(E v) { return static_cast<F>(static_cast<int>(v)); }
+
+pcm::Options to_runtime_options(const CoremlOptions & o) {
+    static_assert(static_cast<int>(CoremlOptions::Use::require) == static_cast<int>(pcm::Use::require), "Use");
+    static_assert(static_cast<int>(CoremlOptions::Generate::background) ==
+                      static_cast<int>(pcm::Generate::background), "Generate");
+    static_assert(static_cast<int>(CoremlOptions::Wait::call) == static_cast<int>(pcm::Wait::call), "Wait");
+    static_assert(static_cast<int>(CoremlOptions::Prewarm::all) == static_cast<int>(pcm::Prewarm::all), "Prewarm");
+    pcm::Options r;
+    r.use = map_enum<CoremlOptions::Use, pcm::Use>(o.use);
+    r.generate = map_enum<CoremlOptions::Generate, pcm::Generate>(o.generate);
+    r.wait = map_enum<CoremlOptions::Wait, pcm::Wait>(o.wait);
+    r.prewarm = map_enum<CoremlOptions::Prewarm, pcm::Prewarm>(o.prewarm);
+    r.cache_dir = o.cache_dir;
+    r.compute_units = o.compute_units;
+    r.strict_wait_ms = o.strict_wait_ms;
+    r.memory_budget_bytes = o.memory_budget_bytes;
+    return r;
+}
+
+// Resolves one stage's options. A step resolved to cpu_and_ane from the
+// environment or the legacy all-stage units keeps its default units instead
+// (an explicit request throws in validate_options).
+pcm::Resolved resolve_stage(const CoremlEngineOptions & opts, CoremlStage stage) {
+    validate_fields(opts);
+    const CoremlOptions o = coreml_stage_options(opts, stage);
+    const bool units_explicit = opts.coreml.compute_units.has_value() ||
+                                !(stage == CoremlStage::step ? opts.step_units : opts.decoder_units).empty();
+    validate_options(o, stage, units_explicit);
+    CoremlOptions runtime = o;
+    if (stage == CoremlStage::step && !units_explicit && runtime.compute_units &&
+        *runtime.compute_units == "cpu_and_ane") {
+        runtime.compute_units.reset();
+    }
+    pcm::Resolved r = pcm::resolve_coreml(to_runtime_options(runtime), ENV_PREFIX);
+    if (stage == CoremlStage::step && r.compute_units && *r.compute_units == pcm::ComputeUnits::cpu_and_ane) {
+        r.warnings.push_back("the Core ML step cannot run on cpu_and_ane (Core ML state); it keeps " +
+                             std::string(COREML_STEP_DEFAULT_UNITS));
+        r.compute_units.reset();
+    }
+    return r;
+}
+
+uint64_t file_bytes(const std::string & path) {
+    struct stat st {};
+    return ::stat(path.c_str(), &st) == 0 ? uint64_t(st.st_size) : 0;
+}
+
+constexpr double ANE_COMPILE_RESERVE_FACTOR = 1.6;
+// The ggml cost of one chunk bounds the wait for a warm load (M2: FlowLM about
+// 10 ms and Mimi about 3 ms per frame on Metal; the CPU is slower).
+constexpr double GGML_STEP_MS_PER_FRAME = 10.0;
+constexpr double GGML_DECODER_MS_PER_FRAME = 3.0;
+constexpr int64_t GGML_MS_FLOOR = 20;
+constexpr size_t HASH_WORDS = 8;  // a 64-character source hash, 8 bytes per geometry value
+constexpr size_t STEP_GEOMETRY = 6;  // dim, heads, layers, latent_dim, rope_base bits, min context
+
+void put_hash(std::vector<int64_t> & g, const std::string & hash) {
+    std::string h = hash;
+    h.resize(HASH_WORDS * 8, '\0');
+    for (size_t i = 0; i < HASH_WORDS; ++i) {
+        int64_t v = 0;
+        std::memcpy(&v, h.data() + 8 * i, 8);
+        g.push_back(v);
+    }
+}
+
+std::string get_hash(const std::vector<int64_t> & g, size_t at) {
+    std::string h(HASH_WORDS * 8, '\0');
+    for (size_t i = 0; i < HASH_WORDS && at + i < g.size(); ++i) std::memcpy(&h[8 * i], &g[at + i], 8);
+    h.resize(std::strlen(h.c_str()));
+    return h;
+}
+
+// A CoremlStep or load_decoder_model failure: Core ML refusing to load the
+// bundle is retried by a later process; anything the checks reject is not.
+pcm::Error classify(const std::exception & e) {
+    const std::string what = e.what();
+    if (what.find("cannot load ") != std::string::npos) return pcm::Error::transient(what);
+    return pcm::Error::deterministic(what);
+}
+
+// LoadFn of the step: the model, checked against the geometry the constructing
+// thread passed by value ({dim, heads, layers, latent_dim, rope_base bits,
+// minimum context} and the source hash), without its warm-up (warm_step).
+pcm::LoadResult load_step(const pcm::LoadRequest & req) {
+    pcm::LoadResult r;
+    if (!pcm::generation::begin_load(req, r)) return r;
+    auto fail_with = [&](const pcm::Error & e) {
+        r.model.reset();
+        r.error = e;
+        pcm::generation::end_load(req, r);
+        return r;
+    };
+    if (req.geometry.size() != STEP_GEOMETRY + HASH_WORDS) {
+        return fail_with(pcm::Error::deterministic("Pocket TTS: step load without its geometry"));
+    }
+    FlowConfig config;
+    config.dim = int(req.geometry[0]);
+    config.heads = int(req.geometry[1]);
+    config.layers = int(req.geometry[2]);
+    config.latent_dim = int(req.geometry[3]);
+    const uint32_t rope_bits = uint32_t(req.geometry[4]);
+    std::memcpy(&config.rope_base, &rope_bits, 4);
+    const int min_context = int(req.geometry[5]);
+    try {
+        auto step = std::make_shared<CoremlStep>(req.artifact_path, pcm::to_string(req.units), config,
+                                                 get_hash(req.geometry, STEP_GEOMETRY), false);
+        if (step->context() < min_context) {
+            return fail_with(pcm::Error::deterministic(
+                "Pocket TTS: the Core ML step holds " + std::to_string(step->context()) + " positions; the voice needs " +
+                std::to_string(min_context) + " (export a longer --context)"));
+        }
+        r.model = std::static_pointer_cast<void>(step);
+    } catch (const std::exception & e) {
+        return fail_with(classify(e));
+    }
+    pcm::generation::end_load(req, r);
+    return r;
+}
+
+pcm::Error warm_step(void * model, const pcm::LoadRequest &) {
+    try {
+        static_cast<CoremlStep *>(model)->warm_up();
+    } catch (const std::exception & e) {
+        return pcm::Error::transient(std::string("Pocket TTS: the Core ML step warm-up failed: ") + e.what());
+    }
+    return {};
+}
+
+// The decoder model a slot holds: shared by every Engine on the same artifact;
+// each chunk streams on it with its own CoremlDecoder state.
+struct decoder_model {
+    moss_coreml_model * model = nullptr;
+    std::string label;
+    ~decoder_model() {
+        if (model) moss_coreml_free(model);
+    }
+};
+
+pcm::LoadResult load_decoder(const pcm::LoadRequest & req) {
+    pcm::LoadResult r;
+    if (!pcm::generation::begin_load(req, r)) return r;
+    auto fail_with = [&](const pcm::Error & e) {
+        r.model.reset();
+        r.error = e;
+        pcm::generation::end_load(req, r);
+        return r;
+    };
+    if (req.geometry.size() != HASH_WORDS) {
+        return fail_with(pcm::Error::deterministic("Pocket TTS: Mimi decoder load without its source hash"));
+    }
+    try {
+        auto dm = std::make_shared<decoder_model>();
+        dm->model = load_decoder_model(req.artifact_path, pcm::to_string(req.units), get_hash(req.geometry, 0));
+        dm->label = moss_coreml_label(dm->model);
+        r.model = std::static_pointer_cast<void>(dm);
+    } catch (const std::exception & e) {
+        return fail_with(classify(e));
+    }
+    pcm::generation::end_load(req, r);
+    return r;
+}
+
+// One frame on a silent latent, so a chunk's first frame skips Core ML's
+// first-prediction setup.
+pcm::Error warm_decoder(void * model, const pcm::LoadRequest &) {
+    auto & dm = *static_cast<decoder_model *>(model);
+    try {
+        CoremlDecoder stream(dm.model, dm.label);
+        stream.decode(std::vector<float>(size_t(CoremlDecoderGeometry::frames) * CoremlDecoderGeometry::latent));
+    } catch (const std::exception & e) {
+        return pcm::Error::transient(std::string("Pocket TTS: the Core ML Mimi decoder warm-up failed: ") + e.what());
+    }
+    return {};
+}
+
+struct planned {
+    CoremlRoute route;
+    pcm::Resolved resolved;
+    pcm::Plan plan;
+    pcm::ComputeUnits units = pcm::ComputeUnits::all;
+    std::optional<pcm::generation::Candidate> candidate;
+    std::string prebuilt_path;
+};
+
+planned plan_stage(CoremlStage stage, const CoremlEngineOptions & opts) {
+    planned out;
+    out.resolved = resolve_stage(opts, stage);
+    const pcm::Resolved & r = out.resolved;
+    out.route.strict = r.strict();
+    const bool step = stage == CoremlStage::step;
+    const std::string & gguf = step ? opts.flow_lm_path : opts.mimi_path;
+    out.prebuilt_path = step ? coreml_step_path(gguf) : coreml_decoder_path(gguf);
+    const std::shared_ptr<pcm::Manager> mgr = pcm::Manager::instance();
+    pcm::PlanInput in;
+    in.coreml_built = true;
+    in.generation_built = pcm::generation::built();
+    in.prebuilt_present = !gguf.empty() && ::tts_cpp::detail::coreml_sidecar_exists(out.prebuilt_path);
+    if (in.generation_built && !in.prebuilt_present && r.enabled() && !gguf.empty()) {
+#ifdef QVAC_COREML_GENERATE
+        pcm::pocket_provided::register_all();
+#endif
+        std::vector<pcm::generation::Candidate> c =
+            pcm::generation::probe({step ? STEP_TEMPLATE_ID : DECODER_TEMPLATE_ID}, gguf, r);
+        if (!c.empty()) out.candidate = std::move(c.front());
+    }
+    const bool available = out.candidate && out.candidate->available;
+    const pcm::ComputeUnits stage_default =
+        available && out.candidate->default_units
+            ? *out.candidate->default_units
+            : *pcm::parse_compute_units(step ? COREML_STEP_DEFAULT_UNITS : COREML_DECODER_DEFAULT_UNITS);
+    out.units = r.units_or(stage_default);
+    out.route.compute_units = pcm::to_string(out.units);
+    in.template_available = available;
+    in.template_matched = available && out.candidate->matched;
+    if (available) in.validated_units = out.candidate->memory.validated_units;
+    in.units = out.units;
+    in.platform = mgr->platform();
+    in.os = mgr->os_version();
+    out.plan = pcm::plan(in, r);
+    out.route.route = pcm::to_string(out.plan.route);
+    if (out.plan.route == pcm::Route::none) {
+        out.route.state = pcm::to_string(out.plan.none_state);
+        out.route.reason = out.plan.reason;
+        if (out.plan.none_state == pcm::SlotState::no_template && out.candidate && !out.candidate->reason.empty()) {
+            out.route.reason += ": " + out.candidate->reason;
+        }
+    }
+    if (out.plan.route == pcm::Route::generate) {
+        const pcm::generation::TemplateMemory & m = out.candidate->memory;
+        out.route.resident_bytes = pcm::generation::resident_bytes(m);
+        out.route.workspace_bytes = m.workspace_bytes;
+        out.route.prepare_peak_bytes = pcm::generation::prepare_peak_bytes(m);
+        out.route.load_peak_bytes = pcm::generation::load_peak_bytes(m, out.units);
+        out.route.transient_bytes = pcm::generation::transient_bytes(m, out.units);
+        out.route.margin = m.margin > 0 ? m.margin : 1.25;
+        out.route.ane_compile_reserve_bytes = pcm::generation::ane_compile_reserve_bytes(m, out.units);
+        out.route.validated = std::find(m.validated_units.begin(), m.validated_units.end(), out.units) !=
+                              m.validated_units.end();
+    }
+    return out;
+}
+
+struct stage_slot {
+    planned plan;
+    std::shared_ptr<pcm::Slot> slot;
+    pcm::SlotStatus none_status;
+};
+
+} // namespace
+
+CoremlRoute coreml_plan_route(CoremlStage stage, const CoremlEngineOptions & opts) {
+    return plan_stage(stage, opts).route;
+}
+
+struct CoremlStages::impl {
+    std::shared_ptr<pcm::Manager> manager;
+    stage_slot step, decoder;
+    std::shared_ptr<pcm::Group> construction;
+};
+
+namespace {
+
+void make_stage_slot(stage_slot & s, CoremlStage stage, const CoremlEngineOptions & opts,
+                     const std::shared_ptr<pcm::Manager> & mgr, std::vector<int64_t> geometry) {
+    const bool step = stage == CoremlStage::step;
+    if (s.plan.plan.route == pcm::Route::none) {
+        s.none_status.stage = stage_name(stage);
+        s.none_status.function = "main";
+        s.none_status.state = s.plan.plan.none_state;
+        s.none_status.reason = s.plan.plan.reason;
+        s.none_status.compute_units = s.plan.route.compute_units;
+        s.none_status.label = GGML_STAGE_BACKEND;
+        return;
+    }
+    pcm::SlotSpec spec;
+    spec.engine = ENGINE_NAME;
+    spec.stage = stage_name(stage);
+    spec.function = "main";
+    spec.units = s.plan.units;
+    spec.route = s.plan.plan.route;
+    spec.load_fn = step ? &load_step : &load_decoder;
+    spec.warm_fn = step ? &warm_step : &warm_decoder;
+    spec.geometry = std::move(geometry);
+    // The step holds the KV cache in Core ML state: one model per Engine.
+    spec.shareable = !step;
+    if (spec.route == pcm::Route::prebuilt) {
+        spec.artifact_path = s.plan.prebuilt_path;
+        spec.ane_compile_reserve_bytes =
+            pcm::units_include_ane(spec.units)
+                ? uint64_t(ANE_COMPILE_RESERVE_FACTOR * double(file_bytes(spec.artifact_path + "/weights/weight.bin")))
+                : 0;
+    } else {
+        const pcm::generation::Candidate & c = *s.plan.candidate;
+        pcm::SourceStat source;
+        const std::string & gguf = step ? opts.flow_lm_path : opts.mimi_path;
+        if (!pcm::generation::source_stat(gguf, source)) throw std::runtime_error("Pocket TTS: cannot stat " + gguf);
+        spec.tmpl = c.tmpl;
+        spec.prepare = pcm::generation::prepare_request(c, source, s.plan.resolved);
+        spec.prepare_fn = &pcm::generation::prepare;
+        spec.ane_compile_reserve_bytes = pcm::generation::ane_compile_reserve_bytes(c.memory, spec.units);
+    }
+    s.slot = mgr->make_slot(std::move(spec), pcm::SlotPolicy::from(s.plan.resolved));
+}
+
+[[noreturn]] void fail_strict(CoremlStage stage, const std::string & why) {
+    throw std::runtime_error(std::string("Pocket TTS: the Core ML ") + (stage == CoremlStage::step ? "step" : "Mimi decoder") +
+                             " cannot serve this call (" + why + "); Core ML strict policy is enabled (use = require / " +
+                             COREML_STRICT_ENV + ")");
+}
+
+pcm::Acquired acquire_stage(const stage_slot & s, CoremlStage stage, int frames, double ms_per_frame,
+                            const std::atomic<bool> * cancel) {
+    if (!s.slot) return {};
+    const int64_t budget_ms = std::max<int64_t>(GGML_MS_FLOOR, int64_t(ms_per_frame * double(std::max(frames, 0))));
+    const auto deadline = pcm::Clock::now() + std::chrono::milliseconds(budget_ms);
+    try {
+        return s.slot->acquire(pcm::Demand::now, deadline, cancel);
+    } catch (const pcm::CoremlError & e) {
+        fail_strict(stage, e.what());
+    }
+}
+
+} // namespace
+
+std::unique_ptr<CoremlStages> CoremlStages::create(const CoremlEngineOptions & opts, const FlowConfig & config,
+                                                   const std::string & source_hash, int min_step_context,
+                                                   bool degrade) {
+    auto p = std::make_unique<impl>();
+    p->manager = pcm::Manager::instance();
+    p->step.plan = plan_stage(CoremlStage::step, opts);
+    p->decoder.plan = plan_stage(CoremlStage::decoder, opts);
+    for (stage_slot * s : {&p->step, &p->decoder}) {
+        for (const std::string & w : s->plan.resolved.warnings) std::fprintf(stderr, "Pocket TTS: %s\n", w.c_str());
+        if (degrade && s->plan.resolved.enabled()) {
+            // Fit's memory-degrade: only the ggml projection fits the budget.
+            s->plan.resolved.use = pcm::Use::off;
+            s->plan.resolved.disabled_reason = "memory";
+            s->plan.plan.route = pcm::Route::none;
+            s->plan.plan.none_state = pcm::SlotState::disabled;
+            s->plan.plan.reason = "memory";
+            s->plan.route.route = "none";
+            s->plan.route.state = pcm::to_string(pcm::SlotState::disabled);
+            s->plan.route.reason = "memory";
+            s->plan.route.strict = false;
+        }
+    }
+    for (stage_slot * s : {&p->step, &p->decoder}) {
+        if (s->plan.plan.route == pcm::Route::none && s->plan.resolved.strict()) {
+            const CoremlStage st = s == &p->step ? CoremlStage::step : CoremlStage::decoder;
+            fail_strict(st, "no usable sidecar: " + s->plan.route.state + ": " + s->plan.route.reason);
+        }
+    }
+    std::vector<int64_t> step_geometry = {config.dim, config.heads, config.layers, config.latent_dim};
+    uint32_t rope_bits = 0;
+    std::memcpy(&rope_bits, &config.rope_base, 4);
+    step_geometry.push_back(int64_t(rope_bits));
+    step_geometry.push_back(min_step_context);
+    put_hash(step_geometry, source_hash);
+    std::vector<int64_t> decoder_geometry;
+    put_hash(decoder_geometry, source_hash);
+    make_stage_slot(p->step, CoremlStage::step, opts, p->manager, std::move(step_geometry));
+    make_stage_slot(p->decoder, CoremlStage::decoder, opts, p->manager, std::move(decoder_geometry));
+
+    std::vector<pcm::GroupRequest> requests;
+    bool waited = false;
+    for (stage_slot * s : {&p->step, &p->decoder}) {
+        if (!s->slot) continue;
+        if (s->plan.resolved.prewarm != pcm::Prewarm::none) requests.push_back({s->slot, pcm::Priority::minimal});
+        waited = waited || s->plan.resolved.wait == pcm::Wait::construct;
+    }
+    p->construction = p->manager->issue_group(pcm::GroupKind::construction, requests, waited);
+    std::unique_ptr<CoremlStages> out(new CoremlStages(std::move(p)));
+    if (waited && !requests.empty()) {
+        const pcm::PrewarmResult result = out->p_->construction->wait();
+        for (stage_slot * s : {&out->p_->step, &out->p_->decoder}) {
+            if (!s->slot || !s->plan.resolved.strict() || result.success) continue;
+            const pcm::SlotStatus st = s->slot->status();
+            if (st.state == pcm::SlotState::ready) continue;
+            fail_strict(s == &out->p_->step ? CoremlStage::step : CoremlStage::decoder,
+                        "not ready after construction: " + pcm::state_label(st.state, st.reason) +
+                            (st.error.empty() ? "" : ": " + st.error));
+        }
+    }
+    return out;
+}
+
+CoremlStages::CoremlStages(std::unique_ptr<impl> p) : p_(std::move(p)) {}
+CoremlStages::~CoremlStages() = default;
+
+CoremlStepUse CoremlStages::acquire_step(int frames, const std::atomic<bool> * cancel) {
+    CoremlStepUse use;
+    pcm::Acquired got = acquire_stage(p_->step, CoremlStage::step, frames, GGML_STEP_MS_PER_FRAME, cancel);
+    use.pending = got.pending;
+    if (!got.model) return use;
+    auto handle = std::make_shared<pcm::Handle>(std::move(got.model));
+    pcm::SharedModel * m = handle->get();
+    use.step = m->as<CoremlStep>();
+    use.identity = m;
+    use.label = m->label();
+    use.lock = [m] { return m->lock_for_prediction(); };
+    use.retire = [handle](const std::string & reason) { (*handle)->retire(reason); };
+    use.hold = handle;
+    return use;
+}
+
+CoremlDecoderUse CoremlStages::acquire_decoder(int frames, const std::atomic<bool> * cancel) {
+    CoremlDecoderUse use;
+    pcm::Acquired got = acquire_stage(p_->decoder, CoremlStage::decoder, frames, GGML_DECODER_MS_PER_FRAME, cancel);
+    use.pending = got.pending;
+    if (!got.model) return use;
+    auto handle = std::make_shared<pcm::Handle>(std::move(got.model));
+    pcm::SharedModel * m = handle->get();
+    use.model = m->as<decoder_model>()->model;
+    use.label = m->label();
+    use.lock = [m] { return m->lock_for_prediction(); };
+    use.retire = [handle](const std::string & reason) { (*handle)->retire(reason); };
+    use.hold = handle;
+    return use;
+}
+
+bool CoremlStages::step_strict() const { return p_->step.plan.resolved.strict(); }
+bool CoremlStages::decoder_strict() const { return p_->decoder.plan.resolved.strict(); }
+const CoremlRoute & CoremlStages::step_route() const { return p_->step.plan.route; }
+const CoremlRoute & CoremlStages::decoder_route() const { return p_->decoder.plan.route; }
+bool CoremlStages::step_ready() const { return p_->step.slot && p_->step.slot->state() == pcm::SlotState::ready; }
+bool CoremlStages::decoder_ready() const {
+    return p_->decoder.slot && p_->decoder.slot->state() == pcm::SlotState::ready;
+}
+
+std::string CoremlStages::status_json() const {
+    pcm::GenerationStatus gen;
+    gen.supported = pcm::generation::built() && p_->manager->platform() == pcm::Platform::macos &&
+                    pcm::os_at_least(p_->manager->os_version(), 15, 0);
+    if (!gen.supported) {
+        gen.reason = !pcm::generation::built() ? "build" : "os";
+    } else {
+        bool all_unvalidated = true, any_generate = false;
+        for (const stage_slot * s : {&p_->step, &p_->decoder}) {
+            const bool unvalidated = s->plan.plan.route == pcm::Route::none && s->plan.plan.reason == "unvalidated_units";
+            all_unvalidated = all_unvalidated && unvalidated;
+            any_generate = any_generate || unvalidated || s->plan.plan.route == pcm::Route::generate;
+        }
+        if (any_generate && all_unvalidated) gen.reason = "unvalidated_units";
+    }
+    std::vector<std::shared_ptr<pcm::Slot>> slots;
+    for (const stage_slot * s : {&p_->step, &p_->decoder}) {
+        if (s->slot) slots.push_back(s->slot);
+    }
+    pcm::EngineStatus st = p_->manager->status(ENGINE_NAME, p_->step.plan.resolved.cache_dir, slots, gen);
+    // Stages without a slot report their route-none state, in stage order.
+    std::vector<pcm::SlotStatus> ordered;
+    size_t next = 0;
+    for (const stage_slot * s : {&p_->step, &p_->decoder}) {
+        if (s->slot) {
+            if (next < st.stages.size()) ordered.push_back(st.stages[next++]);
+        } else {
+            ordered.push_back(s->none_status);
+        }
+    }
+    st.stages = std::move(ordered);
+    return pcm::to_json(st);
+}
+
+bool CoremlStages::wait(int64_t timeout_ms, const std::atomic<bool> * cancel) const {
+    const auto start = pcm::Clock::now();
+    bool any = false;
+    for (const stage_slot * s : {&p_->step, &p_->decoder}) any = any || s->slot != nullptr;
+    if (!any) return false;
+    for (;;) {
+        bool all_ready = true;
+        for (const stage_slot * s : {&p_->step, &p_->decoder}) {
+            if (!s->slot) continue;
+            const pcm::SlotState st = s->slot->state();
+            if (st == pcm::SlotState::ready) continue;
+            // Terminal, or nothing will move it without a request: idle
+            // (prewarm none before the first chunk) and deferred(memory).
+            if (pcm::is_terminal(st) || st == pcm::SlotState::idle || st == pcm::SlotState::deferred_memory) {
+                return false;
+            }
+            all_ready = false;
+        }
+        if (all_ready) return true;
+        if (cancel && cancel->load()) return false;
+        if (timeout_ms >= 0 && pcm::Clock::now() - start >= std::chrono::milliseconds(timeout_ms)) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+}
+
+#else  // !TTS_CPP_USE_COREML
+
+CoremlRoute coreml_plan_route(CoremlStage stage, const CoremlEngineOptions & opts) {
+    validate_fields(opts);
+    const CoremlOptions o = coreml_stage_options(opts, stage);
+    const bool units_explicit = opts.coreml.compute_units.has_value() ||
+                                !(stage == CoremlStage::step ? opts.step_units : opts.decoder_units).empty();
+    validate_options(o, stage, units_explicit);
+    CoremlRoute r;
+    r.state = "unsupported";
+    r.reason = "build";
+    return r;
+}
+
+struct CoremlStages::impl {};
+std::unique_ptr<CoremlStages> CoremlStages::create(const CoremlEngineOptions & opts, const FlowConfig &,
+                                                   const std::string &, int, bool) {
+    coreml_plan_route(CoremlStage::step, opts);
+    coreml_plan_route(CoremlStage::decoder, opts);
+    return nullptr;
+}
+CoremlStages::CoremlStages(std::unique_ptr<impl> p) : p_(std::move(p)) {}
+CoremlStages::~CoremlStages() = default;
+CoremlStepUse CoremlStages::acquire_step(int, const std::atomic<bool> *) { return {}; }
+CoremlDecoderUse CoremlStages::acquire_decoder(int, const std::atomic<bool> *) { return {}; }
+bool CoremlStages::step_strict() const { return false; }
+bool CoremlStages::decoder_strict() const { return false; }
+const CoremlRoute & CoremlStages::step_route() const { static const CoremlRoute r; return r; }
+const CoremlRoute & CoremlStages::decoder_route() const { static const CoremlRoute r; return r; }
+bool CoremlStages::step_ready() const { return false; }
+bool CoremlStages::decoder_ready() const { return false; }
+std::string CoremlStages::status_json() const { return "{}"; }
+bool CoremlStages::wait(int64_t, const std::atomic<bool> *) const { return false; }
+
 #endif
 
 } // namespace tts_cpp::pocket::detail

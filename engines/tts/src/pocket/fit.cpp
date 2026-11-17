@@ -88,19 +88,51 @@ void validate(const FitOptions & o) {
         throw std::invalid_argument("invalid Pocket fit options");
 }
 }
+
+namespace detail {
+
+CoremlFitVerdict decide_coreml_fit(uint64_t required, uint64_t coreml_bytes, bool generate, uint64_t free,
+                                   const std::optional<int64_t> & budget) {
+    CoremlFitVerdict v;
+    const uint64_t with_coreml = sat_add(required, generate ? coreml_bytes : 0);
+    v.ggml_only_fits = required <= free;
+    v.coreml_fits = with_coreml <= free;
+    if (generate && budget.has_value()) {
+        const uint64_t cap = std::min(free, uint64_t(std::max<int64_t>(*budget, 0)));
+        v.degraded = with_coreml > cap && required <= cap;
+    }
+    v.charged = generate && !v.degraded ? with_coreml : required;
+    v.fits = v.charged <= free;
+    return v;
+}
+
+} // namespace detail
+
 FitResult fit_params(const FitOptions & o) {
     FitResult r; r.model_variant = "pocket-tts";
     try {
         validate(o);
         const auto & e = o.engine;
-        // Enabled Core ML sidecars run FlowLM or Mimi outside ggml: their
-        // resident models and buffers cannot be projected (CosyVoice's rule).
-        const auto policy = detail::resolve_coreml_policy(e.coreml_compute_units, e.coreml_strict);
-        if (detail::coreml_step_enabled(e.flow_lm_path, policy) || detail::coreml_decoder_enabled(e.mimi_path, policy)) {
+        // Each stage's Core ML route, decided without reading the cache. A
+        // prebuilt sidecar runs FlowLM or Mimi outside ggml: its resident model
+        // and buffers are not projected (CosyVoice's rule) until its envelope
+        // is validated. A generated one adds its template's envelope.
+        const auto coreml_options = detail::coreml_engine_options(e);
+        const auto step_route = detail::coreml_plan_route(detail::CoremlStage::step, coreml_options);
+        const auto decoder_route = detail::coreml_plan_route(detail::CoremlStage::decoder, coreml_options);
+        const bool prebuilt = step_route.route == "prebuilt" || decoder_route.route == "prebuilt";
+        const bool generate = step_route.route == "generate" || decoder_route.route == "generate";
+        r.coreml.route = prebuilt ? "prebuilt" : generate ? "generate" : "none";
+        if (prebuilt) {
             r.reason = "coreml-memory-estimate-unavailable";
             r.report = "Core ML sidecars' resident models and buffers cannot be projected; "
                        "set POCKET_COREML_DISABLE=1 to project the ggml FlowLM and Mimi instead.\n";
             return r;
+        }
+        if (generate) {
+            r.coreml.bytes = detail::coreml_envelope_bytes(step_route, decoder_route);
+            r.coreml.validated = (step_route.route != "generate" || step_route.validated) &&
+                                 (decoder_route.route != "generate" || decoder_route.validated);
         }
         // Snapshot before backend initialization and metadata/container loads:
         // all of those allocations are charged in the projection below.
@@ -210,7 +242,18 @@ FitResult fit_params(const FitOptions & o) {
         const auto required = sat_add(sat_add(r.device.total_bytes,
             r.device_shares_host_memory ? r.host_bytes : 0), o.margin_bytes);
         const auto host_required = sat_add(r.host_bytes, o.margin_bytes);
-        r.fits = required <= r.device_free_bytes && (r.device_shares_host_memory || host_required <= host_free);
+        // Core ML-inclusive verdict: the ggml projection keeps its residency
+        // (ggml serves chunks until a sidecar is ready) plus the generated
+        // stages' envelope, charged to process memory: with the device when it
+        // shares host memory, with the host otherwise.
+        const bool shared = r.device_shares_host_memory;
+        const auto v = detail::decide_coreml_fit(shared ? required : host_required, r.coreml.bytes, generate,
+                                                 shared ? r.device_free_bytes : host_free,
+                                                 e.coreml.memory_budget_bytes);
+        r.coreml.ggml_only_fits = required <= r.device_free_bytes && (shared || host_required <= host_free);
+        r.coreml.fits = shared ? v.coreml_fits : (required <= r.device_free_bytes && v.coreml_fits);
+        if (v.degraded) r.coreml.disabled_reason = "memory";
+        r.fits = shared ? v.fits : (required <= r.device_free_bytes && v.fits);
         r.status = r.fits ? FitStatus::Success : FitStatus::Failure;
         r.reason = r.fits ? "fits" : "does-not-fit";
         std::ostringstream report;
@@ -221,6 +264,9 @@ FitResult fit_params(const FitOptions & o) {
                << "\navailable/budget: " << r.device_free_bytes << "\nmaximum audio frames: " << frames
                << "\nshared host memory: " << (r.device_shares_host_memory ? "yes" : "no")
                << "\nhost required/available: " << host_required << '/' << host_free
+               << (generate ? "\nCore ML envelope (generated sidecars" + std::string(r.coreml.validated ? ", validated" : "") +
+                                  (v.degraded ? "; memory-degrade: ggml only" : "") + "): " + std::to_string(r.coreml.bytes)
+                            : std::string())
                << "\nresult: " << r.reason << '\n';
         if (is_hexagon)
             report << "Hexagon registry session RPC queues (included in state): " << hexagon.shared_bytes
