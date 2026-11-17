@@ -317,7 +317,8 @@ two.
   `coreml.use = require` generates anyway. Prebuilt sidecars are not gated.
 - **Options and status.** `EngineOptions::coreml` (`tts-cpp/coreml_options.h`):
   `wait = construct` makes the constructor wait for the sidecar, `prewarm =
-  none` defers it to the first synthesis, `use = require` makes a sidecar that
+  none` defers it to the first synthesis (an Engine `prewarm_text` or
+  `warm_up()` call is one, on a CPU backend too), `use = require` makes a sidecar that
   cannot serve a call an error, `use = off` keeps ggml. `Engine::coreml_status()`
   returns the stage's status JSON (route `generated` or `cached`, state,
   timings, artifact key) and `Engine::coreml_wait(timeout_ms)` waits for it

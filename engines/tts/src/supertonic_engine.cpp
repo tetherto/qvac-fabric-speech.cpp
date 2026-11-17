@@ -226,7 +226,9 @@ struct Engine::Impl {
 #ifdef TTS_CPP_USE_COREML
         // Fit's memory-degrade: with a budget, Core ML is dropped when only
         // the ggml verdict fits. Decided before the weights load, so it reads
-        // the same free memory fit_params reports.
+        // the same free memory fit_params reports, with the allocation inputs
+        // this engine loads and runs with (precision, steps), so it reaches
+        // the verdict fit_params gave the caller for the same options.
         bool coreml_degrade = false;
         if (opts.coreml.memory_budget_bytes) {
             FitOptions fit;
@@ -234,6 +236,13 @@ struct Engine::Impl {
             fit.n_gpu_layers = opts.n_gpu_layers;
             fit.vulkan_device = opts.vulkan_device;
             fit.backend = opts.backend;
+            switch (opts.precision) {
+                case Precision::F32:  fit.precision = "f32";  break;
+                case Precision::F16:  fit.precision = "f16";  break;
+                case Precision::Q8_0: fit.precision = "q8_0"; break;
+                case Precision::Auto: fit.precision = "auto"; break;
+            }
+            fit.steps = opts.steps;
             fit.f16_weights = opts.f16_weights;
             fit.backends_dir = opts.backends_dir;
             fit.coreml = opts.coreml;
@@ -783,12 +792,8 @@ struct Engine::Impl {
             if (k == 0) full.text_encoder_synthesis_backend = std::move(chunk_res.text_encoder_synthesis_backend);
             else if (full.text_encoder_synthesis_backend != chunk_res.text_encoder_synthesis_backend)
                 full.text_encoder_synthesis_backend = "mixed";
-            if (k == 0) {
-                full.vocoder_synthesis_backend =
-                    std::move(chunk_res.vocoder_synthesis_backend);
-            } else if (full.vocoder_synthesis_backend != chunk_res.vocoder_synthesis_backend) {
-                full.vocoder_synthesis_backend = "mixed";
-            }
+            full.vocoder_synthesis_backend = supertonic_merge_vocoder_backend(
+                k == 0 ? std::string() : full.vocoder_synthesis_backend, chunk_res.vocoder_synthesis_backend);
             full.coreml_pending = full.coreml_pending || chunk_res.coreml_pending;
         }
 
@@ -799,8 +804,13 @@ struct Engine::Impl {
         return model.vocoder_on_coreml || (vocoder_coreml && vocoder_coreml->wait(0));
     }
 
+    // A vocoder stage with a route warms too while its sidecar is not ready
+    // yet: the warm-up's vocoder call requests it (prewarm none leaves the
+    // slot idle until a call does).
     bool wants_warm_up() const {
-        return !model.backend_is_cpu || vocoder_on_coreml() || model.encoder_on_coreml || model.vector_on_coreml;
+        return !model.backend_is_cpu || vocoder_on_coreml() ||
+               (vocoder_coreml && vocoder_coreml->route().route != "none") || model.encoder_on_coreml ||
+               model.vector_on_coreml;
     }
 
     std::string backend_name() const {

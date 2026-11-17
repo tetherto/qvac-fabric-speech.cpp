@@ -68,6 +68,7 @@ constexpr double MIN_COSINE = 0.999;
 // with the default (automatic) policy.
 constexpr const char * UNGATED_BRAND = "Apple M2";
 constexpr int    N_THREADS  = 4;
+constexpr int    DEGRADE_STEPS = 3;  // not the GGUF's default
 
 int g_failures = 0;
 
@@ -384,7 +385,10 @@ void check_engine_generated(const std::string & gguf, const tts_cpp::CoremlOptio
 // reads the environment again. `o` has no budget for use = off; with one it
 // is the memory-degrade case.
 void check_ggml_route_ignores_strict_env(const std::string & gguf, const tts_cpp::CoremlOptions & o,
-                                         const std::string & what) {
+                                         const std::string & what,
+                                         tts_cpp::supertonic::Precision precision =
+                                             tts_cpp::supertonic::Precision::Auto,
+                                         int steps = 0) {
     using tts_cpp::supertonic::Engine;
     using tts_cpp::supertonic::EngineOptions;
     scoped_env strict("SUPERTONIC_COREML_STRICT", "1");
@@ -393,6 +397,8 @@ void check_ggml_route_ignores_strict_env(const std::string & gguf, const tts_cpp
         opts.model_gguf_path = gguf;
         opts.n_threads = N_THREADS;
         opts.n_gpu_layers = 99;  // what fit projects
+        opts.precision = precision;
+        opts.steps = steps;
         opts.coreml = o;
         Engine engine(opts);
         const std::string status = engine.coreml_status();
@@ -400,16 +406,49 @@ void check_ggml_route_ignores_strict_env(const std::string & gguf, const tts_cpp
         auto result = engine.synthesize("The strict variable is ignored here.");
         expect(result.vocoder_synthesis_backend == "ggml" && !result.pcm.empty(),
                what + ": vocoder ran on '" + result.vocoder_synthesis_backend + "'");
-        std::fprintf(stderr, "[supertonic-coreml-parity] %s with SUPERTONIC_COREML_STRICT: synthesized on ggml\n",
-                     what.c_str());
+        std::fprintf(stderr, "[supertonic-coreml-parity] %s with SUPERTONIC_COREML_STRICT: synthesized on %s\n",
+                     what.c_str(), result.vocoder_synthesis_backend.c_str());
     } catch (const std::exception & e) {
         fail(what + " with SUPERTONIC_COREML_STRICT: " + e.what());
     }
 }
 
+// A CPU-backed Engine with prewarm none leaves the vocoder slot idle until a
+// call requests it; its prewarm_text warm-up is such a call, so the slot must
+// have left idle once construction returns.
+void check_cpu_warm_up_requests_idle_sidecar(const std::string & gguf, const tts_cpp::CoremlOptions & o) {
+    using tts_cpp::supertonic::Engine;
+    using tts_cpp::supertonic::EngineOptions;
+    try {
+        EngineOptions opts;
+        opts.model_gguf_path = gguf;
+        opts.n_threads = N_THREADS;
+        opts.n_gpu_layers = 0;
+        opts.coreml = o;
+        opts.coreml.prewarm = tts_cpp::CoremlOptions::Prewarm::none;
+        opts.coreml.wait = tts_cpp::CoremlOptions::Wait::none;
+        {
+            Engine idle(opts);
+            const std::string state = status_field(idle.coreml_status(), "state");
+            expect(state == "idle", "CPU engine without warm-up: state " + state + " (expected idle)");
+        }
+        opts.prewarm_text = "Warm up the vocoder sidecar.";
+        Engine engine(opts);
+        const std::string state = status_field(engine.coreml_status(), "state");
+        expect(!state.empty() && state != "idle", "CPU engine warm-up from an idle slot: state " + state);
+        engine.coreml_wait(-1);
+        std::fprintf(stderr, "[supertonic-coreml-parity] CPU warm-up requested the idle sidecar (state %s after "
+                     "construction)\n", state.c_str());
+    } catch (const std::exception & e) {
+        fail(std::string("CPU warm-up engine: ") + e.what());
+    }
+}
+
 // Fit charges the generated route's envelope; with a budget that only the
 // ggml projection fits, it degrades to ggml (use = off) instead of refusing,
-// and an Engine with that budget synthesizes on ggml. With `required` (the
+// and an Engine with that budget synthesizes on ggml. Fit runs with a
+// precision and a step count other than the defaults, and the Engine with the
+// same ones must reach the same degrade. With `required` (the
 // generated route is required on this host) a fit that cannot be projected or
 // a host without the free memory the near-budget case needs fails instead of
 // skipping.
@@ -418,6 +457,8 @@ void check_fit(const std::string & gguf, const tts_cpp::CoremlOptions & o, const
     tts_cpp::supertonic::FitOptions f;
     f.model_gguf_path = gguf;
     f.n_gpu_layers = 99;  // the fused GPU path is the one fit projects
+    f.precision = "f32";
+    f.steps = DEGRADE_STEPS;
     f.coreml = o;
     const tts_cpp::FitResult r = tts_cpp::supertonic::fit_params(f);
     if (r.status == tts_cpp::FitStatus::Error) {
@@ -447,7 +488,8 @@ void check_fit(const std::string & gguf, const tts_cpp::CoremlOptions & o, const
                std::to_string(d.fits));
     std::fprintf(stderr, "[supertonic-coreml-parity] fit: envelope %.1f MiB, near-budget degrade ok\n",
                  mib(r.coreml.bytes));
-    check_ggml_route_ignores_strict_env(gguf, near.coreml, "memory-degrade");
+    check_ggml_route_ignores_strict_env(gguf, near.coreml, "memory-degrade", tts_cpp::supertonic::Precision::F32,
+                                        DEGRADE_STEPS);
 }
 
 // A generated sidecar stays off on the device classes the template prefers
@@ -660,6 +702,7 @@ int generated_main(const std::string & gguf, const std::string & cache_dir, doub
     }
 
     check_engine_generated(gguf, o);
+    check_cpu_warm_up_requests_idle_sidecar(gguf, o);
     tts_cpp::CoremlOptions off = o;
     off.use = tts_cpp::CoremlOptions::Use::off;
     check_ggml_route_ignores_strict_env(gguf, off, "use = off");

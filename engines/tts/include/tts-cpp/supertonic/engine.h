@@ -349,8 +349,10 @@ struct EngineOptions {
     // cost — measured ~hundreds of ms on first synth on Adreno + RADV
     // in chatterbox PROGRESS.md), so the operator-visible first synth
     // call sees ~steady-state latency.  On a CPU backend with a Core ML
-    // vocoder sidecar attached the pre-warm still runs, absorbing Core
-    // ML's first-prediction device specialization; without one, CPU has
+    // vocoder sidecar attached, or a Core ML vocoder route whose sidecar
+    // is not ready yet (the warm-up's vocoder call requests it, also with
+    // prewarm none), the pre-warm still runs, absorbing Core ML's
+    // first-prediction device specialization; without either, CPU has
     // no shader-compilation cost and warm_up returns immediately.
     //
     // Pre-warm text should be similar in length to representative
@@ -472,8 +474,9 @@ public:
     // pre-compiled pipelines, so the operator-visible first synth
     // sees steady-state latency.
     //
-    // No-op on CPU backends without a Core ML vocoder sidecar (no
-    // pipeline cache to warm; an attached sidecar still warms).  Auto-
+    // No-op on CPU backends without a Core ML vocoder sidecar or route (no
+    // pipeline cache to warm; an attached sidecar still warms, and a
+    // route's idle sidecar is requested).  Auto-
     // invoked by the ctor when `EngineOptions::prewarm_text` is
     // non-empty; callers can also invoke explicitly mid-life when
     // they need to warm a different shape (e.g. switching from a
