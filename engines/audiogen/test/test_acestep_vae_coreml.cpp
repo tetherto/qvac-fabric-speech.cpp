@@ -7,9 +7,12 @@
 //       verdict with memory-degrade.
 //   test-acestep-vae-coreml --fit-stable --vae GGUF [--models DIR]
 //       The decoder's route and envelope, and with --models the whole fit,
-//       are the same with an empty cache directory and with one holding
-//       artifacts and warm hints (fresh, stale): the route never reads the
-//       cache.
+//       are the same on an empty cache directory, on one holding what a
+//       generation leaves (artifact, memo, used marker in the runtime's
+//       layout) and with a non-stale and then a stale warm hint written where
+//       the runtime reads it: the route never reads the cache. With the
+//       device cases, the cache the lowmem case populated (its compiled
+//       artifact and the hint its load wrote) is compared the same way.
 //   test-acestep-vae-coreml --models DIR --cache-root DIR [--cases LIST]
 //       [--duration S] [--require-coreml]
 //       Device cases (AUDIOGEN_COREML, macOS 15), each on a fresh cache under
@@ -41,6 +44,11 @@
 #include "vae_coreml.h"
 #include "vae_coreml_path.h"
 #include "memory_probe.h"
+
+#ifdef AUDIOGEN_USE_COREML
+#include "hints.h"
+#include "qvac_coreml/manager.h"
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -214,9 +222,10 @@ void self_test() {
 // ---- fit stability ------------------------------------------------------------
 
 std::string route_line(const detail::vae_coreml_route & r) {
-    return r.route + "|" + r.state + "|" + r.compute_units + "|" + std::to_string(r.envelope_bytes) + "|" +
-           std::to_string(r.resident_bytes) + "|" + std::to_string(r.transient_bytes) + "|" +
-           (r.validated ? "validated" : "unvalidated");
+    return r.route + "|" + r.state + "|" + r.reason + "|" + r.compute_units + "|" + std::to_string(r.envelope_bytes) +
+           "|" + std::to_string(r.resident_bytes) + "|" + std::to_string(r.transient_bytes) + "|" +
+           std::to_string(r.ane_compile_reserve_bytes) + "|" + (r.validated ? "validated" : "unvalidated") + "|" +
+           (r.strict ? "strict" : "");
 }
 
 std::string fit_line(const FitResult & f) {
@@ -226,32 +235,171 @@ std::string fit_line(const FitResult & f) {
            std::to_string(f.peak_host_bytes);
 }
 
-void populate_cache(const std::string & dir) {
-    fs::create_directories(dir + "/hints");
-    fs::create_directories(dir + "/artifacts/fake.mlmodelc/weights");
-    std::ofstream(dir + "/hints/fresh.json") << "{\"warm_load_ms\":120,\"cold_load_ms\":21000,\"last_ok\":1,\"stale_until\":0}";
-    std::ofstream(dir + "/hints/stale.json") << "{\"warm_load_ms\":120,\"cold_load_ms\":21000,\"last_ok\":1,"
-                                                "\"stale_until\":99999999999999}";
-    std::ofstream(dir + "/artifacts/fake.mlmodelc/weights/weight.bin") << "x";
+void write_file(const fs::path & p, const std::string & text) {
+    fs::create_directories(p.parent_path());
+    std::ofstream(p) << text;
 }
 
+// Every entry (file or directory) under `dir`.
+int entries_under(const fs::path & dir) {
+    int n = 0;
+    std::error_code ec;
+    for (auto it = fs::recursive_directory_iterator(dir, ec); it != fs::recursive_directory_iterator(); ++it) ++n;
+    return n;
+}
+
+// The artifact directories of the runtime's cache layout under `cache`.
+std::vector<fs::path> artifact_dirs(const fs::path & cache) {
+    std::vector<fs::path> out;
+    std::error_code ec;
+    for (const auto & e : fs::directory_iterator(cache / "qvac-coreml-v1" / "artifacts", ec)) {
+        if (e.is_directory()) out.push_back(e.path());
+    }
+    return out;
+}
+
+// What a generation of the decoder leaves in the runtime's cache layout: the
+// artifact with its compiled model and record, the source memo naming it and
+// the used marker.
+void simulate_generation(const fs::path & cache) {
+    const std::string key = "0123456789abcdef0123456789abcdef";
+    const fs::path root = cache / "qvac-coreml-v1";
+    const fs::path art = root / "artifacts" / ("acestep-vae-t64." + key);
+    write_file(art / "model.mlmodelc" / "model.mil", "program(1.0)\n");
+    write_file(art / "artifact.json", "{\"schema\":1,\"complete\":true,\"artifact_key\":\"" + key +
+                                          "\",\"inventory\":[{\"path\":\"model.mlmodelc/model.mil\",\"bytes\":13}]}\n");
+    write_file(root / "sources" / ("fedcba9876543210fedcba9876543210." + key + ".json"), "{\"schema\":1}\n");
+    write_file(root / "used" / key, "");
+}
+
+#ifdef AUDIOGEN_USE_COREML
+namespace rt = QVAC_COREML_NS;
+
+// The hint record this process's runtime reads for the model of
+// `artifact_dir` (function main, `units`, this host and OS build).
+std::string runtime_hint_path(const fs::path & cache, const fs::path & artifact_dir, const std::string & units) {
+    const auto m = rt::Manager::instance();
+    return rt::detail::hint_path_for(cache.string(), m->host_id(), (artifact_dir / "model.mlmodelc").string(), "main",
+                                     units, m->os_build());
+}
+
+// Artifacts of `cache` with a hint record at the runtime's id.
+int hints_at_runtime_id(const fs::path & cache, const std::string & units) {
+    int n = 0;
+    for (const fs::path & art : artifact_dirs(cache)) {
+        if (rt::detail::read_hint(runtime_hint_path(cache, art, units))) ++n;
+    }
+    return n;
+}
+
+// Rewrites every hint record under `cache` with `stale` and writes one at the
+// runtime's id for every artifact; returns how many read back at a runtime id
+// with that staleness.
+int write_hints(const fs::path & cache, const std::string & units, bool stale) {
+    const std::optional<int64_t> until =
+        stale ? std::optional<int64_t>(rt::detail::unix_now_s() + 365LL * 24 * 3600) : std::nullopt;
+    std::error_code ec;
+    for (const auto & e : fs::directory_iterator(cache / "qvac-coreml-v1" / "hints", ec)) {
+        if (e.path().extension() != ".json") continue;
+        std::optional<rt::detail::HintRecord> rec = rt::detail::read_hint(e.path().string());
+        if (!rec) continue;
+        rec->stale_until_s = until;
+        rt::detail::write_hint(e.path().string(), *rec);
+    }
+    int n = 0;
+    for (const fs::path & art : artifact_dirs(cache)) {
+        const std::string path = runtime_hint_path(cache, art, units);
+        std::optional<rt::detail::HintRecord> rec = rt::detail::read_hint(path);
+        if (!rec) {
+            rec.emplace();
+            rec->warm_load_ms = 120;
+            rec->cold_load_ms = 21000;
+            rec->last_ok = rt::detail::iso8601_utc(rt::detail::unix_now_s());
+            rec->artifact = (art / "model.mlmodelc").string();
+        }
+        rec->stale_until_s = until;
+        fs::create_directories(fs::path(path).parent_path());
+        const std::optional<rt::detail::HintRecord> back =
+            rt::detail::write_hint(path, *rec) ? rt::detail::read_hint(path) : std::nullopt;
+        if (back && back->stale_until_s.has_value() == stale) ++n;
+    }
+    return n;
+}
+#endif
+
+// The route (and with `models` the whole fit) planned on an empty cache, to
+// compare caches against.
+struct cache_comparison {
+    std::string vae, models, route0, fit0;
+
+    std::string route_at(const fs::path & cache) const {
+        CoremlOptions o;
+        o.cache_dir = cache.string();
+        return route_line(detail::vae_coreml_plan_route(vae, o));
+    }
+    std::string fit_at(const fs::path & cache) const {
+        FitOptions f;
+        f.models_dir = models;
+        f.vae_model_path = vae;
+        f.coreml.cache_dir = cache.string();
+        const FitResult r = fit_params(f);
+        return (r.status == FitStatus::Error ? "error|" : "") + fit_line(r);
+    }
+    cache_comparison(const std::string & v, const std::string & m, const fs::path & empty) : vae(v), models(m) {
+        route0 = route_at(empty);
+        std::fprintf(stderr, "  route on an empty cache: %s\n", route0.c_str());
+        if (!models.empty()) {
+            fit0 = fit_at(empty);
+            std::fprintf(stderr, "  fit on an empty cache:   %s\n", fit0.c_str());
+            check(fit0.rfind("error|", 0) != 0, "fit on an empty cache");
+        }
+    }
+    void same(const fs::path & cache, const std::string & what) const {
+        const std::string r = route_at(cache);
+        check(r == route0, what + ": route " + r);
+        if (!models.empty()) {
+            const std::string f = fit_at(cache);
+            check(f == fit0, what + ": fit " + f);
+        }
+    }
+};
+
+// The hint cases on `cache`: a non-stale hint, then a stale one, at the id the
+// runtime reads for every artifact of it.
+void hint_cases(const cache_comparison & cmp, const fs::path & cache, const std::string & units) {
+#ifdef AUDIOGEN_USE_COREML
+    const size_t n = artifact_dirs(cache).size();
+    int written = write_hints(cache, units, /*stale=*/false);
+    check(n > 0 && written == (int) n, "non-stale hints at the runtime's id for " + std::to_string(written) + " of " +
+                                           std::to_string(n) + " artifact(s)");
+    cmp.same(cache, "with non-stale hints");
+    written = write_hints(cache, units, /*stale=*/true);
+    check(n > 0 && written == (int) n, "stale hints at the runtime's id for " + std::to_string(written) + " of " +
+                                           std::to_string(n) + " artifact(s)");
+    cmp.same(cache, "with stale hints");
+#else
+    (void) cmp;
+    (void) cache;
+    (void) units;
+    std::fprintf(stderr, "  built without AUDIOGEN_COREML: hint cases skipped\n");
+#endif
+}
+
+// The decoder's route and envelope (and with `models` the whole fit) are the
+// same on an empty cache, after a generation, and with a non-stale and a stale
+// warm hint: the route never reads the cache.
 void fit_stable(const std::string & vae, const std::string & models, const std::string & root, bool require) {
     std::fprintf(stderr, "fit stability (%s)\n", vae.c_str());
-    const std::string empty = fresh_dir(root, "fit-empty");
-    const std::string full = fresh_dir(root, "fit-populated");
-    populate_cache(full);
-    CoremlOptions a, b;
-    a.cache_dir = empty;
-    b.cache_dir = full;
+    const fs::path empty = fresh_dir(root, "fit-empty");
+    const fs::path cache = fresh_dir(root, "fit-generated");
+    CoremlOptions a;
+    a.cache_dir = empty.string();
     const detail::vae_coreml_route ra = detail::vae_coreml_plan_route(vae, a);
-    const detail::vae_coreml_route rb = detail::vae_coreml_plan_route(vae, b);
-    std::fprintf(stderr, "  route %s\n", route_line(ra).c_str());
 #ifdef AUDIOGEN_USE_COREML
     if (require) check(ra.route == "generate", "route generate (" + ra.route + " " + ra.state + " " + ra.reason + ")");
 #else
     (void) require;
 #endif
-    check(route_line(ra) == route_line(rb), "route and envelope: empty cache == populated cache with hints");
     if (ra.route == "generate") {
         // The template's measured charges (template.json memory), pinned so a
         // change to them is deliberate.
@@ -262,28 +410,40 @@ void fit_stable(const std::string & vae, const std::string & models, const std::
                   std::to_string(ra.transient_bytes) + ", envelope " + std::to_string(ra.envelope_bytes) +
                   ", compiler reserve " + std::to_string(ra.ane_compile_reserve_bytes));
     }
-    // A second plan of the empty cache after the first one: nothing was written.
-    check(route_line(detail::vae_coreml_plan_route(vae, a)) == route_line(ra) && bundles_under(empty) == 0,
-          "planning writes nothing to the cache");
-    if (!models.empty()) {
-        FitOptions fa;
-        fa.models_dir = models;
-        fa.vae_model_path = vae;
-        fa.coreml = a;
-        FitOptions fb = fa;
-        fb.coreml = b;
-        const FitResult x = fit_params(fa);
-        const FitResult y = fit_params(fb);
-        std::fprintf(stderr, "  fit %s\n", fit_line(x).c_str());
-        check(x.status != FitStatus::Error && fit_line(x) == fit_line(y), "fit: empty cache == populated cache");
-        if (ra.route == "generate") {
-            check(x.coreml.route == "generate" && x.coreml.bytes == ra.envelope_bytes,
-                  "fit charges the generated envelope (" + std::to_string(x.coreml.bytes) + " bytes)");
-        }
-    }
+    const cache_comparison cmp(vae, models, empty);
+    simulate_generation(cache);
+    cmp.same(cache, "after a generation (artifact, memo, used marker)");
+    hint_cases(cmp, cache, ra.compute_units);
+    check(entries_under(empty) == 0, "planning and fit wrote nothing to the empty cache (" +
+                                         std::to_string(entries_under(empty)) + " entries)");
     std::error_code ec;
     fs::remove_all(empty, ec);
-    fs::remove_all(full, ec);
+    fs::remove_all(cache, ec);
+}
+
+// The same comparison on a cache a real run populated (a compiled artifact and
+// the hint its load wrote) against a fresh empty directory: the cache as it
+// is, then with its hints stale.
+void fit_stable_on(const std::string & vae, const std::string & models, const std::string & root,
+                   const fs::path & cache) {
+    std::fprintf(stderr, "fit stability on the populated cache %s\n", cache.string().c_str());
+    const fs::path empty = fresh_dir(root, "fit-empty");
+    CoremlOptions a;
+    a.cache_dir = empty.string();
+    const std::string units = detail::vae_coreml_plan_route(vae, a).compute_units;
+    const cache_comparison cmp(vae, models, empty);
+    const size_t n = artifact_dirs(cache).size();
+#ifdef AUDIOGEN_USE_COREML
+    const int hinted = hints_at_runtime_id(cache, units);
+    check(n > 0 && hinted > 0, "the populated cache holds " + std::to_string(n) + " artifact(s), " +
+                                   std::to_string(hinted) + " with the hint its load wrote at the runtime's id");
+#else
+    check(n > 0, "the populated cache holds " + std::to_string(n) + " artifact(s)");
+#endif
+    cmp.same(cache, "the populated cache as it is");
+    hint_cases(cmp, cache, units);
+    std::error_code ec;
+    fs::remove_all(empty, ec);
 }
 
 // ---- device cases --------------------------------------------------------------
@@ -343,8 +503,9 @@ void case_encode(const std::string & models, const std::string & root) {
           "nothing was generated into the cache (" + std::to_string(bundles_under(cache)) + " bundle(s))");
 }
 
-// Three generate() calls in low-memory mode on a fresh cache.
-void case_lowmem(const std::string & models, const std::string & root, float duration) {
+// Three generate() calls in low-memory mode on a fresh cache. Returns the
+// cache they populated.
+std::string case_lowmem(const std::string & models, const std::string & root, float duration) {
     std::fprintf(stderr, "lowmem: three generations, %.0f s each\n", duration);
     const std::string cache = fresh_dir(root, "lowmem");
     std::unique_ptr<Engine> engine = Engine::create(engine_options(models, cache));
@@ -402,6 +563,7 @@ void case_lowmem(const std::string & models, const std::string & root, float dur
               "gen " + std::to_string(g) + " reloads warm within its deadline and decodes on " + r.vae_backend);
         check(state_of(st) == "idle", "gen " + std::to_string(g) + ": evicted again (" + state_of(st) + ")");
     }
+    return cache;
 }
 
 // Install-time preparation: {prewarm all, wait construct} in low-memory mode.
@@ -763,10 +925,14 @@ int main(int argc, char ** argv) {
         } else {
             std::fprintf(stderr, "device cases on %s (host %s)\n", models.c_str(), host_chip().c_str());
             if (contains(cases, "encode")) case_encode(models, cache_root);
-            if (contains(cases, "lowmem")) case_lowmem(models, cache_root, duration);
+            std::string lowmem_cache;
+            if (contains(cases, "lowmem")) lowmem_cache = case_lowmem(models, cache_root, duration);
             if (contains(cases, "prewarm")) case_prewarm(models, cache_root, duration);
             if (contains(cases, "evict")) case_evict(vae, cache_root);
             if (contains(cases, "degrade")) case_degrade(models, cache_root);
+            // The cache the low-memory generations left (a compiled artifact
+            // and the hint its load wrote) against an empty one.
+            if (fit && !lowmem_cache.empty()) fit_stable_on(vae, models, cache_root, lowmem_cache);
         }
     }
 #else

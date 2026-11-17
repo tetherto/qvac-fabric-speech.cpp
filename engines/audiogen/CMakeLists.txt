@@ -392,7 +392,14 @@ if (AUDIOGEN_BUILD_TESTS)
     # memory_probe.h: the shared probes of the Core ML memory schedules.
     target_include_directories(test-acestep-vae-coreml PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/test)
     if (AUDIOGEN_COREML)
-        target_compile_definitions(test-acestep-vae-coreml PRIVATE AUDIOGEN_USE_COREML)
+        # The fit-stable hint cases write records where the runtime reads
+        # them, so the test uses the runtime's hint-path helper (same
+        # namespace as the runtime objects it links).
+        get_target_property(_ag_test_coreml_ns audiogen-cpp QVAC_COREML_NS)
+        target_compile_definitions(test-acestep-vae-coreml PRIVATE AUDIOGEN_USE_COREML
+                                   QVAC_COREML_NS=${_ag_test_coreml_ns})
+        target_include_directories(test-acestep-vae-coreml PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/include ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/src)
     endif()
     add_test(NAME test-acestep-vae-coreml-self-test COMMAND test-acestep-vae-coreml --self-test)
     set_property(TEST test-acestep-vae-coreml-self-test PROPERTY LABELS "unit")
@@ -404,7 +411,8 @@ if (AUDIOGEN_BUILD_TESTS)
                          --seed 1 --types bf16 -o "${_acestep_vae_twin}")
         set_tests_properties(test-acestep-vae-fit-stable-twin PROPERTIES LABELS "unit" FIXTURES_SETUP acestep-vae-twin)
         add_test(NAME test-acestep-vae-fit-stable
-                 COMMAND test-acestep-vae-coreml --fit-stable --vae "${_acestep_vae_twin}")
+                 COMMAND test-acestep-vae-coreml --fit-stable --vae "${_acestep_vae_twin}"
+                         $<$<AND:$<BOOL:${AUDIOGEN_COREML}>,$<PLATFORM_ID:Darwin>>:--require-coreml>)
         set_tests_properties(test-acestep-vae-fit-stable PROPERTIES LABELS "unit" FIXTURES_REQUIRED acestep-vae-twin)
     endif()
 
