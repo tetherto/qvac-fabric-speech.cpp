@@ -676,6 +676,13 @@ if (PARAKEET_BUILD_TESTS)
         endif()
     endfunction()
 
+    # The host log sink is drained before parakeet_log_set returns.
+    add_executable(test-log-unregister test/test_log_unregister.cpp src/parakeet_log.cpp)
+    target_link_libraries(test-log-unregister PRIVATE ggml)
+    target_include_directories(test-log-unregister PRIVATE ggml/include src include)
+    parakeet_apply_ccache(test-log-unregister)
+    parakeet_register_test(test-log-unregister LABEL "unit")
+
     add_executable(test-parity test/test_parity.cpp)
     parakeet_register_test(test-parity LABEL "unit")
 
