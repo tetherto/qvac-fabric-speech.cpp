@@ -541,6 +541,19 @@ std::optional<bool> ane_query_loading(mem_phase before, mem_phase after) {
     return loading(before);
 }
 
+// One decode of the overlapped schedule: it counts as a ggml call or a Core
+// ML call only when it succeeded on that backend (the Core ML one being the
+// route's own label); a failed decode, or one on any other backend, is bad
+// and fails the run instead of filling the call counts.
+enum class schedule_call { ggml, coreml, bad };
+
+schedule_call classify_call(bool ok, const std::string & backend, const std::string & coreml_label) {
+    if (!ok) return schedule_call::bad;
+    if (backend == PARLER_DAC_GGML_BACKEND) return schedule_call::ggml;
+    if (backend == coreml_label) return schedule_call::coreml;
+    return schedule_call::bad;
+}
+
 // What the probes failed to measure: the baseline, footprint samples, or (on
 // the Neural Engine) ANECompilerService while loading. A run with any of them
 // fails instead of counting the missing readings as 0.
@@ -660,7 +673,14 @@ void memory_schedule_gates() {
         const auto none = growth({{700, false, true}, {0, true, false}, {0, true, false}});
         check(!qvac_coreml_memory::ane_compiler_measured(none) && !qvac_coreml_memory::ane_compiler_measured(growth({})),
               "memory schedule: no successful query while loading is no compiler measurement");
-        check(probe_failures(true, 0, true, f).size() == 1 && probe_failures(true, 0, false, f).empty() &&
+        check(classify_call(true, "ggml", "coreml-all") == schedule_call::ggml &&
+              classify_call(true, "coreml-all", "coreml-all") == schedule_call::coreml &&
+              classify_call(false, "ggml", "coreml-all") == schedule_call::bad &&
+              classify_call(false, "coreml-all", "coreml-all") == schedule_call::bad &&
+              classify_call(true, "coreml-gpu", "coreml-all") == schedule_call::bad &&
+              classify_call(true, "mixed", "coreml-all") == schedule_call::bad,
+          "memory schedule: a failed decode, or one on another backend, is not a ggml or Core ML call");
+    check(probe_failures(true, 0, true, f).size() == 1 && probe_failures(true, 0, false, f).empty() &&
                   probe_failures(true, 0, true, growth({{700, false}, {900, true}})).empty(),
               "memory schedule: failed compiler queries fail a Neural Engine run");
         check(probe_failures(false, 0, false, none).size() == 1 && probe_failures(true, 3, false, none).size() == 1 &&
@@ -1629,7 +1649,14 @@ void memory_schedule(parler_model & model, const std::string & gguf, const std::
     model.dac_sidecar.reset();
     model.dac_pending.reset();
     std::vector<float> pcm;
-    for (int i = 0; i < 2; ++i) decode(model, codes, n_frames, pcm);  // warm the ggml arena
+    for (int i = 0; i < 2; ++i) {  // warm the ggml arena
+        std::string warm_backend;
+        const bool ok = decode(model, codes, n_frames, pcm, nullptr, 0, -1, &warm_backend);
+        if (classify_call(ok, warm_backend, "") != schedule_call::ggml) {
+            check(false, "memory schedule: the ggml warm-up decode succeeds (" + warm_backend + ")");
+            return;
+        }
+    }
     uint64_t base = 0;
     const bool base_ok = qvac_coreml_memory::phys_footprint(base);
     size_t footprint_failures = 0;
@@ -1677,16 +1704,26 @@ void memory_schedule(parler_model & model, const std::string & gguf, const std::
     const auto t0 = std::chrono::steady_clock::now();
     auto dac = parler_dac_coreml::create(model, gguf, opts);
     watched.store(dac.get());
-    int ggml_calls = 0, coreml_calls = 0;
-    std::string backend;
+    int ggml_calls = 0, coreml_calls = 0, bad_calls = 0;
+    std::string backend, bad_backend;
+    const std::string coreml_label = label_for_units(route.compute_units);
     while (std::chrono::steady_clock::now() - t0 < std::chrono::minutes(5)) {
-        decode(model, codes, n_frames, pcm, nullptr, 0, -1, &backend);
-        if (backend == "ggml") {
+        backend.clear();
+        const bool ok = decode(model, codes, n_frames, pcm, nullptr, 0, -1, &backend);
+        const schedule_call k = classify_call(ok, backend, coreml_label);
+        if (k == schedule_call::bad) {
+            ++bad_calls;
+            bad_backend = (ok ? "" : "failed on ") + backend;
+            break;
+        }
+        if (k == schedule_call::ggml) {
             ++ggml_calls;
         } else if (++coreml_calls >= 5) {
             break;
         }
     }
+    if (bad_calls > 0) check(false, "memory schedule: every overlapped decode succeeds on ggml or " + coreml_label +
+                                        " (" + bad_backend + ")");
     const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     stop.store(true);
     sampler.join();
@@ -1758,7 +1795,7 @@ void memory_schedule(parler_model & model, const std::string & gguf, const std::
                   "(envelope %.1f MiB, units %s); ANECompilerService %.1f MiB while loading, grew %.1f MiB (%s)",
                   ggml_calls, coreml_calls, secs, mib(base), mib(b.total), mib(route.envelope_bytes),
                   route.compute_units.c_str(), mib(ane.peak), mib(ane.growth), before_load);
-    check(coreml_calls >= 5 && ggml_calls >= 1 && failures.empty(), line);
+    check(coreml_calls >= 5 && ggml_calls >= 1 && bad_calls == 0 && failures.empty(), line);
     model.dac_pending.reset();
 }
 #endif
