@@ -244,6 +244,11 @@ static VaeModel * vae_model_load_impl(const std::string & path, ggml_backend_t b
         vae_gguf_close(g);
         throw std::runtime_error(refusal);
     }
+    const std::string type_refusal = vae_gguf_type_refusal(g, path);
+    if (!type_refusal.empty()) {
+        vae_gguf_close(g);
+        throw std::runtime_error(type_refusal);
+    }
 
     // encoder tensors only exist in the file if it's a full VAE
     if (with_encoder && !vae_gguf_has(g, "encoder.conv1.weight_v")) {

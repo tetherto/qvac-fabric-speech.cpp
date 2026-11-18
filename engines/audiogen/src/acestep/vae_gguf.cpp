@@ -58,6 +58,17 @@ bool vae_gguf_has(const VaeGGUF & g, const std::string & name) {
     return gguf_find_tensor(g.ctx, name.c_str()) >= 0;
 }
 
+std::string vae_gguf_type_refusal(const VaeGGUF & g, const std::string & path) {
+    const int64_t n = gguf_get_n_tensors(g.ctx);
+    for (int64_t i = 0; i < n; ++i) {
+        const ggml_type t = gguf_get_tensor_type(g.ctx, i);
+        if (t == GGML_TYPE_BF16) continue;
+        return "[acestep-vae] " + path + ": " + gguf_get_tensor_name(g.ctx, i) + " is " + ggml_type_name(t) +
+               "; the VAE loader reads BF16 weights only";
+    }
+    return "";
+}
+
 static float bf16_to_f32(uint16_t v) {
     ggml_bf16_t b; b.bits = v; return ggml_bf16_to_fp32(b);
 }
