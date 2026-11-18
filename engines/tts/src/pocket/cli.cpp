@@ -8,10 +8,14 @@
 #include "json.hpp"
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <set>
 #include <stdexcept>
+#include <utility>
+#include <vector>
 
 namespace {
 using namespace tts_cpp::pocket;
@@ -69,10 +73,25 @@ void print_help() {
               "--fit estimates memory on the selected backend without loading weights; optional --fit-budget-mib and --fit-margin-mib.\n"
               "  Synthesis uses the same budget, text and margin to decide whether Core ML fits (memory-degrade).\n"
               "--coreml-cache-dir DIR generates the Core ML sidecars from the GGUFs into DIR when none is prebuilt (macOS 15+);\n"
+              "  default: QVAC_COREML_CACHE_DIR, else ~/Library/Application Support/qvac-speech/coreml;\n"
               "  --coreml-wait none|construct|call, --coreml-prewarm none|minimal|predicted|all,\n"
               "  --coreml-step-units / --coreml-decoder-units all|cpu_and_ane|cpu_and_gpu|cpu_only,\n"
               "  --coreml-status-json FILE writes the Core ML status after the runs.\n"
               "Fit exit status: 0 fits, 1 does not fit, 2 measurement error.");
+}
+// The CLI keeps generated sidecars and warm-load hints under Application
+// Support when neither --coreml-cache-dir nor QVAC_COREML_CACHE_DIR names a
+// directory (Library/Caches can be purged, and a purge means a new path and a
+// cold compile). The library's own default stays "no cache".
+void apply_cli_cache_default(tts_cpp::CoremlOptions & coreml) {
+#if defined(__APPLE__)
+    const char * shared = std::getenv("QVAC_COREML_CACHE_DIR");
+    const char * home = std::getenv("HOME");
+    if (!coreml.cache_dir && (shared == nullptr || *shared == '\0') && home != nullptr && *home != '\0')
+        coreml.cache_dir = std::string(home) + "/Library/Application Support/qvac-speech/coreml";
+#else
+    (void) coreml;
+#endif
 }
 EngineOptions engine_options(const Arguments & args, const std::string & text) {
     const auto dir = args.get("--model-dir", ".");
@@ -95,6 +114,7 @@ EngineOptions engine_options(const Arguments & args, const std::string & text) {
     opts.context = args.integer("--context", opts.context); opts.max_tokens = args.integer("--max-tokens", opts.max_tokens);
     opts.frames_after_eos = args.integer("--frames-after-eos", opts.frames_after_eos);
     if (args.has("--coreml-cache-dir")) opts.coreml.cache_dir = args.get("--coreml-cache-dir", "");
+    apply_cli_cache_default(opts.coreml);
     if (args.has("--coreml-wait")) {
         const auto w = args.get("--coreml-wait", "");
         if (w == "none") opts.coreml.wait = tts_cpp::CoremlOptions::Wait::none;
@@ -154,6 +174,35 @@ void write_wav(const std::string & path, const SynthesisResult & result) {
     drwav_uninit(&wav);
     if (written != result.pcm.size()) throw std::runtime_error("incomplete WAV write");
 }
+// Whether two paths name the same file: the same absolute path once
+// normalized and symlinks resolved, or (both existing) the same file, which
+// also catches spellings only the filesystem equates (a case-insensitive
+// volume, a hard link).
+bool same_file(const std::string & a, const std::string & b) {
+    namespace fs = std::filesystem;
+    if (a.empty() || b.empty()) return false;
+    std::error_code ec;
+    const fs::path pa = fs::weakly_canonical(fs::absolute(a, ec), ec);
+    if (!ec) {
+        const fs::path pb = fs::weakly_canonical(fs::absolute(b, ec), ec);
+        if (!ec && pa == pb) return true;
+    }
+    ec.clear();
+    return fs::exists(a, ec) && fs::exists(b, ec) && fs::equivalent(a, b, ec);
+}
+// The files --coreml-status-json must never replace: the model inputs, the
+// audio and the report.
+std::vector<std::pair<std::string, std::string>> protected_files(const Arguments & args, const EngineOptions & opts) {
+    return {{"--output", args.get("--output", "pocket-output.wav")}, {"--report", args.get("--report", "")},
+            {"--flow-lm", opts.flow_lm_path}, {"--mimi", opts.mimi_path}, {"--frontend", opts.frontend_path},
+            {"--voice", opts.voice_path}, {"--reference-audio", opts.reference_audio_path}};
+}
+void check_status_path(const Arguments & args, const EngineOptions & opts, const std::string & status_path) {
+    for (const auto & [name, path] : protected_files(args, opts)) {
+        if (same_file(status_path, path))
+            throw std::runtime_error("--coreml-status-json names the same file as " + name + " (" + path + ")");
+    }
+}
 double seconds_since(Clock::time_point start) {
     return std::chrono::duration<double>(Clock::now()-start).count();
 }
@@ -183,6 +232,10 @@ Json benchmark_runs(Engine & engine, const std::string & text, const std::string
 int run_synthesis(const Arguments & args, const EngineOptions & opts, const std::string & text) {
     const int runs = args.integer("--runs", 1);
     if (runs < 1 || runs > 100) throw std::runtime_error("runs must be 1..100");
+    // Refused before any synthesis, so no audio, report or input is ever
+    // overwritten by the status.
+    const auto status_path = args.get("--coreml-status-json", "");
+    if (!status_path.empty()) check_status_path(args, opts, status_path);
     const auto start = Clock::now(); Engine engine(opts);
     const double load = seconds_since(start);
     std::fprintf(stderr, "Pocket FlowLM: %s%s; Mimi: %s%s; device: %s\n", engine.flow_lm_backend_name(),
@@ -202,8 +255,11 @@ int run_synthesis(const Arguments & args, const EngineOptions & opts, const std:
             "float32 (Core ML sidecars: float16)" : "float32"},{"rng","Fabric MT19937 Box-Muller (not PyTorch seed-equivalent)"},
         {"assets",{{"flow_lm",opts.flow_lm_path},{"mimi",opts.mimi_path},{"frontend",opts.frontend_path},{"voice",opts.voice_path}}},
         {"coreml_status",Json::parse(engine.coreml_status())}});
-    const auto status_path = args.get("--coreml-status-json", "");
     if (!status_path.empty()) {
+        // Checked again now that the audio and report exist: a spelling only
+        // the filesystem equates with one of them is caught here, before the
+        // status file is opened (and truncated).
+        check_status_path(args, opts, status_path);
         std::ofstream file(status_path); file << engine.coreml_status() << '\n';
         if (!file) throw std::runtime_error("cannot write the Core ML status");
     }
