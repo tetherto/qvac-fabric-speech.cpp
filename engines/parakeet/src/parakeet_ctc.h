@@ -761,6 +761,11 @@ CoremlCallStats model_coreml_call_stats(ParakeetCtcModel & m);
 #ifdef PARAKEET_USE_COREML
 class CoremlDiarizers;
 CoremlDiarizers * model_coreml_diarizers(const ParakeetCtcModel & m);
+// Tests: called with "open" just before load_from_gguf opens the GGUF (its
+// one open: metadata and tensor data are read through that descriptor) and
+// with "read" after its last read of tensor data. Null by default.
+using GgufLoadObserver = void (*)(const char * point);
+void set_gguf_load_observer(GgufLoadObserver fn);
 #endif
 bool        model_bypass_encoder_on_coreml(const ParakeetCtcModel & m);
 
