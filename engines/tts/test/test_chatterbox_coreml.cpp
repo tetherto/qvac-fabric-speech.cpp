@@ -1471,8 +1471,22 @@ void cfm_rollback_check(const std::string & s3gen, const fs::path & root) {
     const run_result served = run(waited);
     require(served.backend == cb::MIXED_STAGE_BACKEND, "CFM runs on Core ML");
     cb::coreml_test().fail_cfm_step = 1;
+    cb::coreml_test().clear_events();
+    cb::coreml_test().tracing = true;
     const run_result rolled = run(waited);
+    cb::coreml_test().tracing = false;
     require(cb::coreml_test().fail_cfm_step == -1, "the failure was injected");
+    // No random number is drawn after the initial noise: not by any Euler
+    // step, nor by the rollback.
+    std::string draws;
+    for (const auto & e : cb::coreml_test().events()) {
+        if (e.rfind("cfm draws ", 0) == 0) draws = e;
+    }
+    const size_t init_at = draws.find("init="), end_at = draws.find(" end=");
+    require(init_at != std::string::npos && end_at != std::string::npos, "the CFM noise draws are traced");
+    const std::string init = draws.substr(init_at + 5, end_at - init_at - 5), end = draws.substr(end_at + 5);
+    std::printf("[cfm-rollback] %s\n", draws.c_str());
+    require(std::stoull(init) > 0 && init == end, "no CFM noise draw after initialisation, rollback included");
     std::printf("[cfm-rollback] backend=%s, max |rolled back - use=off| = %.3e\n", rolled.backend.c_str(),
                 rolled.wav.size() == reference.wav.size() ? max_abs(rolled.wav, reference.wav) : -1.0);
     require(rolled.backend == cb::GGML_STAGE_BACKEND, "after the failure the whole call ran on ggml");

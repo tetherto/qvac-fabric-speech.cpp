@@ -2655,6 +2655,19 @@ namespace {
 // A Core ML stage failed on a plan whose failures are deferred: the call
 // stops before producing anything and its caller renders it again.
 struct coreml_redo {};
+
+// A random engine that counts its draws (the CFM noise source).
+struct counted_rng {
+    using result_type = std::mt19937::result_type;
+    std::mt19937 engine;
+    uint64_t * draws;
+    static constexpr result_type min() { return std::mt19937::min(); }
+    static constexpr result_type max() { return std::mt19937::max(); }
+    result_type operator()() {
+        ++*draws;
+        return engine();
+    }
+};
 }  // namespace
 
 static int s3gen_synthesize_impl(
@@ -3125,6 +3138,13 @@ static int s3gen_synthesize_impl(
     vlog("Initializing CFM noise (seed=%d, %s)...\n", seed,
             meanflow ? "meanflow" : "standard CFM + CFG");
     std::vector<float> z(T_mu * MEL);
+    // The CFM noise source: every draw is counted, and the count after the
+    // integration (rollback included) must equal the count after this
+    // initialisation, so a rollback to z0 replays the same trajectory (the
+    // tests assert it through the test-hook trace).
+    uint64_t cfm_draws = 0;
+    counted_rng cfm_noise{std::mt19937(seed), &cfm_draws};
+    counted_rng cfm_noise2{std::mt19937(seed + 2), &cfm_draws};
     int n_speech_part = m.token_mel_ratio * (int)padded.size();
     int prompt_len_in_mu = T_mu - n_speech_part;
     vlog("  T_mu=%d prompt_len_in_mu=%d n_speech_part=%d\n",
@@ -3150,17 +3170,16 @@ static int s3gen_synthesize_impl(
             for (int t = 0; t < nm_T; ++t)
                 z[m2 * T_mu + (prompt_len_in_mu + t)] = nm[m2 * nm_T + t];
     } else {
-        std::mt19937 rng(seed);
         std::normal_distribution<float> gauss(0.0f, 1.0f);
-        for (size_t i = 0; i < z.size(); ++i) z[i] = gauss(rng);
+        for (size_t i = 0; i < z.size(); ++i) z[i] = gauss(cfm_noise);
         if (meanflow) {
-            std::mt19937 rng2(seed + 2);
             std::normal_distribution<float> gauss2(0.0f, 1.0f);
             for (int m2 = 0; m2 < MEL; ++m2)
                 for (int t = prompt_len_in_mu; t < T_mu; ++t)
-                    z[m2 * T_mu + t] = gauss2(rng2);
+                    z[m2 * T_mu + t] = gauss2(cfm_noise2);
         }
     }
+    const uint64_t cfm_draws_init = cfm_draws;
     if (!opts.dump_mel_path.empty()) {
         std::string base = opts.dump_mel_path;
         if (base.size() > 4 && base.substr(base.size() - 4) == ".npy")
@@ -3396,6 +3415,8 @@ static int s3gen_synthesize_impl(
             });
         if (rc != 0) return rc;
     }
+    coreml::coreml_test().trace("cfm draws init=" + std::to_string(cfm_draws_init) +
+                                " end=" + std::to_string(cfm_draws));
     stage_backends.insert(stage_label(coreml::s3gen_stage::cfm, cfm_latched && !cfm_failed));
     double prof_cfm_ms = now_ms() - cfm_t0;
     vlog("  [cfm_total] %.1f ms\n", prof_cfm_ms);
