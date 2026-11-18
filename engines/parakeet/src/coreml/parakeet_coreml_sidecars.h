@@ -71,6 +71,12 @@ EncoderRoute route_from_acquired(pcm::Acquired && acquired, const EncoderModelOp
 // but its interface or capacity is not the one expected) is deterministic.
 pcm::Error sidecar_load_error(const std::string & what, const parakeet_coreml_load_error & error);
 
+// The slot's model if it is ready now, for readiness probes (accessors,
+// capacity lookups, the ggml prewarm pass). It never requests, waits or
+// throws: a strict slot that failed is reported by the acquisition a unit of
+// inference makes, not by a probe.
+pcm::Acquired acquire_if_ready(pcm::Slot & slot);
+
 // Bytes ANECompilerService needs for a cold compile of `mlmodelc` (by
 // default 1.6 x weights/weight.bin), or 0 when `units` cannot use the ANE.
 uint64_t ane_compile_reserve_bytes(const std::string & mlmodelc, pcm::ComputeUnits units);

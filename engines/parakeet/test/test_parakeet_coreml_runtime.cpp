@@ -230,6 +230,28 @@ void case_encoder_load_error(const std::string & gguf) {
     expect(has_kv(encoder, "state", "failed") && has_kv(encoder, "error_class", "transient") &&
                encoder.find("com.apple.CoreML") != std::string::npos,
            "load-error-class: a corrupt encoder bundle fails as transient with the Core ML error domain");
+
+    // use = require with the failed encoder: construction (with the ggml
+    // prewarm pass) and the readiness accessors never throw; the call does.
+    CoremlOptions strict = coreml_ready_options();
+    strict.use = CoremlOptions::Use::require;
+    parakeet::EngineOptions so = engine_options(staged.string(), strict);
+    so.prewarm = true;
+    bool probes_ok = false, call_threw = false;
+    try {
+        parakeet::Engine strict_engine(so);
+        probes_ok = !strict_engine.encoder_on_coreml() && !strict_engine.encoder_backend().empty();
+        try {
+            std::vector<float> silence(16000, 0.0f);
+            (void) strict_engine.transcribe_samples(silence.data(), (int) silence.size(), 16000);
+        } catch (const std::runtime_error &) {
+            call_threw = true;
+        }
+    } catch (const std::exception & e) {
+        std::printf("       strict construction threw: %s\n", e.what());
+    }
+    expect(probes_ok && call_threw,
+           "strict-probe: under require a failed encoder never throws from construction or the accessors, only from a call");
     std::error_code ec;
     fs::remove_all(dir, ec);
 }

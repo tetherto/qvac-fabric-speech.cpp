@@ -113,6 +113,15 @@ pcm::Error sidecar_load_error(const std::string & what, const parakeet_coreml_lo
     return pcm::Error::transient(message, error.domain, error.code);
 }
 
+pcm::Acquired acquire_if_ready(pcm::Slot & slot) {
+    if (slot.state() != pcm::SlotState::ready) return {};
+    try {
+        return slot.acquire(pcm::Demand::if_ready);
+    } catch (const pcm::CoremlError &) {
+        return {};  // retired between the state read and the acquisition
+    }
+}
+
 uint64_t ane_compile_reserve_bytes(const std::string & mlmodelc, pcm::ComputeUnits units) {
     if (!pcm::units_include_ane(units)) return 0;
     return static_cast<uint64_t>(kAneCompileReserveFactor *

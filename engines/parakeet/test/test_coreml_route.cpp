@@ -28,6 +28,9 @@
 //                         different directories get distinct absolute paths:
 //                         two shared models, each loaded from its own
 //                         directory even after the process changes directory
+//   strict-probe          a readiness probe on a strict slot whose load
+//                         failed returns no model and does not throw (only
+//                         the unit's own acquisition does)
 //   loader-geometry       an encoder and a bypass encoder, or two diarizer
 //                         capacities, registered at one bundle path load two
 //                         models even while the first owner is alive
@@ -761,6 +764,48 @@ pcm::LoadResult typed_load(const pcm::LoadRequest & req) {
     return r;
 }
 
+pcm::LoadResult broken_load(const pcm::LoadRequest &) {
+    pcm::LoadResult r;
+    r.error = pcm::Error::transient("bundle unreadable", "com.apple.CoreML", 0);
+    return r;
+}
+
+void case_strict_probe() {
+    const fs::path dir = make_temp_dir("strict-probe");
+    auto m = pcm::Manager::create(fast_config());
+    if (m->platform() == pcm::Platform::other) {
+        fs::remove_all(dir);
+        return;
+    }
+    pcm::SlotSpec spec;
+    spec.engine = "parakeet";
+    spec.stage = "encoder";
+    spec.units = pcm::ComputeUnits::all;
+    spec.route = pcm::Route::prebuilt;
+    spec.artifact_path = (dir / "broken-encoder.mlmodelc").string();
+    spec.load_fn = &broken_load;
+    pcm::SlotPolicy policy;
+    policy.wait = pcm::Wait::call;
+    policy.strict = true;
+    auto slot = m->make_slot(spec, policy);
+    bool unit_threw = false;
+    try {
+        (void) slot->acquire(pcm::Demand::now);
+    } catch (const pcm::CoremlError &) {
+        unit_threw = true;
+    }
+    CHECK(unit_threw && slot->state() == pcm::SlotState::failed, "strict-probe: the unit's acquisition throws");
+    bool probe_threw = false;
+    pcm::Acquired probed;
+    try {
+        probed = acquire_if_ready(*slot);
+    } catch (...) {
+        probe_threw = true;
+    }
+    CHECK(!probe_threw && !probed.model, "strict-probe: a readiness probe returns no model without throwing");
+    fs::remove_all(dir);
+}
+
 void case_loader_geometry() {
     const fs::path dir = make_temp_dir("loader-geometry");
     write_text(dir / "m.mlmodelc" / "weights" / "weight.bin", std::string(10, 'x'));
@@ -983,6 +1028,7 @@ int main() {
     case_pending_route();
     case_sidecar_groups();
     case_relative_paths();
+    case_strict_probe();
     case_loader_geometry();
     case_load_error_class();
     case_options();

@@ -3374,23 +3374,29 @@ const EncoderModelOps & encoder_ops() {
 // TranscribePsy EU's English program gives the route its geometry (the
 // long-form plan and the segment cap); its dispatches pick their program in
 // run_encoder.
-EncoderRoute synchronous_route(const ParakeetCtcModel & m) {
+EncoderRoute synchronous_route(const ParakeetCtcModel & m, bool strict) {
     EncoderRoute::Ops ops;
     ops.encode = &encode_on_context;
     return EncoderRoute::coreml(m.impl->ctx_coreml, describe_encoder(m.impl->ctx_coreml, m.mel_cfg.n_mels),
                                 parakeet_coreml_backend_label(m.impl->ctx_coreml),
                                 std::static_pointer_cast<void>(m.impl), ops,
                                 /*owner=*/m.impl->coreml_owns_encoder,
-                                /*strict=*/m.impl->coreml && m.impl->coreml->resolved().strict());
+                                strict);
 }
 
-// The encoder route if it is ready now, without requesting anything.
+bool resolved_strict(const ParakeetCtcModel & m) {
+    return m.impl && m.impl->coreml && m.impl->coreml->resolved().strict();
+}
+
+// The encoder route if it is ready now, without requesting anything. A probe
+// (encoder_on_coreml, encoder_backend, the ggml prewarm pass): never throws
+// and is never strict, whatever use is.
 EncoderRoute ready_encoder_route(const ParakeetCtcModel & m) {
     if (!m.impl) return {};
-    if (m.impl->ctx_coreml != nullptr) return synchronous_route(m);
+    if (m.impl->ctx_coreml != nullptr) return synchronous_route(m, /*strict=*/false);
     if (!m.impl->encoder_slot) return {};
-    return route_from_acquired(m.impl->encoder_slot->acquire(pcm::Demand::if_ready), encoder_ops(),
-                               m.mel_cfg.n_mels, m.impl->coreml->resolved().strict());
+    return route_from_acquired(acquire_if_ready(*m.impl->encoder_slot), encoder_ops(), m.mel_cfg.n_mels,
+                               /*strict=*/false);
 }
 
 }  // namespace
@@ -3399,7 +3405,7 @@ EncoderRoute ready_encoder_route(const ParakeetCtcModel & m) {
 EncoderRoute acquire_encoder_route(ParakeetCtcModel & m, const std::atomic<bool> * cancel) {
 #ifdef PARAKEET_USE_COREML
     if (!m.impl) return {};
-    if (m.impl->ctx_coreml != nullptr) return synchronous_route(m);
+    if (m.impl->ctx_coreml != nullptr) return synchronous_route(m, resolved_strict(m));
     if (!m.impl->encoder_slot) return {};
     // One acquisition per unit: raised to `now`, then the resolved wait mode
     // (none: no blocking; call: until ready or terminal; strict throws).
@@ -3565,7 +3571,7 @@ int model_coreml_fixed_mel_frames(const ParakeetCtcModel & m) {
 int model_coreml_bypass_fixed_frames(const ParakeetCtcModel & m) {
 #ifdef PARAKEET_USE_COREML
     if (m.impl && m.impl->bypass_slot) {
-        pcm::Acquired a = m.impl->bypass_slot->acquire(pcm::Demand::if_ready);
+        pcm::Acquired a = acquire_if_ready(*m.impl->bypass_slot);
         if (a.model) {
             return (int) parakeet_coreml_fixed_mel_frames(
                 a.model->as<parakeet_coreml_context>(), m.encoder_cfg.d_model);
