@@ -53,9 +53,12 @@ uint64_t resident_bytes(const TemplateMemory & m) {
     return sat_add(r, m.workspace_bytes);
 }
 
-uint64_t transient_bytes(const TemplateMemory & m, ComputeUnits units) {
+uint64_t prepare_peak_bytes(const TemplateMemory & m) {
     const uint64_t compile = m.compile_peak_bytes ? *m.compile_peak_bytes : m.weight_bin_size / 2;
-    const uint64_t prepare_peak = sat_add(sat_add(m.generation_peak_bytes, 8 * MIB), compile);
+    return sat_add(sat_add(m.generation_peak_bytes, 8 * MIB), compile);
+}
+
+uint64_t load_peak_bytes(const TemplateMemory & m, ComputeUnits units) {
     std::optional<uint64_t> load;
     switch (units) {
         case ComputeUnits::cpu_and_ane: load = m.load_peak_cpu_and_ane; break;
@@ -63,9 +66,11 @@ uint64_t transient_bytes(const TemplateMemory & m, ComputeUnits units) {
         case ComputeUnits::cpu_and_gpu: load = m.load_peak_cpu_and_gpu; break;
         case ComputeUnits::cpu_only: load = m.load_peak_cpu_only; break;
     }
-    const uint64_t load_peak =
-        load ? *load : (units == ComputeUnits::cpu_and_ane ? m.weight_bin_size / 4 : m.weight_bin_size);
-    return std::max(prepare_peak, load_peak);
+    return load ? *load : (units == ComputeUnits::cpu_and_ane ? m.weight_bin_size / 4 : m.weight_bin_size);
+}
+
+uint64_t transient_bytes(const TemplateMemory & m, ComputeUnits units) {
+    return std::max(prepare_peak_bytes(m), load_peak_bytes(m, units));
 }
 
 uint64_t envelope_bytes(const TemplateMemory & m, ComputeUnits units) {
@@ -262,6 +267,13 @@ bool source_stat(const std::string & path, SourceStat & out) {
     return true;
 }
 
+bool source_stat_fd(int fd, const std::string & path, SourceStat & out) {
+    if (fd < 0 || !stat_fd(fd, out)) return false;
+    out.path = real_path(path);
+    out.changed = false;
+    return true;
+}
+
 SourceStat loaded_source(const SourceStat & before, bool ok_before, const SourceStat & after, bool ok_after,
                          const std::string & path) {
     SourceStat s = after;
@@ -393,6 +405,8 @@ std::vector<Candidate> probe(const std::vector<std::string> & template_ids, cons
 }
 
 bool source_stat(const std::string &, SourceStat &) { return false; }
+
+bool source_stat_fd(int, const std::string &, SourceStat &) { return false; }
 
 SourceStat loaded_source(const SourceStat &, bool, const SourceStat & after, bool, const std::string &) {
     SourceStat s = after;

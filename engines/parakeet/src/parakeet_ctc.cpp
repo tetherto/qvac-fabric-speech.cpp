@@ -378,6 +378,9 @@ struct ParakeetCtcModel::Impl {
     // from the file whose weights this model loaded.
     pcm::SourceStat source;
     bool source_ok = false;
+    // The owning engine's cancel flag: every unit's acquisition (an
+    // encoder window, a diarizer pass, an AOSC step) stops waiting on it.
+    const std::atomic<bool> * unit_cancel = nullptr;
 #endif
     // Set when the encoder sidecar loaded before weight allocation and the
     // `encoder.*` tensors were therefore never given memory: the GGUF has no
@@ -1907,11 +1910,6 @@ static bool path_is_directory(const std::string & path) {
     return ::stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
 }
 
-static bool path_is_regular_file(const std::string & path) {
-    struct stat st{};
-    return ::stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
-}
-
 static constexpr const char * kCoremlOnlyEnv    = "PARAKEET_COREML_ONLY";
 static constexpr const char * kCoremlDecoderUnitsEnv = "PARAKEET_COREML_DECODER_COMPUTE_UNITS";
 
@@ -2090,10 +2088,9 @@ static parakeet_coreml_context * init_coreml_only_encoder(const gguf_context * g
     // (coreml_can_own_encoder). When the bundle's metadata shows another
     // export, a load here would only be thrown away, so it is skipped: a
     // full GGUF gets the background encoder slot and an encoder-less one is
-    // rejected, as after the load. A bundle without metadata is loaded to
-    // find out.
-    if (type == "tdt" && path_is_regular_file(path + "/metadata.json") &&
-        !parakeet_coreml_encoder_prefers_ane(path.c_str())) {
+    // rejected, as after the load. A bundle whose metadata is missing,
+    // unreadable or does not list its inputs is loaded to find out.
+    if (type == "tdt" && parakeet_coreml_encoder_export_kind(path.c_str()) == 0) {
         PARAKEET_LOG_WARN("parakeet: TDT sidecar has no validated seam policy; native encoder "
                           "weights are required for oversized inputs and push streaming\n");
         return nullptr;
@@ -2112,25 +2109,6 @@ static parakeet_coreml_context * init_coreml_only_encoder(const gguf_context * g
 std::atomic<GgufLoadObserver> g_gguf_load_observer{nullptr};
 
 void set_gguf_load_observer(GgufLoadObserver fn) { g_gguf_load_observer.store(fn); }
-
-// The identity of the open GGUF: (size, mtime, inode, device) from fstat of
-// the descriptor its weights are read through, with the path's realpath (the
-// prepare job reopens the path and must find this same file there).
-static bool source_of_descriptor(int fd, const std::string & path, pcm::SourceStat & out) {
-    struct stat st{};
-    if (fd < 0 || ::fstat(fd, &st) != 0) return false;
-    out.size = static_cast<uint64_t>(st.st_size);
-#if defined(__APPLE__)
-    out.mtime_ns = static_cast<int64_t>(st.st_mtimespec.tv_sec) * 1000000000LL + st.st_mtimespec.tv_nsec;
-#else
-    out.mtime_ns = static_cast<int64_t>(st.st_mtim.tv_sec) * 1000000000LL + st.st_mtim.tv_nsec;
-#endif
-    out.ino = static_cast<uint64_t>(st.st_ino);
-    out.dev = static_cast<uint64_t>(st.st_dev);
-    char resolved[PATH_MAX];
-    out.path = ::realpath(path.c_str(), resolved) ? std::string(resolved) : path;
-    return true;
-}
 
 static void maybe_init_coreml_diarizers(const std::string & gguf_path,
                                         ParakeetCtcModel  & model,
@@ -2227,12 +2205,14 @@ static void init_eu_coreml_encoders(const std::string & path, ParakeetCtcModel &
 // Runs on the runtime's load lane with the resolved compute units.
 static pcm::LoadResult load_encoder_sidecar(const pcm::LoadRequest & request) {
     pcm::LoadResult result;
-    parakeet_coreml_context * ctx = parakeet_coreml_init_with_units(
-        request.artifact_path.c_str(), pcm::to_string(request.units));
+    parakeet_coreml_load_error error{};
+    parakeet_coreml_context * ctx = parakeet_coreml_init_with_units_error(
+        request.artifact_path.c_str(), pcm::to_string(request.units), &error);
     if (ctx == nullptr) {
-        PARAKEET_LOG_WARN("parakeet: failed to load Core ML %s at '%s'; falling back to ggml\n",
-                          request.stage.c_str(), request.artifact_path.c_str());
-        result.error = pcm::Error::deterministic("failed to load the Core ML " + request.stage);
+        result.error = sidecar_load_error("Core ML " + request.stage, error);
+        PARAKEET_LOG_WARN("parakeet: failed to load Core ML %s at '%s' (%s); falling back to ggml\n",
+                          request.stage.c_str(), request.artifact_path.c_str(),
+                          result.error.message.c_str());
         return result;
     }
     PARAKEET_LOG_INFO("parakeet: Core ML %s loaded from '%s'\n",
@@ -2255,6 +2235,8 @@ static SidecarRequest encoder_sidecar_request(const char * stage, const std::str
         ? pcm::ComputeUnits::cpu_and_ane
         : pcm::ComputeUnits::all;
     request.load_fn = &load_encoder_sidecar;
+    request.geometry = sidecar_geometry(std::string(stage) == "bypass-encoder" ? SidecarLoader::bypass_encoder
+                                                                               : SidecarLoader::encoder);
     request.minimal = minimal;
     return request;
 }
@@ -2796,7 +2778,7 @@ static int load_from_gguf_impl(const std::string & gguf_path,
             PARAKEET_LOG_ERROR("gguf: failed to open %s\n", gguf_path.c_str());
             return 1;
         }
-        impl->source_ok = source_of_descriptor(fileno(gguf_file.get()), gguf_path, impl->source);
+        impl->source_ok = pcm::generation::source_stat_fd(fileno(gguf_file.get()), gguf_path, impl->source);
     }
     impl->gguf = gguf_file ? gguf_init_from_file_ptr(gguf_file.get(), params)
                            : gguf_init_from_file(gguf_path.c_str(), params);
@@ -3454,25 +3436,34 @@ const EncoderModelOps & encoder_ops() {
 
 // The synchronous context as a route. The owner never retires, and a
 // failure is an error (there are no ggml encoder weights to fall back to).
+// Under use = require it is strict like a slot's route: a dispatch it cannot
+// serve throws.
 // TranscribePsy EU's English program gives the route its geometry (the
 // long-form plan and the segment cap); its dispatches pick their program in
 // run_encoder.
-EncoderRoute synchronous_route(const ParakeetCtcModel & m) {
+EncoderRoute synchronous_route(const ParakeetCtcModel & m, bool strict) {
     EncoderRoute::Ops ops;
     ops.encode = &encode_on_context;
     return EncoderRoute::coreml(m.impl->ctx_coreml, describe_encoder(m.impl->ctx_coreml, m.mel_cfg.n_mels),
                                 parakeet_coreml_backend_label(m.impl->ctx_coreml),
                                 std::static_pointer_cast<void>(m.impl), ops,
-                                /*owner=*/m.impl->coreml_owns_encoder);
+                                /*owner=*/m.impl->coreml_owns_encoder,
+                                strict);
 }
 
-// The encoder route if it is ready now, without requesting anything.
+bool resolved_strict(const ParakeetCtcModel & m) {
+    return m.impl && m.impl->coreml && m.impl->coreml->resolved().strict();
+}
+
+// The encoder route if it is ready now, without requesting anything. A probe
+// (encoder_on_coreml, encoder_backend, the ggml prewarm pass): never throws
+// and is never strict, whatever use is.
 EncoderRoute ready_encoder_route(const ParakeetCtcModel & m) {
     if (!m.impl) return {};
-    if (m.impl->ctx_coreml != nullptr) return synchronous_route(m);
+    if (m.impl->ctx_coreml != nullptr) return synchronous_route(m, /*strict=*/false);
     if (!m.impl->encoder_slot) return {};
-    return route_from_acquired(m.impl->encoder_slot->acquire(pcm::Demand::if_ready), encoder_ops(),
-                               m.mel_cfg.n_mels, m.impl->coreml->resolved().strict());
+    return route_from_acquired(acquire_if_ready(*m.impl->encoder_slot), encoder_ops(), m.mel_cfg.n_mels,
+                               /*strict=*/false);
 }
 
 }  // namespace
@@ -3481,7 +3472,8 @@ EncoderRoute ready_encoder_route(const ParakeetCtcModel & m) {
 EncoderRoute acquire_encoder_route(ParakeetCtcModel & m, const std::atomic<bool> * cancel) {
 #ifdef PARAKEET_USE_COREML
     if (!m.impl) return {};
-    if (m.impl->ctx_coreml != nullptr) return synchronous_route(m);
+    if (cancel == nullptr) cancel = m.impl->unit_cancel;
+    if (m.impl->ctx_coreml != nullptr) return synchronous_route(m, resolved_strict(m));
     if (!m.impl->encoder_slot) return {};
     // One acquisition per unit: raised to `now`, then the resolved wait mode
     // (none: no blocking; call: until ready or terminal; strict throws).
@@ -3491,6 +3483,17 @@ EncoderRoute acquire_encoder_route(ParakeetCtcModel & m, const std::atomic<bool>
     (void) m;
     (void) cancel;
     return {};
+#endif
+}
+
+void model_set_cancel_flag(ParakeetCtcModel & m, const std::atomic<bool> * cancel) {
+#ifdef PARAKEET_USE_COREML
+    if (!m.impl) return;
+    m.impl->unit_cancel = cancel;
+    if (m.impl->coreml_diarizers) m.impl->coreml_diarizers->set_cancel(cancel);
+#else
+    (void) m;
+    (void) cancel;
 #endif
 }
 
@@ -3512,13 +3515,20 @@ std::string model_coreml_status_json(const ParakeetCtcModel & m) {
     return "{}";
 }
 
+// A group with no sidecar to prepare (no Core ML in the build, no sidecar,
+// or none planned): finished and successful at once.
+static std::string empty_group_json(const char * group) {
+    return std::string("{\"group\":\"") + group +
+           "\",\"nothing_to_prepare\":true,\"skipped_route_none\":[],\"slots\":[],\"success\":true}";
+}
+
 std::string model_coreml_construction_json(const ParakeetCtcModel & m) {
 #ifdef PARAKEET_USE_COREML
     if (m.impl && m.impl->coreml) return m.impl->coreml->construction_json();
 #else
     (void) m;
 #endif
-    return "{}";
+    return empty_group_json("construction");
 }
 
 std::string model_coreml_prewarm(ParakeetCtcModel & m, CoremlOptions::Prewarm scope, bool wait,
@@ -3531,7 +3541,7 @@ std::string model_coreml_prewarm(ParakeetCtcModel & m, CoremlOptions::Prewarm sc
     (void) wait;
     (void) cancel;
 #endif
-    return "{}";
+    return empty_group_json("prewarm");
 }
 
 bool model_coreml_wait(ParakeetCtcModel & m, int64_t timeout_ms, const std::atomic<bool> * cancel) {
@@ -3542,7 +3552,7 @@ bool model_coreml_wait(ParakeetCtcModel & m, int64_t timeout_ms, const std::atom
     (void) timeout_ms;
     (void) cancel;
 #endif
-    return false;
+    return true;  // nothing to wait for
 }
 
 void model_coreml_reset_call_stats(ParakeetCtcModel & m) {
@@ -3647,7 +3657,7 @@ int model_coreml_fixed_mel_frames(const ParakeetCtcModel & m) {
 int model_coreml_bypass_fixed_frames(const ParakeetCtcModel & m) {
 #ifdef PARAKEET_USE_COREML
     if (m.impl && m.impl->bypass_slot) {
-        pcm::Acquired a = m.impl->bypass_slot->acquire(pcm::Demand::if_ready);
+        pcm::Acquired a = acquire_if_ready(*m.impl->bypass_slot);
         if (a.model) {
             return (int) parakeet_coreml_fixed_mel_frames(
                 a.model->as<parakeet_coreml_context>(), m.encoder_cfg.d_model);
@@ -5504,7 +5514,11 @@ static EncoderEligibility coreml_encoder_eligibility(const ParakeetCtcModel & mo
 void model_coreml_check_stream_window(ParakeetCtcModel & m, int window_mel_frames,
                                       const std::atomic<bool> * cancel) {
 #ifdef PARAKEET_USE_COREML
-    if (!m.impl || !m.impl->coreml || !m.impl->coreml->resolved().strict()) return;
+    // Strict streams, and streams on an encoder Core ML owns (no ggml
+    // weights to run a window the sidecar cannot take), are checked.
+    if (!m.impl || !m.impl->coreml) return;
+    const bool owned = m.impl->ctx_coreml != nullptr && m.impl->coreml_owns_encoder;
+    if (!owned && !m.impl->coreml->resolved().strict()) return;
     const EncoderRoute route = acquire_encoder_route(m, cancel);
     // The same eligibility the window's run_encoder computes (every frame
     // valid, no capture, no padding).
@@ -6259,7 +6273,8 @@ bool resolve_transcribepsy_eu_route(ParakeetCtcModel & model,
                                     const float * cropped_mel,
                                     int cropped_mel_frames,
                                     int audio_samples,
-                                    bool * encoder_used_coreml, bool prefer_precise_eu) {
+                                    bool * encoder_used_coreml, bool prefer_precise_eu,
+                                    EncoderBackendTally * gate_tally) {
     if (encoder_used_coreml) *encoder_used_coreml = true;
     if (model.model_variant != "transcribepsy-250m-eu") return false;
     model.eu_use_adapters = false;
@@ -6296,6 +6311,9 @@ bool resolve_transcribepsy_eu_route(ParakeetCtcModel & model,
         tap.n_enc_frames);
     const float probability = eu_gate_head(gate, eu_gate_pool(gate, tap.encoder_out, frames, dim));
     if (encoder_used_coreml) *encoder_used_coreml = tap.used_coreml;
+    // The gate is one dispatch of the call; its program is the EU dispatch
+    // label run_encoder just recorded.
+    if (gate_tally) gate_tally->add(tap.used_coreml, tap.used_coreml ? model_encoder_backend_name(model) : std::string());
     PARAKEET_LOG_INFO("TranscribePsy EU gate encoder: %s\n", tap.used_coreml ? "coreml" : "ggml");
     if (p_non_english) *p_non_english = probability;
     model.eu_use_adapters = probability >= gate.threshold;
@@ -6352,7 +6370,8 @@ int run_encoder_bypass_pre_encode(ParakeetCtcModel & model,
         model.model_type == ParakeetModelType::SORTFORMER &&
         model.model_variant == "sortformer-streaming-v2.1-aosc" &&
         max_layers < 0) {
-        pcm::Acquired acquired = model.impl->bypass_slot->acquire(pcm::Demand::now);
+        pcm::Acquired acquired =
+            model.impl->bypass_slot->acquire(pcm::Demand::now, std::nullopt, model.impl->unit_cancel);
         auto * ctx = acquired.model ? acquired.model->as<parakeet_coreml_context>() : nullptr;
         const int fixed_frames = ctx ? (int) parakeet_coreml_fixed_mel_frames(ctx, d_model) : 0;
         const bool strict = model.impl->coreml->resolved().strict();

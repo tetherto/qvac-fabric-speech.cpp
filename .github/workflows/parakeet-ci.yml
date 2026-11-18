@@ -438,10 +438,15 @@ jobs:
       - name: Test (background sidecars on the device, no skips)
         if: inputs.fixture_root != ''
         run: |
-          ctest --test-dir build-coreml -R '^test-parakeet-coreml-runtime$' --no-tests=error \
+          ctest --test-dir build-coreml -R '^test-parakeet-coreml-runtime' --no-tests=error \
             --output-on-failure --timeout 900 --output-junit coreml-device-results.xml
           python3 engines/parakeet/scripts/check-ctest-junit.py \
-            build-coreml/coreml-device-results.xml --require test-parakeet-coreml-runtime
+            build-coreml/coreml-device-results.xml --require test-parakeet-coreml-runtime \
+            --require test-parakeet-coreml-runtime-diarizer \
+            --require test-parakeet-coreml-runtime-encoderless \
+            --require test-parakeet-coreml-runtime-eu-labels \
+            --require test-parakeet-coreml-runtime-fit-layouts \
+            --require test-parakeet-coreml-runtime-sortformer
 
   mosaic_authorize:
     if: github.event_name == 'workflow_dispatch' && inputs.run_mosaic

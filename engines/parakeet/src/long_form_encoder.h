@@ -13,6 +13,7 @@ struct WindowedEncoderStats {
     double encoder_ms = 0.0;
     int coreml_windows = 0;
     int ggml_windows = 0;
+    EncoderBackendTally tally;  // per encoded window, with the program that ran it
 };
 
 // The long-form plan for one unit of work. The Core ML fixed-shape plan is

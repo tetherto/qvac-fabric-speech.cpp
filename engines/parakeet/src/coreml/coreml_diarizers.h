@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 #include "coreml/parakeet-diarizer.h"
 #include "coreml/parakeet_coreml_sidecars.h"
 #include "parakeet_coreml_path.h"
@@ -33,13 +35,14 @@ struct CoremlDiarizerCallStats {
 // keeps a status-only slot and never serves a pass. Under use = require a
 // pass that covering capacities cannot serve (every covering capacity failed
 // or is not generated, a timeout, or a failed prediction, which still retires
-// the capacity) throws pcm::CoremlError instead; a pass longer than every
-// capacity runs on ggml.
+// the capacity) throws pcm::CoremlError instead, and so does a pass longer
+// than every capacity (under use = automatic it runs on ggml).
 class CoremlDiarizers {
 public:
     // Registers one slot per capacity with `sidecars` (DiarizerSlots).
     // `source`: the identity of the GGUF the model loaded its weights from
-    // (generation::loaded_source); generated capacities prepare only from it.
+    // (fstat of the descriptor it read through); generated capacities
+    // prepare only from it.
     CoremlDiarizers(const std::string & gguf_path, std::vector<DiarizerCapacity> capacities,
                     CoremlSidecars & sidecars, const pcm::SourceStat & source);
     ~CoremlDiarizers();
@@ -55,6 +58,9 @@ public:
     int run(int valid_frames,
             const parakeet_coreml_rows * inputs, int n_inputs,
             const parakeet_coreml_rows_out * outputs, int n_outputs);
+    // The owning engine's cancel flag: a pass waiting for a capacity stops
+    // waiting when it is set.
+    void set_cancel(const std::atomic<bool> * cancel);
     std::string label();
     // The capacities that can serve a pass: prebuilt, or generated.
     std::vector<int> capacities() const;

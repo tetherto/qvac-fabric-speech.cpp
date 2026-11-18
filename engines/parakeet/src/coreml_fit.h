@@ -34,9 +34,9 @@ struct CoremlEncoderEnvelopeInputs {
 // The client-side load transient (`load_peak`) by compute-unit class, until
 // the model's own measurement replaces it:
 //  - cpu_and_ane: 0.25 x weight file (cold ANE load peaked at 0.19x);
-//  - all, cpu_and_gpu: 1.0 x weight file (update 2026-11-11: Parakeet TDT
-//    0.6B fp16 measured +1.08 GiB over a 1.2 GB weight file, ~0.9x, and the
-//    palettized prebuilt ~0.95x);
+//  - all, cpu_and_gpu: 1.0 x weight file (Parakeet TDT 0.6B fp16 measured
+//    +1.08 GiB over a 1.2 GB weight file on an M2, ~0.9x, and the palettized
+//    prebuilt ~0.95x);
 //  - cpu_only: 1.0 x as well. The CPU load builds the same expanded weights
 //    and nothing has measured it lower, so it is charged like `all`.
 inline uint64_t coreml_encoder_load_transient_bytes(uint64_t weight_file_bytes, CoremlFitUnits units) {
@@ -56,15 +56,43 @@ inline uint64_t coreml_encoder_load_transient_bytes(uint64_t weight_file_bytes, 
 //  - I/O backing, input and output: 2 x io_bytes;
 //  - one load transient by unit class (above);
 //  - margin x1.25 on resident + transient.
-inline uint64_t coreml_encoder_envelope_bytes(const CoremlEncoderEnvelopeInputs & in) {
+// One Core ML program the encoder stage keeps resident. Programs a model
+// keeps loaded together (TranscribePsy EU's route programs, Sortformer's
+// encoder and bypass bundles) are charged together.
+struct CoremlFitProgram {
+    uint64_t       weight_file_bytes = 0;    // <bundle>/weights/weight.bin
+    uint64_t       runtime_floor_bytes = 0;  // expanded fp16 floor of a full-encoder program, else 0
+    uint64_t       io_bytes = 0;             // worst-window input + output, f32
+    int            functions = 1;            // functions loaded from the bundle, each charged its weights
+    CoremlFitUnits units = CoremlFitUnits::all;
+};
+
+// Every resident program (runtime weights per loaded function, since loaded
+// functions are not assumed to share weight memory until measured, plus
+// 2 x I/O backing), one load transient (the largest: the runtime runs one
+// Core ML load at a time), and the 1.25 margin on the sum.
+inline uint64_t coreml_programs_envelope_bytes(const std::vector<CoremlFitProgram> & programs) {
     using fitutil::sat_add;
     using fitutil::sat_mul;
-    const uint64_t runtime_weights =
-        std::max(in.weight_file_bytes, sat_mul(in.encoder_parameters, (uint64_t) 2));
-    const uint64_t resident = sat_add(runtime_weights, sat_mul(in.io_bytes, (uint64_t) 2));
-    const uint64_t transient = coreml_encoder_load_transient_bytes(in.weight_file_bytes, in.units);
+    uint64_t resident = 0;
+    uint64_t transient = 0;
+    for (const CoremlFitProgram & p : programs) {
+        const uint64_t weights = std::max(p.weight_file_bytes, p.runtime_floor_bytes);
+        resident = sat_add(resident, sat_mul(weights, (uint64_t) std::max(1, p.functions)));
+        resident = sat_add(resident, sat_mul(p.io_bytes, (uint64_t) 2));
+        transient = std::max(transient, coreml_encoder_load_transient_bytes(p.weight_file_bytes, p.units));
+    }
     const uint64_t total = sat_add(resident, transient);
     return sat_add(total, total / 4);
+}
+
+inline uint64_t coreml_encoder_envelope_bytes(const CoremlEncoderEnvelopeInputs & in) {
+    CoremlFitProgram p;
+    p.weight_file_bytes = in.weight_file_bytes;
+    p.runtime_floor_bytes = fitutil::sat_mul(in.encoder_parameters, (uint64_t) 2);
+    p.io_bytes = in.io_bytes;
+    p.units = in.units;
+    return coreml_programs_envelope_bytes({p});
 }
 
 // The encoder route fit charges: prebuilt when Core ML is enabled and the
@@ -86,9 +114,35 @@ inline CoremlEncoderFitRoute coreml_encoder_fit_route(const std::string & sideca
     return r;
 }
 
+// A stage's Core ML charge in two parts: what stays resident, and the one
+// load transient it adds while a load runs. The runtime runs one Core ML job
+// per library image, so a model charges its stages' residents together and
+// only the largest transient among them.
+struct CoremlCharge {
+    uint64_t resident = 0;
+    uint64_t transient = 0;
+};
+
+// The encoder programs' charge, both parts with the 1.25 margin.
+inline CoremlCharge coreml_programs_charge(const std::vector<CoremlFitProgram> & programs) {
+    using fitutil::sat_add;
+    using fitutil::sat_mul;
+    CoremlCharge c;
+    for (const CoremlFitProgram & p : programs) {
+        const uint64_t weights = std::max(p.weight_file_bytes, p.runtime_floor_bytes);
+        const uint64_t functions = (uint64_t) std::max(1, p.functions);
+        c.resident = sat_add(c.resident, sat_mul(weights, functions));
+        c.resident = sat_add(c.resident, sat_mul(sat_mul(p.io_bytes, (uint64_t) 2), functions));
+        c.transient = std::max(c.transient, coreml_encoder_load_transient_bytes(p.weight_file_bytes, p.units));
+    }
+    c.resident = sat_add(c.resident, c.resident / 4);
+    c.transient = sat_add(c.transient, c.transient / 4);
+    return c;
+}
+
 // One diarizer capacity of the generated-diarizer charge. A prebuilt
 // capacity (generated = false) only shapes which capacities a range loads
-// (coreml_diarizer_bytes charges it); a generated one carries its
+// (the prebuilt bundle charge covers it); a generated one carries its
 // template's unmargined parts for the resolved units.
 struct CoremlDiarizerCharge {
     int      frames = 0;
@@ -98,13 +152,13 @@ struct CoremlDiarizerCharge {
     double   margin = 1.0;
 };
 
-// The Core ML envelope of the generated capacities that calls in `ranges`
-// can load, selected over every capacity (prebuilt and generated) by
-// coreml_diarizer_loaded_capacities, or of every generated capacity when
-// `every_capacity` (prewarm = all loads them all at construction): the sum of
-// their resident parts plus the largest single transient (prepares and loads
-// run one at a time), times the largest margin among them. 0 when no
-// generated capacity is loaded.
+// The generated capacities' charge: those calls in `ranges` can load,
+// selected over every capacity (prebuilt and generated) by
+// coreml_diarizer_loaded_capacities, or every generated capacity when
+// `every_capacity` (prewarm = all loads them all at construction). Resident:
+// the sum of their resident parts; transient: the largest single transient
+// (prepares and loads run one at a time); both times the largest margin among
+// them, split so that the two parts add up to the envelope rounded once.
 //
 // A capacity that fails to load (or never loads: a status-only template)
 // hands its calls to the smallest larger capacity that has not failed, which
@@ -113,9 +167,9 @@ struct CoremlDiarizerCharge {
 // can reach that way: itself, or a larger one below the next selected
 // capacity (which is charged on its own); above the largest selected one,
 // every larger capacity.
-inline uint64_t coreml_generated_diarizer_envelope(const std::vector<CoremlDiarizerCharge> & capacities,
-                                                   const std::vector<CoremlFrameRange> & ranges,
-                                                   bool every_capacity = false) {
+inline CoremlCharge coreml_generated_diarizer_charge(const std::vector<CoremlDiarizerCharge> & capacities,
+                                                     const std::vector<CoremlFrameRange> & ranges,
+                                                     bool every_capacity = false) {
     using fitutil::sat_add;
     std::vector<int> sorted;
     sorted.reserve(capacities.size());
@@ -138,26 +192,43 @@ inline uint64_t coreml_generated_diarizer_envelope(const std::vector<CoremlDiari
         }
         resident = sat_add(resident, slot);
     }
+    CoremlCharge charge;
     const uint64_t total = sat_add(resident, transient);
-    return total == 0 ? 0 : fitutil::sat_u64_from_double(std::ceil(static_cast<double>(total) * margin));
+    if (total == 0) return charge;
+    const uint64_t envelope = fitutil::sat_u64_from_double(std::ceil(static_cast<double>(total) * margin));
+    charge.resident = std::min(envelope, fitutil::sat_u64_from_double(std::ceil(static_cast<double>(resident) * margin)));
+    charge.transient = envelope - charge.resident;
+    return charge;
 }
 
-// Fills the two verdicts from today's verdict. `required` is what today's
-// verdict charged (it includes the prebuilt diarizer sidecars when the device
-// shares host memory); `encoder_envelope` is the encoder sidecar's envelope (0
-// with no route); `generated_diarizers` is the Core ML envelope of the
-// diarizer capacities on route generate (validated templates only).
-// `coreml.validated` holds when generated capacities are charged and nothing
-// else is: a prebuilt charge in the bytes is not a validated envelope. The
-// top-level `fits` is left as it is: prebuilt routes keep today's fit results
-// until their model's PR validates them, and a generated route never turns a
-// working ggml verdict into a refusal (memory-degrade resolves use = off).
+// The generated charge as one number: resident + transient.
+inline uint64_t coreml_generated_diarizer_envelope(const std::vector<CoremlDiarizerCharge> & capacities,
+                                                   const std::vector<CoremlFrameRange> & ranges,
+                                                   bool every_capacity = false) {
+    const CoremlCharge c = coreml_generated_diarizer_charge(capacities, ranges, every_capacity);
+    return fitutil::sat_add(c.resident, c.transient);
+}
+
+// Fills the two verdicts. `required` is today's verdict charge (with the
+// device sharing host memory it includes today's diarizer charge,
+// r.coreml_bytes); the ggml-only total excludes that. The Core ML-inclusive
+// total adds the residents of the stages Core ML would activate (`diarizers`
+// and `encoder`, counted only on shared memory for the diarizers as today)
+// and the largest single transient. `generated` is the generated diarizer
+// capacities' charge (validated templates only), counted like the other
+// stages. `coreml.validated` holds when generated capacities are charged and
+// nothing else is: a prebuilt charge in the bytes is not a validated
+// envelope. The top-level `fits` is left as it is: prebuilt routes keep
+// today's fit results until their model's PR validates them, and a generated
+// route never turns a working ggml verdict into a refusal (memory-degrade
+// resolves use = off).
 inline void apply_coreml_verdicts(FitResult & r, uint64_t required, bool coreml_enabled,
-                                  const std::string & disabled_reason, bool encoder_prebuilt,
-                                  uint64_t encoder_envelope, uint64_t generated_diarizers = 0) {
+                                  const std::string & disabled_reason, const CoremlCharge & diarizers,
+                                  bool encoder_prebuilt, const CoremlCharge & encoder,
+                                  const CoremlCharge & generated = {}) {
     using fitutil::sat_add;
-    const uint64_t diarizers = r.device_shares_host_memory ? r.coreml_bytes : 0;
-    r.ggml_required_bytes = required >= diarizers ? required - diarizers : 0;
+    const uint64_t legacy_diarizers = r.device_shares_host_memory ? r.coreml_bytes : 0;
+    r.ggml_required_bytes = required >= legacy_diarizers ? required - legacy_diarizers : 0;
     r.ggml_only_fits = r.ggml_required_bytes <= r.device_free_bytes;
     r.coreml.encoder_route = encoder_prebuilt ? "prebuilt" : "none";
     r.coreml.validated = false;
@@ -167,11 +238,14 @@ inline void apply_coreml_verdicts(FitResult & r, uint64_t required, bool coreml_
         r.coreml.fits = r.ggml_only_fits;
         return;
     }
+    const CoremlCharge diar = r.device_shares_host_memory ? diarizers : CoremlCharge{};
+    const CoremlCharge enc = encoder_prebuilt ? encoder : CoremlCharge{};
     r.coreml.disabled_reason.clear();
-    r.coreml.bytes = sat_add(sat_add(diarizers, encoder_prebuilt ? encoder_envelope : 0), generated_diarizers);
-    // Validated only when every charged byte comes from a validated template
-    // envelope: prebuilt sidecars keep today's unvalidated charge.
-    r.coreml.validated = generated_diarizers > 0 && diarizers == 0 && !encoder_prebuilt;
+    r.coreml.bytes = sat_add(sat_add(sat_add(diar.resident, enc.resident), generated.resident),
+                             std::max({diar.transient, enc.transient, generated.transient}));
+    const bool generated_charged = generated.resident > 0 || generated.transient > 0;
+    const bool other_charged = diar.resident > 0 || diar.transient > 0 || encoder_prebuilt;
+    r.coreml.validated = generated_charged && !other_charged;
     r.coreml.fits = sat_add(r.ggml_required_bytes, r.coreml.bytes) <= r.device_free_bytes;
 }
 

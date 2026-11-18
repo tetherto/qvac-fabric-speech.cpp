@@ -18,6 +18,7 @@
 // platform with fake loaders.
 
 #include "coreml_fit.h"
+#include "coreml/parakeet_coreml_load_error.h"
 #include "encoder_route.h"
 #include "parakeet/coreml_options.h"
 #include "qvac_coreml/generation.h"
@@ -68,18 +69,43 @@ struct EncoderModelOps {
 EncoderRoute route_from_acquired(pcm::Acquired && acquired, const EncoderModelOps & ops, int n_mels,
                                  bool strict = false);
 
+// A sidecar load failure as the runtime's error. A framework failure (the
+// model did not load: a corrupt or unreadable bundle, a compile error, memory
+// pressure) is transient and keeps the framework's domain and code, so a
+// repeat can be recognised; only a verified incompatibility (the model loaded
+// but its interface or capacity is not the one expected) is deterministic.
+pcm::Error sidecar_load_error(const std::string & what, const parakeet_coreml_load_error & error);
+
+// The slot's model if it is ready now, for readiness probes (accessors,
+// capacity lookups, the ggml prewarm pass). It never requests, waits or
+// throws: a strict slot that failed is reported by the acquisition a unit of
+// inference makes, not by a probe.
+pcm::Acquired acquire_if_ready(pcm::Slot & slot);
+
 // Bytes ANECompilerService needs for a cold compile of `mlmodelc` (by
 // default 1.6 x weights/weight.bin), or 0 when `units` cannot use the ANE.
 uint64_t ane_compile_reserve_bytes(const std::string & mlmodelc, pcm::ComputeUnits units);
 
+// The loader that opens a sidecar, first in its geometry: an encoder, bypass
+// encoder and diarizer bundle at one path are never one shared model.
+enum class SidecarLoader : int64_t { encoder = 1, bypass_encoder = 2, diarizer = 3 };
+
+inline std::vector<int64_t> sidecar_geometry(SidecarLoader loader, std::vector<int64_t> rest = {}) {
+    rest.insert(rest.begin(), static_cast<int64_t>(loader));
+    return rest;
+}
+
 // One sidecar to register (route from plan(): prebuilt when present).
 struct SidecarRequest {
     std::string stage;          // status "stage": encoder, bypass-encoder, diarizer-<frames>
-    std::string path;           // adjacent .mlmodelc
+    std::string path;           // adjacent .mlmodelc (made absolute and canonical by add())
     bool present = false;       // the directory exists (today's path rules)
     pcm::ComputeUnits stage_default = pcm::ComputeUnits::all;
     pcm::LoadFn load_fn = nullptr;
-    std::vector<int64_t> geometry;  // validated by the loader (diarizer capacity)
+    // Validated by the loader and part of the runtime's sharing key: the
+    // loader kind first (sidecar_geometry), then e.g. the diarizer capacity,
+    // so two owners share a model only when the same loader would accept it.
+    std::vector<int64_t> geometry;
     bool minimal = false;       // part of the minimal (construction) set
     // Route generate: the stage's template as probed against the GGUF (null:
     // prebuilt only) and the GGUF's stat tuple, taken when the model loaded.
@@ -218,8 +244,8 @@ struct DiarizerPass {
 // it; a load or prediction failure retires that capacity for the process.
 // Under use = require a pass that covering capacities cannot serve throws
 // pcm::CoremlError: every covering capacity failed or is status-only, a
-// timeout, or a failed prediction. A pass longer than every capacity runs on
-// ggml.
+// timeout, or a failed prediction, and so does a pass longer than every
+// capacity (under use = automatic that pass runs on ggml).
 class DiarizerSlots {
 public:
     // Runs one prediction on a ready model of `capacity` frames; 0 on success.
@@ -229,8 +255,9 @@ public:
     // a pass and every status-only capacity are in the minimal (construction)
     // set; the others are requested by the pass that needs them, or by
     // prewarm = all. `source` is the identity of the GGUF whose weights the
-    // model loaded (generation::loaded_source): generated capacities prepare
-    // only from that file. Without it the path is stat'ed now.
+    // model loaded (generation::source_stat_fd of the descriptor it read
+    // through): generated capacities prepare only from that file. Without it
+    // the path is stat'ed now.
     DiarizerSlots(const std::string & gguf_path, std::vector<DiarizerCapacity> capacities, CoremlSidecars & sidecars,
                   pcm::LoadFn load_fn, std::optional<pcm::SourceStat> source = std::nullopt);
 
@@ -241,8 +268,9 @@ public:
     // Requests the covering capacity now; true when it is ready.
     bool prepare(int frames) const;
     // Runs `predict` on the smallest covering capacity that is ready (see the
-    // class comment for ggml and use = require).
-    DiarizerPass run(int frames, const Predict & predict) const;
+    // class comment for ggml and use = require). `cancel` (the owning
+    // engine's flag, may be null) stops a wait for a capacity.
+    DiarizerPass run(int frames, const std::atomic<bool> * cancel, const Predict & predict) const;
 
     bool strict() const { return strict_; }
     // The capacities that can serve a pass: prebuilt, or route generate.
@@ -256,6 +284,10 @@ private:
         std::shared_ptr<pcm::Slot> slot;
         bool serves = false;  // prebuilt or route generate
     };
+    // use = require: a pass longer than every capacity is refused (throws),
+    // like any stage too wide for its sidecar, before a caller falls back to
+    // ggml.
+    void refuse_too_wide(int frames) const;
     bool strict_ = false;
     std::vector<Capacity> capacities_;  // ascending
 };

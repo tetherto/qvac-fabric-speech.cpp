@@ -211,7 +211,9 @@ void print_usage(const char * argv0) {
         "  --coreml-cache-dir DIR       Core ML cache and warm hints (default\n"
         "                               ~/Library/Application Support/qvac-speech/coreml)\n"
         "  --coreml-status-json PATH    write the Core ML sidecar status (JSON) to PATH\n"
-        "                               on exit; '-' writes to stdout\n"
+        "                               on exit; '-' writes to stdout. It describes the\n"
+        "                               engine that ran; with --diarization-model,\n"
+        "                               {\"transcription\": ..., \"diarization\": ...}\n"
         "  --version            print version and exit\n"
         "  --help               this help text\n",
         argv0);
@@ -575,13 +577,16 @@ void apply_cli_coreml_defaults(parakeet::CoremlOptions & coreml) {
 #endif
 }
 
-// Writes the Core ML status on every exit path once the model has loaded.
+// Writes the Core ML status on every exit path once the model has loaded:
+// the status of the engine(s) that ran when one did (captured before they
+// are destroyed), else the CLI's own model.
 struct CoremlStatusOnExit {
     const parakeet::ParakeetCtcModel & model;
     std::string path;
+    std::string captured;
     ~CoremlStatusOnExit() {
         if (path.empty()) return;
-        const std::string json = parakeet::model_coreml_status_json(model);
+        const std::string json = captured.empty() ? parakeet::model_coreml_status_json(model) : captured;
         if (path == "-") {
             std::printf("%s\n", json.c_str());
             return;
@@ -592,6 +597,25 @@ struct CoremlStatusOnExit {
             std::fclose(fp);
         } else {
             PARAKEET_LOG_ERROR("error: cannot write --coreml-status-json '%s'\n", path.c_str());
+        }
+    }
+};
+
+// Captures the status of the engines a mode ran, when it leaves scope (before
+// the engines are destroyed): one engine's status as is; with a separate
+// diarization engine, {"transcription": ..., "diarization": ...}.
+struct CaptureEngineStatus {
+    CoremlStatusOnExit & out;
+    const parakeet::Engine * transcription = nullptr;
+    const parakeet::Engine * diarization = nullptr;
+    ~CaptureEngineStatus() {
+        // The innermost capture (the widest set of engines) is destroyed first and wins.
+        if (out.path.empty() || !out.captured.empty()) return;
+        if (transcription && diarization) {
+            out.captured = "{\"transcription\":" + transcription->coreml_status_json() +
+                           ",\"diarization\":" + diarization->coreml_status_json() + "}";
+        } else if (transcription || diarization) {
+            out.captured = (transcription ? transcription : diarization)->coreml_status_json();
         }
     }
 };
@@ -871,7 +895,9 @@ static int parakeet_cli_run(int argc, char ** argv) {
         sf_opts.backend         = opts.backend;
         sf_opts.n_threads       = opts.n_threads;
         sf_opts.verbose         = opts.verbose;
+        sf_opts.coreml          = extra.coreml;
         Engine sf_engine(sf_opts);
+        CaptureEngineStatus sf_status{coreml_status, nullptr, &sf_engine};
 
         if (!sf_engine.is_diarization_model()) {
             PARAKEET_LOG_ERROR("error: --diarization-model %s is not a diarization GGUF\n",
@@ -888,6 +914,7 @@ static int parakeet_cli_run(int argc, char ** argv) {
         asr_opts.language        = opts.language;
         asr_opts.coreml          = extra.coreml;
         Engine asr_engine(asr_opts);
+        CaptureEngineStatus attributed_status{coreml_status, &asr_engine, &sf_engine};
 
         AttributedTranscriptionOptions topts;
         topts.min_segment_ms = extra.attributed_min_segment_ms;
@@ -943,6 +970,7 @@ static int parakeet_cli_run(int argc, char ** argv) {
         eopts.language        = opts.language;
         eopts.coreml          = extra.coreml;
         Engine engine(eopts);
+        CaptureEngineStatus engine_status{coreml_status, &engine, nullptr};
 
         const std::string emit_fmt = extra.emit_format;
 
@@ -1564,6 +1592,7 @@ static int parakeet_cli_run(int argc, char ** argv) {
         const bool full_eu = model.model_variant == "transcribepsy-250m-eu";
         if (full_eu) model = ParakeetCtcModel{};
         Engine engine(eopts);
+        CaptureEngineStatus engine_status{coreml_status, &engine, nullptr};
 
         StreamingOptions sopts;
         sopts.sample_rate       = sr;

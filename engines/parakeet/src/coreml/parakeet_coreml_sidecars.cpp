@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <chrono>
 #include <optional>
+#include <filesystem>
+#include <system_error>
 #include <utility>
 
 namespace parakeet {
@@ -23,6 +25,19 @@ constexpr double kAneCompileReserveFactor = 1.6;
 uint64_t file_bytes(const std::string & path) {
     struct stat st {};
     return ::stat(path.c_str(), &st) == 0 ? static_cast<uint64_t>(st.st_size) : 0;
+}
+
+// The bundle path a slot keys its shared model by and loads from: absolute
+// and canonical, resolved once at registration. A relative path would name
+// a different bundle after the process changes directory, and two models
+// opened by the same relative name from different directories would share
+// one model.
+std::string canonical_bundle_path(const std::string & path) {
+    if (path.empty()) return path;
+    std::error_code ec;
+    std::filesystem::path p = std::filesystem::weakly_canonical(path, ec);
+    if (ec) p = std::filesystem::absolute(path, ec).lexically_normal();
+    return ec ? path : p.string();
 }
 
 template <class E, class F>
@@ -94,6 +109,23 @@ EncoderRoute route_from_acquired(pcm::Acquired && acquired, const EncoderModelOp
                                 route_ops, /*owner=*/false, strict);
 }
 
+pcm::Error sidecar_load_error(const std::string & what, const parakeet_coreml_load_error & error) {
+    std::string message = "failed to load the " + what;
+    if (error.domain[0] != '\0') message += " (" + std::string(error.domain) + " " + std::to_string(error.code) + ")";
+    if (error.message[0] != '\0') message += ": " + std::string(error.message);
+    if (error.incompatible != 0) return pcm::Error::deterministic(message, "parakeet", 0);
+    return pcm::Error::transient(message, error.domain, error.code);
+}
+
+pcm::Acquired acquire_if_ready(pcm::Slot & slot) {
+    if (slot.state() != pcm::SlotState::ready) return {};
+    try {
+        return slot.acquire(pcm::Demand::if_ready);
+    } catch (const pcm::CoremlError &) {
+        return {};  // retired between the state read and the acquisition
+    }
+}
+
 uint64_t ane_compile_reserve_bytes(const std::string & mlmodelc, pcm::ComputeUnits units) {
     if (!pcm::units_include_ane(units)) return 0;
     return static_cast<uint64_t>(kAneCompileReserveFactor *
@@ -159,9 +191,9 @@ std::shared_ptr<pcm::Slot> CoremlSidecars::add(const SidecarRequest & request, c
         spec.tmpl = request.generated->tmpl;
         spec.ane_compile_reserve_bytes = pcm::generation::ane_compile_reserve_bytes(request.generated->memory, in.units);
     } else {
-        spec.artifact_path = request.path;
+        spec.artifact_path = canonical_bundle_path(request.path);
         spec.ane_compile_reserve_bytes =
-            plan.route == pcm::Route::prebuilt ? ane_compile_reserve_bytes(request.path, in.units) : 0;
+            plan.route == pcm::Route::prebuilt ? ane_compile_reserve_bytes(spec.artifact_path, in.units) : 0;
     }
     if (request.generated != nullptr && !request.present) {
         const bool unvalidated = plan.route == pcm::Route::none && plan.reason == pcm::kUnvalidatedUnits;
@@ -229,14 +261,19 @@ pcm::PrewarmResult CoremlSidecars::prewarm(CoremlOptions::Prewarm scope, bool wa
 }
 
 bool CoremlSidecars::wait_construction(int64_t timeout_ms, const std::atomic<bool> * cancel) {
-    if (!construction_) return false;
+    if (!construction_) return true;  // no group issued: nothing to wait for
     std::optional<pcm::Clock::duration> timeout;
     if (timeout_ms >= 0) timeout = std::chrono::milliseconds(timeout_ms);
     return construction_->wait(timeout, cancel).success;
 }
 
 std::string CoremlSidecars::construction_json() const {
-    return construction_ ? pcm::to_json(construction_->result()) : std::string("{}");
+    if (construction_) return pcm::to_json(construction_->result());
+    pcm::PrewarmResult empty;
+    empty.group = "construction";
+    empty.success = true;
+    empty.nothing_to_prepare = true;
+    return pcm::to_json(empty);
 }
 
 std::string CoremlSidecars::status_json() const {
@@ -294,7 +331,7 @@ SidecarRequest diarizer_request(const std::string & gguf_path, const DiarizerCap
     request.present = c.prebuilt;
     request.stage_default = pcm::ComputeUnits::cpu_and_ane;
     request.load_fn = load_fn;
-    request.geometry = {c.frames};
+    request.geometry = sidecar_geometry(SidecarLoader::diarizer, {c.frames});
     request.generated = c.prebuilt ? nullptr : c.generated;
     request.source = source;
     return request;
@@ -347,8 +384,17 @@ DiarizerSlots::DiarizerSlots(const std::string & gguf_path, std::vector<Diarizer
     }
 }
 
+void DiarizerSlots::refuse_too_wide(int frames) const {
+    if (!strict_ || capacities_.empty() || capacities_.back().frames >= frames) return;
+    throw pcm::CoremlError("coreml: a diarization pass of " + std::to_string(frames) +
+                               " frames is longer than every Core ML diarizer capacity (largest " +
+                               std::to_string(capacities_.back().frames) + ") and Core ML is required",
+                           pcm::SlotState::ready, pcm::ErrorClass::deterministic);
+}
+
 bool DiarizerSlots::covers(int frames) const {
     if (frames <= 0) return false;
+    refuse_too_wide(frames);
     for (const Capacity & c : capacities_) {
         if (c.frames >= frames && (strict_ || !pcm::is_terminal(c.slot->state()))) return true;
     }
@@ -365,9 +411,10 @@ bool DiarizerSlots::prepare(int frames) const {
     return false;
 }
 
-DiarizerPass DiarizerSlots::run(int frames, const Predict & predict) const {
+DiarizerPass DiarizerSlots::run(int frames, const std::atomic<bool> * cancel, const Predict & predict) const {
     DiarizerPass pass;
     if (frames <= 0) return pass;
+    refuse_too_wide(frames);
     // Strict: why the covering capacities tried so far could not serve the pass.
     std::optional<pcm::CoremlError> refused;
     for (const Capacity & c : capacities_) {
@@ -378,7 +425,7 @@ DiarizerPass DiarizerSlots::run(int frames, const Predict & predict) const {
         // One acquisition per pass (a chunk or block is the unit).
         pcm::Acquired acquired;
         try {
-            acquired = c.slot->acquire(pcm::Demand::now);
+            acquired = c.slot->acquire(pcm::Demand::now, std::nullopt, cancel);
         } catch (const pcm::CoremlError & error) {
             // A failed capacity gives way to the next covering one; a timeout
             // or a memory deferral refuses the pass at once.
