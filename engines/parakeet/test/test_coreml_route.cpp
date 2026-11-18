@@ -681,6 +681,17 @@ void case_sidecar_groups() {
         CHECK(enc->state() == pcm::SlotState::disabled, "use = off reports disabled");
     }
     {
+        // No group issued (nothing was planned): finished and successful.
+        CoremlSidecars idle(opts, m);
+        CHECK(idle.wait_construction(0), "an engine with no construction group waits successfully");
+        const std::string json = idle.construction_json();
+        CHECK((json.find("\"nothing_to_prepare\":true") != std::string::npos ||
+               json.find("\"nothing_to_prepare\": true") != std::string::npos) &&
+                  (json.find("\"success\":true") != std::string::npos ||
+                   json.find("\"success\": true") != std::string::npos),
+              "an engine with no construction group reports nothing_to_prepare and success");
+    }
+    {
         CoremlOptions budget = opts;
         budget.memory_budget_bytes = 1;
         CoremlSidecars sidecars(budget, m, /*memory_degraded=*/true);

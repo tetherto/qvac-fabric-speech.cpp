@@ -205,14 +205,19 @@ pcm::PrewarmResult CoremlSidecars::prewarm(CoremlOptions::Prewarm scope, bool wa
 }
 
 bool CoremlSidecars::wait_construction(int64_t timeout_ms, const std::atomic<bool> * cancel) {
-    if (!construction_) return false;
+    if (!construction_) return true;  // no group issued: nothing to wait for
     std::optional<pcm::Clock::duration> timeout;
     if (timeout_ms >= 0) timeout = std::chrono::milliseconds(timeout_ms);
     return construction_->wait(timeout, cancel).success;
 }
 
 std::string CoremlSidecars::construction_json() const {
-    return construction_ ? pcm::to_json(construction_->result()) : std::string("{}");
+    if (construction_) return pcm::to_json(construction_->result());
+    pcm::PrewarmResult empty;
+    empty.group = "construction";
+    empty.success = true;
+    empty.nothing_to_prepare = true;
+    return pcm::to_json(empty);
 }
 
 std::string CoremlSidecars::status_json() const {

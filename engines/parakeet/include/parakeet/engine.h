@@ -450,6 +450,8 @@ public:
     // Requests the sidecars of `scope` (minimal / predicted / all) as a
     // prewarm group and, with `wait`, blocks until every one is ready or has
     // failed. Returns the group result as JSON (each sidecar's final state).
+    // With nothing to prepare (no sidecar, or a build without Core ML) the
+    // group succeeds at once with nothing_to_prepare = true.
     std::string coreml_prewarm(CoremlOptions::Prewarm scope, bool wait);
 
     // The construction group's result as JSON (wait = construct exposes the
@@ -457,7 +459,8 @@ public:
     std::string coreml_construction_json() const;
 
     // Waits until the construction group has finished, up to `timeout_ms`
-    // (< 0: no limit). Returns true when every sidecar in it reached ready.
+    // (< 0: no limit). Returns true when every sidecar in it reached ready,
+    // and at once when there is nothing to prepare.
     bool coreml_wait(int64_t timeout_ms = -1);
 
     // True when a GPU was detected but the engine fell back to CPU because the

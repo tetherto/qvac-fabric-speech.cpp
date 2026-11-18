@@ -3451,13 +3451,20 @@ std::string model_coreml_status_json(const ParakeetCtcModel & m) {
     return "{}";
 }
 
+// A group with no sidecar to prepare (no Core ML in the build, no sidecar,
+// or none planned): finished and successful at once.
+static std::string empty_group_json(const char * group) {
+    return std::string("{\"group\":\"") + group +
+           "\",\"nothing_to_prepare\":true,\"skipped_route_none\":[],\"slots\":[],\"success\":true}";
+}
+
 std::string model_coreml_construction_json(const ParakeetCtcModel & m) {
 #ifdef PARAKEET_USE_COREML
     if (m.impl && m.impl->coreml) return m.impl->coreml->construction_json();
 #else
     (void) m;
 #endif
-    return "{}";
+    return empty_group_json("construction");
 }
 
 std::string model_coreml_prewarm(ParakeetCtcModel & m, CoremlOptions::Prewarm scope, bool wait,
@@ -3470,7 +3477,7 @@ std::string model_coreml_prewarm(ParakeetCtcModel & m, CoremlOptions::Prewarm sc
     (void) wait;
     (void) cancel;
 #endif
-    return "{}";
+    return empty_group_json("prewarm");
 }
 
 bool model_coreml_wait(ParakeetCtcModel & m, int64_t timeout_ms, const std::atomic<bool> * cancel) {
@@ -3481,7 +3488,7 @@ bool model_coreml_wait(ParakeetCtcModel & m, int64_t timeout_ms, const std::atom
     (void) timeout_ms;
     (void) cancel;
 #endif
-    return false;
+    return true;  // nothing to wait for
 }
 
 void model_coreml_reset_call_stats(ParakeetCtcModel & m) {
