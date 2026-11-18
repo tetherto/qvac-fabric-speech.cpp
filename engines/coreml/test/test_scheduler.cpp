@@ -9,6 +9,7 @@
 #include "qvac_coreml/manager.h"
 
 #include "hints.h"
+#include "runtime.h"
 #include "sha256.h"
 #include "test_hooks.h"
 
@@ -482,6 +483,60 @@ void case_dedup_geometry() {
     release("geo");
     CHECK(wait_for([&] { return is_ready(d) && is_terminal(f->state()); }));
     CHECK(!is_ready(f) && g_geometry_loads.load() == 4);
+}
+
+void case_retire_geometry() {
+    // Owners of one artifact, function and units whose loaders accept
+    // different geometries load their own instances (dedup-geometry), but a
+    // prediction failure retires (artifact, function, units) for all of them:
+    // the other geometry's ready owner, a load of it still queued, and any
+    // later owner. Another function stays ready.
+    Env e;
+    auto with_geometry = [&](const std::string & fn, std::vector<int64_t> g) {
+        SlotSpec s = e.spec(fn);
+        s.geometry = std::move(g);
+        return e.m->make_slot(s, e.policy());
+    };
+    auto a = with_geometry("rg", {1});
+    auto b = with_geometry("rg", {2});
+    auto other = with_geometry("rg-other", {1});
+    for (const auto & s : {a, b, other}) s->request(Priority::minimal);
+    CHECK(wait_for([&] { return is_ready(a) && is_ready(b) && is_ready(other); }));
+    CHECK(calls("rg") == 2);  // one instance per geometry
+    set_beh("rg-block", {true});
+    auto blocker = with_geometry("rg-block", {1});
+    blocker->request(Priority::minimal);
+    CHECK(wait_for([] { return in_progress("rg-block"); }));
+    auto queued = with_geometry("rg", {3});  // a load of a third geometry, queued behind the blocker
+    queued->request(Priority::minimal);
+    CHECK(queued->state() == SlotState::queued);
+    Acquired held = a->acquire(Demand::if_ready);
+    CHECK(held);
+    held.model->retire("prediction failed");
+    CHECK(b->state() == SlotState::retired && b->status().reason == "prediction failed");
+    Acquired hb = b->acquire(Demand::now);
+    CHECK(!hb && !hb.pending);
+    CHECK(queued->state() == SlotState::retired);
+    release("rg-block");
+    CHECK(wait_for([&] { return is_ready(blocker); }));
+    auto later = with_geometry("rg", {4});
+    later->request(Priority::minimal);
+    CHECK(later->state() == SlotState::retired);
+    CHECK(calls("rg") == 2);  // the queued and the later owner never loaded
+    CHECK(is_ready(other));
+}
+
+void case_key_fields() {
+    // Length-prefixed fields: no two (artifact, function, units, geometry)
+    // tuples share a key, and the retirement key is a prefix of the model key.
+    const ComputeUnits u = ComputeUnits::all;
+    CHECK(detail::retire_key("a\nb", "c", u) != detail::retire_key("a", "b\nc", u));
+    CHECK(detail::model_key("a\nb", "c", u, {}) != detail::model_key("a", "b\nc", u, {}));
+    CHECK(detail::model_key("a", "b", u, {12}) != detail::model_key("a", "b", u, {1, 2}));
+    CHECK(detail::model_key("a", "b", u, {}) != detail::model_key("a", "b", u, {0}));
+    const std::string r = detail::retire_key("a", "b", u);
+    CHECK(detail::model_key("a", "b", u, {7}).compare(0, r.size(), r) == 0);
+    CHECK(detail::model_key("a", "b", ComputeUnits::cpu_only, {7}).compare(0, r.size(), r) != 0);
 }
 
 void case_cancel_when_owners_drop() {
@@ -2946,6 +3001,8 @@ const Case kCases[] = {
     {"priority-order", case_priority_order},
     {"dedup-two-owners", case_dedup_two_owners},
     {"dedup-geometry", case_dedup_geometry},
+    {"retire-geometry", case_retire_geometry},
+    {"key-fields", case_key_fields},
     {"cancel-when-owners-drop", case_cancel_when_owners_drop},
     {"admission-gate", case_admission_gate},
     {"current-outranks-minimal", case_current_outranks_minimal},
