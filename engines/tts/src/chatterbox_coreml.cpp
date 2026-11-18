@@ -284,7 +284,9 @@ s3gen_gguf_facts s3gen_read_facts(const std::string & path) {
     };
     read_u32("s3gen.encoder.token_mel_ratio", f.token_mel_ratio);
     read_u32("s3gen.speech_vocab_size", f.speech_vocab);
-    if (f.token_mel_ratio < 1 || f.token_mel_ratio > 8) f.token_mel_ratio = 2;
+    // The loader's own limit: a valid ratio plans with exactly the value the
+    // call renders with (an invalid one fails the load).
+    if (f.token_mel_ratio < 1 || f.token_mel_ratio > S3GEN_MAX_TOKEN_MEL_RATIO) f.token_mel_ratio = 2;
     const int64_t k_mf = gguf_find_key(g, "s3gen.meanflow");
     if (k_mf >= 0 && gguf_get_kv_type(g, k_mf) == GGUF_TYPE_BOOL) f.meanflow = gguf_get_val_bool(g, k_mf);
     if (meta != nullptr) {

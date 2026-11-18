@@ -128,7 +128,7 @@ static bool backend_is_arm_mali(ggml_backend_t b) {
 // destroying members at another struct's offsets (observed as a SIGSEGV in
 // ~sched_fallback on the Vulkan load path, where a bool was read as this).
 namespace {
-static constexpr int MAX_TOKEN_MEL_RATIO = 16;
+static constexpr int MAX_TOKEN_MEL_RATIO = ::tts_cpp::chatterbox::detail::S3GEN_MAX_TOKEN_MEL_RATIO;
 
 struct model_ctx {
     ggml_backend_t backend = nullptr;

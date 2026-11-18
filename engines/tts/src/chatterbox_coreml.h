@@ -136,6 +136,11 @@ struct s3gen_call_shape {
     int frames = 0;  // CFM frames: tokens * token_mel_ratio, minus the streaming trim
 };
 
+// The largest token_mel_ratio an S3Gen GGUF may declare: the loader rejects a
+// larger one, and planning uses the same limit so a plan's widths always
+// match the shapes the call renders.
+constexpr int S3GEN_MAX_TOKEN_MEL_RATIO = 16;
+
 // Lookahead silence tokens a finalizing call appends (pre_lookahead_len).
 constexpr int S3GEN_LOOKAHEAD_TOKENS = 3;
 

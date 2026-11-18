@@ -36,6 +36,7 @@
 // (77) without its inputs or without Core ML.
 
 #include "chatterbox_coreml.h"
+#include "gguf.h"
 #include "coreml_sidecar_path.h"
 #include "npy.h"
 #include "test_env_portable.h"
@@ -366,6 +367,34 @@ void check_cfm_rollback() {
                               [](size_t s, std::vector<float> &, bool) { return s == 1 ? 2 : 0; },
                               [](auto &, size_t) {}) == 2,
             "a step's result stops the integration");
+}
+
+// Planning reads token_mel_ratio with the loader's limit: a ratio-10 GGUF
+// (valid for the loader) plans 10 frames per token, so a call of 11 tokens
+// takes the 112-frame width, not the undersized 96 a fallback ratio of 2
+// would give (22 frames).
+void check_ratio_planning() {
+    temp_dir dir("ratio");
+    auto write = [&](const std::string & name, uint32_t ratio) {
+        gguf_context * g = gguf_init_empty();
+        gguf_set_val_u32(g, "s3gen.encoder.token_mel_ratio", ratio);
+        gguf_set_val_u32(g, "s3gen.speech_vocab_size", 6561);
+        const std::string path = (dir.path / name).string();
+        require(gguf_write_to_file(g, path.c_str(), /*only_meta=*/true), "write a metadata-only GGUF");
+        gguf_free(g);
+        return path;
+    };
+    const std::string ten = write("ratio10.gguf", 10);
+    const cb::s3gen_gguf_facts facts = cb::s3gen_read_facts(ten);
+    require(facts.token_mel_ratio == 10, "a ratio-10 GGUF plans with ratio 10");
+    s3gen_synthesize_opts opts;
+    opts.s3gen_gguf_path = ten;
+    const cb::s3gen_call_shape shape = cb::s3gen_call_shape_for(opts, std::vector<int32_t>(8, 1), facts);
+    require(shape.tokens == 11 && shape.frames == 110, "8 speech tokens + 3 lookahead at ratio 10 = 110 frames");
+    require(cb::coreml_pick_bucket({96, 112, 128}, shape.frames) == 112, "the covering CFM width is 112");
+    require(cb::s3gen_read_facts(write("ratio16.gguf", cb::S3GEN_MAX_TOKEN_MEL_RATIO)).token_mel_ratio ==
+                cb::S3GEN_MAX_TOKEN_MEL_RATIO,
+            "the loader's largest ratio plans as itself");
 }
 
 void check_warm_estimates() {
@@ -1713,6 +1742,7 @@ int main(int argc, char ** argv) {
         check_buckets();
         check_windows();
         check_warm_estimates();
+        check_ratio_planning();
         check_shapes_and_estimate();
         check_cfm_rollback();
         check_fit_and_detection();
