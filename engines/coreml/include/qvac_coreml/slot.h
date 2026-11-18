@@ -80,6 +80,11 @@ struct LoadResult {
     // (e.g. pruned after its preparation published it): the slot returns to
     // preparation, which regenerates it, instead of failing.
     bool artifact_gone = false;
+    // Set by the LoadFn: the framework refused this generated artifact (it
+    // did not load, or loaded with the wrong interface). The error keeps the
+    // class the engine reports; end_load quarantines the artifact unless the
+    // error is a resource one, and the slot regenerates it once.
+    bool rejected = false;
 };
 
 using LoadFn = LoadResult (*)(const LoadRequest & req);

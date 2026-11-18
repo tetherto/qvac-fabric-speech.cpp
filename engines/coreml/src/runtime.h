@@ -281,9 +281,10 @@ private:
                      const std::string & reason = {});
     void requeue(const std::shared_ptr<Job> & j);
     // Ends load job `j`, whose generated artifact was gone: each live
-    // generate-route subscriber returns to preparation (at most
-    // kMaxRegenerations times in a row); the others fail with `e`.
-    void regenerate(const std::shared_ptr<Job> & j, const Error & e);
+    // generate-route subscriber returns to preparation (at most `limit` times
+    // in a row: kMaxRegenerations for a vanished artifact, 1 after a
+    // rejection); the others fail with `e`.
+    void regenerate(const std::shared_ptr<Job> & j, const Error & e, int limit);
     std::optional<HintView> record_hint(const Job & j, int64_t ms, bool warm);
     void write_stale(const std::string & path, const std::string & artifact);
     WaitPlan plan_bounded_wait_locked(SlotCore & c, std::optional<Clock::time_point> deadline,
