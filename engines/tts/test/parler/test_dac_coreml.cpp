@@ -316,6 +316,14 @@ bool sweep_case_holds(bool ref_ok, const std::string & ref_backend, bool ok, con
     return ref_ok && ref_backend == PARLER_DAC_GGML_BACKEND && ok && backend == label && snr >= gate;
 }
 
+// The backend label a sidecar opened for `units` must report.
+std::string label_for_units(const std::string & units) {
+    if (units == "cpu_and_ane") return "coreml-ane";
+    if (units == "cpu_and_gpu") return "coreml-gpu";
+    if (units == "cpu_only") return "coreml-cpu";
+    return "coreml-all";
+}
+
 // A chip with a gated row needs the sweep: a sweep that cannot find, link or
 // load the artifact fails there instead of reporting nothing.
 bool sweep_required(const std::string & chip, double min_snr) {
@@ -355,6 +363,11 @@ void parity_floor_gates() {
               !sweep_case_holds(true, "ggml", false, "coreml-ane", "coreml-ane", 60, 54) &&
               !sweep_case_holds(true, "ggml", true, "coreml-ane", "coreml-ane", 53.9, 54),
           "units sweep: a fallback to ggml, another sidecar, a failed decode or a low SNR fails the case");
+    check(label_for_units("cpu_and_ane") == "coreml-ane" && label_for_units("cpu_and_gpu") == "coreml-gpu" &&
+              label_for_units("cpu_only") == "coreml-cpu" && label_for_units("all") == "coreml-all",
+          "units sweep: the expected label comes from the requested units");
+    check(!sweep_case_holds(true, "ggml", true, "coreml-gpu", label_for_units("cpu_and_ane"), 68.3, 54),
+          "units sweep: a cpu_and_ane row decoded by a GPU sidecar fails although its SNR is high");
     check(sweep_required("Apple M4 Max", 54) && !sweep_required("Apple M2", 54) && !sweep_required("Apple M4 Max", 45),
           "units sweep: required where a row is gated");
     check(sweep_row_gated("cpu_and_ane", "Apple M4 Max", 54) && !sweep_row_gated("all", "Apple M4 Max", 54) &&
@@ -469,6 +482,17 @@ struct mem_charges {
 // measured: the envelope adds phases that each carry the margin.
 constexpr double MEASURED_MARGIN = 1.25;
 
+// The charges of a run of the generated route `r`. The resident charge for
+// the steady state is the template's alone: the host quantizer copy
+// (`adapter_bytes`, inside r.resident_bytes) is built at construction, before
+// the load, so the footprint the steady state is measured from already holds
+// it. The envelope keeps it, since the whole run starts before construction.
+mem_charges charges_of(const parler_dac_route & r, uint64_t adapter_bytes) {
+    return {r.prepare_peak_bytes, r.load_peak_bytes,
+            r.resident_bytes > adapter_bytes ? r.resident_bytes - adapter_bytes : 0, r.ane_compile_reserve_bytes,
+            r.envelope_bytes};
+}
+
 // One line per charge the run exceeds (with `margin` applied to every phase
 // but the whole run), or per state it never sampled.
 std::vector<std::string> mem_failures(const mem_breakdown & b, uint64_t ane_compiler_load_peak, const mem_charges & c,
@@ -553,6 +577,26 @@ void memory_schedule_gates() {
     }
     check(mem_failures(b, 999, {70, 98, 93, 0, 100}, 1.0).empty(),
           "memory schedule: no compiler check without the Neural Engine");
+    {
+        // The steady state is charged against the template's resident part
+        // alone: 327.5 MiB needs 409.375, over the 409 MiB charged, although
+        // the route's resident figure with the quantizer copy would allow it.
+        constexpr uint64_t MB = 1ull << 20;
+        parler_dac_route r;
+        r.resident_bytes = 409 * MB + 626688;
+        r.envelope_bytes = 2000 * MB;
+        r.prepare_peak_bytes = 553 * MB;
+        r.load_peak_bytes = 409 * MB;
+        const mem_charges ch = charges_of(r, 626688);
+        check(ch.resident == 409 * MB && ch.envelope == r.envelope_bytes,
+              "memory schedule: the steady-state charge leaves out the quantizer copy, the envelope keeps it");
+        mem_breakdown steady327{};
+        steady327.generated = steady327.compiled = steady327.loaded = steady327.warmed = steady327.ready = true;
+        steady327.steady = (uint64_t) (327.5 * MB);
+        const std::vector<std::string> f = mem_failures(steady327, 0, ch);
+        check(f.size() == 1 && f[0].find("steady state") != std::string::npos,
+              "memory schedule: 327.5 MiB of steady state fails a 409 MiB resident charge");
+    }
     // With the template's 1.25 margin each phase needs 1.25 x its measurement
     // (rounded up); the whole run is held to the envelope as measured.
     const mem_charges margined{88, 123, 117, 500, 100};  // 87.5, 122.5, 116.25, 500 rounded up
@@ -1098,9 +1142,12 @@ void units_sweep(parler_model & model, const std::string & cache_dir, double min
         }
         const int window = sidecar->window();
         const int keep = window - 2 * parler_dac_rf_frames(model);
-        const std::string label = sidecar->label();
-        std::string line;
-        bool row_holds = true;
+        // The label the requested units must give, not the one the opened
+        // sidecar reports: a sidecar opened on other units fails the row.
+        const std::string label = label_for_units(units);
+        const std::string opened = sidecar->label();
+        std::string line = opened == label ? std::string() : "  opened as " + opened;
+        bool row_holds = opened == label;
         for (const int n_frames : {2 * keep + keep / 2, window / 3, 1}) {
             const std::vector<int32_t> codes = random_codes(hp, n_frames, 100 + n_frames);
             model.dac_sidecar.reset();
@@ -1609,11 +1656,10 @@ void memory_schedule(parler_model & model, const std::string & gguf, const std::
     }
     uint64_t ane_peak = 0;
     for (const auto & a : ane_samples) ane_peak = std::max(ane_peak, a.rss);
-    const mem_charges c{route.prepare_peak_bytes, route.load_peak_bytes, route.resident_bytes,
-                        route.ane_compile_reserve_bytes, route.envelope_bytes};
+    const mem_charges c = charges_of(route, parler_dac_rvq_bytes(model));
     // The prediction workspace this run implies: the steady state above the
     // template's other resident charges.
-    const uint64_t other_resident = route.resident_bytes - route.workspace_bytes;
+    const uint64_t other_resident = c.resident - route.workspace_bytes;
     const uint64_t workspace = b.steady > other_resident ? b.steady - other_resident : 0;
     fprintf(stderr,
             "  memory (MiB; each phase over the footprint just before it began, steady over the footprint just "
