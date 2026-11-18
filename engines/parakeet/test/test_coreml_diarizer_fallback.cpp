@@ -130,8 +130,10 @@ std::string bundle_path(const fs::path & model, int capacity) {
     return parakeet::coreml_diarizer_sidecar_path(model.string(), capacity);
 }
 
+// A copy per case, not a link: the runtime keys a bundle by its canonical
+// path, so cases linking one bundle would share its process-wide retirement.
 void link_bundle(const fs::path & model, int capacity, const std::string & bundle) {
-    fs::create_directory_symlink(fs::absolute(bundle), bundle_path(model, capacity));
+    fs::copy(fs::absolute(bundle), bundle_path(model, capacity), fs::copy_options::recursive);
 }
 
 void broken_bundle(const fs::path & model, int capacity) {
