@@ -13,8 +13,8 @@
 // generates the vocoder sidecar from MODEL.gguf into DIR (no sidecar may sit
 // next to it) and holds it to the ggml vocoder of the same GGUF at
 // --min-cosine on a padded, an exact-window and a stitched multi-window
-// latent; then a second owner adopts the artifact (route cached), an Engine
-// synthesizes on it, fit charges the template's envelope (and degrades to
+// latent; then a second owner adopts the artifact (route cached), a GGUF
+// replaced after the load is not generated from, an Engine synthesizes on it, fit charges the template's envelope (and degrades to
 // ggml near a budget), and a Max or Ultra brand string keeps a generated
 // sidecar off unless use = require. --require-coreml fails (instead of
 // skipping, 77) when the route is not generate. --memory-schedule runs the
@@ -56,6 +56,8 @@ int main() {
 #include <fstream>
 #include <memory>
 #include <thread>
+
+#include <sys/clonefile.h>
 
 using namespace tts_cpp::supertonic::detail;
 namespace fs = std::filesystem;
@@ -355,6 +357,78 @@ void check_generated_parity(const supertonic_model & ggml_model, const supertoni
     std::fprintf(stderr, "[supertonic-coreml-parity] %s %s cosine=%.6f (gate %.4f)\n", tag.c_str(), backend.c_str(),
                  cos, min_cosine);
     expect(cos >= min_cosine, tag + ": cosine " + std::to_string(cos) + " below " + std::to_string(min_cosine));
+}
+
+// The GGUF is replaced after the weights were loaded and before the sidecar
+// is made: the model is loaded through a symlink, which is then pointed at a
+// clone of the file (same bytes, another inode). The prepare job must not
+// follow the path to the replacement: it fails with source_changed, nothing
+// is generated, and with use = automatic the vocoder runs on ggml. Loaded
+// through the same symlink without the replacement, the stage adopts the
+// artifact in `cache_dir` (the symlink resolves to the loaded file). The
+// brand is an ungated one, so the generated route is planned on every host.
+void check_replaced_gguf(const std::string & gguf, const std::string & cache_dir) {
+    std::error_code ec;
+    const fs::path dir = fs::temp_directory_path(ec) /
+                         ("supertonic-replaced-" +
+                          std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    const fs::path link = dir / "model.gguf", clone = dir / "clone.gguf", cache = dir / "cache";
+    fs::create_directories(dir, ec);
+    fs::create_symlink(fs::absolute(gguf), link, ec);
+    if (ec) {
+        fail("replaced GGUF: cannot link the GGUF: " + ec.message());
+        fs::remove_all(dir, ec);
+        return;
+    }
+    tts_cpp::CoremlOptions o;
+    o.wait = tts_cpp::CoremlOptions::Wait::construct;
+    o.use = tts_cpp::CoremlOptions::Use::automatic;
+    for (const bool replace : {false, true}) {
+        const std::string what = replace ? "a GGUF replaced after the load" : "a GGUF loaded through a symlink";
+        owned_model owned;
+        owned.model.vocoder_coreml_managed = true;
+        if (!load(link.string(), owned)) break;
+        if (replace) {
+            bool replaced = ::clonefile(fs::absolute(gguf).c_str(), clone.c_str(), 0) == 0;
+            if (replaced) {
+                fs::remove(link, ec);
+                fs::create_symlink(clone, link, ec);
+                replaced = !ec;
+            }
+            if (!replaced) {
+                fail("replaced GGUF: cannot point the symlink at a clone");
+                break;
+            }
+        }
+        o.cache_dir = replace ? cache.string() : cache_dir;
+        std::shared_ptr<supertonic_vocoder_coreml> stage;
+        try {
+            stage = supertonic_vocoder_coreml::create(owned.model, link.string(), o, false, UNGATED_BRAND);
+        } catch (const std::exception & e) {
+            fail(what + ": create: " + e.what());
+            break;
+        }
+        const std::string st = stage ? stage->status_json() : std::string();
+        const int latent_len = 8;
+        const std::vector<float> latent = make_latent(owned.model.hparams.latent_channels, latent_len, 23u);
+        std::vector<float> wav;
+        std::string error, backend;
+        const bool ok =
+            supertonic_vocoder_forward_ggml(owned.model, latent.data(), latent_len, wav, &error, &backend);
+        if (replace) {
+            expect(stage && !stage->wait(0) && st.find("source_changed") != std::string::npos && ok &&
+                       backend == "ggml",
+                   what + " is not generated from (vocoder on " + backend + "): " + st.substr(0, 300));
+        } else {
+            expect(stage && stage->wait(0) && ok && backend.rfind("coreml", 0) == 0,
+                   what + " adopts the cached sidecar (vocoder on " + backend + "): " + st.substr(0, 300));
+        }
+        std::fprintf(stderr, "[supertonic-coreml-parity] %s: state %s, vocoder on %s\n", what.c_str(),
+                     status_field(st, "state").c_str(), backend.c_str());
+        owned.model.vocoder_pending.reset();
+        stage.reset();
+    }
+    fs::remove_all(dir, ec);
 }
 
 void check_engine_generated(const std::string & gguf, const tts_cpp::CoremlOptions & o) {
@@ -701,6 +775,7 @@ int generated_main(const std::string & gguf, const std::string & cache_dir, doub
                "second owner: " + st);
     }
 
+    check_replaced_gguf(gguf, cache_dir);
     check_engine_generated(gguf, o);
     check_cpu_warm_up_requests_idle_sidecar(gguf, o);
     tts_cpp::CoremlOptions off = o;

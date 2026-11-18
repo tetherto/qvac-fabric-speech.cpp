@@ -145,6 +145,13 @@ supertonic_vocoder_route supertonic_vocoder_plan_route(const std::string & gguf_
 // SUPERTONIC_COREML_ALLOW_LOW_BIT lifts it.
 bool supertonic_vocoder_prebuilt_below_floor(const supertonic_model & model);
 
+// The identity of the GGUF load_supertonic_gguf read the weights from, which
+// it calls with the descriptor it read through (`fd` < 0: no identity).
+// supertonic_vocoder_coreml::create generates only from that file, so a GGUF
+// replaced since the load is never generated from. Core ML builds keep it in
+// supertonic_model::vocoder_source; elsewhere it does nothing.
+void supertonic_vocoder_source_record(supertonic_model & model, int fd, const std::string & path);
+
 // The vocoder stage of one Engine on the shared Core ML runtime.
 class supertonic_vocoder_coreml final : public supertonic_vocoder_pending {
 public:

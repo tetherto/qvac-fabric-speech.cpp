@@ -31,6 +31,7 @@ namespace tts_cpp::supertonic::detail {
 
 // The vocoder stage on the shared Core ML runtime (supertonic_vocoder_coreml.h).
 class supertonic_vocoder_pending;
+struct supertonic_vocoder_source;
 
 // round 4 — multi-dtype K/V flash-attention dispatch.
 //
@@ -599,6 +600,8 @@ struct supertonic_model {
     // `vocoder_pending` (supertonic_vocoder_coreml.h).
     bool vocoder_coreml_managed = false;
     std::shared_ptr<supertonic_vocoder_pending> vocoder_pending;
+    // The file the weights were loaded from (supertonic_vocoder_source_record).
+    std::shared_ptr<supertonic_vocoder_source> vocoder_source;
     ::supertonic_coreml_encoder_context * coreml_encoder = nullptr;
     bool encoder_on_coreml = false;
     ::supertonic_coreml_vector_context * coreml_vector = nullptr;

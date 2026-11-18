@@ -309,6 +309,11 @@ two.
   rather than substituting the reference one; the 8-bit floor above applies
   to prebuilt sidecars only. A prebuilt sidecar below its floor is ignored
   and a generated one is used instead.
+- **Source file.** The engine opens the GGUF once and reads its metadata and
+  every weight through that descriptor, and generates only from that file: a
+  GGUF replaced at the path since the load (an atomic rename, a re-pointed
+  symlink) fails generation with `source_changed`, and the vocoder stays on
+  ggml.
 - **Device class.** Generation is skipped (`unsupported(device)` in the
   status) on Max and Ultra parts (`prefer_ggml_on` in the templates;
   `machdep.cpu.brand_string`), where the GPU runs the ggml vocoder faster than

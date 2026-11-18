@@ -336,6 +336,17 @@ supertonic_vocoder_route supertonic_vocoder_plan_route(const std::string & gguf_
     return plan_route(gguf_path, r, prebuilt_below_floor, cpu_brand).route;
 }
 
+struct supertonic_vocoder_source {
+    pcm::SourceStat stat;  // fstat of the descriptor the load read through
+    bool ok = false;       // false: no descriptor or no fstat
+};
+
+void supertonic_vocoder_source_record(supertonic_model & model, int fd, const std::string & path) {
+    auto s = std::make_shared<supertonic_vocoder_source>();
+    s->ok = fd >= 0 && pcm::generation::source_stat_fd(fd, path, s->stat);
+    model.vocoder_source = std::move(s);
+}
+
 std::shared_ptr<supertonic_vocoder_coreml> supertonic_vocoder_coreml::create(supertonic_model & model,
                                                                              const std::string & gguf_path,
                                                                              const CoremlOptions & options,
@@ -393,10 +404,16 @@ std::shared_ptr<supertonic_vocoder_coreml> supertonic_vocoder_coreml::create(sup
                 : 0;
     } else {
         const pcm::generation::Candidate & c = *p->plan.candidate;
+        // The file the weights were read from (fstat of the load's one
+        // descriptor), not whatever `gguf_path` names now: prepare opens the
+        // path and fails with source_changed unless it is that file, and
+        // asking for another path than the load's is refused here; the
+        // vocoder then stays on ggml.
         pcm::SourceStat source;
-        if (!pcm::generation::source_stat(gguf_path, source)) {
-            throw std::runtime_error("supertonic: cannot stat " + gguf_path);
-        }
+        pcm::SourceStat asked;
+        const bool loaded = model.vocoder_source && model.vocoder_source->ok;
+        if (loaded) source = model.vocoder_source->stat;
+        source.changed = !loaded || !pcm::generation::source_stat(gguf_path, asked) || asked.path != source.path;
         spec.tmpl = c.tmpl;
         spec.prepare = pcm::generation::prepare_request(c, source, p->resolved);
         spec.prepare_fn = &pcm::generation::prepare;
@@ -490,6 +507,8 @@ bool supertonic_vocoder_coreml::wait(int64_t timeout_ms, const std::atomic<bool>
 }
 
 #else  // !TTS_CPP_USE_COREML
+
+void supertonic_vocoder_source_record(supertonic_model &, int, const std::string &) {}
 
 struct supertonic_vocoder_coreml::impl {
     supertonic_vocoder_route route;
