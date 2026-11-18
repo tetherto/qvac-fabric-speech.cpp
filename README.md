@@ -172,9 +172,9 @@ feedback on macOS 15 and 26; see the [Core ML guide](engines/tts/docs/cosyvoice3
 `scripts/coreml/bench-load-time.py` measures Core ML load time for the
 Chatterbox sidecars: first-load compile on a fresh host identity, warm load,
 time until every function is ready with and without the admission gate, and
-whether loaded functions share weight memory. It records the power source and
-Low Power Mode with every result row and flags the rows measured after either
-changed mid-run. The
+whether loaded functions share weight memory. It samples the power source and
+Low Power Mode after every measurement, records the sample with each result
+row and flags the rows next to a sample that differs from the start's. The
 [Core ML load time measurements](docs/COREML-LOAD-TIME.md#setup-and-usage)
 list its requirements, the commands to run it and the recorded results.
 

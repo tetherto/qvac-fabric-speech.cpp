@@ -787,6 +787,21 @@ class PowerRunnerTest(unittest.TestCase):
         self.assertIn("| ttr_cached | 4 | 2 | 2 | 0 | 0 | 0 | 2 |", doc)
         self.assertIsNone(TASK_ID.search(doc), TASK_ID.search(doc))
 
+    def test_the_flag_is_described_as_an_adjacent_sample_test(self):
+        # Row 3 reads AC again yet is flagged: the sample before it was
+        # battery. The report must say what the flag can and cannot tell.
+        fx, r, _ = self.run_ttr([AC, AC, BATTERY, AC])
+        rows = self.rows(fx, r)
+        self.assertEqual(rows[2]["power"], AC)
+        self.assertTrue(rows[2]["power_changed"])
+        doc = blt.render(blt.summarize(fx.records(r)))
+        self.assertIn("A row's `power` in `results.jsonl` is the sample taken after it was measured", doc)
+        self.assertIn("`power_changed` is a conservative flag from adjacent samples", doc)
+        self.assertIn("It can flag a row measured wholly on the start's power", doc)
+        self.assertIn("misses a change that reverts between two samples", doc)
+        self.assertIn("flags each row whose own sample or the one before it differs from the start's", doc)
+        self.assertNotIn("measured while the power differed", doc)
+
     def test_cold_load_rows_of_one_process_share_its_reading(self):
         # A cold load runs one process per stage and records a row per
         # function. The power went to battery during the encoder process and

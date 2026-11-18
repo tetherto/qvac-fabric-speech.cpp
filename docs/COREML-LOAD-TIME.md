@@ -10,7 +10,7 @@ Measured with `scripts/coreml/bench-load-time.py` on the workloads pinned in `sc
 <!-- report:power -->
 ## Power source per row
 
-`run` reads the power source (`pmset -g batt`) and Low Power Mode (`pmset -g`) at the start and again after each measurement (`power` in `results.jsonl`); the rows one process produces, such as every function of a cold load, share that reading. A row is flagged (`power_changed`) when its reading or the one before it differs from the start's, that is when the power was not the start's at some point while it was measured.
+`run` samples the power source (`pmset -g batt`) and Low Power Mode (`pmset -g`) at the start and once after each measurement. A row's `power` in `results.jsonl` is the sample taken after it was measured; the rows one process produces, such as every function of a cold load, share it. `power_changed` is a conservative flag from adjacent samples: it is set when the row's sample or the one before it differs from the start's. It can flag a row measured wholly on the start's power (the power came back before the measurement began), and it misses a change that reverts between two samples.
 
 None of the 443 rows carries a power reading: they were recorded before `run` read the power source per row. The header says how the run was powered.
 
@@ -51,7 +51,7 @@ Limits of this run: the generate route is a stand-in (copy and compile), not tem
 
 Requirements:
 
-- Apple silicon, macOS 15 or later, Xcode command-line tools (`xcrun clang++`) and Python 3.9 or later. The published numbers come from an otherwise idle M2 on macOS 15.7.3; `run` refuses to start on battery power unless `--allow-battery` is given. When the power source or Low Power Mode changes mid-run, `run` keeps going, flags every row measured while the power differed from the start (`power_changed`) and warns at the end; the report counts them under "Power source per row".
+- Apple silicon, macOS 15 or later, Xcode command-line tools (`xcrun clang++`) and Python 3.9 or later. The published numbers come from an otherwise idle M2 on macOS 15.7.3; `run` refuses to start on battery power unless `--allow-battery` is given. When the power source or Low Power Mode changes mid-run, `run` keeps going, flags each row whose own sample or the one before it differs from the start's (`power_changed`) and warns at the end; the report counts them under "Power source per row", which also says what the samples miss.
 - The Chatterbox GGUFs pinned in `bench-manifest.json` (`variants`, with SHA-256 and Hugging Face revisions) under the models root: `--models-root DIR`, or `QVAC_BENCH_MODELS`.
 - The Core ML sidecars for each width set in `sidecar_sets`, exported from the pinned f32 GGUFs with `engines/tts/scripts/export-chatterbox-coreml.py` as `exporter` in the manifest describes (`--frames` selects the widths, `--compile` writes the `.mlmodelc` next to the `.mlpackage`).
 - A `tts-cli` built with `-DTTS_CPP_COREML=ON` (see `engines/tts/docs/chatterbox.md`).
