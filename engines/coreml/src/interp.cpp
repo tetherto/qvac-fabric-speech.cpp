@@ -316,7 +316,10 @@ std::vector<size_t> strides_of(const std::vector<int64_t> & shape) {
 
 class Interp {
 public:
-    Interp(const Recipe & r, TensorSource & src, const ReadObserver & obs) : r_(r), src_(src), obs_(obs) {
+    // `driver`: the items this pass evaluates in file order (blob for
+    // weight.bin, patch for the spec); lets are evaluated on demand.
+    Interp(const Recipe & r, TensorSource & src, const ReadObserver & obs, Item::Kind driver = Item::Kind::blob)
+        : r_(r), src_(src), obs_(obs), driver_(driver) {
         for (const Item & it : r.items) {
             if (it.kind == Item::Kind::let) lets_[it.name] = &it;
         }
@@ -334,7 +337,7 @@ public:
             names(*it.expr, d);
             if (it.kind == Item::Kind::let) {
                 direct_let[it.name] = d;
-            } else {
+            } else if (it.kind == driver_) {
                 direct_blob.push_back(d);
             }
         }
@@ -705,12 +708,70 @@ private:
             }
             return o;
         }
+        if (op == "slice") {
+            V x = eval(*e.args[0]);
+            const size_t axis = static_cast<size_t>(e.args[1]->number);
+            const size_t begin = static_cast<size_t>(e.args[2]->number);
+            const size_t step = e.args.size() == 5 ? static_cast<size_t>(e.args[4]->number) : 1;
+            const size_t outer = count_of(x->shape, 0, axis);
+            const size_t inner = count_of(x->shape, axis + 1);
+            const size_t dim = static_cast<size_t>(x->shape[axis]);
+            const size_t n = static_cast<size_t>(e.shape[axis]);
+            return relayout(x, e.shape, [&](const auto * in, auto * out) {
+                size_t w = 0;
+                for (size_t o = 0; o < outer; ++o) {
+                    for (size_t k = 0; k < n; ++k) {
+                        const size_t i = begin + k * step;
+                        std::copy(in + (o * dim + i) * inner, in + (o * dim + i + 1) * inner, out + w);
+                        w += inner;
+                    }
+                }
+            });
+        }
+        if (op == "neg") {
+            V x = eval(*e.args[0]);
+            V o = fresh();
+            if (x->dt == DType::weak) {
+                o->weak = -x->weak;
+                return o;
+            }
+            o->alloc(x->dt, x->shape);
+            for (size_t i = 0; i < x->f.size(); ++i) o->f[i] = -x->f[i];
+            for (size_t i = 0; i < x->g.size(); ++i) o->g[i] = -x->g[i];
+            return o;
+        }
+        if (op == "zeros" || op == "ones") {
+            V o = fresh();
+            o->alloc(DType::f32, e.shape);
+            if (op == "ones") std::fill(o->f.begin(), o->f.end(), 1.0f);
+            return o;
+        }
+        if (op == "lit") {
+            const Literal * l = r_.find_literal(e.args[0]->text);
+            if (l == nullptr || l->data == nullptr) {
+                throw EvalError(Error::deterministic("recipe:" + std::to_string(e.line) + ": literal " +
+                                                     e.args[0]->text + " has no bytes"));
+            }
+            V o = fresh();
+            o->alloc(DType::f32, l->shape);
+            if (l->dtype == BlobType::fp16) {
+                for (size_t i = 0; i < o->f.size(); ++i) {
+                    uint16_t h;
+                    std::memcpy(&h, l->data + 2 * i, 2);
+                    o->f[i] = f16_to_f32(h);
+                }
+            } else {
+                std::memcpy(o->f.data(), l->data, o->f.size() * sizeof(float));
+            }
+            return o;
+        }
         throw EvalError(Error::deterministic("recipe: op " + op + "() cannot be evaluated"));
     }
 
     const Recipe & r_;
     TensorSource & src_;
     const ReadObserver & obs_;
+    Item::Kind driver_;
     std::map<std::string, const Item *> lets_;
     std::map<std::string, V> cache_;
     std::map<std::string, size_t> last_use_;
@@ -755,6 +816,51 @@ Error evaluate(const Recipe & r, TensorSource & src, const std::function<Error(c
         stats->tensors_read = in.tensors_read;
     }
     return result;
+}
+
+Error evaluate_patches(const Recipe & r, TensorSource & src, const std::function<Error(const PatchOut &)> & sink,
+                       const ReadObserver & observer) {
+    Interp in(r, src, observer, Item::Kind::patch);
+    in.plan_liveness();
+    size_t p = 0;
+    try {
+        for (const Item & it : r.items) {
+            if (it.kind != Item::Kind::patch) continue;
+            std::vector<uint8_t> bytes = in.blob_bytes(it, in.tracker);
+            PatchOut out;
+            out.offset = it.offset;
+            out.dtype = it.dtype;
+            out.count = it.count;
+            out.data = bytes.data();
+            out.bytes = bytes.size();
+            out.line = it.line;
+            Error e = sink(out);
+            in.tracker.release(bytes.size());
+            if (!e.ok()) return e;
+            in.free_after(p);
+            ++p;
+        }
+    } catch (const EvalError & e) {
+        return e.err;
+    } catch (const std::bad_alloc &) {
+        return Error::transient("recipe: out of memory", "qvac.coreml", 12 /* ENOMEM */);
+    }
+    return {};
+}
+
+Error patched_spec(const Recipe & r, TensorSource & src, const uint8_t * spec, size_t spec_size,
+                   std::vector<uint8_t> & out, const ReadObserver & observer) {
+    out.assign(spec, spec + spec_size);
+    return evaluate_patches(
+        r, src,
+        [&](const PatchOut & p) -> Error {
+            if (p.offset > out.size() || p.bytes > out.size() - p.offset) {
+                return Error::deterministic("recipe:" + std::to_string(p.line) + ": patch outside the spec");
+            }
+            std::memcpy(out.data() + p.offset, p.data, p.bytes);
+            return {};
+        },
+        observer);
 }
 
 }  // namespace recipe

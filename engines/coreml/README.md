@@ -19,7 +19,9 @@ engines share:
   (`src/templates.h`);
 - `python/coreml_template.py`, which makes templates from an unchanged
   exporter and checks them against it, and `python/golden.py`, the
-  generator tripwire.
+  generator tripwire;
+- the generation glue engines use (`include/qvac_coreml/generation.h`,
+  below).
 
 No library is installed: the headers under `include/` are build-interface
 only.
@@ -69,6 +71,126 @@ another process on the same OS build marks the artifact deterministic (not
 retried until the OS build or the generator version changes). A missing
 package or a failed move or copy is an I/O error: it is retried by the next
 process and is never promoted, however often it repeats.
+
+## Generating a stage's sidecar in an engine
+
+`include/qvac_coreml/generation.h` is what an engine calls to give a stage
+route `generate`:
+
+1. `generation::probe(ids, gguf, resolved)` looks the templates up (embedded,
+   or under the development override) and matches each against the GGUF:
+   `general.architecture`, `match.metadata` and every recipe `source` (name,
+   allowed type, shape). It reads the GGUF's header only, never the cache. A
+   `Candidate` carries the template, its match result and its `memory` section.
+2. `plan()` gets `generation_built`, `template_available`,
+   `template_matched` and the template's `validated_for` units in its
+   `PlanInput`. With no adjacent prebuilt it returns `generate` when the
+   build has the generator, the GGUF matches, a cache directory is set,
+   `generate` is not `never`, the OS is macOS 15 or later and the resolved
+   units are validated.
+3. The slot's `SlotSpec` gets `prepare = generation::prepare_request(...)`
+   (the template, the identity of the GGUF the engine loaded its weights
+   from, the cache directory), `prepare_fn = generation::prepare` (the cache
+   pipeline with the on-device compile) and `tmpl`. Its `artifact_path` stays
+   empty: the prepare job supplies the published bundle. The identity comes
+   from `generation::source_stat_fd`: the engine opens the GGUF once, reads
+   its metadata, mapping and streamed weights through that one descriptor,
+   and records fstat of it, so the identity is the loaded file whatever the
+   path named during the load. The prepare job opens the path and fails with
+   `source_changed` unless it is that file; an identity marked `changed`
+   (no descriptor, or a request for another path than the load's) fails the
+   same way, and the stage stays on ggml. `generation::loaded_source` (stats
+   of the path before the first open and after the last read) is the weaker
+   form for an engine that cannot read through one descriptor: a file
+   swapped in and restored between its two samples passes unseen.
+   A stat taken only when the slot is made would follow a replacement.
+   Owners of one artifact share a loaded model, or a running load, only
+   with equal `SlotSpec::geometry`, so each geometry is validated by its own
+   `LoadFn`; a prediction failure retires the (artifact, function, units)
+   for every owner, whatever its geometry: their ready models, queued loads
+   and later acquisitions.
+4. The stage's `LoadFn` calls `generation::begin_load` before loading and
+   `generation::end_load` after: a generated bundle loads under the shared
+   lease of its cache entry, and `used/<key>` is touched after a successful
+   load. Both do nothing for a prebuilt bundle.
+
+Fit charges a generated stage with `generation::envelope_bytes(memory,
+units)`: resident (runtime weights, twice the function I/O, state,
+workspace) plus one transient (the larger of `generation_peak_bytes + 8 MiB +
+compile_peak_bytes` and the unit class's `load_peak`), times the margin.
+`resident_bytes`, `prepare_peak_bytes`, `load_peak_bytes` and
+`transient_bytes` return those parts before the margin, so a memory
+validation can hold each phase to its own constant.
+`ane_compile_reserve_bytes` gives the memory admission reserve of a cold ANE
+load. Tests replace the Core ML compile with
+`generation::set_compile_override`.
+
+### Measured memory constants
+
+`extract` writes a template's `memory` section with the defaults above,
+`margin` 1.25 and `coreml_bound: "conservative"`. A model's memory validation
+replaces them with measured constants. It runs an overlapped schedule:
+ggml work on the calling thread while the stage is generated, compiled,
+loaded and warmed in the background, sampling the process footprint and
+`ANECompilerService`'s size. `test-parler-dac-coreml --memory-schedule` is the
+Parler DAC's. Its constants follow this convention:
+
+- Each constant is 1.25 times the largest value measured over every run on
+  every host in `validated_for`, rounded up to 1 MiB:
+  - `compile_peak_bytes`: the prepare (from the start of generation to the end
+    of the compile, over the footprint just before generation), less
+    `generation_peak_bytes` and 8 MiB;
+  - `load_peak_bytes.<units>`: the load and warm-up, over the footprint just
+    before the load;
+  - the resident part (`runtime_weight_bytes` + 2 x I/O + `state_bytes` +
+    `workspace_bytes`) must cover 1.25 times the steady state once ready,
+    over the footprint just before the load. `runtime_weight_bytes` stays
+    the weights' size. `workspace_bytes` is what that figure needs beyond
+    the weights, I/O and state, as on a GPU placement that holds its own
+    copy of the weights and working memory, or 0 when the charged weights
+    already cover it, as on the Neural Engine, which keeps the weights
+    outside the process;
+  - `ane_compile_reserve_bytes`: below.
+- A schedule run passes only when 1.25 times each phase it measured fits the
+  constant that charges it, so a run that sets a new maximum fails until the
+  constants are recomputed. The whole run is held to the envelope as
+  measured, since the envelope adds phases that each carry the margin.
+- Each constant carries its own 1.25, so the envelope adds none: `margin` 1.0
+  and `coreml_bound: "measured"`. The runtime reads `margin`; `coreml_bound`
+  and `measured` are records.
+- `memory.measured` records the derivation: `margin` (the 1.25 each constant
+  carries), `runs` (how many runs the maxima cover), `resident_bytes` (the
+  resident part the template charges, the sum above: at least 1.25 times the
+  largest measured steady state, not the raw measurement) and `basis` (what
+  each constant covers and which host set its maximum).
+- `validated_for` lists every measured host as `{units, os, chip}`. `plan()`
+  matches the units only, so every chip is charged the largest placement's
+  values.
+
+`ane_compile_reserve_bytes` is not part of the envelope. It is runtime
+admission: a cold Neural Engine load waits until that much memory is free.
+`ANECompilerService` is a long-lived system process (it runs as root under
+`aned`, so a test cannot restart it, and it does not exit when idle). A
+schedule measures it in two ways:
+
+- its **growth** during the load: its peak while loading, less its size just
+  before the first load;
+- its **absolute** size while loading. On a shared host it includes what
+  other processes compiled, before the load or during it.
+
+Both sum every instance of the service, so another process that compiles
+for the Neural Engine during the load counts in both. A service that
+already holds memory from earlier compiles reuses it, so on such a dirty
+baseline the growth understates a cold compile on a clean host, where the
+growth is the whole size. The reserve is therefore 1.25 times the largest
+growth measured from a clean start (at most 32 MiB before the load,
+`ANE_COMPILER_CLEAN_BYTES` in `test/memory_probe.h`) on every validated
+host, when every host has such runs. Otherwise it is 1.25 times the largest
+absolute size while loading on any validated host, a conservative basis
+that compares across placements, and the schedule holds 1.25 times the
+absolute size to it. Each run report prints both, the size before the load,
+and labels that baseline clean, dirty or unknown (no sample before the
+load, in which case the growth is the whole size while loading).
 
 ## Building the tests and the tool
 
@@ -138,7 +260,8 @@ script).
    comment; a blob that several tensors explain gets an `AMBIGUOUS` comment.
    Suggested constants come from the twin's values: confirm them against the
    exporter.
-3. Complete `recipe.txt` by hand (the recipe language: `include/qvac_coreml/recipe.h`).
+3. Complete `recipe.txt` by hand (the recipe language: `include/qvac_coreml/recipe.h`
+   and the vocabulary below).
 4. Write `template.json` with the fields only the author knows (`family`,
    `stage`, `export_kind`, `match.metadata`, `exporter` with `{gguf}` and
    `{out}` in its `args`, `default_compute_units`, `memory`), then extract:
@@ -147,24 +270,34 @@ script).
    python engines/coreml/python/coreml_template.py --tool build/qvac-coreml-tool extract --template-dir <dir>
    ```
 
-   `extract` runs the exporter on twins A and B (seeds 1 and 2), fails when
-   their specs differ anywhere (a weight-dependent value in the spec needs
-   patches, which this generator version lacks) or when their `weight.bin`
-   layouts differ, then writes `model.mlmodel` (A's spec, deterministically
-   serialised), `Manifest.json` and the computed `template.json` fields
-   (`functions`, `stateful`, `weight_bin_size`, `generation_peak_bytes`, the
-   exporter's sha256, the toolchain versions), and refreshes the header of
-   `recipe.txt`. Every output is staged in a temporary copy of the template
-   first, and the twin-A `generate` runs on that copy; the template directory
-   is written only after every check has passed. A rejected extraction (a
-   twin check, the recipe header, the twin-A `generate`) therefore leaves the
-   template's files untouched, including `reference-gguf.json` when
-   `--manifest` names another file. A `model.mlmodel` that equals the new
-   spec (the coremltools
-   conversion date aside) and a `Manifest.json` that differs only in its
-   random item identifiers are kept byte for byte, so extracting an unchanged
-   template again leaves its files, and so its `template_sha256`, as they
-   were.
+   `extract` runs the exporter on twins A and B (seeds 1 and 2) and compares
+   the two specs field by field. An inline fp16 or fp32 constant whose value
+   differs between A and B (a weight the compiler folded into the program,
+   such as a bias it negated) becomes a patch site: `model.mlmodel` holds a
+   deterministic sentinel there, `template.json` `patches` records
+   `{spec_offset, len, sentinel_hex}`, and `extract` adds a drafted `patch`
+   line to `recipe.txt` for every site it can explain from twin A. Any other
+   difference between the specs, or between the two `weight.bin` layouts,
+   fails the extraction. Literals declared in `template.json` `literals`
+   with an `exporter_blob` (a `weight.bin` blob offset) are copied from that
+   blob into `literals.bin`, 64-byte aligned, after checking that A and B
+   agree on it, so a literal never depends on the weights. `extract` then
+   writes `model.mlmodel` (A's spec, deterministically serialised, sentinels
+   in place), `Manifest.json` and the computed `template.json` fields
+   (`functions`, `stateful`, `weight_bin_size`, `generation_peak_bytes`,
+   `patches`, the literals' offsets, the exporter's sha256, the toolchain
+   versions), and refreshes the header of `recipe.txt`. Every output is
+   staged in a temporary copy of the template first, and the twin-A
+   `generate` runs on that copy; the template directory is written only after
+   every check has passed. A rejected extraction (a twin check, a recipe
+   header or body, a recipe with no `end` line for drafted patch lines, the
+   twin-A `generate`) therefore leaves the template's files untouched,
+   including `reference-gguf.json` when `--manifest` names another file. A
+   `model.mlmodel` that equals the
+   new spec (the coremltools conversion date aside, sentinels in place) and a
+   `Manifest.json` that differs only in its random item identifiers are kept
+   byte for byte, so extracting an unchanged template again leaves its files,
+   and so its `template_sha256`, as they were.
 5. Check it against the exporter:
 
    ```sh
@@ -172,12 +305,39 @@ script).
    ```
 
    For twins A and B (f32) and Q (`--quant-types`, default `q8_0`; the
-   exporter gets `qvac-coreml-tool f32` of it), `report` compares the
-   exporter's `weight.bin` blob by blob with the C++ generator's
-   (`qvac-coreml-tool verify`) and the exporter's spec with the template's.
-   `--all` checks every template under `engines/*/coreml-templates/`.
+   exporter gets `qvac-coreml-tool f32` of it), `report` generates the
+   package with the C++ generator (`qvac-coreml-tool generate`), compares its
+   `weight.bin` blob by blob with the exporter's (`qvac-coreml-tool verify`)
+   and its spec, patches applied, with the exporter's. `--all` checks every
+   template under `engines/*/coreml-templates/`.
+
+   On a production GGUF the same comparison is the real-weights gate:
+
+   ```sh
+   python engines/coreml/python/coreml_template.py --tool build/qvac-coreml-tool real \
+       --gguf models/Nemotron-3-Diarization.q8_0.gguf --template-dir <dir> [--template-dir <dir> ...]
+   ```
 6. Add the template's golden line:
    `python3 engines/coreml/python/golden.py update --tool build/qvac-coreml-tool`.
+
+### Recipe vocabulary
+
+This generator version knows `t f32 f64 f16 add mul div recip clip reshape
+permute take concat`, `let` bindings, and:
+
+| Op | Semantics |
+|---|---|
+| `slice(x, axis, begin, end[, step])` | half-open, `0 <= begin < end <= dim`, `step >= 1` |
+| `neg(x)` | IEEE negation (`neg(0)` is `-0`) |
+| `zeros([d...])`, `ones([d...])` | f32 constants |
+| `lit("id")` | a `template.json` `literals` entry `{id, dtype, shape, offset}`: bytes of `literals.bin` (fp16 or fp32, numpy order), as f32 |
+
+`patch <spec_offset> fp16|fp32 <count> <expr>` lines write `count` values
+into `model.mlmodel` at `spec_offset`, replacing the sentinel that
+`template.json` `patches` records there. Patch lines come in spec offset
+order and must not overlap; each lies on a declared patch site of exactly its
+length, and every site has a line. `patch ... str`, `provided()`, `meta_f`
+and `meta_s` belong to a later generator version.
 
 ### Gates in CI
 
@@ -253,7 +413,10 @@ qvac-coreml-tool dump <model.gguf> [-o <manifest.json>]
 
 Writes a shape manifest: every metadata key with its GGUF type and value, and
 every tensor's name, type, `n_dims`, `ne` and value statistics (min, max,
-mean, std). `twin` reads it.
+mean, std). `twin` reads it. `n_dims` is the count the file records: ggml's
+GGUF API drops trailing dimensions of 1 (a `[1, 96, 7]` weight reads as 2-D),
+while exporters read the rank through gguf-py, so `dump` reads it from the
+file header and every GGUF the tool writes (`twin`, `f32`) records it too.
 
 ```sh
 qvac-coreml-tool dump models/mimi.gguf -o mimi-manifest.json
@@ -268,7 +431,11 @@ qvac-coreml-tool twin --manifest <manifest.json> --seed <N> --types <type[,type.
 
 Writes a random GGUF with the same metadata and tensor geometry as the
 manifest. Each tensor's values are drawn from a normal distribution with the
-recorded mean and standard deviation, clamped to the recorded range. Tensors
+recorded mean and standard deviation, clamped to the recorded range. A tensor
+whose recorded values are all equal (a scalar bias, a constant vector) is drawn
+within ±25% of that value (±0.00025 around zero) instead, so every tensor
+differs between seeds and `extract` can see any value the exporter folds into
+the program. Tensors
 that are not f32 in the original (quantised, f16, bf16) take the `--types`
 entries in turn, quantised with ggml's own quantisers, when their row length is
 a multiple of that type's block size; the rest stay f32. `--set` sets a string

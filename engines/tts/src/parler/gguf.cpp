@@ -7,10 +7,16 @@
 #include "ggml-alloc.h"
 #include "gguf.h"
 
+#ifndef _WIN32
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <utility>
 #include <vector>
 
@@ -217,15 +223,82 @@ ggml_backend_t init_policy_backend(int n_gpu_layers) {
 
 } // namespace
 
+void (*parler_gguf_load_hook)(const char * stage) = nullptr;
+
+namespace {
+
+// The GGUF open once for a load (POSIX; on Windows, or when the open fails,
+// every reader opens the path as before). An empty path opens nothing.
+struct parler_gguf_file {
+    int fd = -1;
+    explicit parler_gguf_file(const std::string & path) {
+#ifndef _WIN32
+        if (!path.empty()) fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+#endif
+    }
+    ~parler_gguf_file() {
+#ifndef _WIN32
+        if (fd >= 0) ::close(fd);
+#endif
+    }
+    parler_gguf_file(const parler_gguf_file &) = delete;
+    parler_gguf_file & operator=(const parler_gguf_file &) = delete;
+
+    gguf_context * init(const std::string & path, gguf_init_params gp) const {
+#ifndef _WIN32
+        if (fd >= 0) {
+            const int d = ::dup(fd);
+            FILE * f = d >= 0 ? ::fdopen(d, "rb") : nullptr;
+            if (!f) {
+                if (d >= 0) ::close(d);
+                return nullptr;
+            }
+            if (std::fseek(f, 0, SEEK_SET) != 0) {
+                std::fclose(f);
+                return nullptr;
+            }
+            gguf_context * g = gguf_init_from_file_ptr(f, gp);
+            std::fclose(f);
+            return g;
+        }
+#endif
+        return gguf_init_from_file(path.c_str(), gp);
+    }
+
+    bool map(tts_cpp::cosyvoice::MappedFile & m, const std::string & path) const {
+#ifndef _WIN32
+        if (fd >= 0) return tts_cpp::cosyvoice::mapped_file_open_fd(m, fd, "parler");
+#endif
+        return tts_cpp::cosyvoice::mapped_file_open(m, path, "parler");
+    }
+
+    std::unique_ptr<::tts_cpp::detail::gguf_stream_reader> stream(const gguf_context * g,
+                                                                   const std::string & path) const {
+#ifndef _WIN32
+        if (fd >= 0) return std::make_unique<::tts_cpp::detail::gguf_stream_reader>(g, fd);
+#endif
+        return std::make_unique<::tts_cpp::detail::gguf_stream_reader>(g, path);
+    }
+};
+
+} // namespace
+
 // Shared body of parler_load_gguf and parler_load_gguf_metadata_only.  When
 // `measure` is non-null the load is metadata-only: every buffer the real path
 // allocates is sized instead and no tensor data leaves the disk.
 bool parler_load_gguf_impl(const std::string & path, parler_model & model,
                            int n_gpu_layers, std::string * error,
                            parler_fit_measure * measure, const std::string & requested_backend) {
+    // One open of the GGUF: the metadata, the mapping and the streamed
+    // weights all read through this descriptor (POSIX), so every byte comes
+    // from one file whatever the path names meanwhile, and fstat of it is the
+    // loaded file's identity (parler_dac_source_record).
+    parler_gguf_file file(measure ? std::string() : path);
+    if (!measure) parler_dac_source_record(model, file.fd, path);
     ggml_context * ctx_meta = nullptr;
     gguf_init_params gp = { /*.no_alloc=*/ true, /*.ctx=*/ &ctx_meta };
-    gguf_context * g = gguf_init_from_file(path.c_str(), gp);
+    gguf_context * g = file.init(path, gp);
+    if (!measure && parler_gguf_load_hook) parler_gguf_load_hook("metadata");
     if (!g) {
         if (error) *error = "failed to open GGUF: " + path;
         return false;
@@ -400,7 +473,7 @@ bool parler_load_gguf_impl(const std::string & path, parler_model & model,
     // stream fallback, which bounds the fully-touched mapping from above.
     const bool on_cpu = ::tts_cpp::detail::backend_is_cpu(model.backend);
     bool mapping = false;
-    if (on_cpu && !measure && tts_cpp::cosyvoice::mapped_file_open(model.mapped, path, "parler")) {
+    if (on_cpu && !measure && file.map(model.mapped, path)) {
         model.map_buf = ggml_backend_cpu_buffer_from_ptr(
             (void *) model.mapped.data, model.mapped.size);
         mapping = model.map_buf != nullptr;
@@ -438,7 +511,8 @@ bool parler_load_gguf_impl(const std::string & path, parler_model & model,
         model.buffer_w = ggml_backend_alloc_ctx_tensors_from_buft(model.ctx_w, weight_buft);
         if (!model.buffer_w) return fail("failed to allocate weight buffer");
 
-        ::tts_cpp::detail::gguf_stream_reader rd(g, path);
+        std::unique_ptr<::tts_cpp::detail::gguf_stream_reader> rd_own = file.stream(g, path);
+        ::tts_cpp::detail::gguf_stream_reader & rd = *rd_own;
         if (!rd.ok()) return fail("failed to reopen GGUF for streaming");
         for (ggml_tensor * t = ggml_get_first_tensor(model.ctx_w); t;
              t = ggml_get_next_tensor(model.ctx_w, t)) {
@@ -448,6 +522,7 @@ bool parler_load_gguf_impl(const std::string & path, parler_model & model,
             }
         }
     }
+    if (!measure && parler_gguf_load_hook) parler_gguf_load_hook("weights");
 
     // ---- wire named tensors into the typed structs ----
     auto get = [&](const std::string & name, bool required = true) -> ggml_tensor * {
@@ -618,6 +693,8 @@ void parler_free_model(parler_model & model) {
     model.dac_sidecar_retired = false;
     model.dac_coreml_strict = false;
     model.dac_rvq = {};
+    model.dac_pending.reset();
+    model.dac_source.reset();
     if (model.buffer_dac_derived) {
         ggml_backend_buffer_free(model.buffer_dac_derived);
         model.buffer_dac_derived = nullptr;

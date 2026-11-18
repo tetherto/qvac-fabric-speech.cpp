@@ -45,6 +45,8 @@ struct Config {
     bool (*low_power)() = nullptr;
     std::string host_id;
     std::string os_build;
+    std::optional<Platform> platform;  // tests: plan() as on that platform
+    std::optional<OsVersion> os;
 
     std::chrono::milliseconds memory_recheck{5000};  // deferred(memory) re-check period
     std::chrono::milliseconds backoff_initial{1000}; // would_block re-queue backoff

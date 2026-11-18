@@ -33,16 +33,23 @@
 // stream fallback, which bounds the fully-touched mapping from above --
 // wrong only in the strict direction.
 //
-// Core ML: when the Engine would run the DAC on its Core ML sidecar (the
-// GGUF's name minus its quant tag plus `-dac.mlmodelc`, next to it, in a
-// TTS_CPP_COREML build, not disabled by PARLER_COREML_DISABLE), the result
-// is Error with reason
-// "coreml-memory-estimate-unavailable": resident Core ML models and their
-// prediction buffers cannot be projected by the native fitter. The same
-// refusal applies when coreml_decoder is requested in a Core ML build.
+// Core ML (FitResult::coreml): the DAC stage's route, from `coreml` and the
+// PARLER_COREML_* environment, decided without reading the cache.
+//   - A prebuilt sidecar next to the GGUF (the GGUF's name minus its quant tag
+//     plus `-dac.mlmodelc`, in a TTS_CPP_COREML build, not disabled) keeps the
+//     result Error with reason "coreml-memory-estimate-unavailable": its
+//     resident model and prediction buffers are not projected.
+//   - A generated sidecar (coreml.cache_dir set, template match, macOS 15)
+//     adds the template's Core ML envelope to the projection; the verdict is
+//     the Core ML-inclusive one. With coreml.memory_budget_bytes, a budget only
+//     the ggml projection fits resolves use = off instead (memory-degrade:
+//     coreml.disabled_reason "memory", the ggml verdict).
+// The same refusal applies when coreml_decoder is requested in a Core ML
+// build.
 //
 // See tts-cpp/fit.h for the status contract and result layout.
 
+#include "tts-cpp/coreml_options.h"
 #include "tts-cpp/export.h"
 #include "tts-cpp/fit.h"
 
@@ -64,6 +71,8 @@ struct FitOptions {
     // EngineOptions::coreml_compute_units/coreml_strict have no fitter
     // counterparts: neither makes Core ML memory projectable. Mirror the
     // explicit decoder opt-in above; enabled DAC sidecars are detected by path.
+    // Mirrors EngineOptions::coreml: the DAC route and its Core ML envelope.
+    CoremlOptions coreml;
 
     // ── Workload ──────────────────────────────────────────────────────────
     // Token count of the voice description fed to the T5 encoder (the

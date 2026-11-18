@@ -18,6 +18,13 @@
 //   ./parler-bench --model parler-indic-q8_0.gguf --text "..." \
 //       [--description DESC] [--n-gpu-layers N] [--backend NAME] [--threads N] \
 //       [--max-frames N] [--min-new-tokens N] [--seed 42] [--runs 5] [--warmup 1] [--wav-out audio.wav] [--json-out f.json]
+//       [--coreml-cache-dir DIR] [--coreml-wait none|construct|call] [--coreml-prewarm none|minimal|predicted|all]
+//       [--coreml-compute-units U] [--coreml-status-json FILE]
+//
+// The DAC loads through the shared Core ML runtime as in the Engine: a
+// prebuilt sidecar next to the model, or one generated into --coreml-cache-dir.
+// Each run reports the backend its DAC call took; a run whose sidecar was not
+// ready yet decodes on ggml (`coreml_pending_runs` in --json-out).
 
 #include "internal.h"
 #include "decoder_runtime.h"
@@ -67,7 +74,10 @@ void usage(const char * argv0) {
         "          [--coreml-decoder] (experimental Core ML decoder steps)\n"
         "          [--profile-coreml-decoder] (requires --coreml-decoder; successful measured steps only)\n"
         "          [--seed 42] [--sampled] (default greedy/deterministic)\n"
-        "          [--runs 5] [--warmup 1] [--wav-out FILE] [--json-out FILE]\n",
+        "          [--runs 5] [--warmup 1] [--wav-out FILE] [--json-out FILE]\n"
+        "          [--coreml-cache-dir DIR] (generate the DAC sidecar from the GGUF into DIR)\n"
+        "          [--coreml-wait none|construct|call] [--coreml-prewarm none|minimal|predicted|all]\n"
+        "          [--coreml-compute-units all|cpu_and_ane|cpu_and_gpu|cpu_only] [--coreml-status-json FILE]\n",
         argv0);
 }
 
@@ -139,6 +149,8 @@ int main(int argc, char ** argv) {
     bool greedy = true;
     bool coreml_decoder = false;
     bool profile_coreml_decoder = false;
+    tts_cpp::CoremlOptions coreml;
+    std::string coreml_status_json;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -162,6 +174,24 @@ int main(int argc, char ** argv) {
         else if (a == "--sampled")      greedy      = false;
         else if (a == "--wav-out")      wav_out     = next("--wav-out");
         else if (a == "--json-out")     json_out    = next("--json-out");
+        else if (a == "--coreml-cache-dir") coreml.cache_dir = next("--coreml-cache-dir");
+        else if (a == "--coreml-compute-units") coreml.compute_units = next("--coreml-compute-units");
+        else if (a == "--coreml-status-json") coreml_status_json = next("--coreml-status-json");
+        else if (a == "--coreml-wait") {
+            const std::string v = next("--coreml-wait");
+            if (v == "none") coreml.wait = tts_cpp::CoremlOptions::Wait::none;
+            else if (v == "construct") coreml.wait = tts_cpp::CoremlOptions::Wait::construct;
+            else if (v == "call") coreml.wait = tts_cpp::CoremlOptions::Wait::call;
+            else { fprintf(stderr, "--coreml-wait: none, construct or call\n"); return 2; }
+        }
+        else if (a == "--coreml-prewarm") {
+            const std::string v = next("--coreml-prewarm");
+            if (v == "none") coreml.prewarm = tts_cpp::CoremlOptions::Prewarm::none;
+            else if (v == "minimal") coreml.prewarm = tts_cpp::CoremlOptions::Prewarm::minimal;
+            else if (v == "predicted") coreml.prewarm = tts_cpp::CoremlOptions::Prewarm::predicted;
+            else if (v == "all") coreml.prewarm = tts_cpp::CoremlOptions::Prewarm::all;
+            else { fprintf(stderr, "--coreml-prewarm: none, minimal, predicted or all\n"); return 2; }
+        }
         else if (a == "-h" || a == "--help") { usage(argv[0]); return 0; }
         else { fprintf(stderr, "unknown arg: %s\n", a.c_str()); usage(argv[0]); return 2; }
     }
@@ -189,10 +219,17 @@ int main(int argc, char ** argv) {
         return 1;
     }
     const bool is_cpu = ::tts_cpp::detail::backend_is_cpu(model.backend);
-    // the Core ML DAC sidecar next to the GGUF, as the Engine attaches it
-    // (PARLER_COREML_DISABLE=1 benchmarks the ggml DAC instead)
+    // the Core ML DAC as the Engine loads it: a prebuilt sidecar next to the
+    // GGUF or one generated into --coreml-cache-dir, in the background unless
+    // --coreml-wait construct (PARLER_COREML_DISABLE=1 benchmarks the ggml DAC)
+    std::shared_ptr<parler_dac_coreml> dac_coreml;
+    double coreml_construct_ms = 0.0;
     try {
-        parler_attach_dac_sidecar(model, model_path);
+        const auto c0 = std::chrono::steady_clock::now();
+        dac_coreml = parler_dac_coreml::create(model, model_path, coreml);
+        coreml_construct_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - c0).count();
+        if (!dac_coreml) parler_attach_dac_sidecar(model, model_path);  // builds without Core ML
     } catch (const std::exception & e) {
         fprintf(stderr, "parler-bench: %s\n", e.what());
         parler_free_model(model);
@@ -259,6 +296,7 @@ int main(int argc, char ** argv) {
     Stage st_tot  {"total",       {}};
     std::vector<double> rtfs;
     std::set<std::string> measured_decoder_backends, measured_dac_backends;
+    int coreml_pending_runs = 0;
     parler_decoder_profile_summary decoder_profile;
     double last_audio_s = 0.0;
     int    last_steps = 0;
@@ -316,8 +354,9 @@ int main(int argc, char ** argv) {
         int n_frames = 0;
         const std::vector<int32_t> codes = st.undelay(hp.dac_codebook_size, &n_frames);
         std::vector<float> pcm;
+        bool dac_pending = false;
         if (n_frames <= 0 || !parler_dac_decode(model, codes.data(), n_frames, n_thr, pcm,
-                                                nullptr, 0, -1, nullptr, &dac_backend)) {
+                                                nullptr, 0, -1, nullptr, &dac_backend, &dac_pending)) {
             fprintf(stderr, "parler-bench: dac decode failed\n"); parler_free_model(model); return 1;
         }
         sync(); auto t4 = clk::now();
@@ -328,6 +367,7 @@ int main(int argc, char ** argv) {
             if (profile_coreml_decoder) decoder_profile.merge(std::move(run_decoder_profile));
             measured_decoder_backends.insert(decoder.backend());
             measured_dac_backends.insert(dac_backend);
+            if (dac_pending) ++coreml_pending_runs;
             st_t5 .ms.push_back(ms_t(t1 - t0).count());
             st_pre.ms.push_back(ms_t(t2 - t1).count());
             st_dec.ms.push_back(ms_t(t3 - t2).count());
@@ -361,6 +401,10 @@ int main(int argc, char ** argv) {
     printf("  backend: %s%s\n", ggml_backend_name(model.backend),
            is_cpu ? " (CPU)" : " (GPU)");
     printf("  dac: %s\n", dac_label.c_str());
+    if (dac_coreml) {
+        printf("  dac core ml: route %s, construction %.1f ms, %d measured run(s) on ggml while pending\n",
+               dac_coreml->route().route.c_str(), coreml_construct_ms, coreml_pending_runs);
+    }
     printf("  decoder: %s (ggml prefill)\n", decoder_label.c_str());
     printf("  threads: %d, n_gpu_layers: %d, greedy: %s\n",
            n_thr, n_gpu_layers, greedy ? "yes" : "no");
@@ -392,6 +436,9 @@ int main(int argc, char ** argv) {
             os << "  \"backend\": \"" << json_escape(ggml_backend_name(model.backend)) << "\",\n";
             os << "  \"is_cpu\": " << (is_cpu ? "true" : "false") << ",\n";
             os << "  \"dac_backend\": \"" << json_escape(dac_label) << "\",\n";
+            os << "  \"coreml_construct_ms\": " << coreml_construct_ms << ",\n";
+            os << "  \"coreml_pending_runs\": " << coreml_pending_runs << ",\n";
+            os << "  \"coreml_status\": " << (dac_coreml ? dac_coreml->status_json() : std::string("{}")) << ",\n";
             os << "  \"decoder_backend\": \"" << json_escape(decoder_label) << "\",\n";
             os << "  \"threads\": " << n_thr << ",\n";
             os << "  \"n_gpu_layers\": " << n_gpu_layers << ",\n";
@@ -424,6 +471,9 @@ int main(int argc, char ** argv) {
     }
 
     ggml_gallocr_free(allocr);
+    if (!coreml_status_json.empty()) {
+        std::ofstream(coreml_status_json) << (dac_coreml ? dac_coreml->status_json() : std::string("{}")) << "\n";
+    }
     parler_free_model(model);
     return 0;
 }
