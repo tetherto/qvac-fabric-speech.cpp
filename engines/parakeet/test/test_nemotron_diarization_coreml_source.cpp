@@ -8,7 +8,9 @@
 // holds no artifact. Loaded again with nothing swapped, the minimal capacity
 // is generated and ready.
 //
-// Usage: test-nemotron-diarization-coreml-source <Nemotron q8_0 GGUF> <work dir>
+// Usage: test-nemotron-diarization-coreml-source <q8_0 GGUF> <work dir>
+// The GGUF is Nemotron 3 Diarization or Sortformer v2.1 (both have diarizer
+// templates).
 // Never skips: every check needs Core ML generation (macOS 15, the generator
 // built in).
 

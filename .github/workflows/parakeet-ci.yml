@@ -394,7 +394,8 @@ jobs:
             --require test-nemotron-diarization-coreml-generated-parity \
             --require test-fit-coreml-generated-diarizers \
             --require test-sortformer-diarizer-coreml-generated-parity \
-            --require test-fit-coreml-generated-sortformer-diarizer
+            --require test-fit-coreml-generated-sortformer-diarizer \
+            --require test-sortformer-diarizer-coreml-source
 
       # Real-weights gate: for each Nemotron template, the unchanged exporter on
       # the staged GGUF dequantised by ggml against the C++ generator on the

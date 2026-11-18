@@ -2041,6 +2041,32 @@ if (PARAKEET_BUILD_TESTS)
                     "${CMAKE_CURRENT_BINARY_DIR}/coreml-generated-sortformer-fit-cache" 1)
         set_tests_properties(test-fit-coreml-generated-sortformer-diarizer PROPERTIES
             LABELS "fixture;coreml;coreml-generated" TIMEOUT 1800)
+        # The Sortformer diarizer is generated only from the file whose weights
+        # the model loaded, as for Nemotron (same test, Sortformer GGUF).
+        if (NOT TARGET test-nemotron-diarization-coreml-source)
+            add_executable(test-nemotron-diarization-coreml-source
+                test/test_nemotron_diarization_coreml_source.cpp
+                src/parakeet_ctc.cpp
+                src/parakeet_diarization_v3.cpp
+                src/parakeet_coreml_path.cpp
+                src/coreml/parakeet_coreml_shape.cpp
+                src/parakeet_log.cpp
+                src/mel_preprocess.cpp
+                src/sentencepiece_bpe.cpp
+                ${PARAKEET_COREML_OBJC_SOURCES})
+            target_link_libraries(test-nemotron-diarization-coreml-source PRIVATE ggml parakeet-backend-defs
+                ${PARAKEET_FOUNDATION_FRAMEWORK} ${PARAKEET_COREML_FRAMEWORK})
+            target_include_directories(test-nemotron-diarization-coreml-source PRIVATE include src ggml/include)
+            target_compile_definitions(test-nemotron-diarization-coreml-source PRIVATE PARAKEET_USE_COREML)
+            parakeet_apply_backend_defs(test-nemotron-diarization-coreml-source)
+            parakeet_apply_ccache(test-nemotron-diarization-coreml-source)
+            parakeet_test_use_coreml_runtime(test-nemotron-diarization-coreml-source)
+        endif()
+        add_test(NAME test-sortformer-diarizer-coreml-source
+            COMMAND test-nemotron-diarization-coreml-source "${PARAKEET_TEST_SORTFORMER_GENERATED_GGUF}"
+                    "${CMAKE_CURRENT_BINARY_DIR}/coreml-source-swap-sortformer")
+        set_tests_properties(test-sortformer-diarizer-coreml-source PROPERTIES
+            LABELS "fixture;coreml;coreml-generated" TIMEOUT 1800)
     endif()
 
     # Diarizer failure handling: a bundle that fails to load or to run is
