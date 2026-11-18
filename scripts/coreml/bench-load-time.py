@@ -1065,7 +1065,16 @@ def summarize(recs: list) -> dict:
     by = {}
     for r in recs:
         by.setdefault(r["kind"], []).append(r)
-    s: dict = {"env": (by.get("env") or [{}])[-1], "runs": by.get("env", [])}
+    # A run is an env row followed by its measurement rows. An attempt that
+    # stopped before measuring anything (such as one refused on battery power)
+    # still wrote its env row; it contributed nothing and is not a run here.
+    runs, current = [], None
+    for r in recs:
+        if r["kind"] == "env":
+            current = r
+        elif current is not None and (not runs or runs[-1] is not current):
+            runs.append(current)
+    s: dict = {"env": (runs or by.get("env") or [{}])[-1], "runs": runs}
 
     # Results appended by several runs into one --out: one row per artifact.
     s["sizes"] = list({(r["variant"], r["set"], r["stage"]): r for r in by.get("sizes", [])}.values())

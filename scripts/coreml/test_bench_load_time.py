@@ -961,6 +961,31 @@ class PowerRunnerTest(unittest.TestCase):
             self.run_ttr([BATTERY])
         self.assertIn("need AC power (pmset reports battery)", str(cm.exception))
 
+    def test_an_attempt_refused_on_battery_is_not_a_run_of_the_report(self):
+        # A completed AC run, then an attempt on battery into the same output
+        # directory: the attempt writes its env row before refusing, but it
+        # measured nothing, so the report has one run that started on AC.
+        fx, r, _ = self.run_ttr([AC])
+        fx.power, fx.power_reads = [BATTERY], 0
+        again = fx.runner()
+        self.assertEqual(again.results, r.results)
+
+        def run(cmd, *a, **k):
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with fx.patched(), contextlib.redirect_stdout(io.StringIO()), mock.patch.object(blt.subprocess, "run", run):
+            with self.assertRaises(SystemExit) as cm:
+                again.environment()
+        self.assertIn("need AC power (pmset reports battery)", str(cm.exception))
+        recs = fx.records(r)
+        self.assertEqual([x["power"]["source"] for x in recs if x["kind"] == "env"], ["ac", "battery"])
+        s = blt.summarize(recs)
+        self.assertEqual(len(s["runs"]), 1)
+        self.assertIs(s["env"], s["runs"][0])
+        block = self.power_block(blt.render(s))
+        self.assertIn("Power at the start of the run: AC.", block)
+        self.assertNotIn("battery", block.split("| Measurement |")[0].split("misses a change")[1])
+
     def run_cmd(self, readings, ready=lambda call: True):
         """`run ttr` through cmd_run on the fixture: (exit code or exception, stderr)."""
         d = tempfile.TemporaryDirectory()
