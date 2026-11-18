@@ -10,7 +10,7 @@ Measured with `scripts/coreml/bench-load-time.py` on the workloads pinned in `sc
 <!-- report:power -->
 ## Power source per row
 
-`run` samples the power source (`pmset -g batt`) and Low Power Mode (`pmset -g`) at the start and once after each measurement. A row's `power` in `results.jsonl` is the sample taken after it was measured; the rows one process produces, such as every function of a cold load, share it. `power_changed` is a conservative flag from adjacent samples: it is set when the row's sample or the one before it differs from the start's. It can flag a row measured wholly on the start's power (the power came back before the measurement began), and it misses a change that reverts between two samples.
+`run` samples the power source (`pmset -g batt`) and Low Power Mode (`pmset -g`) at the start and once after each measurement. A row's `power` in `results.jsonl` is the sample taken after it was measured; the rows one process produces, such as every function of a cold load, share it. `power_changed` is a conservative flag from adjacent samples: it is set when the row's sample or the one before it differs from the start's. It can flag a row measured wholly on the start's power (the power came back before the measurement began), and it misses a change that reverts between two samples. A field `pmset` could not give (source `unknown`, `low_power` null) is never counted as a change: the rows next to it get `power_uncertain` instead, unless a field that was read confirms a change.
 
 None of the 443 rows carries a power reading: they were recorded before `run` read the power source per row. The header says how the run was powered.
 

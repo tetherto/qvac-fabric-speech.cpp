@@ -530,6 +530,20 @@ def read_power(reader=pmset) -> dict:
     return {"source": parse_power_source(reader("-g", "batt")), "low_power": parse_low_power(reader("-g"))}
 
 
+def power_compare(start: dict, p: dict):
+    """(changed, uncertain) for sample `p` against the start's, field by
+    field. A field pmset did not give (source 'unknown', low_power None) in
+    either sample is uncertain, never a change."""
+    changed = uncertain = False
+    for field, unavailable in (("source", "unknown"), ("low_power", None)):
+        a, b = start.get(field, unavailable), p.get(field, unavailable)
+        if a == unavailable or b == unavailable:
+            uncertain = True
+        elif a != b:
+            changed = True
+    return changed, uncertain
+
+
 def power_label(p) -> str:
     """'AC', 'battery', 'AC, Low Power Mode', ... for messages and the report."""
     if not p:
@@ -666,8 +680,9 @@ class Runner:
         self.power_reader = power_reader or read_power
         self.power_start = None
         self.power_last = None
-        self.power_flagged: dict = {}  # kind -> rows recorded while the power differed from the start
-        self.power_warned = False
+        self.power_flagged: dict = {}    # kind -> rows flagged power_changed
+        self.power_uncertain: dict = {}  # kind -> rows flagged power_uncertain
+        self.power_warned: set = set()   # which of the two warnings were printed
         self.m = m
         self.proto = m["protocol"]
         self.models = models_root(args.models_root)
@@ -697,8 +712,9 @@ class Runner:
         if kind != "env":
             reading = reading or self._power_reading()
             fields.update(reading)
-            if reading["power_changed"]:
-                self.power_flagged[kind] = self.power_flagged.get(kind, 0) + 1
+            for flag, counts in (("power_changed", self.power_flagged), ("power_uncertain", self.power_uncertain)):
+                if reading[flag]:
+                    counts[kind] = counts.get(kind, 0) + 1
         rec = {"kind": kind, "t": datetime.datetime.now(datetime.timezone.utc).isoformat(), **fields}
         with open(self.results, "a") as f:
             f.write(json.dumps(rec) + "\n")
@@ -710,27 +726,44 @@ class Runner:
         conservative adjacent-sample test: set when this sample or the one
         before it differs from the start's. It can flag a measurement that ran
         wholly on the start's power (the power came back before it began), and
-        a change that reverts between two samples goes unseen."""
+        a change that reverts between two samples goes unseen. A field pmset
+        could not give is not compared: the rows next to it are flagged
+        power_uncertain instead, unless a known field confirms a change."""
         now = self.power_reader()
         if self.power_start is None:
             self.power_start = self.power_last = now
-        changed = now != self.power_start or self.power_last != self.power_start
+        c_now, u_now = power_compare(self.power_start, now)
+        c_last, u_last = power_compare(self.power_start, self.power_last)
+        changed = c_now or c_last
+        uncertain = not changed and (u_now or u_last)
         self.power_last = now
-        if changed and not self.power_warned:
-            self.power_warned = True
+        if changed and "changed" not in self.power_warned:
+            self.power_warned.add("changed")
             print(f"bench-load-time: warning: power changed from {power_label(self.power_start)} to "
                   f"{power_label(now)}; flagging rows (power_changed) and continuing", file=sys.stderr, flush=True)
-        return {"power": now, "power_changed": changed}
+        if uncertain and "uncertain" not in self.power_warned:
+            self.power_warned.add("uncertain")
+            print(f"bench-load-time: warning: could not read the power source or Low Power Mode (pmset gave "
+                  f"{power_label(now)}, started on {power_label(self.power_start)}); flagging rows "
+                  "(power_uncertain) and continuing", file=sys.stderr, flush=True)
+        return {"power": now, "power_changed": changed, "power_uncertain": uncertain}
 
     def power_warning(self) -> str | None:
         """The end-of-run warning when any row was flagged, else None."""
-        if not self.power_flagged:
-            return None
-        n = sum(self.power_flagged.values())
-        kinds = ", ".join(f"{k} {c}" for k, c in self.power_flagged.items())
-        return (f"bench-load-time: warning: the power source or Low Power Mode changed during the run "
-                f"(started on {power_label(self.power_start)}); {n} rows are flagged power_changed ({kinds}). "
-                f"Their numbers may not compare with the rest; re-run those measurements on steady power.")
+        def rows(counts):
+            return f"{sum(counts.values())} rows", ", ".join(f"{k} {c}" for k, c in counts.items())
+
+        out = []
+        if self.power_flagged:
+            n, kinds = rows(self.power_flagged)
+            out.append(f"bench-load-time: warning: the power source or Low Power Mode changed during the run "
+                       f"(started on {power_label(self.power_start)}); {n} are flagged power_changed ({kinds}). "
+                       "Their numbers may not compare with the rest; re-run those measurements on steady power.")
+        if self.power_uncertain:
+            n, kinds = rows(self.power_uncertain)
+            out.append(f"bench-load-time: warning: pmset could not be read for some power samples; {n} are flagged "
+                       f"power_uncertain ({kinds}): whether the power changed while they were measured is unknown.")
+        return "\n".join(out) or None
 
     def need(self, what: Path, label: str):
         if what is None or not Path(what).exists():
@@ -1105,17 +1138,18 @@ def summarize(recs: list) -> dict:
     for r in recs:
         if r["kind"] == "env":
             continue
-        e = power.setdefault(r["kind"], {"rows": 0, "ac": 0, "battery": 0, "other": 0, "not_recorded": 0,
-                                         "low_power": 0, "changed": 0})
+        e = power.setdefault(r["kind"], {"rows": 0, "ac": 0, "battery": 0, "other": 0, "unavailable": 0,
+                                         "not_recorded": 0, "low_power": 0, "changed": 0, "uncertain": 0})
         e["rows"] += 1
         p = r.get("power")
         if not p:
             e["not_recorded"] += 1
             continue
         src = p.get("source")
-        e[src if src in ("ac", "battery") else "other"] += 1
+        e[src if src in ("ac", "battery") else "unavailable" if src in (None, "unknown") else "other"] += 1
         e["low_power"] += bool(p.get("low_power"))
         e["changed"] += bool(r.get("power_changed"))
+        e["uncertain"] += bool(r.get("power_uncertain"))
     s["power"] = power
     return s
 
@@ -1162,7 +1196,9 @@ def render(s: dict) -> str:
       "process produces, such as every function of a cold load, share it. `power_changed` is a conservative flag "
       "from adjacent samples: it is set when the row's sample or the one before it differs from the start's. It can "
       "flag a row measured wholly on the start's power (the power came back before the measurement began), and it "
-      "misses a change that reverts between two samples.")
+      "misses a change that reverts between two samples. A field `pmset` could not give (source `unknown`, "
+      "`low_power` null) is never counted as a change: the rows next to it get `power_uncertain` instead, unless "
+      "a field that was read confirms a change.")
     w("")
     pw = s["power"]
     recorded = sum(e["rows"] - e["not_recorded"] for e in pw.values())
@@ -1172,18 +1208,26 @@ def render(s: dict) -> str:
         w(f"None of the {sum(e['rows'] for e in pw.values())} rows carries a power reading: they were recorded "
           "before `run` read the power source per row. The header says how the run was powered.")
     else:
+        total = sum(e["rows"] for e in pw.values())
         changed = sum(e["changed"] for e in pw.values())
+        uncertain = sum(e["uncertain"] for e in pw.values())
         if changed:
             kinds = ", ".join(k for k, e in pw.items() if e["changed"])
-            w(f"**Warning: the power source or Low Power Mode changed during the run.** {changed} of "
-              f"{sum(e['rows'] for e in pw.values())} rows are flagged ({kinds}); their numbers may not compare with "
-              "the rest. Re-run those measurements on steady power.")
+            w(f"**Warning: the power source or Low Power Mode changed during the run.** {changed} of {total} rows "
+              f"are flagged changed ({kinds}); their numbers may not compare with the rest. Re-run those "
+              "measurements on steady power.")
             w("")
-        w("| Measurement | Rows | AC | Battery | Other | Not recorded | Low Power Mode | Flagged |")
-        w("|---|--:|--:|--:|--:|--:|--:|--:|")
+        if uncertain:
+            kinds = ", ".join(k for k, e in pw.items() if e["uncertain"])
+            w(f"**Warning: `pmset` could not be read for some samples.** {uncertain} of {total} rows are flagged "
+              f"uncertain ({kinds}): whether the power changed while they were measured is unknown.")
+            w("")
+        w("| Measurement | Rows | AC | Battery | Other | Unavailable | Not recorded | Low Power Mode | Changed | "
+          "Uncertain |")
+        w("|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|")
         for k, e in pw.items():
-            w(f"| {k} | {e['rows']} | {e['ac']} | {e['battery']} | {e['other']} | {e['not_recorded']} | "
-              f"{e['low_power']} | {e['changed']} |")
+            w(f"| {k} | {e['rows']} | {e['ac']} | {e['battery']} | {e['other']} | {e['unavailable']} | "
+              f"{e['not_recorded']} | {e['low_power']} | {e['changed']} | {e['uncertain']} |")
     w("")
     end("power")
 

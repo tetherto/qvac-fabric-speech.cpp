@@ -446,6 +446,7 @@ class TtrSummaryTest(unittest.TestCase):
 AC = {"source": "ac", "low_power": False}
 BATTERY = {"source": "battery", "low_power": False}
 AC_LOW_POWER = {"source": "ac", "low_power": True}
+UNREADABLE = {"source": "unknown", "low_power": None}  # what read_power gives when pmset fails
 
 PMSET_BATT_AC = """Now drawing from 'AC Power'
  -InternalBattery-0 (id=36438115)\t100%; charged; 0:00 remaining present: true
@@ -759,13 +760,14 @@ class PowerRunnerTest(unittest.TestCase):
         rows = self.rows(fx, r)
         self.assertEqual([x["kind"] for x in rows], ["ttr", "ttr_cached", "ttr_cached", "ttr", "ttr_cached",
                                                      "ttr_cached", "ttr"])
-        self.assertTrue(all(x["power"] == AC and x["power_changed"] is False for x in rows), rows)
+        self.assertTrue(all(x["power"] == AC and x["power_changed"] is False and x["power_uncertain"] is False
+                            for x in rows), rows)
         self.assertEqual(fx.power_reads, 1 + len(rows))
         self.assertIsNone(r.power_warning())
         self.assertEqual(err, "")
         doc = blt.render(blt.summarize(fx.records(r)))
         self.assertIn("power at the start: AC.", doc)
-        self.assertIn("| ttr | 3 | 3 | 0 | 0 | 0 | 0 | 0 |", doc)
+        self.assertIn("| ttr | 3 | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |", doc)
         self.assertNotIn("Warning", doc)
 
     def test_a_change_mid_run_flags_the_rows_and_continues(self):
@@ -782,10 +784,47 @@ class PowerRunnerTest(unittest.TestCase):
         self.assertIn("started on AC", warning)
         doc = blt.render(blt.summarize(fx.records(r)))
         self.assertIn("**Warning: the power source or Low Power Mode changed during the run.** 3 of 7 rows are "
-                      "flagged (ttr, ttr_cached)", doc)
-        self.assertIn("| ttr | 3 | 3 | 0 | 0 | 0 | 0 | 1 |", doc)
-        self.assertIn("| ttr_cached | 4 | 2 | 2 | 0 | 0 | 0 | 2 |", doc)
+                      "flagged changed (ttr, ttr_cached)", doc)
+        self.assertIn("| ttr | 3 | 3 | 0 | 0 | 0 | 0 | 0 | 1 | 0 |", doc)
+        self.assertIn("| ttr_cached | 4 | 2 | 2 | 0 | 0 | 0 | 0 | 2 | 0 |", doc)
         self.assertIsNone(TASK_ID.search(doc), TASK_ID.search(doc))
+
+    def test_a_failed_read_on_steady_ac_is_uncertain_not_a_change(self):
+        # pmset failed once (row 2) on a run that stayed on AC: rows 2 and 3
+        # are uncertain, nothing is a change, and the report counts the
+        # failed sample as unavailable, not as another source.
+        fx, r, err = self.run_ttr([AC, AC, UNREADABLE, AC])
+        rows = self.rows(fx, r)
+        self.assertEqual([x["power_changed"] for x in rows], [False] * 7)
+        self.assertEqual([x["power_uncertain"] for x in rows], [False, True, True, False, False, False, False])
+        self.assertNotIn("power changed", err)
+        self.assertEqual(err.count("could not read the power source or Low Power Mode"), 1, err)
+        warning = r.power_warning()
+        self.assertNotIn("power_changed", warning)
+        self.assertIn("2 rows are flagged power_uncertain (ttr_cached 2)", warning)
+        doc = blt.render(blt.summarize(fx.records(r)))
+        self.assertNotIn("changed during the run", doc)
+        self.assertIn("**Warning: `pmset` could not be read for some samples.** 2 of 7 rows are flagged uncertain "
+                      "(ttr_cached)", doc)
+        self.assertIn("| ttr_cached | 4 | 3 | 0 | 0 | 1 | 0 | 0 | 0 | 2 |", doc)
+        self.assertIn("| ttr | 3 | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |", doc)
+
+    def test_a_known_field_confirms_a_change_when_the_other_is_unavailable(self):
+        # `pmset -g` failed but `pmset -g batt` says battery: a change.
+        fx, r, err = self.run_ttr([AC, AC, {"source": "battery", "low_power": None}, AC])
+        rows = self.rows(fx, r)
+        self.assertEqual([x["power_changed"] for x in rows], [False, True, True, False, False, False, False])
+        self.assertEqual([x["power_uncertain"] for x in rows], [False] * 7)
+        self.assertIn("power changed from AC to battery, Low Power Mode unknown", err)
+        self.assertNotIn("power_uncertain", r.power_warning())
+
+    def test_power_compare_field_by_field(self):
+        self.assertEqual(blt.power_compare(AC, AC), (False, False))
+        self.assertEqual(blt.power_compare(AC, BATTERY), (True, False))
+        self.assertEqual(blt.power_compare(AC, AC_LOW_POWER), (True, False))
+        self.assertEqual(blt.power_compare(AC, UNREADABLE), (False, True))
+        self.assertEqual(blt.power_compare(UNREADABLE, AC), (False, True))
+        self.assertEqual(blt.power_compare(AC, {"source": "ac", "low_power": None}), (False, True))
 
     def test_the_flag_is_described_as_an_adjacent_sample_test(self):
         # Row 3 reads AC again yet is flagged: the sample before it was
@@ -838,7 +877,7 @@ class PowerRunnerTest(unittest.TestCase):
         rows = self.rows(fx, r)
         self.assertEqual([x["power"]["low_power"] for x in rows], [False, True, False, False, False, False, False])
         self.assertEqual([x["power_changed"] for x in rows], [False, True, True, False, False, False, False])
-        self.assertIn("| ttr_cached | 4 | 4 | 0 | 0 | 0 | 1 | 2 |", blt.render(blt.summarize(fx.records(r))))
+        self.assertIn("| ttr_cached | 4 | 4 | 0 | 0 | 0 | 0 | 1 | 2 | 0 |", blt.render(blt.summarize(fx.records(r))))
 
     def test_steady_battery_run_is_labelled_not_flagged(self):
         fx, r, _ = self.run_ttr([BATTERY], allow_battery=True)
@@ -848,7 +887,7 @@ class PowerRunnerTest(unittest.TestCase):
         self.assertIsNone(r.power_warning())
         doc = blt.render(blt.summarize(fx.records(r)))
         self.assertIn("power at the start: battery.", doc)
-        self.assertIn("| ttr | 3 | 0 | 3 | 0 | 0 | 0 | 0 |", doc)
+        self.assertIn("| ttr | 3 | 0 | 3 | 0 | 0 | 0 | 0 | 0 | 0 |", doc)
 
     def test_battery_at_the_start_still_refuses(self):
         with self.assertRaises(SystemExit) as cm:
