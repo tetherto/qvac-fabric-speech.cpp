@@ -33,6 +33,7 @@
 
 #include "pocket/coreml.h"
 #include "tts-cpp/pocket/fit.h"
+#include "../test_env_portable.h"
 
 #ifdef TTS_CPP_USE_COREML
 #include "hints.h"
@@ -87,6 +88,9 @@ void write_file(const fs::path & p, const std::string & text) {
     std::ofstream(p) << text;
 }
 
+#ifdef TTS_CPP_USE_COREML
+namespace pcm = QVAC_COREML_NS;
+
 std::vector<fs::path> artifact_dirs(const fs::path & cache) {
     std::vector<fs::path> out;
     std::error_code ec;
@@ -99,9 +103,6 @@ std::vector<fs::path> artifact_dirs(const fs::path & cache) {
 bool starts_with(const std::string & s, const std::string & prefix) {
     return s.compare(0, prefix.size(), prefix) == 0;
 }
-
-#ifdef TTS_CPP_USE_COREML
-namespace pcm = QVAC_COREML_NS;
 
 // The compute units the runtime loads an artifact with: its stage's, from
 // the template id the artifact directory starts with.
