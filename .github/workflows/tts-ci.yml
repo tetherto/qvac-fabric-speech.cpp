@@ -1150,15 +1150,20 @@ jobs:
       # three times per template, each from a re-signed copy of the test and
       # an empty cache, so every Neural Engine load is cold. The schedule
       # measures the generated route whatever the device class prefers. Each
-      # run prints its per-phase table and fails when the prepare, the load
-      # and warm-up, the steady state, the whole run or ANECompilerService's
-      # growth during the load exceeds the template constant that charges it;
-      # it also prints the service's size before the load and labels that
-      # baseline clean, dirty or unknown (docs/supertonic.md). Runs whenever
-      # the generated-sidecar step ran. Known failure mode, as for the Parler
-      # DAC's schedule: the growth sums every ANECompilerService instance on
-      # the Mac, so a co-hosted job that compiles for the Neural Engine during
-      # this load counts as growth; rerun the job.
+      # run prints its per-phase table and fails unless 1.25 x each phase it
+      # measured (the prepare, the load and warm-up, the steady state,
+      # ANECompilerService's absolute size while loading) fits the template
+      # constant that charges it, and the whole run fits the envelope; a failed
+      # probe, or a call that fails or runs on another backend, fails it too.
+      # The constants are 1.25 x the largest value of every run on every
+      # validated host, so a run that sets a new maximum fails until they are
+      # recomputed (docs/supertonic.md). Each run also prints the service's
+      # growth and its size before the load, labelled clean, dirty or unknown.
+      # Runs whenever the generated-sidecar step ran. Known failure mode, as
+      # for the Parler DAC's schedule: the service's size sums every instance
+      # on the Mac, so a co-hosted job that compiles for the Neural Engine
+      # during this load counts too: a run above 532 MiB fails the 665 MiB
+      # reserve and, by the rule above, raises it.
       - name: Memory schedule (generated Supertonic vocoder, overlapped, this runner)
         if: >-
           !cancelled() && runner.os == 'macOS' &&

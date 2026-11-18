@@ -55,6 +55,7 @@ int main() {
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <thread>
 
 #include <sys/clonefile.h>
@@ -632,12 +633,23 @@ void check_device_gating(const std::string & gguf, const std::string & cache_dir
            "use = require generates on an Ultra");
 }
 
+// The backend label a sidecar opened for `units` reports.
+std::string label_for_units(const std::string & units) {
+    if (units == "cpu_and_ane") return "coreml-ane";
+    if (units == "cpu_and_gpu") return "coreml-gpu";
+    if (units == "cpu_only") return "coreml-cpu";
+    return "coreml-all";
+}
+
 // The overlapped memory schedule: ggml vocoder calls on this thread while the
 // sidecar is generated, compiled, loaded and warmed in the background into a
 // fresh `cache_dir`, until five calls have run on Core ML. One sampler thread
 // reads the footprint and the slot's state every millisecond (the warm-up
-// prediction takes a few); another reads ANECompilerService every 20 ms. Every phase must stay within the
-// template constant that charges it (engines/coreml/test/memory_schedule.h).
+// prediction takes a few); another reads ANECompilerService every 20 ms,
+// each query bracketed by two reads of the slot state. 1.25 x every phase's
+// measurement must stay within the template constant that charges it, and a
+// failed probe, a failed call or one on another backend fails the run
+// (engines/coreml/test/memory_schedule.h).
 void memory_schedule(const std::string & gguf, const std::string & cache_dir) {
     using namespace qvac_coreml_memory;
     const std::string chip = supertonic_cpu_brand();
@@ -658,8 +670,16 @@ void memory_schedule(const std::string & gguf, const std::string & cache_dir) {
     const std::vector<float> latent = make_latent(model.hparams.latent_channels, latent_len, 29u);
     std::vector<float> wav;
     std::string error, backend;
-    for (int i = 0; i < 2; ++i) supertonic_vocoder_forward_ggml(model, latent.data(), latent_len, wav);  // warm ggml
-    const uint64_t base = phys_footprint();
+    for (int i = 0; i < 2; ++i) {  // warm the ggml arena
+        const bool ok = supertonic_vocoder_forward_ggml(model, latent.data(), latent_len, wav, &error, &backend);
+        if (classify_call(ok, backend, SUPERTONIC_VOCODER_GGML_BACKEND, "") != schedule_call::ggml) {
+            fail("memory schedule: the ggml warm-up call succeeds (" + backend + (ok ? "" : ": " + error) + ")");
+            return;
+        }
+    }
+    uint64_t base = 0;
+    const bool base_ok = phys_footprint(base);
+    size_t footprint_failures = 0;
     std::atomic<bool> stop{false};
     std::atomic<int> phase{(int) mem_phase::ggml};
     std::atomic<const supertonic_vocoder_coreml *> watched{nullptr};
@@ -670,15 +690,34 @@ void memory_schedule(const std::string & gguf, const std::string & cache_dir) {
         while (!stop.load()) {
             const supertonic_vocoder_coreml * v = watched.load();
             if (v != nullptr) phase.store((int) mem_phase_of(v->state()));
-            samples.push_back({phys_footprint(), (mem_phase) phase.load()});
+            uint64_t fp = 0;
+            if (phys_footprint(fp)) {
+                samples.push_back({fp, (mem_phase) phase.load()});
+            } else {
+                ++footprint_failures;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     });
+    // Each compiler query is bracketed by its own reads of the slot state
+    // (not the footprint sampler's cached phase): a query that crossed the
+    // load's start or end is dropped (counted, reported).
+    size_t ane_crossing = 0;
     std::thread ane_sampler([&] {
+        const auto slot_phase = [&] {
+            const supertonic_vocoder_coreml * v = watched.load();
+            return v ? mem_phase_of(v->state()) : mem_phase::ggml;
+        };
         while (!stop.load()) {
-            const uint64_t a = ane_compiler_rss();
-            const auto p = (mem_phase) phase.load();
-            ane_samples.push_back({a, p == mem_phase::load || p == mem_phase::warm});
+            const mem_phase before = slot_phase();
+            uint64_t a = 0;
+            const bool ok = ane_compiler_rss(a);
+            const std::optional<bool> loading = ane_query_loading(before, slot_phase());
+            if (loading) {
+                ane_samples.push_back({a, *loading, ok});
+            } else {
+                ++ane_crossing;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
     });
@@ -690,14 +729,21 @@ void memory_schedule(const std::string & gguf, const std::string & cache_dir) {
         fail(std::string("memory schedule: create: ") + e.what());
     }
     watched.store(stage.get());
-    int ggml_calls = 0, coreml_calls = 0;
+    int ggml_calls = 0, coreml_calls = 0, bad_calls = 0;
+    const std::string coreml_label = label_for_units(route.compute_units);
     while (stage && std::chrono::steady_clock::now() - t0 < std::chrono::minutes(5)) {
         bool pending = false;
-        if (!supertonic_vocoder_forward_ggml(model, latent.data(), latent_len, wav, &error, &backend, &pending)) {
-            fail("memory schedule: vocoder call failed: " + error);
+        backend.clear();
+        const bool ok =
+            supertonic_vocoder_forward_ggml(model, latent.data(), latent_len, wav, &error, &backend, &pending);
+        const schedule_call k = classify_call(ok, backend, SUPERTONIC_VOCODER_GGML_BACKEND, coreml_label);
+        if (k == schedule_call::bad) {
+            ++bad_calls;
+            fail("memory schedule: every overlapped call succeeds on ggml or " + coreml_label + " (" +
+                 (ok ? backend : "failed on " + backend + ": " + error) + ")");
             break;
         }
-        if (backend == "ggml") {
+        if (k == schedule_call::ggml) {
             ++ggml_calls;
         } else if (++coreml_calls >= 5) {
             break;
@@ -713,6 +759,13 @@ void memory_schedule(const std::string & gguf, const std::string & cache_dir) {
     const mem_breakdown b = mem_breakdown_of(samples, base);
     const AneGrowth ane = ane_compiler_growth(ane_samples);
     const AneBaseline baseline = ane_compiler_baseline(ane);
+    char before_load[96];
+    if (baseline == AneBaseline::unknown) {
+        std::snprintf(before_load, sizeof(before_load), "no sample before the load, an unknown baseline");
+    } else {
+        std::snprintf(before_load, sizeof(before_load), "before the load %.1f MiB, a %s baseline", mib(ane.before),
+                      ane_baseline_name(baseline));
+    }
     uint64_t ane_peak = 0;
     for (const auto & a : ane_samples) ane_peak = std::max(ane_peak, a.rss);
     const mem_charges c{route.prepare_peak_bytes, route.load_peak_bytes, route.resident_bytes,
@@ -721,39 +774,48 @@ void memory_schedule(const std::string & gguf, const std::string & cache_dir) {
     const uint64_t workspace = b.steady > other_resident ? b.steady - other_resident : 0;
     std::fprintf(stderr,
                  "  memory (MiB; each phase over the footprint just before it began, steady over the footprint just "
-                 "before the load, whole run over the warm ggml baseline %.1f):\n"
-                 "    prepare    %7.1f  charged %7.1f  (generate %.1f, compile %.1f)\n"
-                 "    load+warm  %7.1f  charged %7.1f  (load %.1f, warm-up %.1f)\n"
-                 "    steady     %7.1f  charged %7.1f  (workspace %.1f, charged %.1f; over the baseline %.1f)\n"
-                 "    whole run  %7.1f  charged %7.1f  (envelope, margin included)\n"
-                 "    ANECompilerService growth while loading and warming %.1f, reserve %.1f (before the load %.1f, "
-                 "a %s baseline; peak while loading %.1f, whole run %.1f)\n",
-                 mib(base), mib(b.prepare), mib(c.prepare), mib(b.generate), mib(b.compile), mib(b.load_warm),
-                 mib(c.load), mib(b.load), mib(b.warm), mib(b.steady), mib(c.resident), mib(workspace),
-                 mib(route.workspace_bytes), mib(b.steady_over_base), mib(b.total), mib(c.envelope), mib(ane.growth),
-                 mib(c.ane_reserve), mib(ane.before), ane_baseline_name(baseline), mib(ane.peak), mib(ane_peak));
+                 "before the load, whole run over the warm ggml baseline %.1f; a phase needs x%.2f its "
+                 "measurement):\n"
+                 "    prepare    %7.1f  needs %7.1f  charged %7.1f  (generate %.1f, compile %.1f)\n"
+                 "    load+warm  %7.1f  needs %7.1f  charged %7.1f  (load %.1f, warm-up %.1f)\n"
+                 "    steady     %7.1f  needs %7.1f  charged %7.1f  (workspace %.1f, charged %.1f; over the baseline "
+                 "%.1f)\n"
+                 "    whole run  %7.1f  needs %7.1f  charged %7.1f  (the envelope: margined phases)\n"
+                 "    ANECompilerService size while loading and warming %.1f, needs %.1f, reserve %.1f (growth %.1f, "
+                 "%s; whole run %.1f)\n",
+                 mib(base), MEASURED_MARGIN, mib(b.prepare), MEASURED_MARGIN * mib(b.prepare), mib(c.prepare),
+                 mib(b.generate), mib(b.compile), mib(b.load_warm), MEASURED_MARGIN * mib(b.load_warm), mib(c.load),
+                 mib(b.load), mib(b.warm), mib(b.steady), MEASURED_MARGIN * mib(b.steady), mib(c.resident),
+                 mib(workspace), mib(route.workspace_bytes), mib(b.steady_over_base), mib(b.total), mib(b.total),
+                 mib(c.envelope), mib(ane.peak), MEASURED_MARGIN * mib(ane.peak), mib(c.ane_reserve),
+                 mib(ane.growth), before_load, mib(ane_peak));
     std::fprintf(stderr,
                  "  memory report: {\"chip\":\"%s\",\"template\":\"%s\",\"units\":\"%s\",\"base\":%llu,\"prepare\":%llu,"
                  "\"generate\":%llu,\"compile\":%llu,\"load_warm\":%llu,\"load\":%llu,\"warm\":%llu,\"steady\":%llu,"
                  "\"steady_over_base\":%llu,\"workspace\":%llu,\"total\":%llu,\"ane_compiler_load_peak\":%llu,"
                  "\"ane_compiler_before_load\":%llu,\"ane_compiler_growth\":%llu,\"ane_compiler_peak\":%llu,"
-                 "\"ane_compiler_baseline\":\"%s\",\"samples\":%zu}\n",
+                 "\"ane_compiler_baseline\":\"%s\",\"samples\":%zu,\"ane_compiler_loading_samples\":%zu,"
+                 "\"ane_compiler_crossing\":%zu}\n",
                  chip.c_str(), route.template_id.c_str(), route.compute_units.c_str(), (unsigned long long) base,
                  (unsigned long long) b.prepare, (unsigned long long) b.generate, (unsigned long long) b.compile,
                  (unsigned long long) b.load_warm, (unsigned long long) b.load, (unsigned long long) b.warm,
                  (unsigned long long) b.steady, (unsigned long long) b.steady_over_base,
                  (unsigned long long) workspace, (unsigned long long) b.total, (unsigned long long) ane.peak,
                  (unsigned long long) ane.before, (unsigned long long) ane.growth, (unsigned long long) ane_peak,
-                 ane_baseline_name(baseline), samples.size());
-    const std::vector<std::string> failures = mem_failures(b, ane.growth, c);
+                 ane_baseline_name(baseline), samples.size(), ane.loading_samples, ane_crossing);
+    const bool ane_units = route.compute_units == "all" || route.compute_units == "cpu_and_ane";
+    std::vector<std::string> failures = probe_failures(base_ok, footprint_failures, ane_units, ane);
+    for (const std::string & f : mem_failures(b, ane.peak, c)) failures.push_back(f);
     for (const std::string & f : failures) fail("memory schedule: " + f);
     std::fprintf(stderr,
                  "[supertonic-coreml-parity] overlapped schedule: %d ggml + %d Core ML calls in %.1f s; footprint base "
-                 "%.1f MiB, peak +%.1f MiB (envelope %.1f MiB, units %s); ANECompilerService grew %.1f MiB\n",
+                 "%.1f MiB, peak +%.1f MiB (envelope %.1f MiB, units %s); ANECompilerService %.1f MiB while loading, "
+                 "grew %.1f MiB (%s)\n",
                  ggml_calls, coreml_calls, secs, mib(base), mib(b.total), mib(route.envelope_bytes),
-                 route.compute_units.c_str(), mib(ane.growth));
-    expect(coreml_calls >= 5 && ggml_calls >= 1, "memory schedule: " + std::to_string(ggml_calls) + " ggml and " +
-                                                     std::to_string(coreml_calls) + " Core ML calls");
+                 route.compute_units.c_str(), mib(ane.peak), mib(ane.growth), before_load);
+    expect(coreml_calls >= 5 && ggml_calls >= 1 && bad_calls == 0,
+           "memory schedule: " + std::to_string(ggml_calls) + " ggml and " + std::to_string(coreml_calls) +
+               " Core ML calls");
     model.vocoder_pending.reset();
 }
 
