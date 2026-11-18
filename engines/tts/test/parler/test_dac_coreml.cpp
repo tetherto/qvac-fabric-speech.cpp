@@ -406,10 +406,13 @@ void parity_floor_gates() {
 //               baseline clean, dirty or unknown (no sample before the load).
 // generate, compile, load and warm are also reported on their own, each over
 // the footprint just before that state began.
-enum class mem_phase { ggml, generate, compile, load, warm, ready };
+// `digest` is charged with the generation (one prepare charge) but is not
+// evidence that the schedule sampled the generation itself.
+enum class mem_phase { ggml, digest, generate, compile, load, warm, ready };
 
 mem_phase mem_phase_of(const std::string & state) {
-    if (state == "digesting" || state == "generating") return mem_phase::generate;
+    if (state == "digesting") return mem_phase::digest;
+    if (state == "generating") return mem_phase::generate;
     if (state == "compiling") return mem_phase::compile;
     if (state == "loading") return mem_phase::load;
     if (state == "warming") return mem_phase::warm;
@@ -430,9 +433,9 @@ struct mem_breakdown {
 };
 
 mem_breakdown mem_breakdown_of(const std::vector<mem_sample> & samples, uint64_t base) {
-    // 1: prepare (generate, compile); 2: load and warm-up; 0: the rest.
+    // 1: prepare (digest, generate, compile); 2: load and warm-up; 0: the rest.
     const auto group = [](mem_phase p) {
-        if (p == mem_phase::generate || p == mem_phase::compile) return 1;
+        if (p == mem_phase::digest || p == mem_phase::generate || p == mem_phase::compile) return 1;
         if (p == mem_phase::load || p == mem_phase::warm) return 2;
         return 0;
     };
@@ -444,12 +447,17 @@ mem_breakdown mem_breakdown_of(const std::vector<mem_sample> & samples, uint64_t
     // load begins counts as the prepare's, not as resident.
     std::optional<uint64_t> load_start;
     mem_phase last = mem_phase::ggml;
+    // The digest and the generation share one increment (from the
+    // footprint before the digest), as one state did before they were told
+    // apart; only a generating sample marks the generation sampled.
+    const auto merged = [](mem_phase p) { return p == mem_phase::digest ? mem_phase::generate : p; };
     for (const mem_sample & s : samples) {
-        if (s.phase != last) phase_start = prev;
+        if (merged(s.phase) != merged(last)) phase_start = prev;
         if (group(s.phase) != group(last)) group_start = prev;
         if (group(s.phase) == 2 && !load_start) load_start = group_start;
         const uint64_t inc = over(s.footprint, phase_start);
         switch (s.phase) {
+            case mem_phase::digest: b.generate = std::max(b.generate, inc); break;
             case mem_phase::generate: b.generated = true; b.generate = std::max(b.generate, inc); break;
             case mem_phase::compile: b.compiled = true; b.compile = std::max(b.compile, inc); break;
             case mem_phase::load: b.loaded = true; b.load = std::max(b.load, inc); break;
@@ -522,6 +530,17 @@ std::vector<std::string> mem_failures(const mem_breakdown & b, uint64_t ane_comp
     return out;
 }
 
+// The label of an ANECompilerService query bracketed by two slot-state
+// reads: while loading when both reads are the load or the warm-up, before
+// or after it when neither is, and no label (the sample is dropped) when the
+// query crossed the start or the end of the load, so a size read before the
+// load never stands for one during it, nor the reverse.
+std::optional<bool> ane_query_loading(mem_phase before, mem_phase after) {
+    const auto loading = [](mem_phase p) { return p == mem_phase::load || p == mem_phase::warm; };
+    if (loading(before) != loading(after)) return std::nullopt;
+    return loading(before);
+}
+
 // What the probes failed to measure: the baseline, footprint samples, or (on
 // the Neural Engine) ANECompilerService while loading. A run with any of them
 // fails instead of counting the missing readings as 0.
@@ -540,7 +559,7 @@ std::vector<std::string> probe_failures(bool base_ok, size_t footprint_failures,
 }
 
 void memory_schedule_gates() {
-    check(mem_phase_of("digesting") == mem_phase::generate && mem_phase_of("generating") == mem_phase::generate &&
+    check(mem_phase_of("digesting") == mem_phase::digest && mem_phase_of("generating") == mem_phase::generate &&
               mem_phase_of("compiling") == mem_phase::compile && mem_phase_of("loading") == mem_phase::load &&
               mem_phase_of("warming") == mem_phase::warm && mem_phase_of("ready") == mem_phase::ready,
           "memory schedule: slot states map to phases");
@@ -663,6 +682,24 @@ void memory_schedule_gates() {
               !qvac_coreml_memory::ane_compiler_clean_start(growth({{900, true}})) &&
               std::string(qvac_coreml_memory::ane_baseline_name(AneBaseline::unknown)) == "unknown",
           "memory schedule: no sample before the load is reported unknown, not clean");
+    {
+        // A digest sampled but no generation: the generation was not covered.
+        const std::vector<mem_sample> no_gen = {{100, P::ggml}, {120, P::digest}, {130, P::compile}, {150, P::load},
+                                                {160, P::warm}, {170, P::ready}};
+        const mem_breakdown nb = mem_breakdown_of(no_gen, 100);
+        const std::vector<std::string> fg = mem_failures(nb, 0, {1000, 1000, 1000, 0, 1000});
+        check(!nb.generated && nb.prepare == 30 && fg.size() == 1 && fg[0].find("generating") != std::string::npos,
+              "memory schedule: a digest sample is not a generation sample (a missed generation fails)");
+        const mem_breakdown both = mem_breakdown_of({{100, P::ggml}, {120, P::digest}, {150, P::generate}}, 100);
+        check(both.generated && both.generate == 50 && both.prepare == 50,
+              "memory schedule: digest and generation share one increment");
+        check(ane_query_loading(P::load, P::load) == std::optional<bool>(true) &&
+                  ane_query_loading(P::warm, P::load) == std::optional<bool>(true) &&
+                  ane_query_loading(P::compile, P::compile) == std::optional<bool>(false) &&
+                  !ane_query_loading(P::compile, P::load).has_value() &&
+                  !ane_query_loading(P::warm, P::ready).has_value(),
+              "memory schedule: a compiler query that crosses the load's start or end has no label");
+    }
     const std::vector<mem_sample> no_warm = {{100, P::ggml}, {120, P::generate}, {130, P::compile}, {150, P::load},
                                              {160, P::ready}};
     const std::vector<std::string> f = mem_failures(mem_breakdown_of(no_warm, 100), 0, {1000, 1000, 1000, 0, 1000});
@@ -1615,12 +1652,25 @@ void memory_schedule(parler_model & model, const std::string & gguf, const std::
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
     });
+    // Each compiler query is bracketed by its own reads of the slot state
+    // (not the footprint sampler's cached phase): a query that crossed the
+    // load's start or end is dropped (counted, reported).
+    size_t ane_crossing = 0;
     std::thread ane_sampler([&] {
+        const auto slot_phase = [&] {
+            const parler_dac_coreml * d = watched.load();
+            return d ? mem_phase_of(status_state(d->status_json())) : mem_phase::ggml;
+        };
         while (!stop.load()) {
+            const mem_phase before = slot_phase();
             uint64_t a = 0;
             const bool ok = qvac_coreml_memory::ane_compiler_rss(a);
-            const auto p = (mem_phase) phase.load();
-            ane_samples.push_back({a, p == mem_phase::load || p == mem_phase::warm, ok});
+            const std::optional<bool> loading = ane_query_loading(before, slot_phase());
+            if (loading) {
+                ane_samples.push_back({a, *loading, ok});
+            } else {
+                ++ane_crossing;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
     });
@@ -1690,13 +1740,14 @@ void memory_schedule(parler_model & model, const std::string & gguf, const std::
             "  memory report: {\"chip\":\"%s\",\"units\":\"%s\",\"base\":%llu,\"prepare\":%llu,\"generate\":%llu,"
             "\"compile\":%llu,\"load_warm\":%llu,\"load\":%llu,\"warm\":%llu,\"steady\":%llu,\"steady_over_base\":%llu,\"workspace\":%llu,"
             "\"total\":%llu,\"ane_compiler_load_peak\":%llu,\"ane_compiler_before_load\":%llu,"
-            "\"ane_compiler_growth\":%llu,\"ane_compiler_peak\":%llu,\"ane_compiler_baseline\":\"%s\",\"samples\":%zu}\n",
+            "\"ane_compiler_growth\":%llu,\"ane_compiler_peak\":%llu,\"ane_compiler_baseline\":\"%s\",\"samples\":%zu,"
+            "\"ane_compiler_loading_samples\":%zu,\"ane_compiler_crossing\":%zu}\n",
             host_chip().c_str(), route.compute_units.c_str(), (unsigned long long) base,
             (unsigned long long) b.prepare, (unsigned long long) b.generate, (unsigned long long) b.compile,
             (unsigned long long) b.load_warm, (unsigned long long) b.load, (unsigned long long) b.warm,
             (unsigned long long) b.steady, (unsigned long long) b.steady_over_base, (unsigned long long) workspace, (unsigned long long) b.total,
             (unsigned long long) ane.peak, (unsigned long long) ane.before, (unsigned long long) ane.growth,
-            (unsigned long long) ane_peak, baseline_name, samples.size());
+            (unsigned long long) ane_peak, baseline_name, samples.size(), ane.loading_samples, ane_crossing);
     const bool ane_units = route.compute_units == "all" || route.compute_units == "cpu_and_ane";
     std::vector<std::string> failures = probe_failures(base_ok, footprint_failures, ane_units, ane);
     for (const std::string & f : mem_failures(b, ane.peak, c)) failures.push_back(f);
