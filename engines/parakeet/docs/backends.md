@@ -987,24 +987,24 @@ ggml-only run of the same passes:
 
 | Host | Runs | Peak increment | Prepare | Load and warm | Resident step | `ANECompilerService` growth |
 |---|---:|---:|---:|---:|---:|---:|
-| M2, macOS 27.2.1 | 16 | 63.7-108.9 MiB | 72.8-79.7 MiB | 36.8-85.4 MiB | 0.0-108.9 MiB | 252.1-674.2 MiB |
+| M2, macOS 27.2.1 | 22 | 62.5-108.9 MiB | 72.8-82.5 MiB | 36.5-90.3 MiB | 0.0-108.9 MiB | 252.1-674.2 MiB |
 | M4 Max, macOS 26.7.2 | 10 | 55.8-72.8 MiB | 80.9-96.3 MiB | 35.8-51.2 MiB | 39.2-61.0 MiB | 120.0-460.4 MiB |
 
-Each constant is 1.25 times the largest value over the 26 runs, rounded up
+Each constant is 1.25 times the largest value over the 32 runs, rounded up
 to 1 MiB:
 
 | Constant | Largest measured | Recorded |
 |---|---:|---:|
 | prepare: `generation_peak_bytes` (8 MiB) + 8 MiB + `compile_peak_bytes` | 96.3 MiB (M4 Max) | 121 MiB |
-| `load_peak_bytes.cpu_and_ane` | 85.4 MiB (M2) | 107 MiB |
+| `load_peak_bytes.cpu_and_ane` | 90.3 MiB (M2) | 113 MiB |
 | resident part: `runtime_weight_bytes` + 2 x I/O (`workspace_bytes` 0) | 108.9 MiB (M2) | 137 MiB |
 | `ane_compile_reserve_bytes` | 674.2 MiB (M2) | 843 MiB |
 
 Fit charges the capacity 137 + 121 = 258 MiB, against a largest measured
 peak increment of 108.9 MiB. As with Nemotron, the M2 sometimes keeps most of
-a load resident: in 2 of 16 runs the load grew the footprint by 83-85 MiB and
+a load resident: in 3 of 22 runs the load grew the footprint by 83-90 MiB and
 the step to the settled footprint was 104-109 MiB; the M4 Max never did. The
-14 runs from the current tool (10 on the M2, 4 on the M4 Max) report no
+20 runs from the current tool (16 on the M2, 4 on the M4 Max) report no
 sampler errors, a compile segment, and an `ANECompilerService` sample during
 the load; the 10 earlier runs predate those fields and count only towards the
 maxima.
