@@ -344,6 +344,7 @@ std::vector<CoremlDiarizerCharge> diarizer_fit_charges(const CoremlSidecars & si
     for (const DiarizerCapacity & c : capacities) {
         CoremlDiarizerCharge charge;
         charge.frames = c.frames;
+        charge.prebuilt = c.prebuilt;
         const SidecarRequest request = diarizer_request(gguf_path, c, nullptr, pcm::SourceStat{});
         if (request.generated != nullptr && sidecars.plan(request).route == pcm::Route::generate) {
             const pcm::generation::TemplateMemory & memory = request.generated->memory;

@@ -180,10 +180,14 @@ std::vector<int> coreml_diarizer_loaded_capacities(const std::vector<int> & sort
     return out;
 }
 
+uint64_t coreml_diarizer_bundle_set_resident_bytes(int bundles, uint64_t weights_bytes) {
+    return bundles == 0 ? 0 : kAneWeightCopies * weights_bytes + kCoremlRuntimeBytes;
+}
+
 uint64_t coreml_diarizer_resident_bytes(const std::vector<CoremlDiarizerBundle> & bundles,
                                         const std::vector<CoremlFrameRange> & ranges) {
     const LoadedWeights loaded = loaded_weights(bundles, ranges);
-    return loaded.bundles == 0 ? 0 : kAneWeightCopies * loaded.bytes + kCoremlRuntimeBytes;
+    return coreml_diarizer_bundle_set_resident_bytes(loaded.bundles, loaded.bytes);
 }
 
 std::vector<CoremlDiarizerBundle> coreml_diarizer_loaded_bundles(

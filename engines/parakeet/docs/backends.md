@@ -867,8 +867,13 @@ projected workload: any input up to the single-pass graph (the long-form
 window past the long-form threshold, 1125 frames by default) runs as one pass
 and keeps its capacity loaded, so the default 300 s projection charges all
 three capacities. A capacity that fails to load hands its calls to the next
-larger one that has not failed, so each selected capacity is charged at the
-largest generated capacity it can fall back to. The templates' constants are measured values that already carry a
+larger one that has not failed, so fit takes every capacity of the model,
+prebuilt and generated, in one ordered list, selects the ones the calls and
+the construction prewarm load, lets each hold any serving capacity from
+itself up to the next selected one, and charges the worst resident set that
+can result (prebuilt bundles at today's estimate, generated capacities at
+their envelope) plus its largest transient. Two capacities that replace each
+other are never charged together. The templates' constants are measured values that already carry a
 1.25 margin, so the envelope adds none (`memory.margin` is 1.0). The fit and
 the engine choose the generated capacities with the same code, so they cannot
 disagree. The route comes from the options and the GGUF, never from the cache,
@@ -937,7 +942,7 @@ capacity they are for, so every template records the same values. On
 `cpu_and_ane` the resident part holds no copy of the fp16 weights: the Neural
 Engine keeps them outside the process, so a loaded capacity costs the process
 tens of MiB, not its 191 MiB `weight.bin`. On the M4 Max a load's increment
-is released when the capacity is ready. On the M2, in 7 of 16 runs one load
+is released when the capacity is ready. On the M2, in 7 of 18 runs one load
 grew the footprint by 59-97 MiB a few seconds in, and most of that stayed.
 Because the next load starts as soon as a capacity is ready, a step also takes
 in the start of the next load, so the largest step (108.8 MiB) is an upper

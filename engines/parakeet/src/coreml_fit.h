@@ -140,65 +140,124 @@ inline CoremlCharge coreml_programs_charge(const std::vector<CoremlFitProgram> &
     return c;
 }
 
-// One diarizer capacity of the generated-diarizer charge. A prebuilt
-// capacity (generated = false) only shapes which capacities a range loads
-// (the prebuilt bundle charge covers it); a generated one carries its
-// template's unmargined parts for the resolved units.
+// One diarizer capacity of a model, as the fit charges it: a prebuilt bundle
+// (`prebuilt`, with its weight.bin size), a generated capacity (`generated`,
+// with its template's unmargined parts for the resolved units and its
+// margin), or neither (a template capacity that is not generated: it never
+// loads, and its calls go to the next capacity).
 struct CoremlDiarizerCharge {
     int      frames = 0;
     bool     generated = false;
     uint64_t resident_bytes = 0;
     uint64_t transient_bytes = 0;
     double   margin = 1.0;
+    bool     prebuilt = false;
+    uint64_t weights_bytes = 0;
 };
 
-// The generated capacities' charge: those calls in `ranges` can load,
-// selected over every capacity (prebuilt and generated) by
-// coreml_diarizer_loaded_capacities, or every generated capacity when
-// `every_capacity` (prewarm = all loads them all at construction). Resident:
-// the sum of their resident parts; transient: the largest single transient
-// (prepares and loads run one at a time); both times the largest margin among
-// them, split so that the two parts add up to the envelope rounded once.
-//
-// A capacity that fails to load (or never loads: a status-only template)
-// hands its calls to the smallest larger capacity that has not failed, which
-// then loads in its place (DiarizerSlots skips terminal capacities). So each
-// selected capacity is charged at the largest generated capacity its calls
-// can reach that way: itself, or a larger one below the next selected
-// capacity (which is charged on its own); above the largest selected one,
-// every larger capacity.
-inline CoremlCharge coreml_generated_diarizer_charge(const std::vector<CoremlDiarizerCharge> & capacities,
+// The diarizers' Core ML charge, from one ordered list of every capacity
+// (prebuilt, generated and status-only), the way the runtime picks them:
+//  - selected: the capacities calls in `ranges` can load
+//    (coreml_diarizer_loaded_capacities over the whole list), plus what
+//    construction loads (`prewarm`: the smallest capacity that can serve for
+//    the minimal set, every one that can for all);
+//  - a selected capacity that fails, or never loads, hands its calls to the
+//    next larger one that can serve, up to the next selected capacity; so
+//    each selected capacity holds one of the serving capacities in
+//    [itself, the next selected one) at a time, never two of them.
+// Every combination of those choices is a resident set the runtime can
+// reach; the charge is the largest: prebuilt bundles at today's estimate
+// (coreml_diarizer_bundle_set_resident_bytes, and each bundle's load
+// transient for `units`), generated capacities at their templates'
+// envelope (residents + their largest transient, times their margin), and
+// one transient, the larger of the two kinds. `prebuilt` is set when the
+// chosen set holds a prebuilt bundle (not a validated envelope).
+struct CoremlDiarizersCharge {
+    CoremlCharge charge;
+    bool prebuilt = false;
+};
+
+inline CoremlDiarizersCharge coreml_diarizers_charge(std::vector<CoremlDiarizerCharge> capacities,
+                                                     const std::vector<CoremlFrameRange> & ranges,
+                                                     CoremlDiarizerPrewarm prewarm, CoremlFitUnits units) {
+    using fitutil::sat_add;
+    std::sort(capacities.begin(), capacities.end(),
+              [](const CoremlDiarizerCharge & a, const CoremlDiarizerCharge & b) { return a.frames < b.frames; });
+    auto serves = [](const CoremlDiarizerCharge & c) { return c.prebuilt || c.generated; };
+    std::vector<int> sorted;
+    for (const CoremlDiarizerCharge & c : capacities) sorted.push_back(c.frames);
+    std::vector<int> selected = coreml_diarizer_loaded_capacities(sorted, ranges);
+    for (const CoremlDiarizerCharge & c : capacities) {
+        if (!serves(c) || prewarm == CoremlDiarizerPrewarm::none) continue;
+        selected.push_back(c.frames);
+        if (prewarm == CoremlDiarizerPrewarm::minimal) break;  // the smallest that can serve
+    }
+    std::sort(selected.begin(), selected.end());
+    selected.erase(std::unique(selected.begin(), selected.end()), selected.end());
+    // The choices of each selected capacity.
+    std::vector<std::vector<const CoremlDiarizerCharge *>> slots;
+    for (size_t i = 0; i < selected.size(); ++i) {
+        const int below = i + 1 < selected.size() ? selected[i + 1] : 0;
+        std::vector<const CoremlDiarizerCharge *> options;
+        for (const CoremlDiarizerCharge & c : capacities) {
+            if (serves(c) && c.frames >= selected[i] && (below == 0 || c.frames < below)) options.push_back(&c);
+        }
+        if (!options.empty()) slots.push_back(std::move(options));
+    }
+    CoremlDiarizersCharge worst;
+    uint64_t worst_total = 0;
+    std::vector<size_t> pick(slots.size(), 0);
+    for (;;) {
+        int bundles = 0;
+        uint64_t weights = 0, pre_transient = 0, gen_resident = 0, gen_transient = 0;
+        double margin = 1.0;
+        for (size_t s = 0; s < slots.size(); ++s) {
+            const CoremlDiarizerCharge & c = *slots[s][pick[s]];
+            if (c.prebuilt) {
+                ++bundles;
+                weights = sat_add(weights, c.weights_bytes);
+                pre_transient = std::max(pre_transient, coreml_encoder_load_transient_bytes(c.weights_bytes, units));
+            } else {
+                gen_resident = sat_add(gen_resident, c.resident_bytes);
+                gen_transient = std::max(gen_transient, c.transient_bytes);
+                margin = std::max(margin, c.margin);
+            }
+        }
+        const uint64_t gen_total = sat_add(gen_resident, gen_transient);
+        const uint64_t envelope =
+            gen_total == 0 ? 0 : fitutil::sat_u64_from_double(std::ceil(static_cast<double>(gen_total) * margin));
+        const uint64_t gen_res = std::min(
+            envelope, fitutil::sat_u64_from_double(std::ceil(static_cast<double>(gen_resident) * margin)));
+        CoremlCharge set;
+        set.resident = sat_add(coreml_diarizer_bundle_set_resident_bytes(bundles, weights), gen_res);
+        set.transient = std::max(pre_transient, envelope - gen_res);
+        const uint64_t total = sat_add(set.resident, set.transient);
+        if (total > worst_total) {
+            worst_total = total;
+            worst.charge = set;
+            worst.prebuilt = bundles > 0;
+        }
+        size_t s = 0;
+        for (; s < slots.size(); ++s) {
+            if (++pick[s] < slots[s].size()) break;
+            pick[s] = 0;
+        }
+        if (s == slots.size()) break;
+    }
+    return worst;
+}
+
+// The generated capacities' charge alone (capacities that are neither
+// prebuilt nor generated only shape the selection), every capacity loaded at
+// construction when `every_capacity` (prewarm = all), else none.
+inline CoremlCharge coreml_generated_diarizer_charge(std::vector<CoremlDiarizerCharge> capacities,
                                                      const std::vector<CoremlFrameRange> & ranges,
                                                      bool every_capacity = false) {
-    using fitutil::sat_add;
-    std::vector<int> sorted;
-    sorted.reserve(capacities.size());
-    for (const CoremlDiarizerCharge & c : capacities) sorted.push_back(c.frames);
-    std::sort(sorted.begin(), sorted.end());
-    const std::vector<int> loaded = every_capacity ? sorted : coreml_diarizer_loaded_capacities(sorted, ranges);
-    uint64_t resident = 0;
-    uint64_t transient = 0;
-    double margin = 1.0;
-    for (size_t i = 0; i < loaded.size(); ++i) {
-        const int from = loaded[i];
-        const bool bounded = i + 1 < loaded.size();
-        const int below = bounded ? loaded[i + 1] : 0;
-        uint64_t slot = 0;
-        for (const CoremlDiarizerCharge & c : capacities) {
-            if (!c.generated || c.frames < from || (bounded && c.frames >= below)) continue;
-            slot = std::max(slot, c.resident_bytes);
-            transient = std::max(transient, c.transient_bytes);
-            margin = std::max(margin, c.margin);
-        }
-        resident = sat_add(resident, slot);
-    }
-    CoremlCharge charge;
-    const uint64_t total = sat_add(resident, transient);
-    if (total == 0) return charge;
-    const uint64_t envelope = fitutil::sat_u64_from_double(std::ceil(static_cast<double>(total) * margin));
-    charge.resident = std::min(envelope, fitutil::sat_u64_from_double(std::ceil(static_cast<double>(resident) * margin)));
-    charge.transient = envelope - charge.resident;
-    return charge;
+    for (CoremlDiarizerCharge & c : capacities) c.prebuilt = false;  // uncharged here
+    return coreml_diarizers_charge(capacities, ranges,
+                                   every_capacity ? CoremlDiarizerPrewarm::all : CoremlDiarizerPrewarm::none,
+                                   CoremlFitUnits::cpu_and_ane)
+        .charge;
 }
 
 // The generated charge as one number: resident + transient.
