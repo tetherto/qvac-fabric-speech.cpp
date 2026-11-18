@@ -519,6 +519,34 @@ KeyLock::Result quarantine(const Layout & l, const std::string & template_id, co
     return KeyLock::Result::ok;
 }
 
+bool artifact_identity(const Layout & l, const std::string & template_id, const std::string & key32, uint64_t & dev,
+                       uint64_t & ino) {
+    struct stat st{};
+    if (::stat(l.artifact_dir(template_id, key32).c_str(), &st) != 0) return false;
+    dev = static_cast<uint64_t>(st.st_dev);
+    ino = static_cast<uint64_t>(st.st_ino);
+    return true;
+}
+
+KeyLock::Result quarantine_if(const Layout & l, const std::string & template_id, const std::string & key32,
+                              uint64_t dev, uint64_t ino, bool * replaced, Error * err) {
+    if (replaced) *replaced = false;
+    KeyLock ex;
+    const KeyLock::Result r = KeyLock::take(l, key32, KeyLock::Mode::exclusive, ex, err);
+    if (r != KeyLock::Result::ok) return r;
+    uint64_t now_dev = 0, now_ino = 0;
+    if (!artifact_identity(l, template_id, key32, now_dev, now_ino) || now_dev != dev || now_ino != ino) {
+        if (replaced) *replaced = true;
+        return KeyLock::Result::ok;
+    }
+    Error e = quarantine_locked(l, template_id, key32);
+    if (!e.ok()) {
+        if (err) *err = e;
+        return KeyLock::Result::error;
+    }
+    return KeyLock::Result::ok;
+}
+
 std::string prune_trash_path(const Layout & l, const std::string & artifact_name) {
     return l.quarantine + "/" + artifact_name + "." + std::to_string(::getpid()) + ".prune." + rand_hex();
 }

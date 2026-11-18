@@ -173,6 +173,10 @@ std::shared_ptr<const recipe::Template> find_kept(const std::string & id, const 
 
 int64_t unix_now() { return static_cast<int64_t>(std::time(nullptr)); }
 
+// Loads of a rejected artifact retried while its quarantine is busy or after
+// another process replaced it, counted by its load failure record.
+constexpr int kBusyRequeues = 3;
+
 std::string real_path(const std::string & p) {
     char buf[PATH_MAX];
     return ::realpath(p.c_str(), buf) ? std::string(buf) : p;
@@ -363,7 +367,11 @@ bool begin_load(const LoadRequest & req, LoadResult & out) {
     }
     cache::Adoption a = cache::adopt(l, template_id, key32);
     switch (a.kind) {
-        case cache::Adoption::Kind::adopted: out.lease_fd = a.lease.release_fd(); return true;
+        case cache::Adoption::Kind::adopted:
+            // Under the shared lease: which publication this load adopted.
+            cache::artifact_identity(l, template_id, key32, out.artifact_dev, out.artifact_ino);
+            out.lease_fd = a.lease.release_fd();
+            return true;
         case cache::Adoption::Kind::would_block: out.would_block = true; return false;
         case cache::Adoption::Kind::missing:
             out.artifact_gone = true;  // the scheduler prepares it again
@@ -397,8 +405,8 @@ void end_load(const LoadRequest & req, LoadResult & out) {
     // The (function, units) load record: a repeat of the same error in
     // another process on this OS build promotes it to deterministic (then
     // begin_load stops loading it), except for resource errors.
-    failed::record(l.failed, key32, failed::Stage::load, out.error, template_id, detail::device_os_build(),
-                   unix_now(), req.function, units);
+    const failed::Record rec = failed::record(l.failed, key32, failed::Stage::load, out.error, template_id,
+                                              detail::device_os_build(), unix_now(), req.function, units);
     // The engine rejected an artifact that passed the inventory check (the
     // framework refused the model, or its interface or geometry is wrong):
     // move it to quarantine/ under the key's exclusive lock and send the slot
@@ -408,7 +416,18 @@ void end_load(const LoadRequest & req, LoadResult & out) {
     const bool rejected = out.rejected || out.error.cls == ErrorClass::deterministic;
     if (!rejected || failed::is_resource(out.error.domain, out.error.code)) return;
     out.rejected = true;
-    if (cache::quarantine(l, template_id, key32, nullptr) == cache::KeyLock::Result::ok) out.artifact_gone = true;
+    bool replaced = false;
+    const cache::KeyLock::Result q =
+        cache::quarantine_if(l, template_id, key32, out.artifact_dev, out.artifact_ino, &replaced, nullptr);
+    if (q == cache::KeyLock::Result::ok && !replaced) {
+        out.artifact_gone = true;
+    } else if ((q == cache::KeyLock::Result::would_block || (q == cache::KeyLock::Result::ok && replaced)) &&
+               rec.attempts <= kBusyRequeues) {
+        // Another holder's lease (the quarantine waits for it), or another
+        // process already replaced the publication (its repair is not
+        // quarantined): load again after the scheduler's backoff.
+        out.would_block = true;
+    }
 }
 
 #else  // !QVAC_COREML_GENERATE

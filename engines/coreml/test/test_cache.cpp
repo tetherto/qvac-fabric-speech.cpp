@@ -1988,6 +1988,87 @@ void case_generated_rejected_hit_quarantined() {
     CHECK(rec && rec->cls == ErrorClass::transient && rec->attempts == 2);
 }
 
+// Quarantine under contention. While another holder keeps a shared lease the
+// quarantine of a rejected artifact cannot run: the load is requeued, not
+// failed, and once the lease is gone the next rejection quarantines it. If
+// another process repaired the entry after this load released its lease, the
+// repair (a new publication) is not quarantined: the load is requeued and
+// loads it.
+std::function<void(LoadResult &, int)> g_contention;  // runs inside the load, after begin_load
+std::atomic<int> g_contention_rejects{0};
+
+LoadResult glue_load_contention(const LoadRequest & req) {
+    LoadResult r;
+    if (!generation::begin_load(req, r)) return r;
+    const int n = ++g_glue_loads;
+    if (g_contention) g_contention(r, n);
+    if (n <= g_contention_rejects) {
+        r.error = Error{ErrorClass::transient, "com.apple.CoreML", 0, "the engine rejected the model"};
+        r.rejected = true;
+    } else {
+        r.model = std::make_shared<int>(1);
+    }
+    generation::end_load(req, r);
+    return r;
+}
+
+void case_generated_rejected_quarantine_contention() {
+    {
+        Env env;
+        const std::string a = env.source("a.gguf");
+        g_sched_inputs = env.inputs(a);
+        PrepareOutcome o = env.prepare(a);
+        CHECK(ready(o));
+        const std::string key = o.key32;
+        o.lease.release();
+        const cache::Layout l = env.layout();
+        cache::KeyLock other;  // another holder's lease
+        Error le;
+        CHECK(cache::KeyLock::take(l, key, cache::KeyLock::Mode::shared, other, &le) == cache::KeyLock::Result::ok);
+        g_glue_loads = 0;
+        g_contention_rejects = 2;
+        g_contention = [&](LoadResult &, int n) {
+            if (n == 2) other.release();  // the other holder is done before the second load's end
+        };
+        auto mgr = glue_manager();
+        auto s = glue_slot(mgr, env, a, &glue_load_contention);
+        s->request(Priority::now);
+        CHECK_MSG(wait_state(s, SlotState::ready), s->status().error);
+        CHECK(g_glue_loads == 3);                // busy -> requeued, rejected -> quarantined, regenerated -> loaded
+        CHECK(count_files(l.quarantine) == 1 && g_compiles == 2);
+        g_contention = nullptr;
+    }
+    {
+        Env env;
+        const std::string a = env.source("a.gguf");
+        g_sched_inputs = env.inputs(a);
+        PrepareOutcome o = env.prepare(a);
+        CHECK(ready(o));
+        const std::string key = o.key32;
+        const std::string tid = env.tpl->id();
+        o.lease.release();
+        const cache::Layout l = env.layout();
+        g_glue_loads = 0;
+        g_contention_rejects = 1;
+        g_contention = [&](LoadResult & r, int n) {
+            if (n != 1) return;
+            // This load is done with its lease; another process repairs the
+            // entry before this one takes the exclusive lock.
+            ::close(r.lease_fd);
+            r.lease_fd = -1;
+            CHECK(cache::quarantine(l, tid, key, nullptr) == cache::KeyLock::Result::ok);
+            CHECK(ready(env.prepare(a)));
+        };
+        auto mgr = glue_manager();
+        auto s = glue_slot(mgr, env, a, &glue_load_contention);
+        s->request(Priority::now);
+        CHECK_MSG(wait_state(s, SlotState::ready), s->status().error);
+        CHECK(g_glue_loads == 2);                                // requeued, then loads the repair
+        CHECK(count_files(l.quarantine) == 1 && g_compiles == 2);  // the repair is not quarantined
+        g_contention = nullptr;
+    }
+}
+
 // An unsupported cache volume: the slot is unsupported(cache_fs), not failed.
 void case_generated_unsupported_cache_fs() {
     Env env;
@@ -2059,6 +2140,7 @@ int main(int argc, char ** argv) {
                          {"generated-artifact-pruned-before-load", case_generated_artifact_pruned_before_load},
                          {"generated-unsupported-cache-fs", case_generated_unsupported_cache_fs},
                          {"generated-rejected-hit-quarantined", case_generated_rejected_hit_quarantined},
+                         {"generated-rejected-quarantine-contention", case_generated_rejected_quarantine_contention},
 #endif
                      },
                      "test-coreml-cache");

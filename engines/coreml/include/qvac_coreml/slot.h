@@ -85,6 +85,10 @@ struct LoadResult {
     // class the engine reports; end_load quarantines the artifact unless the
     // error is a resource one, and the slot regenerates it once.
     bool rejected = false;
+    // The publication begin_load adopted (its directory's dev and inode),
+    // taken under the shared lease: end_load quarantines only that one.
+    uint64_t artifact_dev = 0;
+    uint64_t artifact_ino = 0;
 };
 
 using LoadFn = LoadResult (*)(const LoadRequest & req);
