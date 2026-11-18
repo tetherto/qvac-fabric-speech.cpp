@@ -15,7 +15,7 @@
 // --min-cosine on a padded, an exact-window and a stitched multi-window
 // latent; then a second owner adopts the artifact (route cached), a GGUF
 // replaced after the load is not generated from, an Engine synthesizes on it, fit charges the template's envelope (and degrades to
-// ggml near a budget), and a Max or Ultra brand string keeps a generated
+// ggml near a budget, with the F16 weight deny list projected), and a Max or Ultra brand string keeps a generated
 // sidecar off unless use = require. --require-coreml fails (instead of
 // skipping, 77) when the route is not generate. --memory-schedule runs the
 // overlapped memory schedule into the fresh cache DIR2 and holds each phase
@@ -615,6 +615,77 @@ void check_fit(const std::string & gguf, const tts_cpp::CoremlOptions & o, const
     }
 }
 
+// The F16 weight deny list changes the weight storage, so fit projects it and
+// the Engine decides memory-degrade with it. A budget between the two storage
+// policies (ggml + Core ML fits with F16 weights, not with the denied tensors
+// kept at F32) keeps generation without the deny list and degrades with it,
+// and an Engine given the list and that budget synthesizes on ggml.
+void check_fit_deny_list(const std::string & gguf, const tts_cpp::CoremlOptions & o, bool required) {
+    tts_cpp::supertonic::FitOptions f;
+    f.model_gguf_path = gguf;
+    f.n_gpu_layers = 99;
+    f.precision = "f32";
+    f.f16_weights = 1;
+    f.steps = DEGRADE_STEPS;
+    f.coreml = o;
+    tts_cpp::supertonic::FitOptions denied = f;
+    denied.f16_weights_deny_list = {"convnext"};
+    const tts_cpp::FitResult base = tts_cpp::supertonic::fit_params(f);
+    const tts_cpp::FitResult deny = tts_cpp::supertonic::fit_params(denied);
+    if (base.status == tts_cpp::FitStatus::Error || deny.status == tts_cpp::FitStatus::Error) {
+        if (required) fail("fit with a deny list: " + base.reason + " / " + deny.reason);
+        return;
+    }
+    const uint64_t MiB = 1ull << 20;
+    expect(deny.device.weights_bytes > base.device.weights_bytes + MiB,
+           "fit with a deny list projects " + std::to_string(deny.device.weights_bytes) +
+               " weight bytes, without it " + std::to_string(base.device.weights_bytes));
+    uint64_t need = deny.device.total_bytes + denied.margin_bytes;
+    if (deny.device_shares_host_memory) need += deny.host_bytes;
+    // Core ML + ggml with the deny list exceeds it by 1 MiB; ggml alone fits.
+    const uint64_t budget = need + deny.coreml.bytes - MiB;
+    if (budget + 256 * MiB > deny.device_free_bytes) {
+        if (required) {
+            fail("fit with a deny list: free memory " + std::to_string(deny.device_free_bytes) + " is below " +
+                 std::to_string(budget + 256 * MiB));
+        } else {
+            std::fprintf(stderr, "[supertonic-coreml-parity] fit with a deny list: not run (free memory too low)\n");
+        }
+        return;
+    }
+    f.coreml.memory_budget_bytes = (int64_t) budget;
+    denied.coreml.memory_budget_bytes = (int64_t) budget;
+    const tts_cpp::FitResult base_b = tts_cpp::supertonic::fit_params(f);
+    const tts_cpp::FitResult deny_b = tts_cpp::supertonic::fit_params(denied);
+    expect(base_b.coreml.disabled_reason.empty() && deny_b.coreml.disabled_reason == "memory" && deny_b.fits,
+           "a budget between the storage policies: '" + base_b.coreml.disabled_reason + "' without the deny list, '" +
+               deny_b.coreml.disabled_reason + "' with it");
+    try {
+        tts_cpp::supertonic::EngineOptions eo;
+        eo.model_gguf_path = gguf;
+        eo.n_threads = N_THREADS;
+        eo.n_gpu_layers = 99;
+        eo.precision = tts_cpp::supertonic::Precision::F32;
+        eo.f16_weights = 1;
+        eo.f16_weights_deny_list = denied.f16_weights_deny_list;
+        eo.steps = DEGRADE_STEPS;
+        eo.coreml = denied.coreml;
+        tts_cpp::supertonic::Engine engine(eo);
+        const std::string status = engine.coreml_status();
+        auto result = engine.synthesize("The deny list keeps the vocoder on ggml.");
+        expect(status_field(status, "state") == "disabled" && result.vocoder_synthesis_backend == "ggml" &&
+                   !result.pcm.empty(),
+               "Engine with the deny list near the budget: vocoder on '" + result.vocoder_synthesis_backend + "', " +
+                   status.substr(0, 200));
+        std::fprintf(stderr,
+                     "[supertonic-coreml-parity] deny list: weights %.1f -> %.1f MiB, Engine state %s, vocoder on %s\n",
+                     mib(base.device.weights_bytes), mib(deny.device.weights_bytes),
+                     status_field(status, "state").c_str(), result.vocoder_synthesis_backend.c_str());
+    } catch (const std::exception & e) {
+        fail(std::string("Engine with the deny list near the budget: ") + e.what());
+    }
+}
+
 // A generated sidecar stays off on the device classes the template prefers
 // ggml on, unless use = require.
 void check_device_gating(const std::string & gguf, const std::string & cache_dir) {
@@ -892,6 +963,7 @@ int generated_main(const std::string & gguf, const std::string & cache_dir, doub
     off.use = tts_cpp::CoremlOptions::Use::off;
     check_ggml_route_ignores_strict_env(gguf, off, "use = off");
     check_fit(gguf, o, supertonic_vocoder_plan_route(gguf, o), require_coreml);
+    check_fit_deny_list(gguf, o, require_coreml);
     check_device_gating(gguf, cache_dir);
 
     if (g_failures == 0) {

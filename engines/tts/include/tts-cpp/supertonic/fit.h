@@ -73,6 +73,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace tts_cpp {
 namespace supertonic {
@@ -91,6 +92,9 @@ struct FitOptions {
     std::string precision = "auto";
     // EngineOptions::f16_weights tri-state (-1 auto / 0 off / 1 on).
     int         f16_weights = -1;
+    // Mirrors EngineOptions::f16_weights_deny_list: tensors it names keep
+    // their native storage type, which the weight projection follows.
+    std::vector<std::string> f16_weights_deny_list;
     std::string backends_dir;
     // Mirrors EngineOptions::coreml: the vocoder's route and, for a generated
     // sidecar, its Core ML envelope (FitResult::coreml).
