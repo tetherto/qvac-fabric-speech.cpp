@@ -2859,7 +2859,7 @@ static int load_from_gguf_impl(const std::string & gguf_path,
         // The tensor data comes through the descriptor the metadata did.
         FILE * data_file = gguf_file.get();
 #else
-        FILE * data_file = nullptr;
+        const void * data_file = nullptr;
 #endif
         std::ifstream f;
         if (data_file == nullptr) {
@@ -2883,10 +2883,13 @@ static int load_from_gguf_impl(const std::string & gguf_path,
             const size_t nbytes = ggml_nbytes(t);
             buf.resize(nbytes);
             bool read_ok = false;
+#ifdef PARAKEET_USE_COREML
             if (data_file != nullptr) {
                 read_ok = fseeko(data_file, (off_t) (data_offset + off), SEEK_SET) == 0 &&
                           std::fread(buf.data(), 1, nbytes, data_file) == nbytes;
-            } else {
+            } else
+#endif
+            {
                 f.seekg((std::streamoff)(data_offset + off), std::ios::beg);
                 read_ok = static_cast<bool>(f.read(buf.data(), nbytes));
             }
