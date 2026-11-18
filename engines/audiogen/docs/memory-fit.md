@@ -84,7 +84,7 @@ resident decoder's memory, which the envelope's resident + transient form
 counts twice. A cold Neural Engine compile is admitted only while 915 MiB are
 free (`ane_compile_reserve_bytes`, 1.25 times `ANECompilerService`'s largest
 absolute size while a load ran, 731.4 MiB on the M4 Max, whose service always
-held 373-406 MiB of other jobs' compiles before the load; growth over a
+held 373-454 MiB of other jobs' compiles before the load; growth over a
 service that already holds memory understates a cold compile, so the absolute
 size bounds it. On the M2 it never exceeded 466.6 MiB).
 
