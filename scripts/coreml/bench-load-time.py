@@ -725,23 +725,30 @@ class Runner:
     def _power_reading(self) -> dict:
         """Samples the power once, after a measurement. The flag is a
         conservative adjacent-sample test: set when this sample or the one
-        before it differs from the start's. It can flag a measurement that ran
-        wholly on the start's power (the power came back before it began), and
-        a change that reverts between two samples goes unseen. A field pmset
+        before it differs from the start's, or when the two differ from each
+        other in a field both read. It can flag a measurement that ran wholly
+        on the start's power (the power came back before it began), and a
+        change that reverts between two samples goes unseen. A field pmset
         could not give is not compared: the rows next to it are flagged
         power_uncertain instead, unless a known field confirms a change."""
         now = self.power_reader()
         if self.power_start is None:
             self.power_start = self.power_last = now
+        last = self.power_last
         c_now, u_now = power_compare(self.power_start, now)
-        c_last, u_last = power_compare(self.power_start, self.power_last)
-        changed = c_now or c_last
+        c_last, u_last = power_compare(self.power_start, last)
+        # The previous and current samples against each other: with a field
+        # missing from the start, two known readings can still prove a change.
+        c_step, _ = power_compare(last, now)
+        changed = c_now or c_last or c_step
         uncertain = not changed and (u_now or u_last)
         self.power_last = now
         if changed and "changed" not in self.power_warned:
             self.power_warned.add("changed")
-            print(f"bench-load-time: warning: power changed from {power_label(self.power_start)} to "
-                  f"{power_label(now)}; flagging rows (power_changed) and continuing", file=sys.stderr, flush=True)
+            # The two known samples that differ.
+            a, b = (self.power_start, now) if c_now else (last, now) if c_step else (self.power_start, last)
+            print(f"bench-load-time: warning: power changed from {power_label(a)} to "
+                  f"{power_label(b)}; flagging rows (power_changed) and continuing", file=sys.stderr, flush=True)
         if uncertain and "uncertain" not in self.power_warned:
             self.power_warned.add("uncertain")
             print(f"bench-load-time: warning: could not read the power source or Low Power Mode (pmset gave "
@@ -1218,11 +1225,11 @@ def render(s: dict) -> str:
     w("`run` samples the power source (`pmset -g batt`) and Low Power Mode (`pmset -g`) at the start and once after "
       "each measurement. A row's `power` in `results.jsonl` is the sample taken after it was measured; the rows one "
       "process produces, such as every function of a cold load, share it. `power_changed` is a conservative flag "
-      "from adjacent samples: it is set when the row's sample or the one before it differs from the start's. It can "
-      "flag a row measured wholly on the start's power (the power came back before the measurement began), and it "
-      "misses a change that reverts between two samples. A field `pmset` could not give (source `unknown`, "
-      "`low_power` null) is never counted as a change: the rows next to it get `power_uncertain` instead, unless "
-      "a field that was read confirms a change.")
+      "from adjacent samples: it is set when the row's sample or the one before it differs from the start's, or when "
+      "the two differ from each other in a field both read. It can flag a row measured wholly on the start's power "
+      "(the power came back before the measurement began), and it misses a change that reverts between two "
+      "samples. A field `pmset` could not give (source `unknown`, `low_power` null) is never counted as a change: "
+      "the rows next to it get `power_uncertain` instead, unless a field that was read confirms a change.")
     w("")
     pw = s["power"]
     recorded = sum(e["rows"] - e["not_recorded"] for e in pw.values())

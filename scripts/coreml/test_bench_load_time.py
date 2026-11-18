@@ -867,6 +867,23 @@ class PowerRunnerTest(unittest.TestCase):
         self.assertIn("power changed from AC to battery, Low Power Mode unknown", err)
         self.assertNotIn("power_uncertain", r.power_warning())
 
+    def test_two_known_samples_confirm_a_change_the_start_could_not_read(self):
+        # AC throughout; Low Power Mode unreadable at the start, then off,
+        # then on: the two known readings prove a toggle, so the row whose
+        # sample turned it on is changed, not uncertain. The rows before and
+        # after it cannot be compared with the start and stay uncertain.
+        start = {"source": "ac", "low_power": None}
+        fx, r, err = self.run_ttr([start, AC, AC_LOW_POWER])
+        rows = self.rows(fx, r)
+        self.assertEqual([x["power"]["low_power"] for x in rows], [False] + [True] * 6)
+        self.assertEqual([x["power_changed"] for x in rows], [False, True, False, False, False, False, False])
+        self.assertEqual([x["power_uncertain"] for x in rows], [True, False, True, True, True, True, True])
+        self.assertIn("power changed from AC to AC, Low Power Mode;", err)
+        warning = r.power_warning()
+        self.assertIn("1 rows are flagged power_changed (ttr_cached 1)", warning)
+        self.assertIn("6 rows are flagged power_uncertain", warning)
+        self.assertIn("| ttr_cached | 4 | 4 | 0 | 0 | 0 | 0 | 4 | 1 | 3 |", blt.render(blt.summarize(fx.records(r))))
+
     def test_power_compare_field_by_field(self):
         self.assertEqual(blt.power_compare(AC, AC), (False, False))
         self.assertEqual(blt.power_compare(AC, BATTERY), (True, False))
@@ -885,6 +902,7 @@ class PowerRunnerTest(unittest.TestCase):
         doc = blt.render(blt.summarize(fx.records(r)))
         self.assertIn("A row's `power` in `results.jsonl` is the sample taken after it was measured", doc)
         self.assertIn("`power_changed` is a conservative flag from adjacent samples", doc)
+        self.assertIn("or when the two differ from each other in a field both read", doc)
         self.assertIn("It can flag a row measured wholly on the start's power", doc)
         self.assertIn("misses a change that reverts between two samples", doc)
         self.assertIn("flags each row whose own sample or the one before it differs from the start's", doc)
