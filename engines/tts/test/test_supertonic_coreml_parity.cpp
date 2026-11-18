@@ -607,8 +607,9 @@ void check_fit(const std::string & gguf, const tts_cpp::CoremlOptions & o, const
                    !result.pcm.empty(),
                "Engine with the fit's nondefault margin: memory-degrade as that fit (vocoder on '" +
                    result.vocoder_synthesis_backend + "'), " + status.substr(0, 200));
-        std::fprintf(stderr, "[supertonic-coreml-parity] fit with a %.0f MiB margin: Engine degraded as the fit, "
-                     "vocoder on %s\n", mib(wide.margin_bytes), result.vocoder_synthesis_backend.c_str());
+        std::fprintf(stderr, "[supertonic-coreml-parity] fit with a %.0f MiB margin: Engine state %s, vocoder on %s\n",
+                     mib(wide.margin_bytes), status_field(status, "state").c_str(),
+                     result.vocoder_synthesis_backend.c_str());
     } catch (const std::exception & e) {
         fail(std::string("Engine with the fit's nondefault margin: ") + e.what());
     }
