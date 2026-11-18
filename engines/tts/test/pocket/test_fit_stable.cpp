@@ -36,6 +36,7 @@
 
 #ifdef TTS_CPP_USE_COREML
 #include "hints.h"
+#include "qvac_coreml/generation.h"
 #include "qvac_coreml/manager.h"
 #endif
 #if defined(__APPLE__)
@@ -162,10 +163,27 @@ int write_hints(const fs::path & cache, const std::string & step_units, const st
 constexpr uint64_t POCKET_ENVELOPE = 349023360;
 
 void template_charges(const pd::CoremlRoute & step, const pd::CoremlRoute & decoder) {
+#if defined(TTS_CPP_USE_COREML) && defined(__APPLE__) && TARGET_OS_OSX
+    // A prebuilt-only Core ML build (TTS_CPP_COREML_GENERATE off) or macOS
+    // before 15 generates nothing: both routes are none for that reason and
+    // both stages stay on ggml, so there is no charge to check.
+    const bool generator = pcm::generation::built();
+    const bool os_supported = pcm::os_at_least(pcm::Manager::instance()->os_version(), 15, 0);
+    if (!generator || !os_supported) {
+        for (const pd::CoremlRoute * r : {&step, &decoder}) {
+            const bool fallback = r->route == "none" && (!generator ? r->state == "absent" && r->reason == "no sidecar"
+                                                                    : r->state == "unsupported" && r->reason == "os");
+            check(fallback, std::string("template charges: ") +
+                                (!generator ? "no generator in this build" : "macOS before 15") + ", so route none (" +
+                                r->route + " " + r->state + ": " + r->reason + ")");
+        }
+        return;
+    }
+#endif
     if (step.route != "generate" || decoder.route != "generate") {
 #if defined(TTS_CPP_USE_COREML) && defined(__APPLE__) && TARGET_OS_OSX
-        // A macOS Core ML build generates both stages of these GGUFs, so a
-        // charge it cannot check is a failure, not a skip.
+        // A macOS 15+ build with the generator generates both stages of these
+        // GGUFs, so a charge it cannot check is a failure, not a skip.
         check(false, "template charges: step route " + step.route + " (" + step.state + ": " + step.reason +
                          "), decoder route " + decoder.route + " (" + decoder.state + ": " + decoder.reason +
                          "); expected both generate");
