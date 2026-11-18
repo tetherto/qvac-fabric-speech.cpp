@@ -815,7 +815,7 @@ class PowerRunnerTest(unittest.TestCase):
         self.assertIsNone(r.power_warning())
         self.assertEqual(err, "")
         doc = blt.render(blt.summarize(fx.records(r)))
-        self.assertIn("power at the start: AC.", doc)
+        self.assertIn("Power at the start of the run: AC.", doc)
         self.assertIn("| ttr | 3 | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |", doc)
         self.assertNotIn("Warning", doc)
 
@@ -935,7 +935,7 @@ class PowerRunnerTest(unittest.TestCase):
         self.assertTrue(all(x["power"] == BATTERY and not x["power_changed"] for x in rows))
         self.assertIsNone(r.power_warning())
         doc = blt.render(blt.summarize(fx.records(r)))
-        self.assertIn("power at the start: battery.", doc)
+        self.assertIn("Power at the start of the run: battery.", doc)
         self.assertIn("| ttr | 3 | 0 | 3 | 0 | 0 | 0 | 0 | 0 | 0 |", doc)
 
     def test_battery_at_the_start_still_refuses(self):
@@ -996,30 +996,73 @@ class PowerRunnerTest(unittest.TestCase):
                  "load_ms": 1.0, "identity": "id-a"}]
         doc = blt.render(blt.summarize(recs))
         self.assertIn("None of the 1 rows carries a power reading", doc)
-        self.assertIn("AC power: True.", doc)
+        self.assertIn("The run recorded only whether it started on AC power: it started on AC power; the power "
+                      "during the run was not recorded.", doc)
+        self.assertNotIn("header", doc.split("<!-- report:power -->")[1].split("<!-- /report:power -->")[0])
+        # Without a run record the block names no start and points nowhere.
+        block = blt.render(blt.summarize(recs[1:])).split("<!-- report:power -->")[1].split("<!-- /report:power")[0]
+        self.assertNotIn("start", block.split("misses a change")[1])
+        self.assertIn("None of the 1 rows carries a power reading: they were recorded before `run` read the power "
+                      "source per row.\n", block)
         self.assertIn("Not measured yet.", blt.render(blt.summarize([])).split("<!-- /report:power -->")[0])
 
-    def test_header_summarises_the_starting_power_of_every_appended_run(self):
-        # Two runs appended to one results.jsonl: the header must not present
-        # the latest run's start as the start of every row in the tables.
-        row = {"kind": "ttr_cached", "variant": "turbo", "config": "c", "set": "w3", "run": 0, "rep": 0,
-               "time_to_ready_ms": 1.0, "all_ready": True, "power_changed": False, "power_uncertain": False}
+    ROW = {"kind": "ttr_cached", "variant": "turbo", "config": "c", "set": "w3", "run": 0, "rep": 0,
+           "time_to_ready_ms": 1.0, "all_ready": True, "power_changed": False, "power_uncertain": False}
 
-        def header(*starts):
+    @staticmethod
+    def power_block(doc: str) -> str:
+        return doc.split("<!-- report:power -->")[1].split("<!-- /report:power -->")[0]
+
+    def test_power_block_summarises_the_starting_power_of_every_appended_run(self):
+        # Two runs appended to one results.jsonl: the report must not present
+        # the latest run's start as the start of every row in the tables.
+        def block(*starts):
             recs = []
             for p in starts:
-                recs += [{"kind": "env", "ac_power": p["source"] == "ac", "power": p}, dict(row, power=p)]
-            return blt.render(blt.summarize(recs)).split("<!-- report:power -->")[0]
+                recs += [{"kind": "env", "ac_power": p["source"] == "ac", "power": p}, dict(self.ROW, power=p)]
+            doc = blt.render(blt.summarize(recs))
+            self.assertNotIn("start", doc.split("<!-- report:power -->")[0], "no power claim outside the block")
+            return self.power_block(doc)
 
-        self.assertIn("power at the start: AC.", header(AC))
-        self.assertIn("power at the start of each of the 2 runs: AC.", header(AC, AC))
-        mixed = header(AC, BATTERY)
-        self.assertIn("power at the start of the 2 runs: AC (1), battery (1); the latest started on battery.", mixed)
-        self.assertNotIn("power at the start: battery", mixed)
+        self.assertIn("Power at the start of the run: AC.", block(AC))
+        self.assertIn("Power at the start of each of the 2 runs: AC.", block(AC, AC))
+        mixed = block(AC, BATTERY)
+        self.assertIn("Power at the start of the 2 runs: AC (1), battery (1); the latest started on battery.", mixed)
+        self.assertNotIn("start of the run: battery", mixed)
         # A run recorded before the power was read per row keeps its AC flag.
-        self.assertIn("power at the start of the 2 runs: AC (1), not AC (1)",
-                      blt.render(blt.summarize([{"kind": "env", "ac_power": True, "power": AC},
-                                                {"kind": "env", "ac_power": False}])))
+        legacy = [{"kind": "env", "ac_power": True, "power": AC}, dict(self.ROW, power=AC),
+                  {"kind": "env", "ac_power": False}, dict(self.ROW)]
+        self.assertIn("Power at the start of the 2 runs: AC (1), not AC (1)",
+                      self.power_block(blt.render(blt.summarize(legacy))))
+
+    def test_refreshing_a_report_after_an_appended_run_updates_its_starting_power(self):
+        # A report written for a steady AC run, then a steady battery run
+        # appended to the same results and the same report refreshed: the
+        # starting power follows the tables, as a fresh render of the results
+        # does, and the hand-written host notes stay.
+        with tempfile.TemporaryDirectory() as d:
+            res = Path(d) / "out"
+            res.mkdir()
+            results, doc = res / "results.jsonl", Path(d) / "doc.md"
+
+            def append(p):
+                with results.open("a") as f:
+                    for r in ({"kind": "env", "ac_power": p["source"] == "ac", "power": p, "chip": "Apple M2"},
+                              dict(self.ROW, power=p)):
+                        f.write(json.dumps(r) + "\n")
+
+            append(AC)
+            self.assertEqual(ReportMergeTest.report("--results", res, "--out", doc)[0], 0)
+            doc.write_text(doc.read_text().replace("- Host: Apple M2", "- Host: Apple M2 (written by hand)"))
+            append(BATTERY)
+            self.assertEqual(ReportMergeTest.report("--results", res, "--out", doc)[0], 0)
+            refreshed = doc.read_text()
+            fresh = blt.render(blt.summarize(blt.read_results(res))) + "\n"
+            self.assertEqual(self.power_block(refreshed), self.power_block(fresh))
+            self.assertIn("Power at the start of the 2 runs: AC (1), battery (1); the latest started on battery.",
+                          self.power_block(refreshed))
+            self.assertIn("- Host: Apple M2 (written by hand)", refreshed)
+            self.assertNotIn("power at the start", refreshed.lower().split("<!-- report:power -->")[0])
 
 
 class NativeTest(unittest.TestCase):

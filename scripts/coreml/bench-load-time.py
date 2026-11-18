@@ -1155,22 +1155,29 @@ def summarize(recs: list) -> dict:
     return s
 
 
-def start_power(runs: list) -> str:
-    """The header's power words: the starting power of every run whose rows
-    the report holds (one env row per run appended to results.jsonl)."""
+def start_power(runs: list):
+    """The power block's sentence on how the runs started: the starting power
+    of every run whose rows the report holds, or None without a run record.
+    It lives in the generated block so a refresh of a report keeps it in step
+    with the tables."""
+    if not runs:
+        return None
     if len(runs) == 1 and not runs[0].get("power"):
-        return f"AC power: {runs[0].get('ac_power')}"  # recorded before the power was read per row
+        # Recorded before the power was read per row: only the starting AC flag.
+        said = {True: "on AC power", False: "not on AC power"}.get(runs[0].get("ac_power"))
+        return (f"The run recorded only whether it started on AC power: it started {said}; the power during the "
+                "run was not recorded." if said else "The run did not record its power source.")
     labels = [power_label(e["power"]) if e.get("power") else
               {True: "AC", False: "not AC"}.get(e.get("ac_power"), "not recorded") for e in runs]
     if len(runs) == 1:
-        return f"power at the start: {labels[0]}"
+        return f"Power at the start of the run: {labels[0]}."
     counts: dict = {}
     for x in labels:
         counts[x] = counts.get(x, 0) + 1
     if len(counts) == 1:
-        return f"power at the start of each of the {len(runs)} runs: {labels[0]}"
-    return (f"power at the start of the {len(runs)} runs: " + ", ".join(f"{k} ({n})" for k, n in counts.items())
-            + f"; the latest started on {labels[-1]}")
+        return f"Power at the start of each of the {len(runs)} runs: {labels[0]}."
+    return (f"Power at the start of the {len(runs)} runs: " + ", ".join(f"{k} ({n})" for k, n in counts.items())
+            + f"; the latest started on {labels[-1]}.")
 
 
 def render(s: dict) -> str:
@@ -1194,9 +1201,8 @@ def render(s: dict) -> str:
       "(Metal cost model, warm-load hints, width set, weight-sharing accounting); the last section says where each one goes.")
     w("")
     if env:
-        power = start_power(s.get("runs") or [env])
         w(f"- Host: {env.get('chip', '—')}, {(env.get('memsize') or 0) / 2**30:.0f} GB, macOS "
-          f"{env.get('os_version', '—')} ({env.get('os_build', '—')}), {power}.")
+          f"{env.get('os_version', '—')} ({env.get('os_build', '—')}).")
         w(f"- Commit `{(env.get('git') or '—')[:12]}`, manifest sha256 `{(env.get('manifest_sha256') or '—')[:16]}…`, "
           f"compute units `{env.get('units', '—')}`.")
         w("- Sidecars exported locally with `engines/tts/scripts/export-chatterbox-coreml.py` from the pinned f32 "
@@ -1220,11 +1226,15 @@ def render(s: dict) -> str:
     w("")
     pw = s["power"]
     recorded = sum(e["rows"] - e["not_recorded"] for e in pw.values())
+    starts = start_power(s.get("runs") or [])
+    if starts:
+        w(starts)
+        w("")
     if not pw:
         w("Not measured yet.")
     elif not recorded:
         w(f"None of the {sum(e['rows'] for e in pw.values())} rows carries a power reading: they were recorded "
-          "before `run` read the power source per row. The header says how the run was powered.")
+          "before `run` read the power source per row.")
     else:
         total = sum(e["rows"] for e in pw.values())
         changed = sum(e["changed"] for e in pw.values())
