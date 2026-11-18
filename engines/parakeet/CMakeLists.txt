@@ -706,6 +706,13 @@ if (PARAKEET_BUILD_TESTS)
         endif()
     endfunction()
 
+    # The host log sink is drained before parakeet_log_set returns.
+    add_executable(test-log-unregister test/test_log_unregister.cpp src/parakeet_log.cpp)
+    target_link_libraries(test-log-unregister PRIVATE ggml)
+    target_include_directories(test-log-unregister PRIVATE ggml/include src include)
+    parakeet_apply_ccache(test-log-unregister)
+    parakeet_register_test(test-log-unregister LABEL "unit")
+
     add_executable(test-parity test/test_parity.cpp)
     parakeet_register_test(test-parity LABEL "unit")
 
@@ -3251,22 +3258,49 @@ if (PARAKEET_BUILD_TESTS)
     # use = off fails as today. No skip path.
     if (PARAKEET_COREML AND TARGET qvac-parakeet)
         add_executable(test-parakeet-coreml-runtime test/test_parakeet_coreml_runtime.cpp)
+        # Public API only: it must link against a shared qvac-parakeet.
         target_link_libraries(test-parakeet-coreml-runtime PRIVATE qvac-parakeet)
-        target_include_directories(test-parakeet-coreml-runtime PRIVATE include src ggml/include)
+        target_include_directories(test-parakeet-coreml-runtime PRIVATE include test)
         parakeet_apply_ccache(test-parakeet-coreml-runtime)
         set(_qvp_nd_q8_gguf "${PARAKEET_TEST_MODEL_DIR}/Nemotron-3-Diarization.q8_0.gguf")
         set(_qvp_nd_diarizer "${PARAKEET_TEST_MODEL_DIR}/Nemotron-3-Diarization-diarizer-1125.mlmodelc")
-        set(_qvp_cr_args "--gguf" "${_qvp_tdt_q8_gguf}" "--wav" "${_qvp_jfk_wav}")
-        if (EXISTS "${_qvp_nd_q8_gguf}" AND EXISTS "${_qvp_nd_diarizer}")
-            list(APPEND _qvp_cr_args "--diar-gguf" "${_qvp_nd_q8_gguf}")
-        endif()
-        if (EXISTS "${_qvp_transcribepsy_coreml_gguf}")
-            list(APPEND _qvp_cr_args "--encoderless-gguf" "${_qvp_transcribepsy_coreml_gguf}")
-        endif()
+        # One test per fixture set: a missing fixture disables that test
+        # (reported as not run, which the device CI step rejects), never
+        # passes it.
         parakeet_register_test(test-parakeet-coreml-runtime
             LABEL    "fixture;coreml"
-            ARGS     ${_qvp_cr_args}
+            ARGS     "--case" "transcription" "--gguf" "${_qvp_tdt_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
             REQUIRES "${_qvp_tdt_q8_gguf}" "${_qvp_tdt_coreml}" "${_qvp_jfk_wav}")
+        parakeet_register_test(test-parakeet-coreml-runtime-diarizer
+            LABEL    "fixture;coreml"
+            EXE      test-parakeet-coreml-runtime
+            ARGS     "--case" "diarizer" "--diar-gguf" "${_qvp_nd_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
+                     "--gguf" "${_qvp_tdt_q8_gguf}"
+            REQUIRES "${_qvp_nd_q8_gguf}" "${_qvp_nd_diarizer}" "${_qvp_jfk_wav}" "${_qvp_tdt_q8_gguf}")
+        parakeet_register_test(test-parakeet-coreml-runtime-eu-labels
+            LABEL    "fixture;coreml"
+            EXE      test-parakeet-coreml-runtime
+            ARGS     "--case" "eu-labels" "--eu-gguf" "${_qvp_transcribepsy_eu_gguf}" "--wav" "${_qvp_jfk_wav}"
+            REQUIRES "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-flexible.mlmodelc")
+        parakeet_register_test(test-parakeet-coreml-runtime-fit-layouts
+            LABEL    "fixture;coreml"
+            EXE      test-parakeet-coreml-runtime
+            ARGS     "--case" "fit-layouts" "--eu-gguf" "${_qvp_transcribepsy_eu_gguf}"
+                     "--sortformer-gguf" "${_qvp_sfsv21_q8_gguf}"
+            REQUIRES "${_qvp_transcribepsy_eu_gguf}" "${_qvp_sfsv21_q8_gguf}")
+        parakeet_register_test(test-parakeet-coreml-runtime-sortformer
+            LABEL    "fixture;coreml"
+            EXE      test-parakeet-coreml-runtime
+            ARGS     "--case" "sortformer" "--sortformer-gguf" "${_qvp_sfsv21_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
+            REQUIRES "${_qvp_sfsv21_q8_gguf}" "${_qvp_jfk_wav}"
+                     "${PARAKEET_TEST_MODEL_DIR}/diar_streaming_sortformer_4spk-v2.1-diarizer-410.mlmodelc")
+        parakeet_register_test(test-parakeet-coreml-runtime-encoderless
+            LABEL    "fixture;coreml"
+            EXE      test-parakeet-coreml-runtime
+            ARGS     "--case" "encoderless" "--encoderless-gguf" "${_qvp_transcribepsy_coreml_gguf}"
+            REQUIRES "${_qvp_transcribepsy_coreml_gguf}")
     endif()
 
     # TranscribePsy on the engine API: expected transcript, precomputed-mel

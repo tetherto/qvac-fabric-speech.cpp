@@ -52,3 +52,13 @@ shapes, low-bit restrictions, placement and runtime status:
 - [MOSS-Speech speech tokenizer](moss.md#core-ml-speech-tokenizer)
 
 Other TTS model families run entirely through their ggml paths.
+
+Sidecars can also be generated on the device instead of downloaded. With a
+cache directory (`CoremlOptions::cache_dir` in `tts-cpp/coreml_options.h`, or
+`QVAC_COREML_CACHE_DIR`), macOS 15 or later and `TTS_CPP_COREML_GENERATE=ON`
+(the macOS default), an engine builds a stage's sidecar from the GGUF it
+loads, using a weight-free template embedded in the library, compiles it on
+the device and keeps it in the cache; the stage runs on ggml until the sidecar
+is ready. A prebuilt sidecar next to the GGUF still takes precedence. Today
+the [Parler-TTS DAC decoder](parler.md#generated-sidecar-and-background-loading)
+is generated; the other families load only prebuilt sidecars.

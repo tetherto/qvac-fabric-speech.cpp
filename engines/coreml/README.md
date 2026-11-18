@@ -93,13 +93,22 @@ route `generate`:
    from, the cache directory), `prepare_fn = generation::prepare` (the cache
    pipeline with the on-device compile) and `tmpl`. Its `artifact_path` stays
    empty: the prepare job supplies the published bundle. The identity comes
-   from `generation::loaded_source`: `generation::source_stat` of the path
-   taken before the engine first opens the GGUF and again after its last
-   read of it. When the two differ (the file was replaced during the load)
-   or the engine asks to generate from another path, the identity is marked
-   `changed`, and the prepare job fails with `source_changed` instead of
-   generating from weights the engine did not load; the stage stays on ggml.
+   from `generation::source_stat_fd`: the engine opens the GGUF once, reads
+   its metadata, mapping and streamed weights through that one descriptor,
+   and records fstat of it, so the identity is the loaded file whatever the
+   path named during the load. The prepare job opens the path and fails with
+   `source_changed` unless it is that file; an identity marked `changed`
+   (no descriptor, or a request for another path than the load's) fails the
+   same way, and the stage stays on ggml. `generation::loaded_source` (stats
+   of the path before the first open and after the last read) is the weaker
+   form for an engine that cannot read through one descriptor: a file
+   swapped in and restored between its two samples passes unseen.
    A stat taken only when the slot is made would follow a replacement.
+   Owners of one artifact share a loaded model, or a running load, only
+   with equal `SlotSpec::geometry`, so each geometry is validated by its own
+   `LoadFn`; a prediction failure retires the (artifact, function, units)
+   for every owner, whatever its geometry: their ready models, queued loads
+   and later acquisitions.
 4. The stage's `LoadFn` calls `generation::begin_load` before loading and
    `generation::end_load` after: a generated bundle loads under the shared
    lease of its cache entry, and `used/<key>` is touched after a successful
@@ -125,9 +134,79 @@ Fit charges a generated stage with `generation::envelope_bytes(memory,
 units)`: resident (runtime weights, twice the function I/O, state,
 workspace) plus one transient (the larger of `generation_peak_bytes + 8 MiB +
 compile_peak_bytes` and the unit class's `load_peak`), times the margin.
+`resident_bytes`, `prepare_peak_bytes`, `load_peak_bytes` and
+`transient_bytes` return those parts before the margin, so a memory
+validation can hold each phase to its own constant.
 `ane_compile_reserve_bytes` gives the memory admission reserve of a cold ANE
 load. Tests replace the Core ML compile with
 `generation::set_compile_override`.
+
+### Measured memory constants
+
+`extract` writes a template's `memory` section with the defaults above,
+`margin` 1.25 and `coreml_bound: "conservative"`. A model's memory validation
+replaces them with measured constants. It runs an overlapped schedule:
+ggml work on the calling thread while the stage is generated, compiled,
+loaded and warmed in the background, sampling the process footprint and
+`ANECompilerService`'s size. `test-parler-dac-coreml --memory-schedule` is the
+Parler DAC's. Its constants follow this convention:
+
+- Each constant is 1.25 times the largest value measured over every run on
+  every host in `validated_for`, rounded up to 1 MiB:
+  - `compile_peak_bytes`: the prepare (from the start of generation to the end
+    of the compile, over the footprint just before generation), less
+    `generation_peak_bytes` and 8 MiB;
+  - `load_peak_bytes.<units>`: the load and warm-up, over the footprint just
+    before the load;
+  - the resident part (`runtime_weight_bytes` + 2 x I/O + `state_bytes` +
+    `workspace_bytes`) must cover 1.25 times the steady state once ready,
+    over the footprint just before the load. `runtime_weight_bytes` stays
+    the weights' size. `workspace_bytes` is what that figure needs beyond
+    the weights, I/O and state, as on a GPU placement that holds its own
+    copy of the weights and working memory, or 0 when the charged weights
+    already cover it, as on the Neural Engine, which keeps the weights
+    outside the process;
+  - `ane_compile_reserve_bytes`: below.
+- A schedule run passes only when 1.25 times each phase it measured fits the
+  constant that charges it, so a run that sets a new maximum fails until the
+  constants are recomputed. The whole run is held to the envelope as
+  measured, since the envelope adds phases that each carry the margin.
+- Each constant carries its own 1.25, so the envelope adds none: `margin` 1.0
+  and `coreml_bound: "measured"`. The runtime reads `margin`; `coreml_bound`
+  and `measured` are records.
+- `memory.measured` records the derivation: `margin` (the 1.25 each constant
+  carries), `runs` (how many runs the maxima cover), `resident_bytes` (the
+  resident part the template charges, the sum above: at least 1.25 times the
+  largest measured steady state, not the raw measurement) and `basis` (what
+  each constant covers and which host set its maximum).
+- `validated_for` lists every measured host as `{units, os, chip}`. `plan()`
+  matches the units only, so every chip is charged the largest placement's
+  values.
+
+`ane_compile_reserve_bytes` is not part of the envelope. It is runtime
+admission: a cold Neural Engine load waits until that much memory is free.
+`ANECompilerService` is a long-lived system process (it runs as root under
+`aned`, so a test cannot restart it, and it does not exit when idle). A
+schedule measures it in two ways:
+
+- its **growth** during the load: its peak while loading, less its size just
+  before the first load;
+- its **absolute** size while loading. On a shared host it includes what
+  other processes compiled, before the load or during it.
+
+Both sum every instance of the service, so another process that compiles
+for the Neural Engine during the load counts in both. A service that
+already holds memory from earlier compiles reuses it, so on such a dirty
+baseline the growth understates a cold compile on a clean host, where the
+growth is the whole size. The reserve is therefore 1.25 times the largest
+growth measured from a clean start (at most 32 MiB before the load,
+`ANE_COMPILER_CLEAN_BYTES` in `test/memory_probe.h`) on every validated
+host, when every host has such runs. Otherwise it is 1.25 times the largest
+absolute size while loading on any validated host, a conservative basis
+that compares across placements, and the schedule holds 1.25 times the
+absolute size to it. Each run report prints both, the size before the load,
+and labels that baseline clean, dirty or unknown (no sample before the
+load, in which case the growth is the whole size while loading).
 
 ## Building the tests and the tool
 
@@ -356,7 +435,10 @@ qvac-coreml-tool dump <model.gguf> [-o <manifest.json>]
 
 Writes a shape manifest: every metadata key with its GGUF type and value, and
 every tensor's name, type, `n_dims`, `ne` and value statistics (min, max,
-mean, std). `twin` reads it.
+mean, std). `twin` reads it. `n_dims` is the count the file records: ggml's
+GGUF API drops trailing dimensions of 1 (a `[1, 96, 7]` weight reads as 2-D),
+while exporters read the rank through gguf-py, so `dump` reads it from the
+file header and every GGUF the tool writes (`twin`, `f32`) records it too.
 
 ```sh
 qvac-coreml-tool dump models/mimi.gguf -o mimi-manifest.json
@@ -371,7 +453,11 @@ qvac-coreml-tool twin --manifest <manifest.json> --seed <N> --types <type[,type.
 
 Writes a random GGUF with the same metadata and tensor geometry as the
 manifest. Each tensor's values are drawn from a normal distribution with the
-recorded mean and standard deviation, clamped to the recorded range. Tensors
+recorded mean and standard deviation, clamped to the recorded range. A tensor
+whose recorded values are all equal (a scalar bias, a constant vector) is drawn
+within ±25% of that value (±0.00025 around zero) instead, so every tensor
+differs between seeds and `extract` can see any value the exporter folds into
+the program. Tensors
 that are not f32 in the original (quantised, f16, bf16) take the `--types`
 entries in turn, quantised with ggml's own quantisers, when their row length is
 a multiple of that type's block size; the rest stay f32. `--set` sets a string

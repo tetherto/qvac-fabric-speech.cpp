@@ -729,15 +729,22 @@ bool        model_selected_encoder_on_coreml(const ParakeetCtcModel & m, int n_m
 // wait. Builds without Core ML always return the ggml route.
 EncoderRoute acquire_encoder_route(ParakeetCtcModel & m,
                                    const std::atomic<bool> * cancel = nullptr);
+// The engine's cancel flag for every Core ML acquisition a unit makes on this
+// model (encoder windows, diarizer passes, AOSC steps), so a cancelled call
+// stops waiting for a sidecar that is still loading.
+void model_set_cancel_flag(ParakeetCtcModel & m, const std::atomic<bool> * cancel);
 // The route only if the sidecar is ready now; requests nothing, never waits
 // (the ggml prewarm pass).
 EncoderRoute encoder_route_if_ready(ParakeetCtcModel & m);
-// Under use = require, refuses a push stream whose full windows
-// (`window_mel_frames` each) the encoder sidecar cannot serve: throws the
-// Core ML error each of those windows would throw, before any audio is fed.
+// Refuses a push stream whose full windows (`window_mel_frames` each) the
+// encoder sidecar cannot serve, before any audio is fed: under use = require
+// (the Core ML error each of those windows would throw), and on an encoder
+// Core ML owns under any policy (there are no ggml weights to run them on).
+// TranscribePsy EU picks its program per window (a flexible one for long
+// windows) and is not checked here.
 // Acquires the encoder route like a call does, so under require it waits for
-// the sidecar and throws when it failed. No-op with other use modes and on
-// builds without Core ML.
+// the sidecar and throws when it failed. No-op otherwise and on builds
+// without Core ML.
 void model_coreml_check_stream_window(ParakeetCtcModel & m, int window_mel_frames,
                                       const std::atomic<bool> * cancel = nullptr);
 
@@ -907,7 +914,8 @@ bool resolve_transcribepsy_eu_route(ParakeetCtcModel & model,
                                     int cropped_mel_frames = 0,
                                     int audio_samples = 0,
                                     bool * encoder_used_coreml = nullptr,
-                                    bool prefer_precise_eu = false);
+                                    bool prefer_precise_eu = false,
+                                    EncoderBackendTally * gate_tally = nullptr);
 
 // The ggml encoder keeps one compiled graph per input shape, least recently
 // used first out, up to a limit of 3 by default. Each graph holds a compute

@@ -52,6 +52,8 @@ struct TemplateMemory {
 //                              1.0 x for the other unit classes
 // Each part is returned unmargined; envelope_bytes() applies the margin.
 uint64_t resident_bytes(const TemplateMemory & m);
+uint64_t prepare_peak_bytes(const TemplateMemory & m);
+uint64_t load_peak_bytes(const TemplateMemory & m, ComputeUnits units);
 uint64_t transient_bytes(const TemplateMemory & m, ComputeUnits units);
 uint64_t envelope_bytes(const TemplateMemory & m, ComputeUnits units);
 // The memory admission reserve of a cold ANE load (default 1.6 x weight_bin_size).
@@ -78,14 +80,25 @@ std::vector<Candidate> probe(const std::vector<std::string> & template_ids, cons
 // The stat tuple of `path` with its realpath (PrepareRequest::source).
 bool source_stat(const std::string & path, SourceStat & out);
 
-// The identity of the file an engine loaded its weights from, for
-// prepare_request. `before` and `after` are source_stat of the path the engine
-// loaded, taken before its first open of it and after its last read; `path`
-// is the path it asks to generate from. When the two stats differ (the file
-// was replaced during the load), either is missing (`ok_*` false) or `path`
-// resolves to another file, the result is marked `changed`, so prepare fails
-// with source_changed rather than generating from weights the engine did not
-// load.
+// The identity of the file an engine read through `fd`, for prepare_request:
+// fstat of that descriptor, with `path`'s realpath (the path prepare opens).
+// An engine that opens its GGUF once and reads the metadata and every weight
+// through this one descriptor gets the loaded file's identity by
+// construction; prepare then opens `path` and fails with source_changed unless
+// it is that file. False when `fd` cannot be fstat'ed (or without the
+// generator). The preferred form: path samples (below) cannot see a file
+// swapped and restored between them.
+bool source_stat_fd(int fd, const std::string & path, SourceStat & out);
+
+// The identity of the file an engine loaded its weights from, from path
+// samples, for an engine that cannot read through one descriptor. `before`
+// and `after` are source_stat of the path the engine loaded, taken before its
+// first open of it and after its last read; `path` is the path it asks to
+// generate from. When the two stats differ (the file was replaced during the
+// load), either is missing (`ok_*` false) or `path` resolves to another file,
+// the result is marked `changed`, so prepare fails with source_changed rather
+// than generating from weights the engine did not load. A file replaced after
+// the first sample and restored before the last one passes unseen.
 SourceStat loaded_source(const SourceStat & before, bool ok_before, const SourceStat & after, bool ok_after,
                          const std::string & path);
 

@@ -4,6 +4,7 @@
 
 #import "coreml/parakeet-diarizer.h"
 #include "coreml/coreml_diarizers.h"
+#include "coreml/parakeet_coreml_load_error.h"
 #include "coreml/parakeet_coreml_sidecars.h"
 #include "coreml/parakeet_coreml_units.h"
 #include "parakeet_coreml_path.h"
@@ -16,6 +17,7 @@
 #include <dirent.h>
 #include <limits>
 #include <sys/stat.h>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -65,13 +67,28 @@ bool is_contiguous(MLMultiArray * array, int64_t columns) {
     return strides.count == 1 || strides[strides.count - kTrailingDims].longLongValue == columns;
 }
 
+// A framework failure while binding (an array or provider Core ML could not
+// allocate), as opposed to a schema the wrapper cannot bind. Set on the
+// loading thread; read once the bind returns.
+thread_local parakeet_coreml_load_error t_bind_failure{};
+thread_local bool t_bind_failed = false;
+
+void record_bind_failure(NSError * error) {
+    t_bind_failed = true;
+    parakeet_coreml_record_load_error(error, &t_bind_failure);
+}
+
 MLMultiArray * float_array(MLMultiArrayConstraint * constraint) {
     if (constraint == nil || constraint.dataType != MLMultiArrayDataTypeFloat32) return nil;
     NSError * error = nil;
     MLMultiArray * array = [[MLMultiArray alloc] initWithShape:constraint.shape
                                                       dataType:MLMultiArrayDataTypeFloat32
                                                          error:&error];
-    return error == nil ? array : nil;
+    if (array == nil || error != nil) {
+        record_bind_failure(error);
+        return nil;
+    }
+    return array;
 }
 
 bool bind_array(MLMultiArrayConstraint * constraint, NSString * name, Binding & binding,
@@ -219,7 +236,10 @@ bool bind_model(parakeet_coreml_diarizer * ctx, MLModel * model) {
     NSError * error = nil;
     MLDictionaryFeatureProvider * provider =
         [[MLDictionaryFeatureProvider alloc] initWithDictionary:features error:&error];
-    if (provider == nil || error != nil) return false;
+    if (provider == nil || error != nil) {
+        record_bind_failure(error);
+        return false;
+    }
     MLPredictionOptions * options = [[MLPredictionOptions alloc] init];
     options.outputBackings = backings;
     ctx->provider = CFBridgingRetain(provider);
@@ -272,21 +292,38 @@ struct parakeet_coreml_diarizer * parakeet_coreml_diarizer_init(const char * pat
 
 struct parakeet_coreml_diarizer * parakeet_coreml_diarizer_init_with_units(const char * path_mlmodelc,
                                                                            const char * units) {
+    return parakeet_coreml_diarizer_init_with_units_error(path_mlmodelc, units, nullptr);
+}
+
+struct parakeet_coreml_diarizer * parakeet_coreml_diarizer_init_with_units_error(
+        const char * path_mlmodelc, const char * units, parakeet_coreml_load_error * error) {
+    if (error != nullptr) *error = parakeet_coreml_load_error{};
     if (path_mlmodelc == nullptr) return nullptr;
     @autoreleasepool {
         std::string label;
         MLModelConfiguration * config = [[MLModelConfiguration alloc] init];
         config.computeUnits = parakeet_coreml_units_for(
             units, /*prefer_neural_engine=*/true, &label);
-        NSError * error = nil;
+        NSError * load_error = nil;
         NSURL * url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path_mlmodelc]];
-        MLModel * model = [MLModel modelWithContentsOfURL:url configuration:config error:&error];
-        if (model == nil || error != nil) return nullptr;
+        MLModel * model = [MLModel modelWithContentsOfURL:url configuration:config error:&load_error];
+        if (model == nil || load_error != nil) {
+            parakeet_coreml_record_load_error(load_error, error);
+            return nullptr;
+        }
         auto * ctx = new parakeet_coreml_diarizer();
         ctx->model = CFBridgingRetain(model);
         ctx->label = label;
+        t_bind_failed = false;
         if (!bind_model(ctx, model)) {
             parakeet_coreml_diarizer_free(ctx);
+            if (error != nullptr && t_bind_failed) {
+                *error = t_bind_failure;  // Core ML could not allocate: keep its error
+            } else if (error != nullptr) {
+                error->incompatible = 1;  // a schema the wrapper cannot bind
+                std::snprintf(error->message, sizeof(error->message), "%s",
+                              "unexpected diarizer inputs or outputs");
+            }
             return nullptr;
         }
         return ctx;
@@ -410,14 +447,26 @@ namespace {
 pcm::LoadResult load_diarizer(const pcm::LoadRequest & request) {
     pcm::LoadResult result;
     if (!pcm::generation::begin_load(request, result)) return result;
-    const int64_t capacity = request.geometry.empty() ? 0 : request.geometry.front();
-    parakeet_coreml_diarizer * context = parakeet_coreml_diarizer_init_with_units(
-        request.artifact_path.c_str(), pcm::to_string(request.units));
-    if (context == nullptr || parakeet_coreml_diarizer_capacity(context) != capacity) {
-        PARAKEET_LOG_WARN("parakeet: failed to load Core ML diarizer at '%s'; using ggml\n",
-                          request.artifact_path.c_str());
+    // sidecar_geometry(diarizer, {capacity})
+    const int64_t capacity = request.geometry.size() == 2 ? request.geometry[1] : 0;
+    parakeet_coreml_load_error error{};
+    parakeet_coreml_diarizer * context = parakeet_coreml_diarizer_init_with_units_error(
+        request.artifact_path.c_str(), pcm::to_string(request.units), &error);
+    if (context != nullptr && parakeet_coreml_diarizer_capacity(context) != capacity) {
+        // A verified incompatibility: the bundle is not the capacity its name says.
+        error = parakeet_coreml_load_error{};
+        error.incompatible = 1;
+        std::snprintf(error.message, sizeof(error.message), "capacity %lld, expected %lld",
+                      (long long) parakeet_coreml_diarizer_capacity(context), (long long) capacity);
         parakeet_coreml_diarizer_free(context);
-        result.error = pcm::Error::deterministic("failed to load Core ML diarizer", "parakeet", capacity);
+        context = nullptr;
+    }
+    if (context == nullptr) {
+        result.error = sidecar_load_error("Core ML diarizer", error);
+        PARAKEET_LOG_WARN("parakeet: failed to load Core ML diarizer at '%s' (%s); using ggml\n",
+                          request.artifact_path.c_str(), result.error.message.c_str());
+        // A generated bundle the load rejected deterministically is quarantined
+        // and prepared again (generation::end_load).
         pcm::generation::end_load(request, result);
         return result;
     }
@@ -437,6 +486,7 @@ struct CoremlDiarizers::State {
         : slots(gguf_path, std::move(capacities), sidecars, &load_diarizer, source) {}
     DiarizerSlots slots;
     std::mutex mutex;  // label and call stats
+    const std::atomic<bool> * cancel = nullptr;  // the owning engine's
     std::string label;
     CoremlDiarizerCallStats stats;
 };
@@ -453,6 +503,8 @@ CoremlDiarizers::CoremlDiarizers(const std::string & gguf_path, std::vector<Diar
 
 CoremlDiarizers::~CoremlDiarizers() = default;
 
+void CoremlDiarizers::set_cancel(const std::atomic<bool> * cancel) { state_->cancel = cancel; }
+
 bool CoremlDiarizers::covers(int frames) { return state_->slots.covers(frames); }
 
 bool CoremlDiarizers::prepare(int frames) { return state_->slots.prepare(frames); }
@@ -463,7 +515,7 @@ int CoremlDiarizers::run(int valid_frames,
     const bool strict = state_->slots.strict();
     std::string label;
     int served = 0;
-    const DiarizerPass pass = state_->slots.run(valid_frames, [&](pcm::Handle & model, int capacity) {
+    const DiarizerPass pass = state_->slots.run(valid_frames, state_->cancel, [&](pcm::Handle & model, int capacity) {
         auto * context = model->as<parakeet_coreml_diarizer>();
         int status = 0;
         {

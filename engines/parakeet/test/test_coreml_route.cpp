@@ -24,9 +24,27 @@
 //                         pending; with wait = call the acquisition waits
 //   sidecar-groups        construction group = the minimal set; prewarm all
 //                         adds the rest; an absent sidecar is skipped
+//   relative-paths        two bundles registered by the same relative name from
+//                         different directories get distinct absolute paths:
+//                         two shared models, each loaded from its own
+//                         directory even after the process changes directory
+//   cancel-wait           a unit acquisition waiting (wait = call) on a load
+//                         that is still running returns, pending, once its
+//                         cancel flag is set
+//   strict-probe          a readiness probe on a strict slot whose load
+//                         failed returns no model and does not throw (only
+//                         the unit's own acquisition does)
+//   loader-geometry       an encoder and a bypass encoder, or two diarizer
+//                         capacities, registered at one bundle path load two
+//                         models even while the first owner is alive
+//   load-error-class      a framework load failure is transient and keeps its
+//                         domain and code; a verified incompatibility is
+//                         deterministic
 //   options               public CoremlOptions -> runtime options, resolution
-//   fit-stable            the fit route and envelope never read the cache:
-//                         identical with no hint, a warm hint and a stale hint
+//   fit-envelope          the fit route helpers and envelope arithmetic never
+//                         read the cache (identical with no hint, a warm hint
+//                         and a stale hint). fit_params itself is checked on a
+//                         real GGUF by test-parakeet-coreml-runtime (fit-stable).
 //   generated-envelope    the generated-diarizer fit charge: capacities a
 //                         range loads (prebuilt ones shape the selection),
 //                         resident sum + one transient, largest margin;
@@ -51,10 +69,14 @@
 //                         a status-only slot that never serves a pass, is
 //                         listed by the construction group (every capacity
 //                         when generation is off) and, under use = require,
-//                         refuses a pass it covers; a pass longer than every
-//                         capacity still runs on ggml; adjacent encoder and
-//                         bypass-encoder sidecars stay in the construction
-//                         group unless a diarizer capacity serves
+//                         refuses a pass it covers, and a pass longer than
+//                         every capacity (under automatic that one runs on ggml);
+//                         adjacent encoder and bypass-encoder sidecars stay in
+//                         the construction group unless a diarizer capacity
+//                         serves
+//   diarizer-loaded-source generated capacities prepare only from the
+//                         identity the load passes (a file renamed over the
+//                         path after the load: source_changed)
 
 #include "coreml/parakeet_coreml_sidecars.h"
 #include "coreml_fit.h"
@@ -432,6 +454,32 @@ void case_call_label() {
     CHECK(coreml_call_label(EncoderRoute::ggml(), "coreml-cpu-gpu") == "coreml-cpu-gpu",
           "a per-dispatch program without a held route is still reported");
     CHECK(coreml_call_label(EncoderRoute::ggml()) == "coreml", "the label is never empty");
+
+    // One tally per call, every dispatch in it: a ggml language gate merged
+    // with a Core ML main pass is mixed and not all Core ML.
+    EncoderBackendTally gate;
+    gate.add(false, "");
+    EncoderBackendTally main_pass;
+    main_pass.add(true, "coreml-ane");
+    main_pass.add(true, "coreml-ane");
+    main_pass.merge(gate);
+    CHECK(main_pass.label() == "mixed" && !main_pass.all_coreml(),
+          "a ggml gate with a Core ML main pass is mixed and not all Core ML");
+    // A call whose dispatches all ran on Core ML, on two programs (the EU
+    // gate's, then the main pass's), is all Core ML and names the last.
+    EncoderBackendTally programs;
+    programs.add(true, "coreml-ane");
+    EncoderBackendTally precise;
+    precise.add(true, "coreml-cpu-gpu");
+    programs.merge(precise);
+    CHECK(programs.all_coreml() && programs.label() == "coreml-cpu-gpu",
+          "an all-Core ML call on two programs names the main pass's program");
+    EncoderBackendTally one;
+    one.add(true, "coreml-cpu-gpu");
+    EncoderBackendTally empty_gate;
+    one.merge(empty_gate);
+    CHECK(one.label() == "coreml-cpu-gpu" && one.all_coreml(),
+          "a call whose gate did not run reports its dispatch's program");
 }
 
 void case_owner_route() {
@@ -465,6 +513,26 @@ void case_owner_route() {
     ggml_runs = 0;
     dispatch_on_route(held, EncoderEligibility::ggml, [&] { return 0; }, [&] { ++ggml_runs; return 0; }, used);
     CHECK(ggml_runs == 1 && !used && held.usable(), "an ineligible dispatch runs on ggml, route intact");
+
+    FakeEncoder owned;
+    const EncoderRoute strict_owner = EncoderRoute::coreml(
+        reinterpret_cast<parakeet_coreml_context *>(&owned), fake_describe(nullptr, 128), kFakeLabel,
+        nullptr, ok_ops, /*owner=*/true, /*strict=*/true);
+
+    // Push streams on an owner route: a window over the fixed capacity can
+    // run nowhere, so the stream is refused under every policy.
+    const EncoderRoute lax_owner = EncoderRoute::coreml(
+        reinterpret_cast<parakeet_coreml_context *>(&owned), fake_describe(nullptr, 128), kFakeLabel,
+        nullptr, ok_ops, /*owner=*/true, /*strict=*/false);
+    const std::string lax = strict_stream_window_refusal(lax_owner, EncoderEligibility::cannot_serve, 4201);
+    CHECK(lax.find("no ggml encoder weights") != std::string::npos,
+          "an owner route refuses a push stream whose windows exceed its capacity, without require");
+    CHECK(!strict_stream_window_refusal(strict_owner, EncoderEligibility::cannot_serve, 4201).empty(),
+          "a strict owner route refuses that push stream too");
+    CHECK(strict_stream_window_refusal(lax_owner, EncoderEligibility::coreml, 1000).empty(),
+          "an owner push stream whose windows fit starts");
+    CHECK(strict_stream_window_refusal(held, EncoderEligibility::cannot_serve, 4201).empty(),
+          "a non-owner route without require still starts (its windows run on ggml)");
 }
 
 // One dispatch of `n_mel` frames as run_encoder drives it: the capacity check
@@ -489,6 +557,8 @@ StrictOutcome dispatch_strict(const EncoderRoute & route, int n_mel) {
         out.threw = true;
         out.error_state = err.state;
         out.error_class = err.cls;
+    } catch (const std::runtime_error &) {
+        out.threw = true;  // a route without the runtime's refusal (the synchronous owner)
     }
     return out;
 }
@@ -543,7 +613,8 @@ void case_strict_route() {
           "strict: the error reports the retirement");
     CHECK(slot->state() == pcm::SlotState::retired, "strict: a failed prediction retires the slot");
 
-    // The owner route keeps its own contract: it returns the error.
+    // A strict owner route has no ggml weights to fall back to either, so
+    // it refuses the over-capacity input like any strict route.
     FakeEncoder owned;
     EncoderRoute::Ops ops;
     ops.encode = &fake_encode;
@@ -551,8 +622,8 @@ void case_strict_route() {
                                                     fake_describe(nullptr, 128), kFakeLabel, nullptr, ops,
                                                     /*owner=*/true, /*strict=*/true);
     const StrictOutcome owner_over = dispatch_strict(owner, (int) kLongMel);
-    CHECK(!owner_over.threw && owner_over.ggml_runs == 1,
-          "an owner route hands an over-capacity input to the ggml path, which reports the error");
+    CHECK(owner_over.threw && owner_over.ggml_runs == 0,
+          "a strict owner route throws for an over-capacity input instead of running the weightless ggml path");
     fs::remove_all(dir);
 }
 
@@ -651,6 +722,17 @@ void case_sidecar_groups() {
         CHECK(enc->state() == pcm::SlotState::disabled, "use = off reports disabled");
     }
     {
+        // No group issued (nothing was planned): finished and successful.
+        CoremlSidecars idle(opts, m);
+        CHECK(idle.wait_construction(0), "an engine with no construction group waits successfully");
+        const std::string json = idle.construction_json();
+        CHECK((json.find("\"nothing_to_prepare\":true") != std::string::npos ||
+               json.find("\"nothing_to_prepare\": true") != std::string::npos) &&
+                  (json.find("\"success\":true") != std::string::npos ||
+                   json.find("\"success\": true") != std::string::npos),
+              "an engine with no construction group reports nothing_to_prepare and success");
+    }
+    {
         CoremlOptions budget = opts;
         budget.memory_budget_bytes = 1;
         CoremlSidecars sidecars(budget, m, /*memory_degraded=*/true);
@@ -658,6 +740,216 @@ void case_sidecar_groups() {
               "memory-degrade resolves use = off with reason memory");
     }
     fs::remove_all(dir);
+}
+
+void write_text(const fs::path & p, const std::string & text) {
+    fs::create_directories(p.parent_path());
+    std::ofstream(p) << text;
+}
+
+std::mutex g_loaded_mu;
+std::vector<std::string> g_loaded_paths;
+
+pcm::LoadResult recording_load(const pcm::LoadRequest & req) {
+    {
+        std::lock_guard<std::mutex> lock(g_loaded_mu);
+        g_loaded_paths.push_back(req.artifact_path);
+    }
+    return fake_load(req);
+}
+
+void case_relative_paths() {
+    const fs::path root = make_temp_dir("relative");
+    for (const char * sub : {"a", "b"}) {
+        write_text(root / sub / "model-encoder.mlmodelc" / "weights" / "weight.bin", std::string(10, 'x'));
+    }
+    fs::create_directories(root / "elsewhere");
+    const fs::path saved = fs::current_path();
+    auto m = pcm::Manager::create(fast_config());
+    const bool routable = m->platform() != pcm::Platform::other;
+
+    CoremlOptions opts;
+    opts.prewarm = CoremlOptions::Prewarm::none;
+    opts.wait = CoremlOptions::Wait::call;
+    auto request = [] {
+        SidecarRequest r;
+        r.stage = "encoder";
+        r.path = "model-encoder.mlmodelc";  // relative, as a GGUF opened by a relative name gives
+        r.present = true;
+        r.stage_default = pcm::ComputeUnits::cpu_and_ane;
+        r.load_fn = &recording_load;
+        return r;
+    };
+    CoremlSidecars first(opts, m), second(opts, m);
+    fs::current_path(root / "a");
+    auto slot_a = first.add(request());
+    fs::current_path(root / "b");
+    auto slot_b = second.add(request());
+    fs::current_path(root / "elsewhere");  // with prewarm none, the loads run after this
+
+    const std::string path_a = slot_a->spec().artifact_path;
+    const std::string path_b = slot_b->spec().artifact_path;
+    CHECK(fs::path(path_a).is_absolute() && fs::path(path_b).is_absolute(),
+          "relative-paths: the slot keeps an absolute bundle path");
+    CHECK(path_a != path_b, "relative-paths: the same relative name in two directories gives two paths");
+    std::error_code ec_a, ec_b;
+    CHECK(fs::path(path_a).is_absolute() && fs::equivalent(path_a, root / "a" / "model-encoder.mlmodelc", ec_a) &&
+              fs::path(path_b).is_absolute() && fs::equivalent(path_b, root / "b" / "model-encoder.mlmodelc", ec_b),
+          "relative-paths: each path names the bundle next to its own model");
+    if (routable) {
+        const pcm::Acquired got_a = slot_a->acquire(pcm::Demand::now);
+        const pcm::Acquired got_b = slot_b->acquire(pcm::Demand::now);
+        CHECK(got_a.model && got_b.model && got_a.model->get() != got_b.model->get(),
+              "relative-paths: two bundles load two models, not one shared");
+        std::lock_guard<std::mutex> lock(g_loaded_mu);
+        CHECK(g_loaded_paths.size() == 2 && g_loaded_paths[0] != g_loaded_paths[1] &&
+                  fs::path(g_loaded_paths[0]).is_absolute() && fs::path(g_loaded_paths[1]).is_absolute(),
+              "relative-paths: the loader opens each bundle by its absolute path after a chdir");
+    }
+    fs::current_path(saved);
+    fs::remove_all(root);
+}
+
+std::atomic<int> g_typed_loads{0};
+
+pcm::LoadResult typed_load(const pcm::LoadRequest & req) {
+    ++g_typed_loads;
+    pcm::LoadResult r;
+    r.model = std::make_shared<std::vector<int64_t>>(req.geometry);  // what this loader validated
+    return r;
+}
+
+pcm::LoadResult broken_load(const pcm::LoadRequest &) {
+    pcm::LoadResult r;
+    r.error = pcm::Error::transient("bundle unreadable", "com.apple.CoreML", 0);
+    return r;
+}
+
+void case_cancel_wait() {
+    const fs::path dir = make_temp_dir("cancel-wait");
+    auto m = pcm::Manager::create(fast_config());
+    if (m->platform() == pcm::Platform::other) {
+        fs::remove_all(dir);
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_gate_mu);
+        g_gate_open = false;
+    }
+    auto slot = make_encoder_slot(*m, &gated_load, pcm::Wait::call, dir);
+    std::atomic<bool> cancel{false};
+    std::thread canceller([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        cancel = true;
+    });
+    const auto t0 = std::chrono::steady_clock::now();
+    const pcm::Acquired got = slot->acquire(pcm::Demand::now, std::nullopt, &cancel);
+    const auto waited = std::chrono::steady_clock::now() - t0;
+    canceller.join();
+    CHECK(!got.model && got.pending && waited < std::chrono::seconds(2),
+          "cancel-wait: a waiting acquisition returns pending once the call is cancelled");
+    open_gate();
+    fs::remove_all(dir);
+}
+
+void case_strict_probe() {
+    const fs::path dir = make_temp_dir("strict-probe");
+    auto m = pcm::Manager::create(fast_config());
+    if (m->platform() == pcm::Platform::other) {
+        fs::remove_all(dir);
+        return;
+    }
+    pcm::SlotSpec spec;
+    spec.engine = "parakeet";
+    spec.stage = "encoder";
+    spec.units = pcm::ComputeUnits::all;
+    spec.route = pcm::Route::prebuilt;
+    spec.artifact_path = (dir / "broken-encoder.mlmodelc").string();
+    spec.load_fn = &broken_load;
+    pcm::SlotPolicy policy;
+    policy.wait = pcm::Wait::call;
+    policy.strict = true;
+    auto slot = m->make_slot(spec, policy);
+    bool unit_threw = false;
+    try {
+        (void) slot->acquire(pcm::Demand::now);
+    } catch (const pcm::CoremlError &) {
+        unit_threw = true;
+    }
+    CHECK(unit_threw && slot->state() == pcm::SlotState::failed, "strict-probe: the unit's acquisition throws");
+    bool probe_threw = false;
+    pcm::Acquired probed;
+    try {
+        probed = acquire_if_ready(*slot);
+    } catch (...) {
+        probe_threw = true;
+    }
+    CHECK(!probe_threw && !probed.model, "strict-probe: a readiness probe returns no model without throwing");
+    fs::remove_all(dir);
+}
+
+void case_loader_geometry() {
+    const fs::path dir = make_temp_dir("loader-geometry");
+    write_text(dir / "m.mlmodelc" / "weights" / "weight.bin", std::string(10, 'x'));
+    auto m = pcm::Manager::create(fast_config());
+    if (m->platform() == pcm::Platform::other) {
+        fs::remove_all(dir);
+        return;  // no routes off Apple platforms
+    }
+    CoremlOptions opts;
+    opts.prewarm = CoremlOptions::Prewarm::none;
+    opts.wait = CoremlOptions::Wait::call;
+    auto request = [&](std::vector<int64_t> geometry) {
+        SidecarRequest r;
+        r.stage = "stage";
+        r.path = (dir / "m.mlmodelc").string();
+        r.present = true;
+        r.stage_default = pcm::ComputeUnits::cpu_and_ane;
+        r.load_fn = &typed_load;
+        r.geometry = std::move(geometry);
+        return r;
+    };
+    CoremlSidecars first(opts, m), second(opts, m);
+    auto encoder = first.add(request(sidecar_geometry(SidecarLoader::encoder)));
+    const pcm::Acquired held = encoder->acquire(pcm::Demand::now);  // the first owner stays alive
+    auto bypass = second.add(request(sidecar_geometry(SidecarLoader::bypass_encoder)));
+    const pcm::Acquired other = bypass->acquire(pcm::Demand::now);
+    CHECK(held.model && other.model && held.model->get() != other.model->get() && g_typed_loads.load() == 2,
+          "loader-geometry: an encoder and a bypass encoder at one path are two models");
+    auto d358 = first.add(request(sidecar_geometry(SidecarLoader::diarizer, {358})));
+    auto d745 = second.add(request(sidecar_geometry(SidecarLoader::diarizer, {745})));
+    const pcm::Acquired a = d358->acquire(pcm::Demand::now);
+    const pcm::Acquired b = d745->acquire(pcm::Demand::now);
+    CHECK(a.model && b.model && a.model->get() != b.model->get() &&
+              static_cast<std::vector<int64_t> *>(b.model->get())->back() == 745,
+          "loader-geometry: a diarizer capacity alias of one bundle is loaded and validated for its own capacity");
+    fs::remove_all(dir);
+}
+
+void case_load_error_class() {
+    parakeet_coreml_load_error framework{};
+    std::snprintf(framework.domain, sizeof(framework.domain), "%s", "com.apple.CoreML");
+    framework.code = 3;
+    std::snprintf(framework.message, sizeof(framework.message), "%s", "compile failed");
+    const pcm::Error transient = sidecar_load_error("Core ML encoder", framework);
+    CHECK(transient.cls == pcm::ErrorClass::transient && transient.domain == "com.apple.CoreML" &&
+              transient.code == 3,
+          "load-error-class: a framework load failure is transient with its domain and code");
+    CHECK(transient.message.find("com.apple.CoreML 3") != std::string::npos &&
+              transient.message.find("compile failed") != std::string::npos,
+          "load-error-class: the message names the framework error");
+
+    parakeet_coreml_load_error mismatch{};
+    mismatch.incompatible = 1;
+    std::snprintf(mismatch.message, sizeof(mismatch.message), "%s", "capacity 358, expected 745");
+    const pcm::Error deterministic = sidecar_load_error("Core ML diarizer", mismatch);
+    CHECK(deterministic.cls == pcm::ErrorClass::deterministic &&
+              deterministic.message.find("capacity 358") != std::string::npos,
+          "load-error-class: a verified incompatibility is deterministic");
+
+    const pcm::Error unknown = sidecar_load_error("Core ML encoder", parakeet_coreml_load_error{});
+    CHECK(unknown.cls == pcm::ErrorClass::transient,
+          "load-error-class: a failure with no detail is not called deterministic");
 }
 
 void case_options() {
@@ -702,12 +994,7 @@ void case_options() {
     if (saved) setenv("PARAKEET_COREML_COMPUTE_UNITS", saved_value.c_str(), 1);
 }
 
-void write_text(const fs::path & p, const std::string & text) {
-    fs::create_directories(p.parent_path());
-    std::ofstream(p) << text;
-}
-
-void case_fit_stable() {
+void case_fit_envelope() {
     const fs::path dir = make_temp_dir("fit");
     const fs::path sidecar = dir / "m-encoder.mlmodelc";
     write_text(sidecar / "weights" / "weight.bin", std::string(4096, 'w'));
@@ -725,8 +1012,14 @@ void case_fit_stable() {
         r.device_free_bytes = 15000;  // ggml-only (10000) fits; + Core ML (9080) does not
         r.device_shares_host_memory = true;
         r.coreml_bytes = 50;
+        CoremlFitProgram program;
+        program.weight_file_bytes = in.weight_file_bytes;
+        program.runtime_floor_bytes = in.encoder_parameters * 2;
+        program.io_bytes = in.io_bytes;
+        program.units = in.units;
         apply_coreml_verdicts(r, /*required=*/10050, resolved.enabled(), resolved.disabled_reason,
-                              route.prebuilt, route.prebuilt ? coreml_encoder_envelope_bytes(in) : 0);
+                              CoremlCharge{50, 0}, route.prebuilt,
+                              route.prebuilt ? coreml_programs_charge({program}) : CoremlCharge{});
         return r;
     };
     auto same = [](const FitResult & a, const FitResult & b) {
@@ -878,8 +1171,8 @@ void case_coreml_verdicts_validated() {
         r.device_shares_host_memory = true;
         r.device_free_bytes = uint64_t(1) << 40;
         r.coreml_bytes = prebuilt_diarizers;
-        apply_coreml_verdicts(r, 1000 + prebuilt_diarizers, true, "", encoder_prebuilt, encoder_prebuilt ? 77 : 0,
-                              generated);
+        apply_coreml_verdicts(r, 1000 + prebuilt_diarizers, true, "", CoremlCharge{prebuilt_diarizers, 0},
+                              encoder_prebuilt, CoremlCharge{encoder_prebuilt ? 77u : 0u, 0}, CoremlCharge{generated, 0});
         return r;
     };
     const FitResult generated_only = verdict(0, false, 500);
@@ -892,6 +1185,13 @@ void case_coreml_verdicts_validated() {
     CHECK(!with_encoder.coreml.validated && with_encoder.coreml.bytes == 577,
           "not validated: a prebuilt encoder envelope is in the bytes");
     CHECK(!verdict(0, false, 0).coreml.validated, "not validated: nothing generated is charged");
+    // Residents add up; only the largest transient counts (one Core ML job at a time).
+    FitResult r;
+    r.device_shares_host_memory = true;
+    r.device_free_bytes = uint64_t(1) << 40;
+    apply_coreml_verdicts(r, 1000, true, "", CoremlCharge{}, true, CoremlCharge{77, 50}, CoremlCharge{400, 100});
+    CHECK(r.coreml.bytes == 400 + 77 + 100 && !r.coreml.validated,
+          "generated and encoder residents add up, the larger transient counts once");
 }
 
 }  // namespace
@@ -994,7 +1294,7 @@ void case_generated_sidecar() {
         r.present = false;
         r.stage_default = pcm::ComputeUnits::cpu_and_ane;
         r.load_fn = &generated_load;
-        r.geometry = {358};
+        r.geometry = sidecar_geometry(SidecarLoader::diarizer, {358});
         r.minimal = true;
         r.generated = c;
         pcm::generation::source_stat(model.string(), r.source);
@@ -1210,7 +1510,7 @@ void case_diarizer_capacities() {
         const DiarizerSlots slots(c.model.string(), capacities, sidecars, &fake_load);
         std::vector<int> registered;
         for (const auto & slot : sidecars.slots()) {
-            if (slot->spec().route == pcm::Route::generate) registered.push_back(slot->spec().geometry.at(0));
+            if (slot->spec().route == pcm::Route::generate) registered.push_back(slot->spec().geometry.at(1));
         }
         CHECK(charged == c.generated, (what + "fit charges the expected generated capacities").c_str());
         CHECK(registered == charged, (what + "discovery registers the capacities fit charges").c_str());
@@ -1230,7 +1530,7 @@ void case_diarizer_capacities() {
     };
     const auto throws = [](const DiarizerSlots & slots, int frames, std::string * what) {
         try {
-            slots.run(frames, [](pcm::Handle &, int) { return 0; });
+            slots.run(frames, nullptr, [](pcm::Handle &, int) { return 0; });
         } catch (const pcm::CoremlError & e) {
             if (what != nullptr) *what = e.what();
             return true;
@@ -1255,7 +1555,7 @@ void case_diarizer_capacities() {
         DiarizerPass pass;
         bool threw = false;
         try {
-            pass = strict_slots.run(300, predict_ok(&seen));
+            pass = strict_slots.run(300, nullptr, predict_ok(&seen));
         } catch (const pcm::CoremlError &) {
             threw = true;
         }
@@ -1268,12 +1568,14 @@ void case_diarizer_capacities() {
         seen = 0;
         threw = false;
         try {
-            pass = strict_slots.run(2000, predict_ok(&seen));
+            pass = strict_slots.run(2000, nullptr, predict_ok(&seen));
         } catch (const pcm::CoremlError &) {
             threw = true;
         }
-        CHECK(!threw && pass.status == kNoDiarizerSidecar && seen == 0,
-              "require: a pass longer than every capacity runs on ggml");
+        CHECK(threw && seen == 0, "require: a pass longer than every capacity throws instead of running on ggml");
+        what.clear();
+        CHECK(throws(strict_slots, 1126, &what) && what.find("longer than every") != std::string::npos,
+              "require: the refusal names the largest capacity");
 
         CoremlSidecars auto_sidecars(o, m);
         const DiarizerSlots auto_slots(gguf.string(), capacities, auto_sidecars, &fake_load);
@@ -1281,7 +1583,7 @@ void case_diarizer_capacities() {
         threw = false;
         seen = 0;
         try {
-            pass = auto_slots.run(800, predict_ok(&seen));
+            pass = auto_slots.run(800, nullptr, predict_ok(&seen));
         } catch (const pcm::CoremlError &) {
             threw = true;
         }
@@ -1325,12 +1627,12 @@ void case_diarizer_capacities() {
         bool threw = false;
         DiarizerPass pass;
         try {
-            pass = slots.run(1126, predict_ok(&seen));
+            pass = slots.run(1126, nullptr, predict_ok(&seen));
         } catch (const pcm::CoremlError &) {
             threw = true;
         }
-        CHECK(!threw && pass.status == kNoDiarizerSidecar && seen == 0,
-              "require, no cache directory: a pass longer than every capacity runs on ggml");
+        CHECK(threw && pass.status == kNoDiarizerSidecar && seen == 0,
+              "require, no cache directory: a pass longer than every capacity throws too");
     }
 
     // Generation off for the whole instance (and Core ML off altogether):
@@ -1547,8 +1849,13 @@ int main() {
     case_strict_route();
     case_pending_route();
     case_sidecar_groups();
+    case_relative_paths();
+    case_cancel_wait();
+    case_strict_probe();
+    case_loader_geometry();
+    case_load_error_class();
     case_options();
-    case_fit_stable();
+    case_fit_envelope();
     case_generated_diarizer_envelope();
     case_coreml_verdicts_validated();
 #if defined(QVAC_COREML_HAVE_GGML)

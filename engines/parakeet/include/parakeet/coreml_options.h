@@ -38,8 +38,8 @@ struct CoremlOptions {
     // the sidecar). Engine::stream_start refuses a push stream whose windows
     // are longer than a fixed-capacity encoder (every offline TDT push
     // stream with a 15 s standard sidecar). A diarization pass throws when
-    // every diarizer capacity that covers it failed; a pass longer than
-    // every capacity runs on ggml. Calls the engine keeps on ggml by design
+    // every diarizer capacity that covers it failed, and when it is longer
+    // than every capacity. Calls the engine keeps on ggml by design
     // (per-stage capture harnesses, model families or shapes with no
     // sidecar) still run on ggml.
     Use use = Use::unset;

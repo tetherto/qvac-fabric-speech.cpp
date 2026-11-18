@@ -186,15 +186,15 @@ inline bool route_fits_capacity(const EncoderRoute & route, int n_mel_frames) {
 // for the next one. A strict route (use = require) throws instead of running
 // on ggml whenever the handle could not serve the dispatch: a cannot_serve
 // call, or any Core ML error (a failed prediction still retires first). An
-// owner route returns any Core ML error (it has no ggml weights).
+// owner route returns any Core ML error (it has no ggml weights); a strict
+// owner route also throws for a cannot_serve call.
 // `used_coreml` reports where the dispatch ran.
 template <class CoremlFn, class GgmlFn>
 int dispatch_on_route(const EncoderRoute & route, EncoderEligibility eligibility,
                       CoremlFn && run_coreml, GgmlFn && run_ggml, bool & used_coreml,
                       int * coreml_rc = nullptr) {
     used_coreml = false;
-    if (eligibility == EncoderEligibility::cannot_serve && route.usable() && route.strict() &&
-        !route.owner()) {
+    if (eligibility == EncoderEligibility::cannot_serve && route.usable() && route.strict()) {
         route.refuse("the Core ML encoder cannot serve this input (longer than its fixed "
                      "capacity of " + std::to_string(route.geometry().fixed_mel_frames) +
                      " mel frames) and Core ML is required", false);
@@ -219,27 +219,37 @@ int dispatch_on_route(const EncoderRoute & route, EncoderEligibility eligibility
     return run_ggml();
 }
 
-// A push stream on a strict route (use = require): every full window is one
-// dispatch of `window_mel_frames`, and `eligibility` is what run_encoder
-// decides for it. When dispatch_on_route would refuse each full window, the
-// stream is refused before it starts; returns the reason, or "" when the
-// stream can run.
+// A push stream whose every full window is one dispatch of
+// `window_mel_frames`, with `eligibility` as run_encoder decides it. When no
+// full window could run, the stream is refused before it starts: on a strict
+// route (use = require) dispatch_on_route would refuse each one, and on an
+// owner route there are no ggml encoder weights to run them on, whatever the
+// policy. Returns the reason, or "" when the stream can run.
 inline std::string strict_stream_window_refusal(const EncoderRoute & route,
                                                 EncoderEligibility eligibility,
                                                 int window_mel_frames) {
-    if (eligibility != EncoderEligibility::cannot_serve || !route.usable() || !route.strict() ||
-        route.owner()) {
+    if (eligibility != EncoderEligibility::cannot_serve || !route.usable() ||
+        !(route.strict() || route.owner())) {
         return {};
     }
-    return "push-stream windows of " + std::to_string(window_mel_frames) +
-           " mel frames (left context, chunk and lookahead) are longer than the Core ML "
-           "encoder's fixed capacity of " + std::to_string(route.geometry().fixed_mel_frames) +
-           " mel frames, so every full window would fail, and Core ML is required; use a "
-           "shorter chunk_ms or left_context_ms where the model allows it, or use = automatic";
+    const std::string windows =
+        "push-stream windows of " + std::to_string(window_mel_frames) +
+        " mel frames (left context, chunk and lookahead) are longer than the Core ML "
+        "encoder's fixed capacity of " + std::to_string(route.geometry().fixed_mel_frames) +
+        " mel frames, so every full window would fail";
+    if (route.owner()) {
+        return windows + ", and the GGUF holds no ggml encoder weights to run them on; use a "
+               "shorter chunk_ms or left_context_ms where the model allows it";
+    }
+    return windows + ", and Core ML is required; use a shorter chunk_ms or left_context_ms "
+           "where the model allows it, or use = automatic";
 }
 
-// Per-call backend label: "ggml" when nothing ran on Core ML, the Core ML
-// label when everything did, "mixed" otherwise.
+// Per-call backend label: "ggml" when nothing ran on Core ML, "mixed" when
+// some dispatches ran on ggml and some on Core ML, otherwise the Core ML
+// program of the call's last Core ML dispatch (a model that picks its program
+// per dispatch, such as TranscribePsy EU after its language gate, reports the
+// program of its main pass, as Engine::encoder_backend() does).
 struct EncoderBackendTally {
     int coreml = 0;
     int ggml = 0;
@@ -249,13 +259,19 @@ struct EncoderBackendTally {
     void add(bool used_coreml, const std::string & label) {
         if (used_coreml) {
             ++coreml;
-            if (coreml_label.empty()) coreml_label = label;
-            else if (coreml_label != label) coreml_label = "mixed";
+            if (!label.empty()) coreml_label = label;
         } else {
             ++ggml;
         }
     }
     void add_route(const EncoderRoute & route) { pending = pending || route.pending(); }
+    // A later part of the same call (a windowed pass after the EU gate).
+    void merge(const EncoderBackendTally & later) {
+        coreml += later.coreml;
+        ggml += later.ggml;
+        if (!later.coreml_label.empty()) coreml_label = later.coreml_label;
+        pending = pending || later.pending;
+    }
 
     std::string label() const {
         if (coreml == 0) return "ggml";

@@ -21,11 +21,14 @@
 // GGUF without the switch loads them. Without the sidecar that part exits 3
 // (skipped).
 // Standard TDT sidecars without validated seams must retain native weights
-// under PARAKEET_COREML_ONLY and reject encoder-less GGUFs even with a sidecar.
+// under PARAKEET_COREML_ONLY and reject encoder-less GGUFs even with a sidecar;
+// with use = off or no sidecar next to it, a full GGUF under
+// PARAKEET_COREML_ONLY keeps its ggml encoder too.
 // `--stub-tdt-skip-load` needs no fixture: with a tensor-less TDT GGUF and a
 // stub bundle that holds only metadata.json, the loader skips the synchronous
 // sidecar load when the metadata shows an export that cannot own a TDT
-// encoder, and still attempts it for Neural Engine metadata or none.
+// encoder, and still attempts it for Neural Engine metadata, for none, and
+// for metadata that does not show the export.
 //
 // Exit 0 on success; non-zero on failure or invalid arguments.
 
@@ -44,6 +47,13 @@
 #include <memory>
 #include <string>
 #include <vector>
+
+#ifdef _WIN32
+#include <process.h>
+#define getpid _getpid
+#else
+#include <unistd.h>
+#endif
 
 using namespace parakeet;
 
@@ -99,6 +109,13 @@ void check_rejected_without_sidecar(const std::string & coreml_gguf) {
                kGgufLoadNoEncoderWeights,
            "the memory-fit loader must reject an encoder-less GGUF");
     unset_env(kDisableEnv);
+
+    // use = off: the same rejection, whether or not a sidecar is present.
+    CoremlOptions off;
+    off.use = CoremlOptions::Use::off;
+    ParakeetCtcModel off_model;
+    expect(load_from_gguf(coreml_gguf, off_model, 0, 0, false, "auto", off) == kGgufLoadNoEncoderWeights,
+           "an encoder-less GGUF with use = off must be rejected with kGgufLoadNoEncoderWeights");
 }
 
 #ifdef PARAKEET_USE_COREML
@@ -146,7 +163,7 @@ void check_owned_encoder_runs(const std::string & coreml_gguf, const std::string
 std::filesystem::path stage_full_gguf_with_sidecar(const std::string & full_gguf,
                                                    const std::string & coreml_gguf) {
     const std::filesystem::path dir =
-        std::filesystem::temp_directory_path() / "parakeet-coreml-owner-test";
+        std::filesystem::temp_directory_path() / ("parakeet-coreml-owner-test-" + std::to_string(::getpid()));
     std::filesystem::remove_all(dir);
     std::filesystem::create_directories(dir);
     const std::filesystem::path staged = dir / "staged.gguf";
@@ -188,7 +205,7 @@ void check_standard_tdt_rejects_encoderless(const std::string & gguf) {
     std::unique_ptr<gguf_context, decltype(&gguf_free)> stripped(gguf_init_empty(), gguf_free);
     gguf_set_kv(stripped.get(), source.get());
 
-    const auto dir = std::filesystem::temp_directory_path() / "parakeet-standard-tdt-owner-test";
+    const auto dir = std::filesystem::temp_directory_path() / ("parakeet-standard-tdt-owner-test-" + std::to_string(::getpid()));
     std::filesystem::create_directories(dir);
     const auto path = dir / "encoderless.gguf";
     expect(gguf_write_to_file(stripped.get(), path.string().c_str(), false),
@@ -200,6 +217,33 @@ void check_standard_tdt_rejects_encoderless(const std::string & gguf) {
     expect(load(path.string(), rejected) == kGgufLoadNoEncoderWeights,
            "standard TDT without encoder weights must reject an unvalidated sidecar");
     std::filesystem::remove_all(dir);
+}
+
+// PARAKEET_COREML_ONLY with a full GGUF keeps its ggml encoder whenever the
+// takeover does not happen: Core ML is off (use = off), or no sidecar sits
+// next to the GGUF, so the takeover attempt fails.
+void check_coreml_only_full_keeps_encoder(const std::string & gguf) {
+    set_env(kOnlyEnv, "1");
+    {
+        CoremlOptions off;
+        off.use = CoremlOptions::Use::off;
+        ParakeetCtcModel model;
+        expect(load_from_gguf(gguf, model, 0, 0, false, "auto", off) == 0 &&
+                   !model_encoder_owned_by_coreml(model),
+               "PARAKEET_COREML_ONLY with use = off keeps the GGUF's ggml encoder");
+    }
+    {
+        const auto dir = std::filesystem::temp_directory_path() / ("parakeet-coreml-only-no-sidecar-" + std::to_string(::getpid()));
+        std::filesystem::remove_all(dir);
+        std::filesystem::create_directories(dir);
+        const auto staged = dir / std::filesystem::path(gguf).filename();
+        std::filesystem::create_symlink(std::filesystem::absolute(gguf), staged);
+        ParakeetCtcModel model;
+        expect(load(staged.string(), model) == 0 && !model_encoder_owned_by_coreml(model),
+               "PARAKEET_COREML_ONLY with a failed takeover keeps the ggml encoder");
+        std::filesystem::remove_all(dir);
+    }
+    unset_env(kOnlyEnv);
 }
 
 void check_standard_tdt_keeps_encoder_weights(const std::string & gguf,
@@ -232,6 +276,7 @@ void check_standard_tdt_keeps_encoder_weights(const std::string & gguf,
                out.n_enc_frames > 0 && !out.used_coreml,
            "oversized TDT input must execute the retained native encoder");
     check_standard_tdt_rejects_encoderless(gguf);
+    check_coreml_only_full_keeps_encoder(gguf);
 }
 
 void capture_log(ggml_log_level, const char * text, void * user) {
@@ -260,7 +305,7 @@ void write_text(const std::filesystem::path & path, const std::string & text) {
 // stub bundle fails to load). The encoder-less GGUF is rejected either way.
 void check_stub_tdt_skips_throwaway_load() {
     namespace fs = std::filesystem;
-    const fs::path dir = fs::temp_directory_path() / "parakeet-stub-tdt-skip-load";
+    const fs::path dir = fs::temp_directory_path() / ("parakeet-stub-tdt-skip-load-" + std::to_string(::getpid()));
     fs::remove_all(dir);
     fs::create_directories(dir);
     const fs::path gguf = dir / "stub.gguf";
@@ -291,6 +336,34 @@ void check_stub_tdt_skips_throwaway_load() {
     expect(load_logged(gguf.string(), log) == kGgufLoadNoEncoderWeights &&
                log.find(kFailedLoad) != std::string::npos,
            "no metadata: the loader still loads the sidecar to find out");
+
+    // The Neural Engine inputs named with JSON escapes: the decoded names are
+    // what counts, so the loader still loads the bundle to read its seams.
+    write_text(bundle / "metadata.json",
+               R"([{"inputSchema":[{"name":"mel"},{"name":"pad\u005fmask"},{"name":"key\u005fbias"}]}])");
+    expect(load_logged(gguf.string(), log) == kGgufLoadNoEncoderWeights &&
+               log.find(kFailedLoad) != std::string::npos &&
+               log.find("no validated seam policy") == std::string::npos,
+           "Neural Engine inputs in escaped metadata: the loader still loads the sidecar");
+    // One Neural Engine name alone does not make the export.
+    write_text(bundle / "metadata.json",
+               R"([{"inputSchema":[{"name":"mel"},{"name":"pad_mask"}],"shortDescription":"key_bias"}])");
+    expect(load_logged(gguf.string(), log) == kGgufLoadNoEncoderWeights &&
+               log.find("no validated seam policy") != std::string::npos,
+           "a schema with only one Neural Engine input is another export: the load is skipped");
+
+    // Metadata that does not show the export (unparsable, or no input names)
+    // is inconclusive: only the model's own description can rule ownership
+    // out, so the bundle is loaded, as with no metadata.
+    for (const char * inconclusive : {"not json", "{}", R"([{"inputSchema":[]}])",
+                                      R"([{"shortDescription":"encoder"}])"}) {
+        write_text(bundle / "metadata.json", inconclusive);
+        expect(load_logged(gguf.string(), log) == kGgufLoadNoEncoderWeights &&
+                   log.find(kFailedLoad) != std::string::npos &&
+                   log.find("no validated seam policy") == std::string::npos,
+               std::string("inconclusive metadata '") + inconclusive +
+                   "': the loader still loads the sidecar to find out");
+    }
     fs::remove_all(dir);
 }
 
