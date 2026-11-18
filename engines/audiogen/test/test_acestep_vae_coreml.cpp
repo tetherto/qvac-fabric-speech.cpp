@@ -83,6 +83,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #if defined(__APPLE__)
@@ -1093,27 +1094,67 @@ void case_degrade(const std::string & models, const std::string & root) {
     std::unique_ptr<Engine> room = Engine::create(o);
     check(state_of(room->coreml_status()) == "idle", "Engine with room: decoder " + state_of(room->coreml_status()));
 
-    // The caller's decision is the one construction applies: a budget the
-    // assessed workload (20 s) degrades at, while the default workload
-    // (60 s), whose ggml projection alone exceeds it, would keep Core ML.
-    FitOptions assessed = f;
-    assessed.coreml.memory_budget_bytes =
-        (int64_t) (need_without + f.margin_bytes + std::min<uint64_t>(delta / 2, 64ull << 20));
-    FitOptions dflt = assessed;
+    // The caller's decision is the one construction applies. Memory-degrade
+    // holds for a budget B with ggml + margin <= B < ggml + Core ML + margin;
+    // a workload whose interval differs from the default workload's (60 s,
+    // no source audio) has a budget where the two choose different routes.
+    struct span { uint64_t ggml, coreml; };
+    auto span_of = [&](FitOptions w) {
+        w.coreml.memory_budget_bytes.reset();
+        FitOptions w_off = w;
+        w_off.coreml.use = CoremlOptions::Use::off;
+        const FitResult rw = fit_params(w), ro = fit_params(w_off);
+        return span{ro.peak_device_bytes + ro.peak_host_bytes + w.margin_bytes,
+                     rw.peak_device_bytes + rw.peak_host_bytes + w.margin_bytes};
+    };
+    FitOptions dflt = f;
     dflt.duration_seconds = FitOptions{}.duration_seconds;
+    dflt.with_source_audio = FitOptions{}.with_source_audio;
+    const span sd = span_of(dflt);
+    FitOptions assessed = f;
+    std::optional<int64_t> budget;
+    for (const auto & [seconds, source] : std::vector<std::pair<float, bool>>{{240.0f, false}, {240.0f, true},
+                                                                            {20.0f, true}, {20.0f, false}}) {
+        FitOptions w = f;
+        w.duration_seconds = seconds;
+        w.with_source_audio = source;
+        const span sw = span_of(w);
+        uint64_t b = 0;
+        if (sw.ggml < sd.ggml) b = sw.ggml;            // degrades for w, ggml-only does not fit for the default
+        else if (sw.ggml > sd.ggml) b = sd.ggml;       // the other way round
+        else if (sw.coreml != sd.coreml) b = std::min(sw.coreml, sd.coreml);
+        if (b == 0 || !(sw.ggml <= b && b < sw.coreml) && !(sd.ggml <= b && b < sd.coreml)) continue;
+        assessed = w;
+        budget = (int64_t) b;
+        break;
+    }
+    check(budget.has_value(), "a workload whose memory-degrade interval differs from the default workload's");
+    if (!budget) return;
+    assessed.coreml.memory_budget_bytes = budget;
+    dflt.coreml.memory_budget_bytes = budget;
     const FitResult a = fit_params(assessed);
     const FitResult d = fit_params(dflt);
-    std::fprintf(stderr, "  budget %.1f MiB: assessed (%.0f s) '%s', default workload (%.0f s) '%s'\n",
-                 mib((uint64_t) *assessed.coreml.memory_budget_bytes), assessed.duration_seconds,
+    std::fprintf(stderr, "  budget %.1f MiB: assessed (%.0f s%s) '%s', default workload (%.0f s) '%s'\n",
+                 mib((uint64_t) *budget), assessed.duration_seconds, assessed.with_source_audio ? ", source audio" : "",
                  a.coreml.disabled_reason.c_str(), dflt.duration_seconds, d.coreml.disabled_reason.c_str());
-    check(a.coreml.disabled_reason == "memory" && d.coreml.disabled_reason.empty(),
+    check((a.coreml.disabled_reason == "memory") != (d.coreml.disabled_reason == "memory"),
           "the assessed and the default workload choose different routes at this budget");
     EngineOptions decided = engine_options(models, cache);
-    decided.coreml.memory_budget_bytes = assessed.coreml.memory_budget_bytes;
+    decided.coreml.memory_budget_bytes = budget;
     decided.coreml.memory_degrade = a.coreml.disabled_reason == "memory";
     std::unique_ptr<Engine> e = Engine::create(decided);
-    check(state_of(e->coreml_status()) == "disabled",
-          "Engine with the caller's memory-degrade decision: decoder " + state_of(e->coreml_status()));
+    const std::string want = *decided.coreml.memory_degrade ? "disabled" : "idle";
+    check(state_of(e->coreml_status()) == want, "Engine with the caller's decision (" +
+                                                    std::string(*decided.coreml.memory_degrade ? "degrade" : "keep") +
+                                                    "): decoder " + state_of(e->coreml_status()));
+    // Without the decision construction assesses the default workload, which
+    // chooses the other route here.
+    EngineOptions undecided = engine_options(models, cache);
+    undecided.coreml.memory_budget_bytes = budget;
+    std::unique_ptr<Engine> u = Engine::create(undecided);
+    const std::string want_u = d.coreml.disabled_reason == "memory" ? "disabled" : "idle";
+    check(state_of(u->coreml_status()) == want_u && want_u != want,
+          "Engine without a decision (default workload): decoder " + state_of(u->coreml_status()));
 }
 
 // ---- memory schedule ----------------------------------------------------------
