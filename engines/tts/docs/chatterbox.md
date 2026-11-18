@@ -117,8 +117,10 @@ Neither construction nor synthesis waits for a load by default.
   chunk) acquires its models once, before it starts: the narrowest *loaded*
   encoder and CFM functions that cover its exact token and frame counts (a
   wider loaded function serves it with the padding masked) and HiFT. The
-  exact function is requested at once if it is not loaded; a call waits for
-  it (as `wait` allows) only when no loaded function covers the call. Each
+  exact function is requested at once if it is not loaded (after the call
+  holds its covering functions, so a full resident pool never evicts one it
+  uses); a call waits for it (as `wait` allows) only when no loaded function
+  covers the call. Each
   `Engine` owns its slots and requests; Engines and `tts-cli` on the same
   sidecars still share loads and models. A stage without a
   model runs that whole call on ggml, so readiness never changes a backend
@@ -144,10 +146,15 @@ Neither construction nor synthesis waits for a load by default.
   constructor wait for its construction group (`{prewarm: all, wait:
   construct}` loads all 15 functions first); `call` makes every call wait for
   its functions when none loaded covers it. `Engine::coreml_wait()`,
-  `coreml_prewarm()` and `coreml_status()` (`--coreml-status-json PATH`; `-`
-  is stdout, refused with `--out -`) expose the same. Without a sidecar in use
-  (Core ML off, absent or not built) a group is empty and succeeds with
-  `nothing_to_prepare`: `coreml_wait()` returns true at once.
+  `coreml_prewarm()`, `coreml_construction()` and `coreml_status()`
+  (`--coreml-status-json PATH`; `-` is stdout, refused with `--out -`, and a
+  path naming the `--out` file is refused) expose the same; the status
+  carries the construction group's result as `construction`. Without a
+  sidecar in use (Core ML off, absent or not built) a group is empty and
+  succeeds with `nothing_to_prepare`: `coreml_wait()` returns true at once,
+  and an Engine constructed that way never loads a function later. A
+  sidecar that lists no usable function makes every group fail with its
+  diagnostic.
 - **Cache directory** (`CoremlOptions::cache_dir`, `QVAC_COREML_CACHE_DIR`,
   `--coreml-cache-dir`): where warm hints live. Without one there are no hints,
   hence no bounded wait and no hinted widths at construction; `tts-cli`
