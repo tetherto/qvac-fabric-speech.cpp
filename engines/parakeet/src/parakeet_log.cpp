@@ -5,6 +5,8 @@
 #include "parakeet/log.h"
 
 #include <condition_variable>
+#include <memory>
+#include <algorithm>
 #include <cstdarg>
 #include <cstdio>
 #include <mutex>
@@ -15,27 +17,70 @@ namespace parakeet {
 
 namespace {
 
-// The sink and the calls in flight on it. Background work (Core ML sidecar
-// loads on the runtime's load lane) can log after the engine that started it
-// is gone, so log_set_callback waits for every callback still running before
-// it returns: once a host has replaced or cleared its sink, its user data is
-// never used again. A callback that logs through parakeet or replaces the sink
-// itself does not wait for its own call.
+// One host sink registration and the callbacks running on it. Background
+// work (a Core ML sidecar load finishing after its engine was destroyed) can
+// log from another thread; replacing or clearing the sink waits for every
+// callback still running on the registration it replaces, so the host may
+// free that sink's user data as soon as parakeet_log_set returns. ggml gets a
+// fixed forwarding callback, so its messages are counted the same way.
+//
+// A replacement waits only for the registration it replaced, and never for
+// the calling thread's own callbacks on it: a callback may log or replace the
+// sink itself, and two callbacks on different threads that both replace it
+// do not wait on each other.
+struct Sink {
+    ggml_log_callback callback = nullptr;
+    void * user_data = nullptr;
+    int in_flight = 0;
+};
+
 std::mutex g_mutex;
 std::condition_variable g_idle;
-ggml_log_callback g_callback = nullptr;
-void * g_user_data = nullptr;
-int g_in_flight = 0;
-thread_local int t_in_flight = 0;
+std::shared_ptr<Sink> g_sink;
+thread_local std::vector<const Sink *> t_running;  // sinks this thread is calling into
+
+void dispatch(ggml_log_level level, const char * text) {
+    std::shared_ptr<Sink> sink;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        sink = g_sink;
+        if (sink) ++sink->in_flight;
+    }
+    if (!sink) {
+        std::fputs(text, stderr);
+        return;
+    }
+    t_running.push_back(sink.get());
+    sink->callback(level, text, sink->user_data);
+    t_running.pop_back();
+    std::lock_guard<std::mutex> lock(g_mutex);
+    --sink->in_flight;
+    g_idle.notify_all();
+}
+
+void forward_ggml(ggml_log_level level, const char * text, void *) { dispatch(level, text); }
 
 }
 
 void log_set_callback(ggml_log_callback cb, void * user_data) {
-    std::unique_lock<std::mutex> lock(g_mutex);
-    g_callback = cb;
-    g_user_data = user_data;
-    g_idle.wait(lock, [] { return g_in_flight == t_in_flight; });
-    ggml_log_set(cb, user_data);
+    std::shared_ptr<Sink> replaced;
+    {
+        std::unique_lock<std::mutex> lock(g_mutex);
+        replaced = std::move(g_sink);
+        if (cb) {
+            g_sink = std::make_shared<Sink>();
+            g_sink->callback = cb;
+            g_sink->user_data = user_data;
+        }
+        ggml_log_set(cb ? &forward_ggml : nullptr, nullptr);
+        if (replaced) {
+            const Sink * old = replaced.get();
+            g_idle.wait(lock, [&] {
+                const int own = (int) std::count(t_running.begin(), t_running.end(), old);
+                return replaced->in_flight == own;
+            });
+        }
+    }
 }
 
 void log_impl(ggml_log_level level, const char * fmt, ...) {
@@ -57,26 +102,7 @@ void log_impl(ggml_log_level level, const char * fmt, ...) {
     }
     va_end(args_copy);
 
-    ggml_log_callback cb = nullptr;
-    void * user_data = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        cb = g_callback;
-        user_data = g_user_data;
-        if (cb) {
-            ++g_in_flight;
-            ++t_in_flight;
-        }
-    }
-    if (!cb) {
-        std::fputs(text, stderr);
-        return;
-    }
-    cb(level, text, user_data);
-    std::lock_guard<std::mutex> lock(g_mutex);
-    --g_in_flight;
-    --t_in_flight;
-    g_idle.notify_all();
+    dispatch(level, text);
 }
 
 }

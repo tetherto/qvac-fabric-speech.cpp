@@ -2,7 +2,14 @@
 
 // Install a ggml_log_callback for libqvac-parakeet; nullptr restores stderr.
 //
-// Also forwards to ggml_log_set so ggml and parakeet share one sink. Uses ggml.h types.
+// ggml's messages are forwarded to the same sink (parakeet installs its own
+// forwarding callback with ggml_log_set). Uses ggml.h types.
+//
+// Blocking: parakeet_log_set returns only after every callback still running
+// on the previous sink has returned, on any thread (background Core ML loads
+// can log after their engine is gone), so the previous user data may be freed
+// as soon as it returns. It does not wait for the calling thread's own
+// callbacks: a callback may log, or replace or clear the sink itself.
 
 #include "export.h"
 
