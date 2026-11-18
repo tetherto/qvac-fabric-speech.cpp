@@ -208,6 +208,10 @@ mini's (`dac_44khZ_8kbps`: latent 1024, 9 codebooks of 1024 entries, 86 Hz
 at 44.1 kHz), so it should share it too, but that stays unverified at the
 tensor level until a converted large-v1 GGUF is checked against the
 template. A GGUF that does not match runs on ggml with state `no_template`.
+The engine opens the GGUF once and reads its metadata and every weight
+through that descriptor, and generates only from that file: a GGUF replaced
+at the path during the load or since (an atomic rename, a re-pointed
+symlink) fails generation with `source_changed`, and the DAC stays on ggml.
 
 The sidecar, generated or prebuilt, loads in the background. Until it is
 ready every DAC call decodes on ggml and `SynthesisResult::coreml_pending`
@@ -285,14 +289,24 @@ The test reads the process footprint every 2 ms and the slot's state every
 10 ms. A run passes only when 1.25 times each phase it measured fits the
 template constant that charges it:
 
-- the prepare (generation and compile, over the footprint just before
-  generation) against `generation_peak_bytes` + 8 MiB + `compile_peak_bytes`;
+- the prepare (digest, generation and compile, over the footprint just
+  before the digest) against `generation_peak_bytes` + 8 MiB +
+  `compile_peak_bytes`;
 - the load and warm-up (over the footprint just before the load) against
   `load_peak_bytes.all`;
 - the steady state (ready, Core ML decodes running, over the footprint just
-  before the load) against the resident charge;
+  before the load) against the template's resident part (the host quantizer
+  copy is built at construction, before the load, so that footprint already
+  holds it);
 - `ANECompilerService`'s absolute size while loading against
-  `ane_compile_reserve_bytes`.
+  `ane_compile_reserve_bytes`. Each `ps` query of the service is bracketed
+  by two reads of the slot state; one that crossed the load's start or end
+  is dropped, so a size read before the load never counts as one during it.
+
+A run also fails when a state was never sampled (the digest does not count
+for the generation), when a probe failed, or when a decode failed or ran on
+another backend than ggml or the route's own label (only successful decodes
+count towards the schedule's ggml and Core ML calls).
 
 The whole run (over the warm ggml baseline) is held to the envelope as
 measured, since the envelope adds phases that each carry the margin. A run
@@ -403,8 +417,10 @@ measures 49.7 dB.
 `--units-sweep` also prints the same artifact's SNR for every compute-unit
 policy. The rows are reported only, except that on a chip with a floor the
 `cpu_and_ane` row is held to `--min-snr` in every case. A case holds only
-when the reference decoded on ggml and the sidecar under test decoded it (a
-fallback to ggml would compare ggml with itself); on such a chip a sweep
+when the reference decoded on ggml and the sidecar decoded it under the
+label the requested units give (`coreml-ane` for `cpu_and_ane`; a fallback
+to ggml would compare ggml with itself, and a sidecar opened on other units
+fails the row); on such a chip a sweep
 that cannot find, link or load the artifact fails. Random codes, 265 / 42 / 1 frames,
 vs ggml CPU:
 

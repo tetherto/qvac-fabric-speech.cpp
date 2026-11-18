@@ -93,13 +93,22 @@ route `generate`:
    from, the cache directory), `prepare_fn = generation::prepare` (the cache
    pipeline with the on-device compile) and `tmpl`. Its `artifact_path` stays
    empty: the prepare job supplies the published bundle. The identity comes
-   from `generation::loaded_source`: `generation::source_stat` of the path
-   taken before the engine first opens the GGUF and again after its last
-   read of it. When the two differ (the file was replaced during the load)
-   or the engine asks to generate from another path, the identity is marked
-   `changed`, and the prepare job fails with `source_changed` instead of
-   generating from weights the engine did not load; the stage stays on ggml.
+   from `generation::source_stat_fd`: the engine opens the GGUF once, reads
+   its metadata, mapping and streamed weights through that one descriptor,
+   and records fstat of it, so the identity is the loaded file whatever the
+   path named during the load. The prepare job opens the path and fails with
+   `source_changed` unless it is that file; an identity marked `changed`
+   (no descriptor, or a request for another path than the load's) fails the
+   same way, and the stage stays on ggml. `generation::loaded_source` (stats
+   of the path before the first open and after the last read) is the weaker
+   form for an engine that cannot read through one descriptor: a file
+   swapped in and restored between its two samples passes unseen.
    A stat taken only when the slot is made would follow a replacement.
+   Owners of one artifact share a loaded model, or a running load, only
+   with equal `SlotSpec::geometry`, so each geometry is validated by its own
+   `LoadFn`; a prediction failure retires the (artifact, function, units)
+   for every owner, whatever its geometry: their ready models, queued loads
+   and later acquisitions.
 4. The stage's `LoadFn` calls `generation::begin_load` before loading and
    `generation::end_load` after: a generated bundle loads under the shared
    lease of its cache entry, and `used/<key>` is touched after a successful
