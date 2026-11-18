@@ -338,7 +338,10 @@ two.
   decide this, with `EngineOptions::fit_text_tokens`, `fit_audio_seconds` and
   `fit_margin_bytes` (defaults 128, 10 s and 256 MiB, as in `FitOptions`): set
   them to the workload and headroom of the `fit_params` call that assessed the
-  engine, so the engine reaches the same decision.
+  engine, so the engine reaches the same decision. When that fit cannot
+  project the options (for example the per-step estimator path), a generated
+  sidecar stays off; fit options it rejects as invalid make the constructor
+  throw.
 
 Accuracy on an M2 (macOS 27.2.1, `all`, which places the program on the
 Neural Engine), waveform cosine against the ggml vocoder of the same GGUF on a

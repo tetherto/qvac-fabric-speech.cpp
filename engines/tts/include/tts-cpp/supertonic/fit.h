@@ -82,9 +82,11 @@ struct FitOptions {
     // Required; same role as EngineOptions::model_gguf_path.
     std::string model_gguf_path;
 
-    // Same semantics as the EngineOptions fields of the same name. The
-    // resolved dispatch must use the fused graph path (see coverage above):
-    // a validated GPU, or CPU without Accelerate/CBLAS pointwise kernels.
+    // Same semantics as the EngineOptions fields of the same name (so
+    // vulkan_device -1 selects the Vulkan adapter automatically, as the
+    // loader does). The resolved dispatch must use the fused graph path (see
+    // coverage above): a validated GPU, or CPU without Accelerate/CBLAS
+    // pointwise kernels.
     int         n_gpu_layers  = 0;
     int         vulkan_device = 0;
     std::string backend;

@@ -463,7 +463,7 @@ void check_ggml_route_ignores_strict_env(const std::string & gguf, const tts_cpp
                                          const std::string & what,
                                          tts_cpp::supertonic::Precision precision =
                                              tts_cpp::supertonic::Precision::Auto,
-                                         int steps = 0) {
+                                         int steps = 0, int vulkan_device = 0) {
     using tts_cpp::supertonic::Engine;
     using tts_cpp::supertonic::EngineOptions;
     scoped_env strict("SUPERTONIC_COREML_STRICT", "1");
@@ -474,6 +474,7 @@ void check_ggml_route_ignores_strict_env(const std::string & gguf, const tts_cpp
         opts.n_gpu_layers = 99;  // what fit projects
         opts.precision = precision;
         opts.steps = steps;
+        opts.vulkan_device = vulkan_device;
         opts.coreml = o;
         Engine engine(opts);
         const std::string status = engine.coreml_status();
@@ -566,6 +567,29 @@ void check_fit(const std::string & gguf, const tts_cpp::CoremlOptions & o, const
                  mib(r.coreml.bytes));
     check_ggml_route_ignores_strict_env(gguf, near.coreml, "memory-degrade", tts_cpp::supertonic::Precision::F32,
                                         DEGRADE_STEPS);
+    // The automatic Vulkan adapter (-1), which the loader accepts and ignores
+    // off Vulkan, needs the same memory: fit projects it and the Engine
+    // degrades the same way.
+    tts_cpp::supertonic::FitOptions near_auto = near;
+    near_auto.vulkan_device = -1;
+    const tts_cpp::FitResult da = tts_cpp::supertonic::fit_params(near_auto);
+    expect(da.status != tts_cpp::FitStatus::Error && da.coreml.disabled_reason == "memory",
+           "fit near the budget, automatic adapter: " + da.reason + ", disabled_reason '" +
+               da.coreml.disabled_reason + "'");
+    check_ggml_route_ignores_strict_env(gguf, near.coreml, "memory-degrade, automatic adapter",
+                                        tts_cpp::supertonic::Precision::F32, DEGRADE_STEPS, -1);
+    // A budget the fit cannot assess (the per-step estimator path it does not
+    // model): nothing shows the generated sidecar fits, so it stays off.
+    {
+        scoped_env per_step("SUPERTONIC_DISABLE_LOOP_GRAPH", "1");
+        tts_cpp::supertonic::FitOptions roomy = f;
+        roomy.coreml.memory_budget_bytes = (int64_t) 1 << 50;
+        const tts_cpp::FitResult u = tts_cpp::supertonic::fit_params(roomy);
+        expect(u.status == tts_cpp::FitStatus::Error && u.reason == "compute-path-not-supported",
+               "fit on the per-step path: " + u.reason);
+        check_ggml_route_ignores_strict_env(gguf, roomy.coreml, "budget without a projection",
+                                            tts_cpp::supertonic::Precision::F32, DEGRADE_STEPS);
+    }
 
     // A fit assessed with a larger headroom than the default: the budget
     // holds ggml + Core ML with the default 256 MiB margin, but only ggml

@@ -252,7 +252,23 @@ struct Engine::Impl {
             fit.f16_weights_deny_list = opts.f16_weights_deny_list;
             fit.backends_dir = opts.backends_dir;
             fit.coreml = opts.coreml;
-            coreml_degrade = fit_params(fit).coreml.disabled_reason == "memory";
+            const FitResult assessed = fit_params(fit);
+            if (assessed.status != FitStatus::Error) {
+                coreml_degrade = assessed.coreml.disabled_reason == "memory";
+            } else if (assessed.reason == "invalid-arguments") {
+                throw std::invalid_argument(
+                    "Supertonic Engine: coreml.memory_budget_bytes needs a fit assessment, which "
+                    "rejected these options (fit workload, margin or adapter index)");
+            } else if (assessed.coreml.route != "prebuilt") {
+                // No projection, so nothing shows a generated sidecar fits the
+                // budget: the vocoder stays on ggml. A prebuilt sidecar keeps
+                // today's behaviour, which a budget does not change.
+                coreml_degrade = true;
+                std::fprintf(stderr,
+                             "supertonic: the memory budget cannot be assessed (%s); "
+                             "the vocoder stays on ggml\n",
+                             assessed.reason.c_str());
+            }
         }
         // The vocoder sidecar loads through the shared Core ML runtime below,
         // not with the weights.

@@ -401,7 +401,9 @@ struct EngineOptions {
     // coreml.memory_budget_bytes set, the constructor repeats that fit to
     // decide memory-degrade (Core ML off when only the ggml projection fits
     // the budget), so these must match the assessment, or the engine can keep
-    // Core ML where that fit dropped it.
+    // Core ML where that fit dropped it. A fit that cannot project these
+    // options keeps a generated sidecar off; one that rejects them as invalid
+    // makes the constructor throw std::invalid_argument.
     int fit_text_tokens = 128;
     float fit_audio_seconds = 10.0f;
     uint64_t fit_margin_bytes = 256ull * 1024 * 1024;

@@ -71,7 +71,7 @@ FitResult fit_params(const FitOptions & opts) {
         return r;
     }
     if (opts.model_gguf_path.empty() || opts.text_tokens <= 0 ||
-        !(opts.audio_seconds > 0.0f) || opts.steps < 0 || opts.vulkan_device < 0) {
+        !(opts.audio_seconds > 0.0f) || opts.steps < 0 || opts.vulkan_device < -1) {
         r.reason = "invalid-arguments";
         return r;
     }
