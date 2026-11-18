@@ -45,9 +45,9 @@
 #include "tts-cpp/pocket/engine.h"
 #include "tts-cpp/pocket/fit.h"
 
+#include "memory_schedule.h"
 #ifdef TTS_CPP_USE_COREML
 #include "moss/coreml/runner.h"
-#include "memory_probe.h"
 #endif
 
 #include <algorithm>
@@ -192,6 +192,131 @@ void check_rope() {
 
 // Detection is presence-only, so an empty sidecar directory next to a GGUF
 // path that does not exist is enough; fit refuses before reading anything.
+namespace qm = qvac_coreml_memory;
+
+// One footprint sample of the Pocket memory schedule, with each stage's slot
+// state when it was taken.
+struct pocket_mem_sample {
+    uint64_t footprint = 0;
+    qm::mem_phase step = qm::mem_phase::ggml, mimi = qm::mem_phase::ggml;
+};
+
+// The schedule's attribution (qvac_coreml_memory::mem_breakdown_of) per
+// stage and for both together. One Core ML job runs at a time, so at most one
+// stage prepares, loads or warms at any sample:
+//   step, mimi  that stage's prepare and load+warm, each over the footprint
+//               just before that phase began (the other stage's work counts as
+//               ggml for it);
+//   both        ready only once both stages are, otherwise the active
+//               stage's phase: its steady state is over the footprint just
+//               before the first load of either stage (against both resident
+//               parts) and its whole run over the baseline (the envelope).
+struct pocket_mem {
+    qm::mem_breakdown step, mimi, both;
+};
+
+pocket_mem pocket_mem_of(const std::vector<pocket_mem_sample> & samples, uint64_t base) {
+    const auto active = [](qm::mem_phase p) { return p != qm::mem_phase::ggml && p != qm::mem_phase::ready; };
+    std::vector<qm::mem_sample> step, mimi, both;
+    for (const pocket_mem_sample & s : samples) {
+        step.push_back({s.footprint, active(s.step) ? s.step : qm::mem_phase::ggml});
+        mimi.push_back({s.footprint, active(s.mimi) ? s.mimi : qm::mem_phase::ggml});
+        const bool ready = s.step == qm::mem_phase::ready && s.mimi == qm::mem_phase::ready;
+        both.push_back({s.footprint, active(s.step)   ? s.step
+                                     : active(s.mimi) ? s.mimi
+                                     : ready          ? qm::mem_phase::ready
+                                                      : qm::mem_phase::ggml});
+    }
+    return {qm::mem_breakdown_of(step, base), qm::mem_breakdown_of(mimi, base), qm::mem_breakdown_of(both, base)};
+}
+
+// A stage's template charges.
+struct pocket_stage_charges {
+    uint64_t prepare = 0, load = 0, ane_reserve = 0;
+};
+
+// One line per charge the run exceeds, or per state it never sampled: each
+// stage's prepare and load+warm and (on the Neural Engine) ANECompilerService's
+// absolute size while it loaded, 1.25 x measured; the steady state with both
+// ready, 1.25 x measured, against both resident parts; the whole run, as
+// measured, against the envelope (qvac_coreml_memory::mem_failures).
+std::vector<std::string> pocket_mem_failures(const pocket_mem & m, const pocket_stage_charges & step,
+                                             const pocket_stage_charges & mimi, uint64_t ane_compiler_load_peak,
+                                             uint64_t resident, uint64_t envelope) {
+    std::vector<std::string> out;
+    const auto stage = [&](const char * name, qm::mem_breakdown b, const pocket_stage_charges & c, uint64_t ane) {
+        b.ready = true;  // the steady state is both stages' (below)
+        b.steady = b.total = 0;
+        for (const std::string & f : qm::mem_failures(b, ane, {c.prepare, c.load, 0, c.ane_reserve, 0}))
+            out.push_back(std::string(name) + " " + f);
+    };
+    stage("step", m.step, step, 0);
+    stage("mimi", m.mimi, mimi, ane_compiler_load_peak);
+    qm::mem_breakdown b = m.both;
+    b.generated = b.compiled = b.loaded = b.warmed = true;  // per stage (above)
+    b.prepare = b.load_warm = 0;
+    for (const std::string & f : qm::mem_failures(b, 0, {0, 0, resident, 0, envelope})) out.push_back("both " + f);
+    return out;
+}
+
+bool contains_text(const std::vector<std::string> & lines, const std::string & what) {
+    for (const std::string & l : lines)
+        if (l.find(what) != std::string::npos) return true;
+    return false;
+}
+
+// The schedule's arithmetic on a synthetic run (no device): per-stage
+// attribution, the margin on every measured phase, the whole run as measured,
+// and every missing state or probe reading failing the run.
+void check_memory_schedule_attribution() {
+    using P = qm::mem_phase;
+    const std::vector<pocket_mem_sample> run = {
+        {100, P::ggml, P::ggml},    {102, P::generate, P::ggml}, {130, P::compile, P::ggml},
+        {110, P::ggml, P::generate}, {150, P::ggml, P::compile},  {140, P::load, P::ggml},
+        {170, P::warm, P::ggml},     {165, P::ready, P::load},    {190, P::ready, P::warm},
+        {185, P::ready, P::ready},   {180, P::ready, P::ready}};
+    const pocket_mem m = pocket_mem_of(run, 100);
+    require(m.step.prepare == 30 && m.step.load_warm == 20 && m.mimi.prepare == 20 && m.mimi.load_warm == 20,
+            "memory schedule: each stage's prepare and load+warm over the footprint just before it began");
+    require(m.both.steady == 35 && m.both.total == 90 && m.both.ready,
+            "memory schedule: steady with both ready over the first load, whole run over the baseline");
+    require(!m.step.ready && !m.mimi.ready, "memory schedule: one stage ready is not the steady state");
+    // 1.25 x 30 = 37.5: a 38 charge holds it, 37 does not.
+    const pocket_stage_charges step{38, 25, 0}, mimi{25, 25, 125};
+    require(pocket_mem_failures(m, step, mimi, 100, 44, 90).empty(), "memory schedule: a run within every charge");
+    require(contains_text(pocket_mem_failures(m, {37, 25, 0}, mimi, 100, 44, 90), "step prepare"),
+            "memory schedule: the margin applies to the step's prepare");
+    require(contains_text(pocket_mem_failures(m, step, {25, 24, 125}, 100, 44, 90), "mimi load and warm-up"),
+            "memory schedule: the margin applies to Mimi's load and warm-up");
+    require(contains_text(pocket_mem_failures(m, step, mimi, 101, 44, 90), "ANECompilerService"),
+            "memory schedule: 1.25 x the compiler's absolute size while loading must fit the reserve");
+    require(contains_text(pocket_mem_failures(m, step, mimi, 100, 43, 90), "steady state"),
+            "memory schedule: the margin applies to the steady state");
+    require(contains_text(pocket_mem_failures(m, step, mimi, 100, 44, 89), "whole run") &&
+                !contains_text(pocket_mem_failures(m, step, mimi, 100, 44, 90), "whole run"),
+            "memory schedule: the whole run is held to the envelope as measured");
+    // A run that never sampled a state fails, and a digest is not a generation.
+    std::vector<pocket_mem_sample> partial = run;
+    partial[1].step = P::digest;
+    require(contains_text(pocket_mem_failures(pocket_mem_of(partial, 100), step, mimi, 100, 44, 90),
+                          "step the schedule never sampled the slot generating"),
+            "memory schedule: a digest alone does not count as the generation");
+    partial = run;
+    partial.resize(9);
+    require(contains_text(pocket_mem_failures(pocket_mem_of(partial, 100), step, mimi, 100, 44, 90),
+                          "never sampled the slot ready"),
+            "memory schedule: a run without a steady-state sample fails");
+    // Missing probe readings fail instead of reading 0.
+    qm::AneGrowth none;
+    require(qm::probe_failures(false, 0, true, none).size() == 2 && qm::probe_failures(true, 3, false, none).size() == 1,
+            "memory schedule: a failed baseline, footprint probe or compiler query fails the run");
+    require(qm::ane_query_loading(P::compile, P::load) == std::nullopt &&
+                qm::ane_query_loading(P::load, P::warm) == std::optional<bool>(true) &&
+                qm::ane_query_loading(P::ready, P::ggml) == std::optional<bool>(false),
+            "memory schedule: a compiler query crossing the load's start or end is dropped");
+    std::puts("[memory] schedule attribution and margins: ok");
+}
+
 void check_detection_and_fit() {
     env_guard units(pd::COREML_UNITS_ENV), strict(pd::COREML_STRICT_ENV), disabled(pd::COREML_DISABLE_ENV);
     unsetenv(pd::COREML_UNITS_ENV);
@@ -705,18 +830,6 @@ const Json & stage_status(const Json & status, const std::string & stage) {
 //   compiler               ANECompilerService's growth while a stage on the
 //                          Neural Engine loads and warms, against that
 //                          template's ane_compile_reserve_bytes.
-struct stage_mem {
-    uint64_t prepare = 0, load_warm = 0;
-    bool prepared = false, loaded = false;
-};
-
-int stage_phase(const std::string & state) {
-    if (state == "digesting" || state == "generating" || state == "compiling") return 1;
-    if (state == "loading" || state == "warming") return 2;
-    if (state == "ready") return 3;
-    return 0;
-}
-
 // The GGUF is replaced, or removed, after the ggml weights were loaded and
 // before the sidecars are made: FlowLM is loaded through a symlink, which is
 // then pointed at a clone of the file (same bytes, another inode), and Mimi
@@ -811,41 +924,53 @@ void memory_schedule(const EngineOptions & bundle, const std::string & cache_dir
     ggml_unit();
     ggml_unit();
     std::atomic<bool> stop{false};
-    std::atomic<int> active{-1};       // 0 step, 1 decoder, -1 none
-    std::atomic<int> active_phase{0};  // stage_phase of the active stage
-    std::atomic<bool> both_ready{false};
     std::atomic<const pd::CoremlStages *> watched{nullptr};
-    struct sample { uint64_t footprint; int stage, phase; bool ready; };
-    std::vector<sample> samples;
+    // Both stages' slot states, read from the status (idle and the like read
+    // as ggml: nothing of the sidecar's yet).
+    auto phases = [](const pd::CoremlStages * stages) {
+        std::pair<qm::mem_phase, qm::mem_phase> out{qm::mem_phase::ggml, qm::mem_phase::ggml};
+        if (stages == nullptr) return out;
+        const Json st = Json::parse(stages->status_json());
+        for (const Json & s : st.at("stages")) {
+            const qm::mem_phase p = qm::mem_phase_of(s.at("state").get<std::string>());
+            (s.at("stage") == "step" ? out.first : out.second) = p;
+        }
+        return out;
+    };
+    std::vector<pocket_mem_sample> samples;
     samples.reserve(1 << 17);
-    std::vector<qvac_coreml_memory::AneSample> ane_samples;
-    const uint64_t base = qvac_coreml_memory::phys_footprint();
+    size_t footprint_failures = 0;
+    std::atomic<int> steady_samples{0};
+    std::vector<qm::AneSample> ane_samples;
+    uint64_t base = 0;
+    const bool base_ok = qm::phys_footprint(base);
     std::thread sampler([&] {
+        std::pair<qm::mem_phase, qm::mem_phase> now{qm::mem_phase::ggml, qm::mem_phase::ggml};
         for (int tick = 0; !stop.load(); ++tick) {
-            const pd::CoremlStages * st_ = watched.load();
-            if (st_ != nullptr && tick % 5 == 0) {
-                const Json st = Json::parse(st_->status_json());
-                int stage = -1, phase = 0, ready = 0;
-                for (const Json & s : st.at("stages")) {
-                    const int p = stage_phase(s.at("state").get<std::string>());
-                    if (p == 3) ++ready;
-                    if (p == 1 || p == 2) {
-                        stage = s.at("stage") == "step" ? 0 : 1;
-                        phase = p;
-                    }
-                }
-                active.store(stage);
-                active_phase.store(phase);
-                both_ready.store(ready == 2);
+            if (tick % 5 == 0) now = phases(watched.load());
+            uint64_t footprint = 0;
+            if (qm::phys_footprint(footprint)) {
+                samples.push_back({footprint, now.first, now.second});
+                if (now.first == qm::mem_phase::ready && now.second == qm::mem_phase::ready) ++steady_samples;
+            } else {
+                ++footprint_failures;
             }
-            samples.push_back({qvac_coreml_memory::phys_footprint(), active.load(), active_phase.load(), both_ready.load()});
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
     });
     std::thread ane_sampler([&] {
         while (!stop.load()) {
-            // The decoder is the stage the Neural Engine compiles.
-            ane_samples.push_back({qvac_coreml_memory::ane_compiler_rss(), active.load() == 1 && active_phase.load() == 2});
+            // The decoder is the stage the Neural Engine compiles. Each query
+            // is bracketed by two state reads; one that crossed the start or
+            // the end of the decoder's load is dropped.
+            const qm::mem_phase before = phases(watched.load()).second;
+            qm::AneSample a;
+            a.ok = qm::ane_compiler_rss(a.rss);
+            const qm::mem_phase after = phases(watched.load()).second;
+            if (const std::optional<bool> loading = qm::ane_query_loading(before, after)) {
+                a.loading = *loading;
+                ane_samples.push_back(a);
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
     });
@@ -887,7 +1012,9 @@ void memory_schedule(const EngineOptions & bundle, const std::string & cache_dir
                 auto lock = decoder.lock();
                 stream.decode(latents);
             }
-            if (++coreml_calls >= 3) break;
+            // The steady state: keep running both sidecars for at least a
+            // second, so the footprint is sampled with both ready.
+            if (++coreml_calls >= 3 && steady_samples.load() >= 100) break;
         }
         std::printf("  status: %s\n", stages->status_json().c_str());
         watched.store(nullptr);
@@ -897,69 +1024,54 @@ void memory_schedule(const EngineOptions & bundle, const std::string & cache_dir
     }
     const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 
-    // Attribution: each stage's prepare and load+warm over the footprint just
-    // before that phase began; the steady state over the footprint just before
-    // the first load.
-    stage_mem mem[2];
-    uint64_t prev = base, start = base, steady = 0, total = 0;
-    std::optional<uint64_t> first_load;
-    int last_stage = -1, last_phase = 0;
-    for (const sample & s : samples) {
-        if (s.stage != last_stage || s.phase != last_phase) start = prev;
-        if (s.stage >= 0 && s.phase == 2 && !first_load) first_load = start;
-        const uint64_t inc = s.footprint > start ? s.footprint - start : 0;
-        if (s.stage >= 0 && s.phase == 1) { mem[s.stage].prepared = true; mem[s.stage].prepare = std::max(mem[s.stage].prepare, inc); }
-        if (s.stage >= 0 && s.phase == 2) { mem[s.stage].loaded = true; mem[s.stage].load_warm = std::max(mem[s.stage].load_warm, inc); }
-        if (s.ready && s.stage < 0) {
-            const uint64_t from = first_load.value_or(base);
-            steady = std::max(steady, s.footprint > from ? s.footprint - from : 0);
-        }
-        total = std::max(total, s.footprint > base ? s.footprint - base : 0);
-        prev = s.footprint;
-        last_stage = s.stage;
-        last_phase = s.phase;
-    }
-    const auto ane = qvac_coreml_memory::ane_compiler_growth(ane_samples);
-    const auto baseline = qvac_coreml_memory::ane_compiler_baseline(ane);
+    const pocket_mem m = pocket_mem_of(samples, base);
+    const auto ane = qm::ane_compiler_growth(ane_samples);
+    const auto baseline = qm::ane_compiler_baseline(ane);
     const uint64_t envelope = pd::coreml_envelope_bytes(step_route, decoder_route);
+    const uint64_t resident = step_route.resident_bytes + decoder_route.resident_bytes;
+    const bool decoder_ane = decoder_route.compute_units == "cpu_and_ane" || decoder_route.compute_units == "all";
+    const qm::mem_breakdown * per[2] = {&m.step, &m.mimi};
     const pd::CoremlRoute * routes[2] = {&step_route, &decoder_route};
     const char * names[2] = {"step", "mimi"};
-    std::vector<std::string> failures;
-    auto over = [&](const std::string & what, uint64_t got, uint64_t charged) {
-        if (got > charged) failures.push_back(what + ": " + std::to_string(got) + " bytes over the charged " + std::to_string(charged));
-    };
-    std::printf("  memory (MiB; each phase over the footprint just before it began, steady over the footprint just "
-                "before the first load, whole run over the warm ggml baseline %.1f):\n", mib(base));
+    std::printf("  memory (MiB; each stage's phase over the footprint just before it began, steady with both ready "
+                "over the footprint just before the first load, whole run over the warm ggml baseline %.1f; each "
+                "phase needs 1.25 x its measurement within its charge, the whole run its measurement):\n",
+                mib(base));
     for (int i = 0; i < 2; ++i) {
-        if (!mem[i].prepared) failures.push_back(std::string("the schedule never sampled the ") + names[i] + " prepare");
-        if (!mem[i].loaded) failures.push_back(std::string("the schedule never sampled the ") + names[i] + " load");
-        std::printf("    %-5s prepare %7.1f  charged %7.1f   load+warm %7.1f  charged %7.1f  (%s)\n", names[i],
-                    mib(mem[i].prepare), mib(routes[i]->prepare_peak_bytes), mib(mem[i].load_warm),
-                    mib(routes[i]->load_peak_bytes), routes[i]->compute_units.c_str());
-        over(std::string(names[i]) + " prepare", mem[i].prepare, routes[i]->prepare_peak_bytes);
-        over(std::string(names[i]) + " load and warm-up", mem[i].load_warm, routes[i]->load_peak_bytes);
+        std::printf("    %-5s prepare %7.1f  charged %7.1f   load+warm %7.1f  charged %7.1f  (%s; generate %.1f, "
+                    "compile %.1f, load %.1f, warm %.1f)\n",
+                    names[i], mib(per[i]->prepare), mib(routes[i]->prepare_peak_bytes), mib(per[i]->load_warm),
+                    mib(routes[i]->load_peak_bytes), routes[i]->compute_units.c_str(), mib(per[i]->generate),
+                    mib(per[i]->compile), mib(per[i]->load), mib(per[i]->warm));
     }
-    const uint64_t resident = step_route.resident_bytes + decoder_route.resident_bytes;
-    std::printf("    steady  %7.1f  charged %7.1f (both resident parts)\n", mib(steady), mib(resident));
-    std::printf("    whole   %7.1f  charged %7.1f (envelope)\n", mib(total), mib(envelope));
-    std::printf("    ANECompilerService growth while the decoder loaded %.1f, reserve %.1f (before the load %.1f MiB, a %s baseline; peak %.1f)\n",
-                mib(ane.growth), mib(decoder_route.ane_compile_reserve_bytes), mib(ane.before),
-                qvac_coreml_memory::ane_baseline_name(baseline), mib(ane.peak));
-    over("steady state (resident)", steady, resident);
-    over("whole run (envelope)", total, envelope);
-    if (decoder_route.ane_compile_reserve_bytes > 0) over("ANECompilerService growth (reserve)", ane.growth, decoder_route.ane_compile_reserve_bytes);
+    std::printf("    steady  %7.1f  charged %7.1f (both resident parts)\n", mib(m.both.steady), mib(resident));
+    std::printf("    whole   %7.1f  charged %7.1f (envelope)\n", mib(m.both.total), mib(envelope));
+    std::printf("    ANECompilerService while the decoder loaded: peak %.1f, reserve %.1f; growth %.1f over %.1f "
+                "before the load (a %s baseline)\n",
+                mib(ane.peak), mib(decoder_route.ane_compile_reserve_bytes), mib(ane.growth), mib(ane.before),
+                qm::ane_baseline_name(baseline));
+    std::vector<std::string> failures = qm::probe_failures(base_ok, footprint_failures, decoder_ane, ane);
+    for (const std::string & f : pocket_mem_failures(
+             m, {step_route.prepare_peak_bytes, step_route.load_peak_bytes, step_route.ane_compile_reserve_bytes},
+             {decoder_route.prepare_peak_bytes, decoder_route.load_peak_bytes, decoder_route.ane_compile_reserve_bytes},
+             ane.peak, resident, envelope))
+        failures.push_back(f);
+    if (coreml_calls < 3 || ggml_calls < 1)
+        failures.push_back("expected ggml calls while pending, then at least 3 Core ML calls (got " +
+                           std::to_string(ggml_calls) + " and " + std::to_string(coreml_calls) + ")");
     std::printf("  memory report: {\"chip\":\"%s\",\"base\":%llu,\"step_prepare\":%llu,\"step_load_warm\":%llu,"
                 "\"mimi_prepare\":%llu,\"mimi_load_warm\":%llu,\"steady\":%llu,\"total\":%llu,"
                 "\"ane_compiler_before_load\":%llu,\"ane_compiler_growth\":%llu,\"ane_compiler_peak\":%llu,"
-                "\"ane_compiler_baseline\":\"%s\",\"samples\":%zu,\"ggml_calls\":%d,\"coreml_calls\":%d,\"seconds\":%.1f}\n",
-                host_chip().c_str(), (unsigned long long) base, (unsigned long long) mem[0].prepare,
-                (unsigned long long) mem[0].load_warm, (unsigned long long) mem[1].prepare,
-                (unsigned long long) mem[1].load_warm, (unsigned long long) steady, (unsigned long long) total,
-                (unsigned long long) ane.before, (unsigned long long) ane.growth, (unsigned long long) ane.peak,
-                qvac_coreml_memory::ane_baseline_name(baseline), samples.size(), ggml_calls, coreml_calls, secs);
+                "\"ane_compiler_baseline\":\"%s\",\"samples\":%zu,\"ane_samples\":%zu,\"ggml_calls\":%d,"
+                "\"coreml_calls\":%d,\"seconds\":%.1f}\n",
+                host_chip().c_str(), (unsigned long long) base, (unsigned long long) m.step.prepare,
+                (unsigned long long) m.step.load_warm, (unsigned long long) m.mimi.prepare,
+                (unsigned long long) m.mimi.load_warm, (unsigned long long) m.both.steady,
+                (unsigned long long) m.both.total, (unsigned long long) ane.before, (unsigned long long) ane.growth,
+                (unsigned long long) ane.peak, qm::ane_baseline_name(baseline), samples.size(), ane.loading_samples,
+                ggml_calls, coreml_calls, secs);
     for (const auto & f : failures) std::printf("  [FAIL] memory schedule: %s\n", f.c_str());
-    require(coreml_calls >= 3 && ggml_calls >= 1, "memory schedule: ggml calls while pending, then Core ML calls");
-    require(failures.empty(), "memory schedule: a phase exceeded its charge");
+    require(failures.empty(), "memory schedule: a phase exceeded its charge or was not measured");
 }
 
 int generated_fixture(const std::string & bundle, const std::string & cache_dir, const std::string & memory_dir) {
@@ -1296,6 +1408,7 @@ int main(int argc, char ** argv) {
         check_naming();
         check_rope();
         check_detection_and_fit();
+        check_memory_schedule_attribution();
         std::puts("test-pocket-coreml: ok");
         return 0;
     } catch (const std::exception & e) {
