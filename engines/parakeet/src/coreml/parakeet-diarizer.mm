@@ -492,6 +492,20 @@ struct CoremlDiarizers::State {
     CoremlDiarizerCallStats stats;
 };
 
+namespace {
+
+// Strict (use = require): a pass no capacity can hold is refused, like any
+// stage too wide for its sidecar, before any caller falls back to ggml.
+void refuse_too_wide(const CoremlDiarizers::State & state, int frames) {
+    if (state.capacities.empty() || state.capacities.back().frames >= frames) return;
+    throw pcm::CoremlError("coreml: a diarization pass of " + std::to_string(frames) +
+                               " frames is longer than every Core ML diarizer capacity (largest " +
+                               std::to_string(state.capacities.back().frames) + ") and Core ML is required",
+                           pcm::SlotState::ready, pcm::ErrorClass::deterministic);
+}
+
+}  // namespace
+
 CoremlDiarizers::CoremlDiarizers(std::string gguf_path, std::vector<int> capacities,
                                  CoremlSidecars & sidecars)
     : state_(std::make_unique<State>()) {
@@ -519,6 +533,7 @@ void CoremlDiarizers::set_cancel(const std::atomic<bool> * cancel) { state_->can
 
 bool CoremlDiarizers::covers(int frames) {
     if (frames <= 0) return false;
+    if (state_->strict) refuse_too_wide(*state_, frames);
     for (const State::Capacity & c : state_->capacities) {
         // Under strict a failed capacity still covers, so run() refuses the pass.
         if (c.frames >= frames && (state_->strict || !unusable(c.slot->state()))) return true;
@@ -541,6 +556,7 @@ int CoremlDiarizers::run(int valid_frames,
                          const parakeet_coreml_rows_out * outputs, int n_outputs) {
     if (valid_frames <= 0) return kNoSidecar;
     const bool strict = state_->strict;
+    if (strict) refuse_too_wide(*state_, valid_frames);
     // Strict: why the covering capacities tried so far could not serve the pass.
     std::optional<pcm::CoremlError> refused;
     for (const State::Capacity & c : state_->capacities) {

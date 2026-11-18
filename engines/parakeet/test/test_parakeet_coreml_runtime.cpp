@@ -5,12 +5,15 @@
 //                  `-encoder.mlmodelc`) --wav W.wav: every case below except
 //                  the two that follow
 //   diarizer       --diar-gguf D.gguf (with its `-diarizer-<frames>.mlmodelc`
-//                  sidecars) --wav W.wav: diarizer-pending
+//                  sidecars) --wav W.wav --gguf TDT.gguf: diarizer-pending,
+//                  the diarizer load-error classes, cli-status
 //   encoderless    --encoderless-gguf E.gguf: encoderless-use-off,
 //                  owner-push-stream
 //   eu-labels      --eu-gguf EU.gguf (with its Core ML programs) --wav W.wav
 //                  (longer than the 20 s language gate): eu-labels
 //   fit-layouts    --eu-gguf EU.gguf --sortformer-gguf S.gguf (v2.1): fit-layouts
+//   sortformer     --sortformer-gguf S.gguf (v2.1, with its 410-frame
+//                  `-diarizer-410.mlmodelc`) --wav W.wav: strict-too-wide
 //
 //   ggml-unchanged        a call whose sidecar is still loading runs on ggml
 //                         (coreml_pending) and its transcript equals use = off
@@ -65,6 +68,9 @@
 //                         a budget between the ggml-only and the inclusive
 //                         totals separates the two verdicts (the bundles are
 //                         staged: fit reads their size, never loads them)
+//   strict-too-wide       use = require: a Sortformer pass longer than every
+//                         diarizer capacity throws a capacity error (under
+//                         automatic it runs on ggml)
 //   owner-push-stream     on that GGUF with its fixed-capacity sidecar owning
 //                         the encoder, stream_start refuses windows longer
 //                         than the capacity under use = require and under
@@ -76,6 +82,7 @@
 // arguments).
 
 #include "coreml_test_options.h"
+#include "parakeet/cli.h"
 #include "parakeet/engine.h"
 #include "parakeet/fit.h"
 #include "test_utils.h"
@@ -252,6 +259,57 @@ void case_encoder_load_error(const std::string & gguf) {
     }
     expect(probes_ok && call_threw,
            "strict-probe: under require a failed encoder never throws from construction or the accessors, only from a call");
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+void case_strict_too_wide(const std::string & gguf, const std::string & wav) {
+    std::vector<float> source;
+    int rate = 0;
+    if (!parakeet_test::load_wav_pcm16le_mono(wav, source, rate) || source.empty()) {
+        expect(false, "strict-too-wide: the wav loads");
+        return;
+    }
+    std::vector<float> audio;  // 60 s: 750 encoder frames, above the 410-frame capacity
+    while (audio.size() < (size_t) rate * 60) audio.insert(audio.end(), source.begin(), source.end());
+    CoremlOptions strict = coreml_ready_options();
+    strict.use = CoremlOptions::Use::require;
+    std::string error;
+    try {
+        parakeet::Engine engine(engine_options(gguf, strict));
+        (void) engine.diarize_samples(audio.data(), (int) audio.size(), rate);
+    } catch (const std::runtime_error & e) {
+        error = e.what();
+    }
+    std::printf("       strict too-wide diarize: %s\n", error.empty() ? "(ran)" : error.c_str());
+    expect(has(error, "longer than every Core ML diarizer capacity"),
+           "strict-too-wide: under require a pass longer than every capacity throws a capacity error");
+    parakeet::Engine automatic(engine_options(gguf, coreml_ready_options()));
+    const parakeet::DiarizationResult r = automatic.diarize_samples(audio.data(), (int) audio.size(), rate);
+    expect(r.encoder_backend == "ggml" && r.n_frames > 0, "strict-too-wide: under automatic that pass runs on ggml");
+}
+
+// The CLI with --diarization-model: the --coreml-* options reach the
+// diarization engine too, and the status file describes both engines.
+void case_cli_diarization_status(const std::string & tdt_gguf, const std::string & diar_gguf,
+                                 const std::string & wav) {
+    const fs::path dir = fresh_dir("cli-status");
+    const std::string status_path = (dir / "status.json").string();
+    std::vector<std::string> args = {"parakeet", "--model", tdt_gguf, "--diarization-model", diar_gguf,
+                                     "--wav", wav, "--coreml-use", "off", "--coreml-status-json", status_path};
+    std::vector<char *> argv;
+    for (std::string & a : args) argv.push_back(a.data());
+    const int rc = parakeet_cli_main((int) argv.size(), argv.data());
+    std::ifstream in(status_path);
+    const std::string status((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    const size_t diar_at = status.find("\"diarization\":");
+    const std::string diar = diar_at == std::string::npos ? std::string() : status.substr(diar_at);
+    std::printf("       cli rc=%d status=%.300s\n", rc, status.c_str());
+    expect(rc == 0 && status.find("\"transcription\":") != std::string::npos && !diar.empty() &&
+               diar.find("diarizer-") != std::string::npos && has(diar, "\"state\":\"disabled\"") &&
+               !has(diar, "\"state\":\"ready\""),
+           "cli-status: with --coreml-use off the diarization engine's sidecars are disabled, and the "
+           "status names both engines");
     std::error_code ec;
     fs::remove_all(dir, ec);
 }
@@ -739,17 +797,19 @@ int main(int argc, char ** argv) {
         }
     }
     const bool ok_args = (which == "transcription" && !gguf.empty() && !wav.empty()) ||
-                         (which == "diarizer" && !diar_gguf.empty() && !wav.empty()) ||
+                         (which == "diarizer" && !diar_gguf.empty() && !wav.empty() && !gguf.empty()) ||
                          (which == "encoderless" && !encoderless.empty()) ||
                          (which == "eu-labels" && !eu_gguf.empty() && !wav.empty()) ||
-                         (which == "fit-layouts" && !eu_gguf.empty() && !sortformer_gguf.empty());
+                         (which == "fit-layouts" && !eu_gguf.empty() && !sortformer_gguf.empty()) ||
+                         (which == "sortformer" && !sortformer_gguf.empty() && !wav.empty());
     if (!ok_args) {
         std::fprintf(stderr, "usage: %s [--case transcription] --gguf TDT.gguf --wav W.wav\n"
-                             "       %s --case diarizer --diar-gguf D.gguf --wav W.wav\n"
+                             "       %s --case diarizer --diar-gguf D.gguf --wav W.wav --gguf TDT.gguf\n"
                              "       %s --case encoderless --encoderless-gguf E.gguf\n"
                              "       %s --case eu-labels --eu-gguf EU.gguf --wav W.wav\n"
-                             "       %s --case fit-layouts --eu-gguf EU.gguf --sortformer-gguf S.gguf\n",
-                     argv[0], argv[0], argv[0], argv[0], argv[0]);
+                             "       %s --case fit-layouts --eu-gguf EU.gguf --sortformer-gguf S.gguf\n"
+                             "       %s --case sortformer --sortformer-gguf S.gguf --wav W.wav\n",
+                     argv[0], argv[0], argv[0], argv[0], argv[0], argv[0]);
         return 2;
     }
     try {
@@ -764,10 +824,13 @@ int main(int argc, char ** argv) {
         } else if (which == "diarizer") {
             case_diarizer(diar_gguf, wav);
             case_diarizer_load_errors(diar_gguf);
+            case_cli_diarization_status(gguf, diar_gguf, wav);
         } else if (which == "eu-labels") {
             case_eu_labels(eu_gguf, wav);
         } else if (which == "fit-layouts") {
             case_fit_layouts(eu_gguf, sortformer_gguf);
+        } else if (which == "sortformer") {
+            case_strict_too_wide(sortformer_gguf, wav);
         } else {
             case_encoderless(encoderless);
         }

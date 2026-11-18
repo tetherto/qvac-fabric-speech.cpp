@@ -3126,7 +3126,8 @@ if (PARAKEET_BUILD_TESTS)
             LABEL    "fixture;coreml"
             EXE      test-parakeet-coreml-runtime
             ARGS     "--case" "diarizer" "--diar-gguf" "${_qvp_nd_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
-            REQUIRES "${_qvp_nd_q8_gguf}" "${_qvp_nd_diarizer}" "${_qvp_jfk_wav}")
+                     "--gguf" "${_qvp_tdt_q8_gguf}"
+            REQUIRES "${_qvp_nd_q8_gguf}" "${_qvp_nd_diarizer}" "${_qvp_jfk_wav}" "${_qvp_tdt_q8_gguf}")
         parakeet_register_test(test-parakeet-coreml-runtime-eu-labels
             LABEL    "fixture;coreml"
             EXE      test-parakeet-coreml-runtime
@@ -3140,6 +3141,12 @@ if (PARAKEET_BUILD_TESTS)
             ARGS     "--case" "fit-layouts" "--eu-gguf" "${_qvp_transcribepsy_eu_gguf}"
                      "--sortformer-gguf" "${_qvp_sfsv21_q8_gguf}"
             REQUIRES "${_qvp_transcribepsy_eu_gguf}" "${_qvp_sfsv21_q8_gguf}")
+        parakeet_register_test(test-parakeet-coreml-runtime-sortformer
+            LABEL    "fixture;coreml"
+            EXE      test-parakeet-coreml-runtime
+            ARGS     "--case" "sortformer" "--sortformer-gguf" "${_qvp_sfsv21_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
+            REQUIRES "${_qvp_sfsv21_q8_gguf}" "${_qvp_jfk_wav}"
+                     "${PARAKEET_TEST_MODEL_DIR}/diar_streaming_sortformer_4spk-v2.1-diarizer-410.mlmodelc")
         parakeet_register_test(test-parakeet-coreml-runtime-encoderless
             LABEL    "fixture;coreml"
             EXE      test-parakeet-coreml-runtime
