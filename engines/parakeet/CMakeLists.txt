@@ -1935,6 +1935,30 @@ if (PARAKEET_BUILD_TESTS)
                     --cache-dir "${_qvp_gen_cache}")
         set_tests_properties(test-nemotron-diarization-coreml-generated-parity PROPERTIES
             LABELS "fixture;coreml;coreml-generated" TIMEOUT 1800)
+        # A generated diarizer comes only from the file whose weights the model
+        # loaded: the path names another file only while the GGUF is opened.
+        add_executable(test-nemotron-diarization-coreml-source
+            test/test_nemotron_diarization_coreml_source.cpp
+            src/parakeet_ctc.cpp
+            src/parakeet_diarization_v3.cpp
+            src/parakeet_coreml_path.cpp
+            src/coreml/parakeet_coreml_shape.cpp
+            src/parakeet_log.cpp
+            src/mel_preprocess.cpp
+            src/sentencepiece_bpe.cpp
+            ${PARAKEET_COREML_OBJC_SOURCES})
+        target_link_libraries(test-nemotron-diarization-coreml-source PRIVATE ggml parakeet-backend-defs
+            ${PARAKEET_FOUNDATION_FRAMEWORK} ${PARAKEET_COREML_FRAMEWORK})
+        target_include_directories(test-nemotron-diarization-coreml-source PRIVATE include src ggml/include)
+        target_compile_definitions(test-nemotron-diarization-coreml-source PRIVATE PARAKEET_USE_COREML)
+        parakeet_apply_backend_defs(test-nemotron-diarization-coreml-source)
+        parakeet_apply_ccache(test-nemotron-diarization-coreml-source)
+        parakeet_test_use_coreml_runtime(test-nemotron-diarization-coreml-source)
+        add_test(NAME test-nemotron-diarization-coreml-source
+            COMMAND test-nemotron-diarization-coreml-source "${PARAKEET_TEST_NEMOTRON_GENERATED_GGUF}"
+                    "${CMAKE_CURRENT_BINARY_DIR}/coreml-source-swap")
+        set_tests_properties(test-nemotron-diarization-coreml-source PROPERTIES
+            LABELS "fixture;coreml;coreml-generated" TIMEOUT 1800)
         # fit_params charges the generated capacities the same with an empty
         # and a full cache; a budget between the ggml-only and Core ML-inclusive
         # totals turns Core ML off for memory; compute units the templates were

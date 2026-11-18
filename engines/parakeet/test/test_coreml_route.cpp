@@ -812,7 +812,9 @@ void case_fit_stable() {
 
 // The generated-diarizer charge: which capacities a range loads (prebuilt
 // ones included in the selection, never charged), resident sum, one
-// transient, the largest margin among the loaded ones.
+// transient, the largest margin among the charged ones. A selected capacity
+// that fails hands its calls to the next larger capacity that has not failed,
+// so each is charged at the largest generated capacity it can fall back to.
 void case_generated_diarizer_envelope() {
     auto gen = [](int frames, uint64_t resident, uint64_t transient, double margin) {
         return CoremlDiarizerCharge{frames, true, resident, transient, margin};
@@ -822,19 +824,34 @@ void case_generated_diarizer_envelope() {
     auto env = [&](std::vector<CoremlFrameRange> ranges) { return coreml_generated_diarizer_envelope(caps, ranges); };
 
     CHECK(env({}) == 0, "no ranges, no charge");
-    CHECK(env({{1, 150}}) == 0, "a range only the prebuilt capacity covers charges nothing");
-    // 200 (prebuilt) and 358: (100 + 30) x 1.25 = 162.5 -> 163.
-    CHECK(env({{1, 358}}) == 163, "one generated capacity: resident + transient, margin, rounded up");
-    // 358, 745, 1125: (100 + 200 + 300 + max(30, 50, 40)) x 1.5 = 975.
+    // 358, 745, 1125 all selected, each its own: (100 + 200 + 300 + max(30, 50, 40)) x 1.5 = 975.
     CHECK(env({{300, 900}}) == 975, "resident sum, one transient, the largest margin");
     // Above every capacity: from the first covering capacity to the largest.
     CHECK(env({{400, 5000}}) == 825, "a range over the largest capacity loads every larger one");
-    // Two ranges: 200 (prebuilt) and 745 -> (200 + 50) x 1.25 = 312.5 -> 313.
-    CHECK(env({{1, 150}, {700, 745}}) == 313, "ranges are unioned; capacities between them are not loaded");
-    // The prebuilt capacity shifts the selection: without it a 1..150 range loads 358.
-    const std::vector<CoremlDiarizerCharge> generated_only = {caps[0], caps[2], caps[3]};
-    CHECK(coreml_generated_diarizer_envelope(generated_only, {{1, 150}}) == 163,
-          "without the prebuilt capacity the smallest generated one covers the range");
+    // A range only the prebuilt 200 covers: if it fails to load, its calls go
+    // to 358, then 745, then 1125: (300 + 50) x 1.5 = 525.
+    CHECK(env({{1, 150}}) == 525, "a failing prebuilt capacity falls back to the generated ones");
+    // 200 (prebuilt, nothing generated below 358) and 358, which falls back to
+    // 745 or 1125: (300 + 50) x 1.5 = 525.
+    CHECK(env({{1, 358}}) == 525, "the largest selected capacity is charged at its largest fallback");
+    // 200 falls back below the next selected capacity only (358, 745), and
+    // 1125 is charged on its own: (200 + 300 + 50) x 1.5 = 825.
+    CHECK(env({{1, 150}, {1000, 1125}}) == 825, "a fallback stops at the next selected capacity");
+    // Two ranges: 200 (-> 358) and 745 (-> 1125): (100 + 300 + 50) x 1.5 = 675.
+    CHECK(env({{1, 150}, {700, 745}}) == 675, "ranges are unioned; each selected capacity has its fallback");
+    // Generated templates of one size (the Nemotron case): falling back costs
+    // nothing more than the capacity itself, 137 + 121 once.
+    const std::vector<CoremlDiarizerCharge> alike = {gen(358, 137, 121, 1.0), gen(745, 137, 121, 1.0),
+                                                     gen(1125, 137, 121, 1.0)};
+    CHECK(coreml_generated_diarizer_envelope(alike, {{1, 300}}) == 258,
+          "alike capacities: one resident, one transient");
+    // An adjacent prebuilt 358 with generated 745 and 1125: a short workload
+    // selects only the prebuilt bundle, but if it fails the runtime loads the
+    // generated 745 (or 1125).
+    const std::vector<CoremlDiarizerCharge> beside = {CoremlDiarizerCharge{358}, gen(745, 137, 121, 1.0),
+                                                      gen(1125, 137, 121, 1.0)};
+    CHECK(coreml_generated_diarizer_envelope(beside, {{1, 300}}) == 258,
+          "a failing prebuilt 358 is charged at the generated capacity that replaces it");
     // Saturates instead of wrapping.
     const std::vector<CoremlDiarizerCharge> huge = {gen(358, UINT64_MAX - 1, UINT64_MAX - 1, 1.25)};
     CHECK(coreml_generated_diarizer_envelope(huge, {{1, 358}}) == UINT64_MAX, "saturating arithmetic");
@@ -1449,6 +1466,75 @@ void case_diarizer_capacities() {
     pcm::generation::set_compile_override(nullptr);
     ::unsetenv("QVAC_COREML_TEMPLATE_DIR");
 }
+
+// The diarizers generate only from the file whose weights the model loaded:
+// a GGUF atomically replaced by a same-shape one after the load (here, before
+// the slots are made) yields an identity marked changed, so the prepare job
+// fails with source_changed and nothing is generated from the new file. The
+// identity of an unchanged file generates as before.
+void case_diarizer_loaded_source() {
+    const fs::path dir = make_temp_dir("loaded-source");
+    const fs::path templates = dir / "templates";
+    fs::create_directories(templates);
+    fs::copy(fs::path(QVAC_COREML_TOY_TEMPLATES) / "toy-stateless", templates / "toy-stateless");
+    {
+        std::ifstream in(templates / "toy-stateless" / "template.json");
+        std::string j((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const std::string from = "\"validated_for\": []";
+        const size_t at = j.find(from);
+        CHECK(at != std::string::npos, "the toy template lists validated_for");
+        if (at == std::string::npos) return;
+        j.replace(at, from.size(),
+                  "\"validated_for\": [{\"units\": \"cpu_and_ane\", \"os\": \"test\", \"chip\": \"test\"}]");
+        write_text(templates / "toy-stateless" / "template.json", j);
+    }
+    ::setenv("QVAC_COREML_TEMPLATE_DIR", templates.c_str(), 1);
+    pcm::generation::set_compile_override(&fake_compile);
+    pcm::Config cfg = fast_config();
+    cfg.platform = pcm::Platform::macos;
+    cfg.os = pcm::OsVersion{15, 7, 0};
+    auto m = pcm::Manager::create(cfg);
+    const std::vector<int> template_frames = {358};
+    const std::vector<std::string> ids = {"toy-stateless"};
+
+    const fs::path gguf = dir / "m.gguf";
+    write_toy_gguf(gguf, "stateless", 1.0f);
+    pcm::SourceStat loaded;
+    CHECK(pcm::generation::source_stat(gguf.string(), loaded), "stat of the loaded GGUF");
+    // The same shapes, other weights, renamed over the path.
+    const fs::path replacement = dir / "m.gguf.new";
+    write_toy_gguf(replacement, "stateless", 2.0f);
+    fs::rename(replacement, gguf);
+    pcm::SourceStat now;
+    CHECK(pcm::generation::source_stat(gguf.string(), now), "stat of the replaced GGUF");
+
+    auto run = [&](const pcm::SourceStat & source, const char * cache) {
+        CoremlOptions o;
+        o.cache_dir = (dir / cache).string();
+        o.wait = CoremlOptions::Wait::construct;
+        CoremlSidecars sidecars(o, m);
+        const std::vector<pcm::generation::Candidate> probed =
+            probe_diarizer_templates(sidecars, gguf.string(), ids);
+        const DiarizerSlots slots(gguf.string(), diarizer_capacities({}, template_frames, probed), sidecars,
+                                  &generated_load, source);
+        sidecars.start();
+        return sidecars.slots().empty() ? pcm::SlotStatus{} : sidecars.slots()[0]->status();
+    };
+    const pcm::SlotStatus replaced =
+        run(pcm::generation::loaded_source(loaded, true, now, true, gguf.string()), "cache-replaced");
+    CHECK(replaced.state == pcm::SlotState::failed && replaced.reason.find("source_changed") != std::string::npos,
+          "a GGUF replaced after the load: the prepare job fails with source_changed");
+    CHECK(!fs::exists(dir / "cache-replaced" / "qvac-coreml-v1" / "artifacts") ||
+              fs::is_empty(dir / "cache-replaced" / "qvac-coreml-v1" / "artifacts"),
+          "nothing is generated from the replacement");
+    const pcm::SlotStatus same =
+        run(pcm::generation::loaded_source(now, true, now, true, gguf.string()), "cache-same");
+    CHECK(same.state == pcm::SlotState::ready && same.route == pcm::StatusRoute::generated,
+          "the file the model loaded, unchanged: generated and loaded");
+
+    pcm::generation::set_compile_override(nullptr);
+    ::unsetenv("QVAC_COREML_TEMPLATE_DIR");
+}
 #endif
 
 int main() {
@@ -1468,6 +1554,7 @@ int main() {
 #if defined(QVAC_COREML_HAVE_GGML)
     case_generated_sidecar();
     case_diarizer_capacities();
+    case_diarizer_loaded_source();
 #endif
     std::printf("test-parakeet-coreml-route: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

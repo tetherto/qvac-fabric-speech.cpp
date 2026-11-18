@@ -819,9 +819,19 @@ Error evaluate(const Recipe & r, TensorSource & src, const std::function<Error(c
 }
 
 Error evaluate_patches(const Recipe & r, TensorSource & src, const std::function<Error(const PatchOut &)> & sink,
-                       const ReadObserver & observer) {
+                       const ReadObserver & observer, EvalStats * stats) {
     Interp in(r, src, observer, Item::Kind::patch);
     in.plan_liveness();
+    struct Report {
+        Interp & in;
+        EvalStats * stats;
+        ~Report() {
+            if (stats) {
+                stats->peak_bytes = in.tracker.peak;
+                stats->tensors_read = in.tensors_read;
+            }
+        }
+    } report{in, stats};
     size_t p = 0;
     try {
         for (const Item & it : r.items) {
@@ -849,8 +859,15 @@ Error evaluate_patches(const Recipe & r, TensorSource & src, const std::function
 }
 
 Error patched_spec(const Recipe & r, TensorSource & src, const uint8_t * spec, size_t spec_size,
-                   std::vector<uint8_t> & out, const ReadObserver & observer) {
+                   std::vector<uint8_t> & out, const ReadObserver & observer, EvalStats * stats) {
     out.assign(spec, spec + spec_size);
+    struct Report {
+        EvalStats * stats;
+        size_t spec_size;
+        ~Report() {
+            if (stats) stats->peak_bytes += spec_size;  // the copy is live through the pass
+        }
+    } report{stats, spec_size};
     return evaluate_patches(
         r, src,
         [&](const PatchOut & p) -> Error {
@@ -860,7 +877,7 @@ Error patched_spec(const Recipe & r, TensorSource & src, const uint8_t * spec, s
             std::memcpy(out.data() + p.offset, p.data, p.bytes);
             return {};
         },
-        observer);
+        observer, stats);
 }
 
 }  // namespace recipe

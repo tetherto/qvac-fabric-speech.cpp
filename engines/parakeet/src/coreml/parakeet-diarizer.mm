@@ -432,8 +432,9 @@ pcm::LoadResult load_diarizer(const pcm::LoadRequest & request) {
 }  // namespace
 
 struct CoremlDiarizers::State {
-    State(const std::string & gguf_path, std::vector<DiarizerCapacity> capacities, CoremlSidecars & sidecars)
-        : slots(gguf_path, std::move(capacities), sidecars, &load_diarizer) {}
+    State(const std::string & gguf_path, std::vector<DiarizerCapacity> capacities, CoremlSidecars & sidecars,
+          const pcm::SourceStat & source)
+        : slots(gguf_path, std::move(capacities), sidecars, &load_diarizer, source) {}
     DiarizerSlots slots;
     std::mutex mutex;  // label and call stats
     std::string label;
@@ -441,8 +442,8 @@ struct CoremlDiarizers::State {
 };
 
 CoremlDiarizers::CoremlDiarizers(const std::string & gguf_path, std::vector<DiarizerCapacity> capacities,
-                                 CoremlSidecars & sidecars)
-    : state_(std::make_unique<State>(gguf_path, std::move(capacities), sidecars)) {
+                                 CoremlSidecars & sidecars, const pcm::SourceStat & source)
+    : state_(std::make_unique<State>(gguf_path, std::move(capacities), sidecars, source)) {
     for (const std::shared_ptr<pcm::Slot> & slot : state_->slots.status_only()) {
         const pcm::SlotStatus status = slot->status();
         PARAKEET_LOG_INFO("parakeet: no Core ML diarizer for %s is generated (%s)\n", status.stage.c_str(),
@@ -461,6 +462,7 @@ int CoremlDiarizers::run(int valid_frames,
                          const parakeet_coreml_rows_out * outputs, int n_outputs) {
     const bool strict = state_->slots.strict();
     std::string label;
+    int served = 0;
     const DiarizerPass pass = state_->slots.run(valid_frames, [&](pcm::Handle & model, int capacity) {
         auto * context = model->as<parakeet_coreml_diarizer>();
         int status = 0;
@@ -473,6 +475,7 @@ int CoremlDiarizers::run(int valid_frames,
                               "quarantining it%s\n", capacity, status, strict ? "" : " and using ggml");
         } else {
             label = parakeet_coreml_diarizer_label(context);
+            served = capacity;
         }
         return status;
     });
@@ -482,6 +485,7 @@ int CoremlDiarizers::run(int valid_frames,
         state_->label = label;
         ++state_->stats.coreml;
         state_->stats.label = label;
+        state_->stats.capacity = served;
     }
     return pass.status;
 }
@@ -526,7 +530,8 @@ const std::vector<CoremlDiarizerTemplate> & diarizer_templates_for(ParakeetModel
 
 std::unique_ptr<CoremlDiarizers> discover_coreml_diarizers(const std::string & gguf_path,
                                                            CoremlSidecars & sidecars,
-                                                           const std::vector<CoremlDiarizerTemplate> & templates) {
+                                                           const std::vector<CoremlDiarizerTemplate> & templates,
+                                                           const pcm::SourceStat & source) {
     // A library without the generator embeds no templates.
     std::vector<int> template_frames;
     std::vector<std::string> template_ids;
@@ -542,7 +547,7 @@ std::unique_ptr<CoremlDiarizers> discover_coreml_diarizers(const std::string & g
     std::vector<DiarizerCapacity> capacities =
         diarizer_capacities(scan_capacities(gguf_path), template_frames, probed);
     if (capacities.empty()) return nullptr;
-    return std::make_unique<CoremlDiarizers>(gguf_path, std::move(capacities), sidecars);
+    return std::make_unique<CoremlDiarizers>(gguf_path, std::move(capacities), sidecars, source);
 }
 
 }

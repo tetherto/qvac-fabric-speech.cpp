@@ -76,6 +76,10 @@ struct LoadResult {
     Error error;
     bool would_block = false;  // a key lock was busy: re-queue with backoff
     int lease_fd = -1;         // shared lease from adoption; closed with the model
+    // A generated artifact was gone or incomplete when the load took its lease
+    // (e.g. pruned after its preparation published it): the slot returns to
+    // preparation, which regenerates it, instead of failing.
+    bool artifact_gone = false;
 };
 
 using LoadFn = LoadResult (*)(const LoadRequest & req);
@@ -87,6 +91,11 @@ struct SourceStat {
     int64_t mtime_ns = 0;
     uint64_t ino = 0;
     uint64_t dev = 0;
+    // The file at `path` is not certainly the one the engine loaded its
+    // weights from (it was replaced during the load, or the engine generates
+    // for another path): prepare fails with source_changed and generates
+    // nothing. See generation::loaded_source.
+    bool changed = false;
 };
 
 struct PrepareRequest {
@@ -115,6 +124,9 @@ struct PrepareResult {
     bool cache_hit = false;     // status route: cached vs generated
     Error error;
     bool would_block = false;   // a key lock was busy: re-queue with backoff
+    // Non-empty: generation cannot run here, for this status reason (e.g.
+    // "cache_fs"). The slot reports unsupported(<reason>), not failed.
+    std::string unsupported;
 };
 
 using PrepareFn = PrepareResult (*)(const PrepareRequest & req, PrepareContext & ctx);

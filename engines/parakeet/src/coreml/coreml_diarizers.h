@@ -22,6 +22,7 @@ struct CoremlDiarizerCallStats {
     int coreml = 0;      // passes that ran on a diarizer sidecar
     int not_ready = 0;   // passes that ran on ggml because the capacity was loading
     std::string label;   // Core ML label of the passes that ran on a sidecar
+    int capacity = 0;    // the capacity (frames) that served the last such pass
 };
 
 // The diarizer sidecars of one model, one runtime slot per capacity
@@ -38,8 +39,10 @@ struct CoremlDiarizerCallStats {
 class CoremlDiarizers {
 public:
     // Registers one slot per capacity with `sidecars` (DiarizerSlots).
+    // `source`: the identity of the GGUF the model loaded its weights from
+    // (generation::loaded_source); generated capacities prepare only from it.
     CoremlDiarizers(const std::string & gguf_path, std::vector<DiarizerCapacity> capacities,
-                    CoremlSidecars & sidecars);
+                    CoremlSidecars & sidecars, const pcm::SourceStat & source);
     ~CoremlDiarizers();
     CoremlDiarizers(const CoremlDiarizers &) = delete;
     CoremlDiarizers & operator=(const CoremlDiarizers &) = delete;
@@ -96,6 +99,7 @@ const std::vector<CoremlDiarizerTemplate> & diarizer_templates_for(ParakeetModel
 // can generate), a status-only slot otherwise. Null when there is none.
 std::unique_ptr<CoremlDiarizers> discover_coreml_diarizers(const std::string & gguf_path,
                                                            CoremlSidecars & sidecars,
-                                                           const std::vector<CoremlDiarizerTemplate> & templates = {});
+                                                           const std::vector<CoremlDiarizerTemplate> & templates,
+                                                           const pcm::SourceStat & source);
 
 }

@@ -306,9 +306,10 @@ pass; under `use = require` a pass it covers throws instead of running on ggml.
 Each generated capacity takes about 200 MB in the cache (232 MB for
 Sortformer v2.1). `parakeet-fit-params` charges the generated capacities'
 Core ML memory in the Core ML-inclusive verdict (every generated capacity
-under `prewarm = all`, otherwise those the workload's calls can load; the
-Sortformer v2.1 capacity always, because construction loads it and every
-AOSC step uses it); see
+under `prewarm = all`, otherwise those the workload's calls, and any shorter
+single pass, can load, or fall back to when a capacity fails; the Sortformer
+v2.1 capacity always, because construction loads it and every AOSC step uses
+it); see
 [docs/backends.md](docs/backends.md#generated-diarizers).
 
 ## Backend selection

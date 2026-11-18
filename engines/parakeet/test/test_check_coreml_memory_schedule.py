@@ -1,6 +1,7 @@
 """Unit tests for scripts/check-coreml-memory-schedule.py: what each check
-compares, that a template stage with no generate or load segment fails, and
-that a stage seen more than once in a phase is checked at its largest value."""
+compares, that the stage constants must keep the 1.25 margin (rounded up to
+1 MiB), that a report missing a measurement fails, and that a stage seen more
+than once in a phase is checked at its largest value."""
 import contextlib
 import copy
 import importlib.util
@@ -58,7 +59,8 @@ def run_report():
         t += 1
     return {"mode": "coreml", "baseline_bytes": 100 * MIB, "fit_coreml_bytes": 1000 * MIB,
             "peak_increment_over_baseline": 50 * MIB, "steady_increment_over_baseline": 10 * MIB,
-            "ane_compiler_before_loads": 250 * MIB, "coreml_passes": 10, "ggml_passes_after_ready": 0,
+            "ane_compiler_before_loads": 280 * MIB, "coreml_passes": 10, "ggml_passes_after_ready": 0,
+            "sampler_errors": 0,
             "segments": segs,
             "status": {"stages": [{"stage": s, "compute_units": "cpu_and_ane"} for s in STAGES]}}
 
@@ -138,32 +140,33 @@ class CheckerTest(unittest.TestCase):
         r = run_report()
         # A first load over the charge, then a retry within it.
         r["segments"].insert(0, segment("diarizer-358", "load", -5, 100 * MIB, 140 * MIB, resident_increment=0))
-        self.assertFails(r, "diarizer-358 load +40.0 MiB over the charged 30.0 MiB")
+        self.assertFails(r, "diarizer-358 load +40.0 MiB (x 1.25 = 50.0 MiB) over the charged 30.0 MiB")
 
     def test_repeated_prepares_are_checked_at_the_largest(self):
         r = run_report()
         r["segments"][0:0] = [segment("diarizer-745", "generate", -10, 100 * MIB, 105 * MIB),
                               segment("diarizer-745", "compile", -9, 105 * MIB, 135 * MIB)]
-        self.assertFails(r, "diarizer-745 prepare +35.0 MiB over the charged 30.0 MiB")
+        self.assertFails(r, "diarizer-745 prepare +35.0 MiB (x 1.25 = 44.0 MiB) over the charged 30.0 MiB")
 
     def test_a_prepare_spans_its_compile(self):
         r = run_report()
-        r["segments"][1]["peak"] = 131 * MIB  # diarizer-358 compile: 131 - 100 (generate before)
-        self.assertFails(r, "diarizer-358 prepare +31.0 MiB over the charged 30.0 MiB")
+        r["segments"][1]["peak"] = 125 * MIB  # diarizer-358 compile: 125 - 100 (generate before)
+        self.assertFails(r, "diarizer-358 prepare +25.0 MiB (x 1.25 = 32.0 MiB) over the charged 30.0 MiB")
 
     def test_the_compiler_is_checked_on_its_growth_not_its_size(self):
-        # Peak 500 MiB over a reserve of 300 MiB, but it held 250 MiB before
-        # the loads: growth 250 MiB passes.
+        # Peak 500 MiB over a reserve of 300 MiB, but it held 280 MiB before
+        # the loads: growth 220 MiB (x 1.25 = 275 MiB) passes.
         rc, out = self.check(run_report())
         self.assertEqual(rc, 0, out)
         r = run_report()
         r["ane_compiler_before_loads"] = 150 * MIB
-        self.assertFails(r, "ANECompilerService grew 350.0 MiB during the loads, over the reserve 300.0 MiB")
+        self.assertFails(r, "ANECompilerService grew 350.0 MiB during the loads (x 1.25 = 438.0 MiB), "
+                            "over the reserve 300.0 MiB")
 
     def test_the_compiler_peak_is_the_largest_over_the_loads(self):
         r = run_report()
         r["segments"][-2]["ane_compiler_peak"] = 600 * MIB  # the first load, not the last
-        self.assertFails(r, "ANECompilerService grew 350.0 MiB")
+        self.assertFails(r, "ANECompilerService grew 320.0 MiB")
 
     def test_a_report_without_the_compiler_baseline_fails(self):
         r = run_report()
@@ -209,6 +212,101 @@ class CheckerTest(unittest.TestCase):
         r = run_report()
         r["baseline_bytes"] = 0
         self.assertFails(r, "not a Core ML run with a ggml-only baseline")
+
+    # ---- the margin: constants hold 1.25 x the measurement, rounded up to 1 MiB
+
+    def test_a_load_within_the_constant_but_not_its_margin_fails(self):
+        r = run_report()
+        r["segments"][-1]["increment"] = 24 * MIB  # x 1.25 = 30 MiB: exactly the constant
+        rc, out = self.check(r)
+        self.assertEqual(rc, 0, out)
+        r["segments"][-1]["increment"] = 24 * MIB + 1  # 30 MiB + 1.25 B: rounds up to 31 MiB
+        self.assertFails(r, "diarizer-745 load +24.0 MiB (x 1.25 = 31.0 MiB) over the charged 30.0 MiB")
+
+    def test_the_nemotron_load_constant_needs_its_margin(self):
+        # A 110 MiB load against the 121 MiB constant: x 1.25 = 137.5, 138 MiB.
+        self.templates = [template(s, load_peak_bytes={"cpu_and_ane": 121 * MIB}) for s in STAGES]
+        r = run_report()
+        r["segments"][-1]["peak"] = r["segments"][-1]["before"] + 110 * MIB
+        r["segments"][-1]["increment"] = 110 * MIB
+        self.assertFails(r, "diarizer-745 load +110.0 MiB (x 1.25 = 138.0 MiB) over the charged 121.0 MiB")
+
+    def test_prepare_resident_and_reserve_keep_the_margin(self):
+        r = run_report()
+        r["segments"][1]["peak"] = 124 * MIB  # prepare 24 MiB: x 1.25 = 30, the constant
+        r["segments"][-1]["resident_increment"] = 9 * MIB  # x 1.25 = 11.25 -> 12 MiB <= 12 MiB + I/O
+        r["ane_compiler_before_loads"] = 260 * MIB  # growth 240 MiB: x 1.25 = 300, the reserve
+        rc, out = self.check(r)
+        self.assertEqual(rc, 0, out)
+        r["segments"][1]["peak"] = 125 * MIB
+        self.assertFails(r, "diarizer-358 prepare +25.0 MiB (x 1.25")
+        r = run_report()
+        r["segments"][-1]["resident_increment"] = 10 * MIB  # x 1.25 = 12.5 -> 13 MiB
+        self.assertFails(r, "diarizer-745 resident step +10.0 MiB (x 1.25 = 13.0 MiB)")
+        r = run_report()
+        r["ane_compiler_before_loads"] = 259 * MIB  # growth 241 MiB: x 1.25 = 301.25 -> 302 MiB
+        self.assertFails(r, "(x 1.25 = 302.0 MiB), over the reserve 300.0 MiB")
+
+    def test_a_recorded_margin_above_the_rule_is_applied(self):
+        self.templates = [template(s, measured={"margin": 1.5}) for s in STAGES]
+        r = run_report()  # load 20 MiB: x 1.5 = 30 MiB, the constant
+        r["ane_compiler_before_loads"] = 300 * MIB  # growth 200 MiB: x 1.5 = 300 MiB, the reserve
+        rc, out = self.check(r)
+        self.assertEqual(rc, 0, out)
+        r["ane_compiler_before_loads"] = 299 * MIB
+        self.assertFails(r, "(x 1.5 = 302.0 MiB), over the reserve 300.0 MiB")
+        r["ane_compiler_before_loads"] = 300 * MIB
+        r["segments"][-1]["increment"] = 20 * MIB + 1
+        self.assertFails(r, "diarizer-745 load +20.0 MiB (x 1.5 = 31.0 MiB)")
+        r["segments"][-1]["increment"] = 20 * MIB
+        rc, out = self.check(r)
+        self.assertEqual(rc, 0, out)
+        self.templates = [template(s, measured={"margin": 1.0}) for s in STAGES]  # never below 1.25
+        r["segments"][-1]["increment"] = 29 * MIB
+        self.assertFails(r, "diarizer-745 load +29.0 MiB (x 1.25 = 37.0 MiB)")
+
+    def test_whole_process_checks_stay_raw(self):
+        r = run_report()
+        r["peak_increment_over_baseline"] = r["fit_coreml_bytes"]
+        r["steady_increment_over_baseline"] = 2 * RESIDENT
+        rc, out = self.check(r)
+        self.assertEqual(rc, 0, out)
+
+    # ---- a measurement missing from the report fails
+
+    def test_a_stage_without_a_compile_segment_fails(self):
+        r = run_report()
+        r["segments"] = [s for s in r["segments"] if s["phase"] != "compile"]
+        rc, out = self.check(r)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("diarizer-358 has no compile segment", out)
+        self.assertIn("diarizer-745 has no compile segment", out)
+
+    def test_a_segment_without_footprint_samples_fails(self):
+        r = run_report()
+        r["segments"][1].update(before=0, peak=0, increment=0)
+        self.assertFails(r, "diarizer-358 compile segment without footprint samples")
+
+    def test_a_load_without_a_compiler_sample_fails(self):
+        r = run_report()
+        r["segments"][-1]["ane_compiler_peak"] = 0
+        self.assertFails(r, "no ANECompilerService sample during a diarizer-745 load")
+
+    def test_a_report_with_no_compiler_observation_fails(self):
+        r = run_report()
+        r["ane_compiler_before_loads"] = 0
+        for s in r["segments"]:
+            s["ane_compiler_peak"] = 0
+        rc, out = self.check(r)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("no ANECompilerService sample during a diarizer-358 load", out)
+
+    def test_sampler_errors_fail(self):
+        r = run_report()
+        r["sampler_errors"] = 3
+        self.assertFails(r, "3 sampler errors")
+        del r["sampler_errors"]
+        self.assertFails(r, "no sampler_errors (an older tool's report)")
 
     def test_every_run_is_checked(self):
         bad = run_report()

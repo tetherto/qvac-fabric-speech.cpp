@@ -30,6 +30,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -372,6 +373,11 @@ struct ParakeetCtcModel::Impl {
     // streaming paths keep the sequential decoder.
     parakeet_coreml_decoder * ctx_coreml_dec = nullptr;
     std::unique_ptr<CoremlDiarizers> coreml_diarizers;
+    // The identity (fstat) of the one descriptor the GGUF's metadata and
+    // tensor data were read through: a generated diarizer is prepared only
+    // from the file whose weights this model loaded.
+    pcm::SourceStat source;
+    bool source_ok = false;
 #endif
     // Set when the encoder sidecar loaded before weight allocation and the
     // `encoder.*` tensors were therefore never given memory: the GGUF has no
@@ -2103,6 +2109,29 @@ static parakeet_coreml_context * init_coreml_only_encoder(const gguf_context * g
     return ctx;
 }
 
+std::atomic<GgufLoadObserver> g_gguf_load_observer{nullptr};
+
+void set_gguf_load_observer(GgufLoadObserver fn) { g_gguf_load_observer.store(fn); }
+
+// The identity of the open GGUF: (size, mtime, inode, device) from fstat of
+// the descriptor its weights are read through, with the path's realpath (the
+// prepare job reopens the path and must find this same file there).
+static bool source_of_descriptor(int fd, const std::string & path, pcm::SourceStat & out) {
+    struct stat st{};
+    if (fd < 0 || ::fstat(fd, &st) != 0) return false;
+    out.size = static_cast<uint64_t>(st.st_size);
+#if defined(__APPLE__)
+    out.mtime_ns = static_cast<int64_t>(st.st_mtimespec.tv_sec) * 1000000000LL + st.st_mtimespec.tv_nsec;
+#else
+    out.mtime_ns = static_cast<int64_t>(st.st_mtim.tv_sec) * 1000000000LL + st.st_mtim.tv_nsec;
+#endif
+    out.ino = static_cast<uint64_t>(st.st_ino);
+    out.dev = static_cast<uint64_t>(st.st_dev);
+    char resolved[PATH_MAX];
+    out.path = ::realpath(path.c_str(), resolved) ? std::string(resolved) : path;
+    return true;
+}
+
 static void maybe_init_coreml_diarizers(const std::string & gguf_path,
                                         ParakeetCtcModel  & model,
                                         bool                verbose) {
@@ -2112,7 +2141,10 @@ static void maybe_init_coreml_diarizers(const std::string & gguf_path,
     // instance can).
     const std::vector<CoremlDiarizerTemplate> & templates =
         diarizer_templates_for(model.model_type, model.model_variant);
-    model.impl->coreml_diarizers = discover_coreml_diarizers(gguf_path, *model.impl->coreml, templates);
+    // Without the descriptor's identity nothing is generated (source_changed).
+    pcm::SourceStat loaded = model.impl->source;
+    loaded.changed = !model.impl->source_ok;
+    model.impl->coreml_diarizers = discover_coreml_diarizers(gguf_path, *model.impl->coreml, templates, loaded);
     const std::vector<int> capacities =
         model.impl->coreml_diarizers ? model.impl->coreml_diarizers->capacities() : std::vector<int>();
     if (!capacities.empty()) {
@@ -2753,7 +2785,26 @@ static int load_from_gguf_impl(const std::string & gguf_path,
     }
 
     gguf_init_params params = { /*no_alloc=*/ true, &impl->ctx };
+#ifdef PARAKEET_USE_COREML
+    // Open the GGUF once: its identity comes from this descriptor, and the
+    // metadata and every tensor are read through it, so a generated sidecar
+    // can only be prepared from the file whose weights the model holds,
+    // whatever the path points at before or after.
+    std::unique_ptr<FILE, int (*)(FILE *)> gguf_file(nullptr, &std::fclose);
+    if (!measure) {
+        if (GgufLoadObserver observer = g_gguf_load_observer.load()) observer("open");
+        gguf_file.reset(std::fopen(gguf_path.c_str(), "rb"));
+        if (!gguf_file) {
+            PARAKEET_LOG_ERROR("gguf: failed to open %s\n", gguf_path.c_str());
+            return 1;
+        }
+        impl->source_ok = source_of_descriptor(fileno(gguf_file.get()), gguf_path, impl->source);
+    }
+    impl->gguf = gguf_file ? gguf_init_from_file_ptr(gguf_file.get(), params)
+                           : gguf_init_from_file(gguf_path.c_str(), params);
+#else
     impl->gguf = gguf_init_from_file(gguf_path.c_str(), params);
+#endif
     if (!impl->gguf) {
         PARAKEET_LOG_ERROR("gguf: failed to open %s\n", gguf_path.c_str());
         return 1;
@@ -2824,10 +2875,19 @@ static int load_from_gguf_impl(const std::string & gguf_path,
         }
         ggml_backend_buffer_set_usage(impl->weights_buffer, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
 
-        std::ifstream f(gguf_path, std::ios::binary);
-        if (!f) {
-            PARAKEET_LOG_ERROR("gguf: cannot reopen %s for tensor data\n", gguf_path.c_str());
-            return 13;
+#ifdef PARAKEET_USE_COREML
+        // The tensor data comes through the descriptor the metadata did.
+        FILE * data_file = gguf_file.get();
+#else
+        FILE * data_file = nullptr;
+#endif
+        std::ifstream f;
+        if (data_file == nullptr) {
+            f.open(gguf_path, std::ios::binary);
+            if (!f) {
+                PARAKEET_LOG_ERROR("gguf: cannot reopen %s for tensor data\n", gguf_path.c_str());
+                return 13;
+            }
         }
         const size_t data_offset = gguf_get_data_offset(g);
         const int64_t n_tensors = gguf_get_n_tensors(g);
@@ -2842,13 +2902,23 @@ static int load_from_gguf_impl(const std::string & gguf_path,
             const size_t off   = gguf_get_tensor_offset(g, i);
             const size_t nbytes = ggml_nbytes(t);
             buf.resize(nbytes);
-            f.seekg((std::streamoff)(data_offset + off), std::ios::beg);
-            if (!f.read(buf.data(), nbytes)) {
+            bool read_ok = false;
+            if (data_file != nullptr) {
+                read_ok = fseeko(data_file, (off_t) (data_offset + off), SEEK_SET) == 0 &&
+                          std::fread(buf.data(), 1, nbytes, data_file) == nbytes;
+            } else {
+                f.seekg((std::streamoff)(data_offset + off), std::ios::beg);
+                read_ok = static_cast<bool>(f.read(buf.data(), nbytes));
+            }
+            if (!read_ok) {
                 PARAKEET_LOG_ERROR("gguf: short read on tensor '%s' (%zu bytes)\n", name, nbytes);
                 return 14;
             }
             ggml_backend_tensor_set(t, buf.data(), 0, nbytes);
         }
+#ifdef PARAKEET_USE_COREML
+        if (GgufLoadObserver observer = g_gguf_load_observer.load()) observer("read");
+#endif
     }
 
     {

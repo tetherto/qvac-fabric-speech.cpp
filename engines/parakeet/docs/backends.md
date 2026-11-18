@@ -887,7 +887,13 @@ follows took 11.4-14.2 s per capacity on macOS 27.2.1.
 generated capacity under `prewarm = all`, which loads them all at
 construction) at its template's Core ML envelope, in the Core ML-inclusive
 verdict only: the resident part of each capacity plus one generation or load
-transient. The templates' constants are measured values that already carry a
+transient. The calls an instance can make include shorter ones than the
+projected workload: any input up to the single-pass graph (the long-form
+window past the long-form threshold, 1125 frames by default) runs as one pass
+and keeps its capacity loaded, so the default 300 s projection charges all
+three capacities. A capacity that fails to load hands its calls to the next
+larger one that has not failed, so each selected capacity is charged at the
+largest generated capacity it can fall back to. The templates' constants are measured values that already carry a
 1.25 margin, so the envelope adds none (`memory.margin` is 1.0). The fit and
 the engine choose the generated capacities with the same code, so they cannot
 disagree. The route comes from the options and the GGUF, never from the cache,
@@ -913,10 +919,13 @@ the first. The steps add up to the run's steady growth over ggml. It also
 reports `ANECompilerService`'s growth during the loads: its peak less its size
 when the first load started. `scripts/check-coreml-memory-schedule.py` checks
 the reports against the templates: the peak increment against what fit
-charges; each prepare, load, resident step and the compiler's growth against
-the template's constant; and the steady growth against the three capacities'
-resident parts. A run in which a capacity shows no generate or load phase
-fails. The Core ML lane of `parakeet-ci.yml` runs the generated schedule and
+charges; each prepare, load, resident step and the compiler's growth, times
+1.25 and rounded up to 1 MiB, against the template's constant (the rule the
+constants were set by, so a constant that lost its margin fails); and the
+steady growth against the three capacities' resident parts. A run fails when a
+capacity shows no generate, compile or load phase, a phase has no footprint
+sample, a load has no `ANECompilerService` sample, or the tool reports sampler
+errors (a footprint or `ps` read that failed). The Core ML lane of `parakeet-ci.yml` runs the generated schedule and
 the check on its macOS runner. Increments are over a ggml-only run of the same
 passes on the same host:
 

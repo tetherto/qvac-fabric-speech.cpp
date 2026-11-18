@@ -416,8 +416,14 @@ void project_nemotron_diarization(const ParakeetCtcModel & model, const GgufLoad
     const uint64_t required = apply_fit_verdict(r, opts.margin_bytes);
     std::string disabled_reason;
     const bool enabled = coreml_fit_enabled(opts, disabled_reason);
+    // The instance also serves shorter calls than this workload, and keeps the
+    // capacities they load: any input up to the single-pass graph (the
+    // long-form window past the long-form threshold) runs as one pass, so the
+    // generated charge covers single passes from 1 frame up to it as well.
+    std::vector<CoremlFrameRange> generated_ranges = ranges;
+    generated_ranges.push_back(CoremlFrameRange{1, graphs.single_pass.frames});
     apply_coreml_verdicts(r, required, enabled, disabled_reason, /*encoder_prebuilt=*/false, 0,
-                          coreml_generated_diarizer_bytes(model, opts, ranges));
+                          coreml_generated_diarizer_bytes(model, opts, generated_ranges));
     r.report = model_device_report(r) + nemotron_diarization_report(graphs, long_form) +
                device_projection_report(r, opts.margin_bytes, required,
                                         "every diarization graph shares one buffer") +

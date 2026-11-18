@@ -78,20 +78,37 @@ std::vector<Candidate> probe(const std::vector<std::string> & template_ids, cons
 // The stat tuple of `path` with its realpath (PrepareRequest::source).
 bool source_stat(const std::string & path, SourceStat & out);
 
-// The PrepareRequest of route `generate` for a matched candidate.
+// The identity of the file an engine loaded its weights from, for
+// prepare_request. `before` and `after` are source_stat of the path the engine
+// loaded, taken before its first open of it and after its last read; `path`
+// is the path it asks to generate from. When the two stats differ (the file
+// was replaced during the load), either is missing (`ok_*` false) or `path`
+// resolves to another file, the result is marked `changed`, so prepare fails
+// with source_changed rather than generating from weights the engine did not
+// load.
+SourceStat loaded_source(const SourceStat & before, bool ok_before, const SourceStat & after, bool ok_after,
+                         const std::string & path);
+
+// The PrepareRequest of route `generate` for a matched candidate. A source
+// marked `changed` is never deduplicated with another engine's job.
 PrepareRequest prepare_request(const Candidate & c, const SourceStat & source, const Resolved & resolved);
 
 // PrepareFn of route `generate`: the cache pipeline (memo, digest, generate,
 // compile, publish, adopt) with the on-device compile. The artifact's lease
-// is released when it returns; the LoadFn takes its own (begin_load).
+// is released when it returns; the LoadFn takes its own (begin_load). An
+// unsupported cache volume returns PrepareResult::unsupported ("cache_fs").
 PrepareResult prepare(const PrepareRequest & req, PrepareContext & ctx);
 
 // For LoadFns. A generated artifact (LoadRequest::tmpl set) loads under the
 // shared lease of its cache entry: begin_load takes it and returns false
 // when the load must not start (`out` then carries would_block, or the
-// error when the artifact is gone). end_load, after the engine's load,
-// touches used/<key> on success and releases the lease on failure. Both do
-// nothing for a prebuilt artifact.
+// error with artifact_gone when the artifact is gone or incomplete, which
+// returns the slot to preparation). end_load, after the engine's load,
+// touches used/<key> on success and releases the lease on failure; after a
+// deterministic failure (the engine rejected the model) it also moves the
+// artifact to quarantine/ under the key's exclusive lock and sets
+// artifact_gone, so the slot regenerates it. Both do nothing for a prebuilt
+// artifact.
 bool begin_load(const LoadRequest & req, LoadResult & out);
 void end_load(const LoadRequest & req, LoadResult & out);
 

@@ -105,6 +105,14 @@ struct CoremlDiarizerCharge {
 // their resident parts plus the largest single transient (prepares and loads
 // run one at a time), times the largest margin among them. 0 when no
 // generated capacity is loaded.
+//
+// A capacity that fails to load (or never loads: a status-only template)
+// hands its calls to the smallest larger capacity that has not failed, which
+// then loads in its place (DiarizerSlots skips terminal capacities). So each
+// selected capacity is charged at the largest generated capacity its calls
+// can reach that way: itself, or a larger one below the next selected
+// capacity (which is charged on its own); above the largest selected one,
+// every larger capacity.
 inline uint64_t coreml_generated_diarizer_envelope(const std::vector<CoremlDiarizerCharge> & capacities,
                                                    const std::vector<CoremlFrameRange> & ranges,
                                                    bool every_capacity = false) {
@@ -117,11 +125,18 @@ inline uint64_t coreml_generated_diarizer_envelope(const std::vector<CoremlDiari
     uint64_t resident = 0;
     uint64_t transient = 0;
     double margin = 1.0;
-    for (const CoremlDiarizerCharge & c : capacities) {
-        if (!c.generated || std::find(loaded.begin(), loaded.end(), c.frames) == loaded.end()) continue;
-        resident = sat_add(resident, c.resident_bytes);
-        transient = std::max(transient, c.transient_bytes);
-        margin = std::max(margin, c.margin);
+    for (size_t i = 0; i < loaded.size(); ++i) {
+        const int from = loaded[i];
+        const bool bounded = i + 1 < loaded.size();
+        const int below = bounded ? loaded[i + 1] : 0;
+        uint64_t slot = 0;
+        for (const CoremlDiarizerCharge & c : capacities) {
+            if (!c.generated || c.frames < from || (bounded && c.frames >= below)) continue;
+            slot = std::max(slot, c.resident_bytes);
+            transient = std::max(transient, c.transient_bytes);
+            margin = std::max(margin, c.margin);
+        }
+        resident = sat_add(resident, slot);
     }
     const uint64_t total = sat_add(resident, transient);
     return total == 0 ? 0 : fitutil::sat_u64_from_double(std::ceil(static_cast<double>(total) * margin));

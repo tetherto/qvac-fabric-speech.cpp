@@ -8,7 +8,12 @@
 #include "digest.h"
 #include "failed.h"
 #include "hints.h"
+#if defined(QVAC_COREML_HAVE_GGML)
+#include "generation_internal.h"
+#include "qvac_coreml/generation.h"
+#endif
 
+#include "qvac_coreml/generation.h"
 #include "qvac_coreml/manager.h"
 
 #include <chrono>
@@ -256,6 +261,38 @@ void case_generate_and_artifact_json() {
     CHECK(cache::write_package(*env.tpl, ms, env.td / "pkg.mlpackage").ok());
     CHECK(read_bytes(env.td / "pkg.mlpackage/Data/com.apple.CoreML/weights/weight.bin") == wb);
     CHECK(read_bytes(env.td / "pkg.mlpackage/Manifest.json") == read_bytes(env.td / "tpl/Manifest.json"));
+}
+
+// The generation peak covers the spec patch pass too: a patch expression
+// whose interpreter peak exceeds every blob expression's sets it.
+void case_patch_pass_peak() {
+    TempDir td;
+    TemplateSpec spec = cache_spec();
+    spec.decls = "source \"w\" f32 [4,8]\nsource \"b\" f32 [8]\nsource \"big\" f32 [4096]\n"
+                 "meta \"general.architecture\" str\n";
+    spec.items.push_back(patch_(16, "fp16", 4096, "f16(mul(t(\"big\"), 2))"));
+    spec.spec_bytes = std::string(16 + 4096 * 2 + 16, '\x01');
+    std::string sentinel;
+    for (int i = 0; i < 4096 * 2; ++i) sentinel += "01";
+    spec.extra["patches"] = json::array({{{"spec_offset", 16}, {"len", 4096 * 2}, {"sentinel_hex", sentinel}}});
+    auto tpl = make_template(td / "tpl", spec);
+    std::vector<TT> ts = tensors(1.0f);
+    ts.push_back(TT{"big", T_F32, {4096}, std::vector<float>(4096, 0.25f)});
+    MemSource ms(ts, kMeta);
+    recipe::EvalStats blobs, patches;
+    CHECK(recipe::evaluate(tpl->recipe(), ms, [](const recipe::BlobOut &) { return Error{}; }, &blobs).ok());
+    std::vector<uint8_t> patched;
+    const recipe::TemplateFile * f = tpl->file("model.mlmodel");
+    CHECK(recipe::patched_spec(tpl->recipe(), ms, f->data, f->size, patched, nullptr, &patches).ok());
+    // t("big") and its product are live together, plus the spec copy.
+    CHECK(patches.peak_bytes >= 2 * 4096 * 4 + f->size);
+    CHECK(patches.peak_bytes > blobs.peak_bytes);
+    recipe::EvalStats st;
+    CHECK(cache::write_package(*tpl, ms, td / "pkg.mlpackage", &st).ok());
+    CHECK_MSG(st.peak_bytes == patches.peak_bytes,
+              std::to_string(st.peak_bytes) + " vs patch pass " + std::to_string(patches.peak_bytes));
+    CHECK(read_bytes(td / "pkg.mlpackage/Data/com.apple.CoreML/model.mlmodel") ==
+          std::string(patched.begin(), patched.end()));
 }
 
 void case_memo_hot_path() {
@@ -1537,6 +1574,38 @@ void case_toctou() {
     CHECK(ready(o) && !o.cache_hit);
 }
 
+void case_loaded_source() {
+    Env env;
+    const std::string a = env.source("a.gguf");
+    const std::string b = env.source("b.gguf", 2.0f);
+    SourceStat before, after, other;
+    CHECK(generation::source_stat(a, before) && generation::source_stat(a, after) &&
+          generation::source_stat(b, other));
+    // The file the engine loaded, unchanged across its load, asked for by its own path.
+    CHECK(!generation::loaded_source(before, true, after, true, a).changed);
+    // Replaced during the load, a stat missing, or generation asked for another file.
+    CHECK(generation::loaded_source(before, true, other, true, b).changed);
+    CHECK(generation::loaded_source(before, false, after, true, a).changed);
+    CHECK(generation::loaded_source(before, true, after, false, a).changed);
+    CHECK(generation::loaded_source(before, true, after, true, b).changed);
+    // prepare fails a changed source with source_changed and generates nothing,
+    // even when the file at its path still has the recorded identity.
+    cache::PrepareInputs in = env.inputs(a);
+    in.expected.changed = true;
+    PrepareOutcome o = cache::prepare(in);
+    CHECK(o.kind == PrepareOutcome::Kind::failed && o.reason == "source_changed");
+    CHECK(o.error.code == failed::SOURCE_CHANGED && o.error.cls == ErrorClass::transient);
+    CHECK(env.artifacts() == 0 && env.memos() == 0 && g_compiles == 0);
+    // Its request never joins another engine's job for the same file.
+    generation::Candidate c;
+    c.template_id = env.tpl->id();
+    c.sha256_hex = env.tpl->sha256_hex();
+    Resolved r;
+    r.cache_dir = env.cache;
+    CHECK(!generation::prepare_request(c, after, r).key.empty());
+    CHECK(generation::prepare_request(c, generation::loaded_source(before, true, other, true, b), r).key.empty());
+}
+
 void case_preflight() {
     Env env;
     const std::string a = env.source("a.gguf");
@@ -1699,6 +1768,178 @@ void case_scheduler_hint_pruned() {
     CHECK(!fs::exists(hint_path));
 }
 
+#if defined(QVAC_COREML_HAVE_GGML)
+// ---- the generation glue through the scheduler ---------------------------------------------
+
+std::function<void()> g_before_glue_load;
+
+PrepareResult glue_prepare(const PrepareRequest &, PrepareContext & ctx) {
+    PrepareOutcome o = cache::prepare(g_sched_inputs, &ctx);
+    return generation::internal::result_of(o);
+}
+
+// Loads like an engine's LoadFn: under the lease the glue's begin_load takes.
+LoadResult glue_load(const LoadRequest & req) {
+    if (g_before_glue_load) g_before_glue_load();
+    LoadResult r;
+    if (!generation::begin_load(req, r)) return r;
+    r.model = std::make_shared<int>(1);
+    generation::end_load(req, r);
+    return r;
+}
+
+// The engine rejects the first `g_glue_rejects` loads with an error of
+// class `g_glue_reject_class` (an invalid model, or a resource failure).
+std::atomic<int> g_glue_rejects{0};
+std::atomic<int> g_glue_loads{0};
+ErrorClass g_glue_reject_class = ErrorClass::deterministic;
+
+LoadResult glue_load_rejecting(const LoadRequest & req) {
+    LoadResult r;
+    if (!generation::begin_load(req, r)) return r;
+    if (g_glue_loads++ < g_glue_rejects) {
+        r.error = Error{g_glue_reject_class, "test", 9, "the engine rejected the model"};
+    } else {
+        r.model = std::make_shared<int>(1);
+    }
+    generation::end_load(req, r);
+    return r;
+}
+
+std::shared_ptr<Slot> glue_slot(const std::shared_ptr<Manager> & mgr, const Env & env, const std::string & a,
+                                LoadFn load = glue_load) {
+    SlotSpec gen;
+    gen.engine = "toy";
+    gen.stage = "dac";
+    gen.units = ComputeUnits::cpu_only;
+    gen.route = Route::generate;
+    gen.tmpl = env.tpl.get();
+    gen.prepare.key = "toy-dac:" + a;
+    gen.prepare.template_id = "toy-dac";
+    gen.prepare_fn = glue_prepare;
+    gen.load_fn = load;
+    SlotPolicy pol;
+    pol.cache_dir = env.cache;
+    return mgr->make_slot(gen, pol);
+}
+
+std::shared_ptr<Manager> glue_manager() {
+    Config cfg;
+    cfg.backoff_initial = 20ms;
+    cfg.backoff_max = 100ms;
+    cfg.pin_image = false;
+    cfg.available_memory = [] { return uint64_t{1} << 40; };
+    return Manager::create(cfg);
+}
+
+// A prune between the artifact's publication and its load (the preparation
+// released its lease) deletes it; the load reports it gone and the slot goes
+// back to preparation, which regenerates it, instead of failing.
+void case_generated_artifact_pruned_before_load() {
+    Env env;
+    const std::string a = env.source("a.gguf");
+    g_sched_inputs = env.inputs(a);
+    int pruned = 0;
+    g_before_glue_load = [&] {
+        if (pruned++ == 0) {
+            CHECK(cache::prune(env.cache, cache::PrunePolicy::all(), env.catalog()).deleted_artifacts.size() == 1);
+        }
+    };
+    {
+        auto mgr = glue_manager();
+        auto s = glue_slot(mgr, env, a);
+        s->request(Priority::now);
+        CHECK_MSG(wait_state(s, SlotState::ready), s->status().error);
+        CHECK(g_compiles == 2);  // generated, pruned, generated again
+        CHECK(env.artifacts() == 1 && env.memos() == 1);
+    }
+    g_before_glue_load = nullptr;
+
+    // An artifact that went incomplete is likewise prepared again.
+    const std::string b = env.source("b.gguf", 2.0f);
+    PrepareOutcome o = env.prepare(b);
+    CHECK(ready(o));
+    o.lease.release();
+    LoadRequest req;
+    req.tmpl = env.tpl.get();
+    req.artifact_path = o.model_path;
+    fs::remove_all(o.model_path);
+    LoadResult r;
+    CHECK(!generation::begin_load(req, r));
+    CHECK(r.artifact_gone && r.lease_fd < 0 && !r.error.ok());
+}
+
+// A cached artifact the engine rejects (it passed the inventory check) is
+// quarantined under EX and regenerated at the same key; a rejection that
+// repeats ends in failed after the scheduler's bound; a transient failure
+// keeps the artifact.
+void case_generated_rejected_hit_quarantined() {
+    Env env;
+    const std::string a = env.source("a.gguf");
+    g_sched_inputs = env.inputs(a);
+    { CHECK(ready(env.prepare(a))); }  // a cache hit for the slot below
+    CHECK(g_compiles == 1);
+    const cache::Layout l = env.layout();
+    {
+        g_glue_rejects = 1;
+        g_glue_loads = 0;
+        g_glue_reject_class = ErrorClass::deterministic;
+        auto mgr = glue_manager();
+        auto s = glue_slot(mgr, env, a, &glue_load_rejecting);
+        s->request(Priority::now);
+        CHECK_MSG(wait_state(s, SlotState::ready), s->status().error);
+        CHECK(g_compiles == 2 && g_glue_loads == 2);
+        CHECK(count_files(l.quarantine) == 1);  // the rejected copy, for prune
+        CHECK(env.artifacts() == 1);
+    }
+    {
+        g_glue_rejects = 100;
+        g_glue_loads = 0;
+        auto mgr = glue_manager();
+        auto s = glue_slot(mgr, env, a, &glue_load_rejecting);
+        s->request(Priority::now);
+        CHECK(wait_state(s, SlotState::failed));
+        CHECK(g_glue_loads == 3 && g_compiles == 4);  // two regenerations, then failed
+        CHECK(s->status().error == "the engine rejected the model");
+    }
+    {
+        g_glue_rejects = 1;
+        g_glue_loads = 0;
+        g_glue_reject_class = ErrorClass::transient;
+        { CHECK(ready(env.prepare(a))); }  // the last rejection left nothing to hit
+        const int compiles = g_compiles;
+        const size_t quarantined = count_files(l.quarantine);
+        auto mgr = glue_manager();
+        auto s = glue_slot(mgr, env, a, &glue_load_rejecting);
+        s->request(Priority::now);
+        CHECK(wait_state(s, SlotState::failed));
+        CHECK(g_compiles == compiles && count_files(l.quarantine) == quarantined && g_glue_loads == 1);
+    }
+    g_glue_rejects = 0;
+}
+
+// An unsupported cache volume: the slot is unsupported(cache_fs), not failed.
+void case_generated_unsupported_cache_fs() {
+    Env env;
+    const std::string a = env.source("a.gguf");
+    g_sched_inputs = env.inputs(a);
+    g_sched_inputs.fs_probe = [](const std::string &, cache::FsFacts & f) {
+        f.local = false;
+        f.fstype = "nfs";
+        f.free_bytes = 1ull << 40;
+        return true;
+    };
+    auto mgr = glue_manager();
+    auto s = glue_slot(mgr, env, a);
+    s->request(Priority::now);
+    CHECK(wait_state(s, SlotState::unsupported));
+    const SlotStatus st = s->status();
+    CHECK(st.reason == "cache_fs" && st.error_class == ErrorClass::none);
+    CHECK(state_label(st.state, st.reason) == "unsupported(cache_fs)");
+    CHECK(g_compiles == 0);
+}
+#endif
+
 }  // namespace
 
 int main(int argc, char ** argv) {
@@ -1707,6 +1948,7 @@ int main(int argc, char ** argv) {
                      {
                          {"golden-keys", case_golden_keys},
                          {"generate-and-artifact-json", case_generate_and_artifact_json},
+                         {"patch-pass-peak", case_patch_pass_peak},
                          {"memo-hot-path", case_memo_hot_path},
                          {"publish-race", case_publish_race},
                          {"recheck-under-lock", case_recheck_under_lock},
@@ -1739,9 +1981,15 @@ int main(int argc, char ** argv) {
                          {"prune-trash", case_prune_trash},
                          {"malformed-records", case_malformed_records},
                          {"toctou", case_toctou},
+                         {"loaded-source", case_loaded_source},
                          {"preflight", case_preflight},
                          {"would-block-requeue", case_would_block_requeue},
                          {"scheduler-hint-pruned", case_scheduler_hint_pruned},
+#if defined(QVAC_COREML_HAVE_GGML)
+                         {"generated-artifact-pruned-before-load", case_generated_artifact_pruned_before_load},
+                         {"generated-unsupported-cache-fs", case_generated_unsupported_cache_fs},
+                         {"generated-rejected-hit-quarantined", case_generated_rejected_hit_quarantined},
+#endif
                      },
                      "test-coreml-cache");
 }

@@ -11,6 +11,7 @@
 #include "cache.h"
 #include "device.h"
 #include "digest.h"
+#include "generation_internal.h"
 #include "gguf_source.h"
 #include "templates.h"
 
@@ -261,6 +262,14 @@ bool source_stat(const std::string & path, SourceStat & out) {
     return true;
 }
 
+SourceStat loaded_source(const SourceStat & before, bool ok_before, const SourceStat & after, bool ok_after,
+                         const std::string & path) {
+    SourceStat s = after;
+    s.changed = !ok_before || !ok_after || before.changed || after.changed || !same_identity(before, after) ||
+                before.path != after.path || real_path(path) != after.path;
+    return s;
+}
+
 PrepareRequest prepare_request(const Candidate & c, const SourceStat & source, const Resolved & resolved) {
     PrepareRequest r;
     r.template_id = c.template_id;
@@ -268,6 +277,7 @@ PrepareRequest prepare_request(const Candidate & c, const SourceStat & source, c
     r.cache_dir = resolved.cache_dir;
     r.options = digest::DEFAULT_OPTIONS;
     r.tmpl = c.tmpl;
+    if (source.changed) return r;  // key "": fails on its own, never joins another engine's job
     // Two engines over the same file and template share one job.
     r.key = c.template_id + "\n" + c.sha256_hex + "\n" + resolved.cache_dir + "\n" + source.path + "\n" +
             std::to_string(source.size) + "\n" + std::to_string(source.mtime_ns) + "\n" + std::to_string(source.ino) +
@@ -294,6 +304,13 @@ PrepareResult prepare(const PrepareRequest & req, PrepareContext & ctx) {
         return GgufSource::open(path, err);
     };
     cache::PrepareOutcome o = cache::prepare(in, &ctx);
+    return internal::result_of(o);
+}
+
+namespace internal {
+
+PrepareResult result_of(cache::PrepareOutcome & o) {
+    PrepareResult r;
     switch (o.kind) {
         case cache::PrepareOutcome::Kind::ready:
             r.artifact_path = o.model_path;
@@ -302,7 +319,9 @@ PrepareResult prepare(const PrepareRequest & req, PrepareContext & ctx) {
             break;
         case cache::PrepareOutcome::Kind::would_block: r.would_block = true; break;
         case cache::PrepareOutcome::Kind::unsupported:
-            r.error = Error::deterministic("unsupported: " + (o.reason.empty() ? o.error.message : o.reason));
+            r.unsupported = o.reason.empty() ? "cache_fs" : o.reason;
+            r.error = o.error;
+            r.error.cls = ErrorClass::none;
             break;
         case cache::PrepareOutcome::Kind::failed:
             r.error = o.error.ok() ? Error::transient(o.reason.empty() ? "prepare failed" : o.reason) : o.error;
@@ -310,6 +329,8 @@ PrepareResult prepare(const PrepareRequest & req, PrepareContext & ctx) {
     }
     return r;
 }
+
+}  // namespace internal
 
 bool begin_load(const LoadRequest & req, LoadResult & out) {
     if (req.tmpl == nullptr) return true;  // prebuilt
@@ -321,9 +342,11 @@ bool begin_load(const LoadRequest & req, LoadResult & out) {
         case cache::Adoption::Kind::adopted: out.lease_fd = a.lease.release_fd(); return true;
         case cache::Adoption::Kind::would_block: out.would_block = true; return false;
         case cache::Adoption::Kind::missing:
+            out.artifact_gone = true;  // the scheduler prepares it again
             out.error = Error::transient("the generated artifact " + req.artifact_path + " is gone");
             return false;
         case cache::Adoption::Kind::invalid:
+            out.artifact_gone = true;  // preparation quarantines and regenerates it
             out.error = Error::transient("the generated artifact " + req.artifact_path + " is incomplete");
             return false;
         case cache::Adoption::Kind::error: out.error = a.error; return false;
@@ -335,12 +358,23 @@ void end_load(const LoadRequest & req, LoadResult & out) {
     if (req.tmpl == nullptr) return;
     std::string cache_dir, template_id, key32;
     if (!split_artifact_path(req.artifact_path, cache_dir, template_id, key32)) return;
+    const cache::Layout l(cache_dir);
     if (out.model) {
-        cache::touch_used(cache::Layout(cache_dir), key32);
-    } else if (out.lease_fd >= 0) {
+        cache::touch_used(l, key32);
+        return;
+    }
+    if (out.lease_fd >= 0) {
         ::close(out.lease_fd);
         out.lease_fd = -1;
     }
+    // The engine rejected an artifact that passed the inventory check (an
+    // invalid model, the wrong geometry): move it to quarantine/ under the
+    // key's exclusive lock and send the slot back to preparation, which
+    // regenerates it at the same key (the scheduler bounds the retries). A
+    // transient failure keeps the artifact, and so does one another holder
+    // of a lease is using.
+    if (out.error.cls != ErrorClass::deterministic) return;
+    if (cache::quarantine(l, template_id, key32, nullptr) == cache::KeyLock::Result::ok) out.artifact_gone = true;
 }
 
 #else  // !QVAC_COREML_GENERATE
@@ -359,6 +393,12 @@ std::vector<Candidate> probe(const std::vector<std::string> & template_ids, cons
 }
 
 bool source_stat(const std::string &, SourceStat &) { return false; }
+
+SourceStat loaded_source(const SourceStat &, bool, const SourceStat & after, bool, const std::string &) {
+    SourceStat s = after;
+    s.changed = true;
+    return s;
+}
 
 PrepareRequest prepare_request(const Candidate & c, const SourceStat & source, const Resolved & resolved) {
     PrepareRequest r;

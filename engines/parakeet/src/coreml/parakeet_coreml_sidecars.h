@@ -239,9 +239,11 @@ public:
     // Registers one slot per capacity. The smallest capacity that can serve
     // a pass and every status-only capacity are in the minimal (construction)
     // set; the others are requested by the pass that needs them, or by
-    // prewarm = all.
+    // prewarm = all. `source` is the identity of the GGUF whose weights the
+    // model loaded (generation::loaded_source): generated capacities prepare
+    // only from that file. Without it the path is stat'ed now.
     DiarizerSlots(const std::string & gguf_path, std::vector<DiarizerCapacity> capacities, CoremlSidecars & sidecars,
-                  pcm::LoadFn load_fn);
+                  pcm::LoadFn load_fn, std::optional<pcm::SourceStat> source = std::nullopt);
 
     // A capacity that has not failed covers `frames` (independent of
     // readiness). Under use = require every capacity covers, so run() refuses

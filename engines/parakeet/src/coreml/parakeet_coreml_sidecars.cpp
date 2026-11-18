@@ -322,14 +322,16 @@ std::vector<CoremlDiarizerCharge> diarizer_fit_charges(const CoremlSidecars & si
 }
 
 DiarizerSlots::DiarizerSlots(const std::string & gguf_path, std::vector<DiarizerCapacity> capacities,
-                             CoremlSidecars & sidecars, pcm::LoadFn load_fn)
+                             CoremlSidecars & sidecars, pcm::LoadFn load_fn, std::optional<pcm::SourceStat> loaded)
     : strict_(sidecars.resolved().strict()) {
     std::sort(capacities.begin(), capacities.end(),
               [](const DiarizerCapacity & a, const DiarizerCapacity & b) { return a.frames < b.frames; });
     pcm::SourceStat source;
-    if (std::any_of(capacities.begin(), capacities.end(), [](const DiarizerCapacity & c) {
-            return !c.prebuilt && c.generated != nullptr && c.generated->matched;
-        })) {
+    if (loaded) {
+        source = *loaded;
+    } else if (std::any_of(capacities.begin(), capacities.end(), [](const DiarizerCapacity & c) {
+                   return !c.prebuilt && c.generated != nullptr && c.generated->matched;
+               })) {
         pcm::generation::source_stat(gguf_path, source);
     }
     bool minimal_served = false;

@@ -4,7 +4,14 @@
 Reads the JSON reports of diarizer-coreml-memory (one per run,
 generated schedule) and the templates they exercised, prints one table row per
 run plus the maxima over the runs, and fails when a measurement exceeds what
-the envelope charges:
+the envelope charges.
+
+The per-stage constants (prepare, load, resident part, compiler reserve) must
+keep the measurement margin: each is checked against the measurement x 1.25
+(or the template's memory.measured.margin when larger), rounded up to 1 MiB,
+the rule the constants were set by. The whole-process checks (peak increment
+against the fit charge, steady growth against the summed resident parts)
+compare the raw measurement, since those totals already carry the margin.
 
   - the run's peak footprint increment over the ggml-only run of the same
     passes, against the Core ML bytes fit_params charged for the same options;
@@ -24,9 +31,11 @@ the envelope charges:
     understates a cold compile on a clean host) or unknown (no sample before
     the load, or a report without the label).
 
-Every template stage must show a generate and a load segment in every run, or
-the stage checks would pass without measuring anything; a stage seen more than
-once in a phase is checked at its largest value.
+Every template stage must show a generate, a compile and a load segment in
+every run, each with footprint samples, every load must have sampled
+ANECompilerService, and the tool must report no sampler errors; otherwise the
+checks would pass without measuring anything. A stage seen more than once in a
+phase is checked at its largest value.
 
 A null constant means the runtime's default: runtime weights = weight.bin;
 compile 0.5 x weight.bin; load 0.25 x weight.bin for cpu_and_ane and 1.0 x for
@@ -43,6 +52,7 @@ from pathlib import Path
 
 MIB = 1 << 20
 PREPARE_FIXED = 8 * MIB
+MARGIN = 1.25  # each stage constant is at least 1.25 x the largest measurement
 
 
 def sh(cmd):
@@ -89,6 +99,25 @@ def mib(v):
     return f"{v / MIB:.1f}"
 
 
+def margin_of(template):
+    measured = template.get("memory", {}).get("measured") or {}
+    return max(MARGIN, float(measured.get("margin") or MARGIN))
+
+
+def with_margin(raw, margin):
+    """What a constant must hold for a raw measurement: x margin, rounded up to 1 MiB."""
+    return -(-int(raw * margin) // MIB) * MIB if raw > 0 else 0
+
+
+def over(path, what, raw, margin, limit):
+    """A failure message when raw x margin (rounded up to 1 MiB) exceeds limit, else None."""
+    need = with_margin(raw, margin)
+    if need <= limit:
+        return None
+    return (f"{path}: {what} +{mib(raw)} MiB (x {margin:g} = {mib(need)} MiB) over the charged "
+            f"{mib(limit)} MiB")
+
+
 def prepares(segs):
     """The increment of each prepare: a generate segment and the compile
     segments after it, up to the next generate or load."""
@@ -114,9 +143,15 @@ def check_run(path, r, templates):
     if r.get("mode") != "coreml" or not r.get("baseline_bytes"):
         return None, [f"{path}: not a Core ML run with a ggml-only baseline"]
     units = {s["stage"]: s.get("compute_units") for s in r.get("status", {}).get("stages", [])}
+    if "sampler_errors" not in r:
+        failures.append(f"{path}: no sampler_errors (an older tool's report)")
+    elif int(r["sampler_errors"]) != 0:
+        failures.append(f"{path}: {r['sampler_errors']} sampler errors: the measurements are incomplete")
     by_stage = {}
     for s in r.get("segments", []):
         by_stage.setdefault(s["stage"], []).append(s)
+        if int(s.get("before", 0)) <= 0 or int(s.get("peak", 0)) <= 0:
+            failures.append(f"{path}: {s['stage']} {s['phase']} segment without footprint samples")
     for stage in sorted(set(by_stage) - set(templates)):
         failures.append(f"{path}: no template for {stage}")
 
@@ -125,9 +160,10 @@ def check_run(path, r, templates):
     for stage, template in sorted(templates.items()):
         segs = by_stage.get(stage, [])
         phases = {s["phase"] for s in segs}
-        for phase in ("generate", "load"):
+        for phase in ("generate", "compile", "load"):
             if phase not in phases:
                 failures.append(f"{path}: {stage} has no {phase} segment")
+        margin = margin_of(template)
         p_lim, l_lim, r_lim, res_lim = charged(template, units.get(stage) or "cpu_and_ane")
         row["resident_sum"] += res_lim
         for key, lim in (("prepare_lim", p_lim), ("load_lim", l_lim), ("reserve_lim", r_lim),
@@ -135,19 +171,21 @@ def check_run(path, r, templates):
             row[key] = lim if row[key] is None else min(row[key], lim)
         inc = max(prepares(segs), default=0)
         row["prepare"] = max(row["prepare"], inc)
-        if inc > p_lim:
-            failures.append(f"{path}: {stage} prepare +{mib(inc)} MiB over the charged {mib(p_lim)} MiB")
+        failures.append(over(path, f"{stage} prepare", inc, margin, p_lim))
         loads = [s for s in segs if s["phase"] == "load"]
         inc = max((s["increment"] for s in loads), default=0)
         row["load"] = max(row["load"], inc)
-        if inc > l_lim:
-            failures.append(f"{path}: {stage} load +{mib(inc)} MiB over the charged {mib(l_lim)} MiB")
+        failures.append(over(path, f"{stage} load", inc, margin, l_lim))
         if any("resident_increment" not in s for s in loads):
             failures.append(f"{path}: {stage} load segment without resident_increment (an older tool's report)")
+        # Every load in a cold generated schedule is a cold ANE load: the
+        # compiler must have been sampled while it ran.
+        if any(int(s.get("ane_compiler_peak", 0)) <= 0 for s in loads):
+            failures.append(f"{path}: no ANECompilerService sample during a {stage} load")
         inc = max((s.get("resident_increment", 0) for s in loads), default=0)
         row["resident"] = max(row["resident"], inc)
-        if inc > res_lim:
-            failures.append(f"{path}: {stage} resident step +{mib(inc)} MiB over the charged {mib(res_lim)} MiB")
+        failures.append(over(path, f"{stage} resident step", inc, margin, res_lim))
+        row["margin"] = max(row.get("margin", MARGIN), margin)
 
     loads = [s for s in r.get("segments", []) if s["phase"] == "load"]
     peak = max((s["ane_compiler_peak"] for s in loads), default=0)
@@ -156,9 +194,12 @@ def check_run(path, r, templates):
     growth = max(0, peak - int(r.get("ane_compiler_before_loads", 0)))
     row["ane_growth"], row["ane_peak"] = growth, peak
     row["ane_baseline"] = r.get("ane_compiler_baseline", "unknown")
-    if row["reserve_lim"] is not None and growth > row["reserve_lim"]:
-        failures.append(f"{path}: ANECompilerService grew {mib(growth)} MiB during the loads, over the reserve "
-                        f"{mib(row['reserve_lim'])} MiB")
+    if row["reserve_lim"] is not None:
+        need = with_margin(growth, row.get("margin", MARGIN))
+        if need > row["reserve_lim"]:
+            failures.append(f"{path}: ANECompilerService grew {mib(growth)} MiB during the loads "
+                            f"(x {row.get('margin', MARGIN):g} = {mib(need)} MiB), over the reserve "
+                            f"{mib(row['reserve_lim'])} MiB")
     steady = int(r.get("steady_increment_over_baseline", 0))
     row["steady"] = steady
     if steady > row["resident_sum"]:
@@ -171,7 +212,7 @@ def check_run(path, r, templates):
     if r.get("ggml_passes_after_ready", 0) and r.get("coreml_passes", 0) == 0:
         failures.append(f"{path}: no pass ran on Core ML")
     row["units"] = ",".join(sorted({u for u in units.values() if u}))
-    return row, failures
+    return row, [f for f in failures if f]
 
 
 def main(argv=None):

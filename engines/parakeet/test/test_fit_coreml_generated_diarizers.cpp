@@ -8,9 +8,12 @@
 // both keeps generation on. An Engine on compute units the templates were not
 // validated for generates nothing, and every capacity keeps a status entry
 // that says so; so does an Engine with generation off (generate = never).
-// With prewarm = all the charge covers every generated capacity: more than
-// the default when the model has several capacities, the same when it has
-// one (construction loads the only capacity either way).
+// With prewarm = all the charge covers every generated capacity, and so does
+// the default 300 s workload: an instance projected for it also runs shorter
+// calls as one pass up to the long-form window (1125 frames for Nemotron),
+// which keep their capacities loaded. A short workload charges less when the
+// model has several capacities, the same when it has one (construction loads
+// the only capacity either way).
 //
 // Usage: test-fit-coreml-generated-diarizers <model.gguf> <empty cache dir> [capacities]
 // `capacities` is the number of the model's diarizer templates (default 3,
@@ -70,12 +73,15 @@ parakeet::CoremlOptions coreml_options(const std::string & cache_dir) {
     return o;
 }
 
-// The same FitOptions the Engine's memory-degrade check builds.
-parakeet::FitResult project(const std::string & gguf, const parakeet::CoremlOptions & coreml) {
+// The same FitOptions the Engine's memory-degrade check builds (the default
+// workload), or a workload of `audio_seconds`.
+parakeet::FitResult project(const std::string & gguf, const parakeet::CoremlOptions & coreml,
+                            float audio_seconds = 0) {
     parakeet::FitOptions opts;
     opts.model_gguf_path = gguf;
     opts.n_gpu_layers = kGpuLayers;
     opts.coreml = coreml;
+    if (audio_seconds > 0) opts.audio_seconds = audio_seconds;
     return parakeet::fit_params(opts);
 }
 
@@ -123,18 +129,25 @@ int main(int argc, char ** argv) {
           "the generated capacities are charged, validated for the resolved units");
 
     // prewarm = all loads every capacity at construction: the charge covers
-    // all of them, more than the capacities this workload's calls load. A
-    // model with one capacity loads it at construction either way.
+    // all of them. The default workload (300 s, long form) reaches every
+    // Nemotron capacity too: its long-form chunks and stream steps load 358
+    // and 745, and a shorter call of up to 1125 frames (about 90 s) runs as
+    // one pass on 1125. A model with one capacity loads it at construction.
     parakeet::CoremlOptions every = coreml_options(cache);
     every.prewarm = parakeet::CoremlOptions::Prewarm::all;
     const parakeet::FitResult all = project(gguf, every);
     print("prewarm all", all);
+    check(all.coreml.bytes > 0 && all.coreml.validated, "prewarm all charges every generated capacity");
+    check(before.coreml.bytes == all.coreml.bytes,
+          "the default workload charges every capacity a shorter single pass can load");
+    const parakeet::FitResult brief = project(gguf, coreml_options(cache), 5.0f);
+    print("5 s workload", brief);
     if (g_capacities > 1) {
-        check(all.coreml.bytes > before.coreml.bytes && all.coreml.validated,
-              "prewarm all charges every generated capacity");
+        check(brief.coreml.bytes > 0 && brief.coreml.bytes < all.coreml.bytes,
+              "a 5 s workload charges fewer capacities");
     } else {
-        check(all.coreml.bytes == before.coreml.bytes && all.coreml.validated,
-              "one capacity: prewarm all charges what the default charges");
+        check(brief.coreml.bytes == all.coreml.bytes,
+              "one capacity: a 5 s workload charges the capacity construction loads");
     }
 
     // Generate every capacity (wait for construction, prewarm all).
@@ -195,6 +208,14 @@ int main(int argc, char ** argv) {
           "a budget between the ggml-only and Core ML-inclusive totals: generation off, reason memory");
     check(!contains(degraded, "\"route\":\"generated\"") && !contains(degraded, "\"route\":\"cached\""),
           "and no generated route");
+
+    // Just under the full charge of the default workload (above what its
+    // long-form and stream calls alone load): Core ML off for memory.
+    parakeet::CoremlOptions near = coreml_options(cache);
+    near.memory_budget_bytes =
+        static_cast<int64_t>(after.ggml_required_bytes + all.coreml.bytes - 1024 * 1024);
+    check(contains(engine_status(gguf, near), "\"generation\":{\"reason\":\"memory\",\"supported\":false}"),
+          "a budget 1 MiB under the three-capacity charge: generation off, reason memory");
 
     // Room for both: generation stays on (the cached minimal capacity loads
     // before the engine goes away).
