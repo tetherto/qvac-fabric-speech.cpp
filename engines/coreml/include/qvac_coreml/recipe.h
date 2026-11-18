@@ -6,15 +6,18 @@
 // weight-free Core ML template is computed from GGUF tensors. parse() checks
 // the grammar and every static rule of the language (known ops, use before `let`, the
 // dtype of the top cast, element counts, offsets against the MILBlob writer,
-// the total size); evaluate() streams the blobs to a sink. The op vocabulary
-// grows with its consumers; this generator version knows Parler's DAC subset:
+// the total size); evaluate() streams the blobs to a sink and
+// evaluate_patches() the spec patches. The op vocabulary grows with its
+// consumers; this generator version knows:
 //   t f32 f64 f16 add mul div recip clip reshape permute take concat (+ let)
-// `patch`, provided(), meta_f/meta_s and lit() belong to later generator
-// versions; the parser rejects them.
+//   slice neg zeros ones lit
+// and `patch` lines of dtype fp16 and fp32, which rewrite inline constants of
+// the spec (model.mlmodel) in place. `patch ... str`, provided() and
+// meta_f/meta_s belong to later generator versions; the parser rejects them.
 //
 // Arithmetic is IEEE in the operand dtype with no FMA contraction (the
-// interpreter is compiled with -ffp-contract=off). No op of this subset is a
-// reduction, a transcendental or provided(), so every blob is `exact`;
+// interpreter is compiled with -ffp-contract=off). No op of this vocabulary is
+// a reduction, a transcendental or provided(), so every blob is `exact`;
 // compare_blob() already implements the `ulp` rule later ops flag into.
 
 #include "qvac_coreml/slot.h"
@@ -86,15 +89,46 @@ struct Meta {
 };
 
 struct Item {
-    enum class Kind : uint8_t { let, blob };
+    enum class Kind : uint8_t { let, blob, patch };
     Kind kind = Kind::blob;
     std::string name;     // let
-    uint64_t offset = 0;  // blob: MILBlob metadata offset
+    uint64_t offset = 0;  // blob: MILBlob metadata offset; patch: byte offset in model.mlmodel
     BlobType dtype = BlobType::fp16;
-    uint64_t count = 0;  // blob: element count
+    uint64_t count = 0;  // blob, patch: element count
     ExprP expr;
     int line = 0;
     bool ulp = false;  // blob tolerance class (see compare_blob)
+};
+
+// A weight-independent constant read by lit(id): template.json `literals`
+// entry {id, dtype, shape, offset}, the bytes in the template's literals.bin
+// (little-endian fp16 or fp32, row-major, `shape` in numpy order). lit()
+// yields f32 (fp16 widened exactly).
+struct Literal {
+    std::string id;
+    BlobType dtype = BlobType::fp16;
+    std::vector<int64_t> shape;
+    uint64_t offset = 0;              // in literals.bin
+    const uint8_t * data = nullptr;   // offset applied; owned by the template (or the caller of parse)
+};
+
+// template.json `patches` entry: the bytes of model.mlmodel at
+// [spec_offset, spec_offset + len) hold the sentinel the extraction wrote, and
+// the recipe's patch line at that offset replaces them.
+struct PatchSite {
+    uint64_t spec_offset = 0;
+    uint64_t len = 0;
+    std::string sentinel_hex;  // lowercase hex, 2 * len characters
+};
+
+// What parse() checks a recipe against besides its own text: the template's
+// literals and, when known, its spec and patch sites. A default context
+// declares no literal and no patch site.
+struct ParseContext {
+    std::vector<Literal> literals;     // `data` set: lit() can be evaluated
+    const uint8_t * spec = nullptr;    // model.mlmodel; null: patch bounds and sentinels are not checked
+    size_t spec_size = 0;
+    std::vector<PatchSite> patches;    // must equal the recipe's patch lines when `spec` is set
 };
 
 struct Recipe {
@@ -104,9 +138,12 @@ struct Recipe {
     uint32_t blob_count = 0;
     std::vector<Source> sources;
     std::vector<Meta> meta;
-    std::vector<Item> items;  // let and blob lines, in file order
+    std::vector<Item> items;  // let, blob and patch lines, in file order
+    std::vector<Literal> literals;  // from the ParseContext
 
     const Source * find_source(std::string_view name) const;
+    const Literal * find_literal(std::string_view id) const;
+    size_t patch_count() const;
 };
 
 class RecipeError : public std::runtime_error {
@@ -118,8 +155,10 @@ public:
 };
 
 // Grammar and every static check of the language. Throws RecipeError (a deterministic
-// recipe-validation failure).
-Recipe parse(std::string_view text);
+// recipe-validation failure). Patch lines come in spec offset order, do not
+// overlap, hold exactly count x dtype-size bytes and, with `ctx.spec`, lie
+// inside the spec on a declared patch site whose bytes equal its sentinel.
+Recipe parse(std::string_view text, const ParseContext & ctx = {});
 
 // ggml type <-> name ("f32", "f16", "bf16", "q8_0", ...): the ABI values of
 // enum ggml_type, so the parser needs no ggml (gguf_source.cpp asserts them).
@@ -199,6 +238,25 @@ using ReadObserver = std::function<Error(const std::string & name, const std::ar
 // deterministic; source read failures carry the source's class.
 Error evaluate(const Recipe & r, TensorSource & src, const std::function<Error(const BlobOut &)> & sink,
                EvalStats * stats = nullptr, const ReadObserver & observer = nullptr);
+
+// One evaluated patch line: `bytes` little-endian fp16 / fp32 values to write
+// at `offset` in model.mlmodel.
+struct PatchOut {
+    uint64_t offset = 0;
+    BlobType dtype = BlobType::fp16;
+    uint64_t count = 0;
+    const uint8_t * data = nullptr;
+    size_t bytes = 0;
+    int line = 0;
+};
+
+// Evaluates every patch line in spec offset order, with the errors of evaluate().
+Error evaluate_patches(const Recipe & r, TensorSource & src, const std::function<Error(const PatchOut &)> & sink,
+                       const ReadObserver & observer = nullptr);
+
+// The spec with every patch applied (`spec` is the template's model.mlmodel).
+Error patched_spec(const Recipe & r, TensorSource & src, const uint8_t * spec, size_t spec_size,
+                   std::vector<uint8_t> & out, const ReadObserver & observer = nullptr);
 
 // ---- Number formats and tolerance ---------------------------------------------
 

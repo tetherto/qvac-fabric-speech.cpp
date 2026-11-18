@@ -39,7 +39,8 @@ const EmbeddedFile * embedded_files(size_t & count);
 // The embedded template ids, sorted.
 std::vector<std::string> embedded_ids();
 
-// The embedded template `id`, parsed once per process; nullptr when this
+// The embedded template `id`, parsed once per process and kept until the
+// process ends (exit-time static destructors included); nullptr when this
 // library does not embed it. Throws std::runtime_error / recipe::RecipeError
 // when the embedded files do not form a valid template (a build defect).
 std::shared_ptr<const recipe::Template> embedded(const std::string & id);
