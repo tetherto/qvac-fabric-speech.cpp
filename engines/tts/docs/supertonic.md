@@ -330,9 +330,11 @@ two.
   (`Engine::cancel()` ends the wait).
 - **Fit.** `supertonic::FitOptions::coreml` mirrors the Engine's options. A
   generated route adds the template's Core ML memory envelope to the
-  projection (`FitResult::coreml`); with `coreml.memory_budget_bytes`, a budget
-  only the ggml projection fits makes the Engine resolve `use = off`
-  (memory-degrade) instead of refusing. The constructor repeats the fit to
+  projection (`FitResult::coreml`); with `coreml.memory_budget_bytes`, every
+  verdict (ggml, Core ML-inclusive, the final one and its headroom) compares
+  against the smaller of the free memory and the budget, and a budget only the
+  ggml projection fits makes the Engine resolve `use = off` (memory-degrade)
+  instead of refusing. The constructor repeats the fit to
   decide this, with `EngineOptions::fit_text_tokens`, `fit_audio_seconds` and
   `fit_margin_bytes` (defaults 128, 10 s and 256 MiB, as in `FitOptions`): set
   them to the workload and headroom of the `fit_params` call that assessed the

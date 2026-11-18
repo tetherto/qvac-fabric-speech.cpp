@@ -76,6 +76,7 @@ parler_coreml_fit_verdict parler_decide_coreml_fit(uint64_t required, uint64_t c
     v.degraded       = d.degraded;
     v.fits           = d.fits;
     v.charged        = d.charged;
+    v.capacity       = d.capacity;
     return v;
 }
 
@@ -383,10 +384,10 @@ FitResult fit_params(const FitOptions & opts) {
         }
         if (r.fits) {
             std::snprintf(line, sizeof(line), "verdict: FITS (headroom %s)\n",
-                          fmt_mib(r.device_free_bytes - v.charged).c_str());
+                          fmt_mib(v.capacity - v.charged).c_str());
         } else {
             std::snprintf(line, sizeof(line), "verdict: DOES NOT FIT (short by %s)\n",
-                          fmt_mib(v.charged - r.device_free_bytes).c_str());
+                          fmt_mib(v.charged - v.capacity).c_str());
         }
         s += line;
         r.report = std::move(s);

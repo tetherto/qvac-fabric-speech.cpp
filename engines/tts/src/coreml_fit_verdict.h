@@ -5,11 +5,12 @@
 //
 // `required` is the ggml projection (which keeps the stage's ggml residency:
 // the ggml stage serves calls until the sidecar is ready); a generated route
-// adds the stage's Core ML envelope. Memory-degrade: with a budget, when the
-// Core ML-inclusive requirement exceeds the capacity the verdict uses,
-// min(device_free, budget), and the ggml one fits it, the engine resolves
-// use = off, so Core ML never turns a working ggml verdict into a refusal. No
-// budget, no memory-degrade.
+// adds the stage's Core ML envelope. With a budget, a generated route decides
+// every verdict on one capacity, min(device_free, budget): both projections,
+// the memory-degrade (the Core ML-inclusive requirement exceeds it and the
+// ggml one fits it: the engine resolves use = off, so Core ML never turns a
+// working ggml verdict into a refusal) and the final verdict. Without a budget
+// or a generated route the capacity is device_free and nothing degrades.
 
 #include "fit_util.h"
 
@@ -25,21 +26,23 @@ struct coreml_fit_verdict {
     bool coreml_fits    = false;
     bool degraded       = false;  // memory-degrade: use = off, reason "memory"
     bool fits           = false;  // the verdict for what the engine will run
-    uint64_t charged    = 0;      // what `fits` compares with device_free
+    uint64_t charged    = 0;      // what `fits` compares with `capacity`
+    uint64_t capacity   = 0;      // device_free, or min(device_free, budget)
 };
 
 inline coreml_fit_verdict decide_coreml_fit(uint64_t required, uint64_t coreml_bytes, bool generate,
                                             uint64_t device_free, const std::optional<int64_t> & budget) {
     coreml_fit_verdict v;
     const uint64_t with_coreml = fitutil::sat_add(required, generate ? coreml_bytes : 0);
-    v.ggml_only_fits = required <= device_free;
-    v.coreml_fits = with_coreml <= device_free;
+    v.capacity = device_free;
     if (generate && budget.has_value()) {
-        const uint64_t cap = std::min(device_free, (uint64_t) std::max<int64_t>(*budget, 0));
-        v.degraded = with_coreml > cap && required <= cap;
+        v.capacity = std::min(device_free, (uint64_t) std::max<int64_t>(*budget, 0));
     }
+    v.ggml_only_fits = required <= v.capacity;
+    v.coreml_fits = with_coreml <= v.capacity;
+    v.degraded = generate && budget.has_value() && !v.coreml_fits && v.ggml_only_fits;
     v.charged = generate && !v.degraded ? with_coreml : required;
-    v.fits = v.charged <= device_free;
+    v.fits = v.charged <= v.capacity;
     return v;
 }
 
