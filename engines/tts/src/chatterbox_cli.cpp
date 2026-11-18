@@ -46,6 +46,7 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <filesystem>
 #include <string>
 #include <thread>
 #include <vector>
@@ -933,6 +934,20 @@ static bool parse_args(int argc, char ** argv, cli_params & params) {
         fprintf(stderr, "error: --coreml-status-json - and --out - both write to stdout; "
                         "give the status JSON a file path\n");
         return false;
+    }
+    if (!params.out_wav.empty() && params.out_wav != "-" && !params.coreml_status_json.empty() &&
+        params.coreml_status_json != "-") {
+        // The status is written on exit and would replace the audio.
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        const fs::path out = fs::weakly_canonical(fs::absolute(params.out_wav, ec), ec);
+        const fs::path status = fs::weakly_canonical(fs::absolute(params.coreml_status_json, ec), ec);
+        const bool same = out == status || (fs::exists(out, ec) && fs::exists(status, ec) && fs::equivalent(out, status, ec));
+        if (same) {
+            fprintf(stderr, "error: --coreml-status-json and --out name the same file ('%s')\n",
+                    params.out_wav.c_str());
+            return false;
+        }
     }
     return true;
 }

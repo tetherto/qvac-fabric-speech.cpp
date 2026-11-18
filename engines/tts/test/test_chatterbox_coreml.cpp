@@ -209,6 +209,18 @@ void check_cli_arguments() {
     require(rc != 0 && text.find("--coreml-status-json - and --out -") != std::string::npos &&
                 fs::file_size(out) == 0,
             "tts-cli rejects --out - with --coreml-status-json -");
+    // The same file under two spellings: the status would replace the WAV.
+    const fs::path wav = dir.path / "result.wav";
+    const std::string same = "'" + std::string(cli) + "' --model none.gguf --s3gen-gguf none.gguf --text hello " +
+                             "--out '" + wav.string() + "' --coreml-status-json '" + (dir.path / "." / "result.wav").string() +
+                             "' > '" + out.string() + "' 2> '" + log.string() + "'";
+    const int same_status = std::system(same.c_str());
+    std::ifstream same_err(log);
+    const std::string same_text((std::istreambuf_iterator<char>(same_err)), std::istreambuf_iterator<char>());
+    require(WIFEXITED(same_status) && WEXITSTATUS(same_status) != 0 &&
+                same_text.find("--coreml-status-json and --out name the same file") != std::string::npos &&
+                !fs::exists(wav),
+            "tts-cli rejects a status JSON path that names its WAV output");
 #endif
 }
 
