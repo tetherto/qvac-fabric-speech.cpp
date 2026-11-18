@@ -1210,6 +1210,25 @@ jobs:
           rm -rf supertonic-vocoder-cache-f16 supertonic-vocoder-cache-q8_0
           exit "$status"
 
+      # A prebuilt-only build (the Core ML runtime without the generator, as
+      # on iOS): the Supertonic route test on the template twins must report
+      # the state this build plans (absent, no adjacent sidecar), not the one
+      # a build without Core ML reports. Builds only the test and the twin
+      # tool.
+      - name: Test (Supertonic vocoder route, Core ML runtime without generation)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          cmake -S engines/tts -B build-nogen \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DTTS_CPP_BUILD_TESTS=ON \
+            -DTTS_CPP_COREML=ON \
+            -DTTS_CPP_COREML_GENERATE=OFF \
+            -DCMAKE_PREFIX_PATH="$PWD/ggml-install"
+          cmake --build build-nogen -j4 --target test-supertonic-coreml-route qvac-coreml-tool
+          ctest --test-dir build-nogen -R '^test-supertonic-coreml-route(-twins.*|-self-test)?$' \
+            --no-tests=error --output-on-failure --timeout 300
+
   # GPU lane stub: opt-in until self-hosted GPU runners exist. Trial outcome
   # (QVAC-22775): hosted macos-14 exposes Metal but its Apple Paravirtual
   # device has no simdgroup matmul — kernel encode aborts with "unsupported

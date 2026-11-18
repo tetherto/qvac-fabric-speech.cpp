@@ -48,6 +48,7 @@ namespace pcm = QVAC_COREML_NS;
 #include <map>
 #include <string>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 using namespace tts_cpp::supertonic::detail;
@@ -70,6 +71,21 @@ bool generation_expected() {
     return pcm::generation::built() && m->platform() == pcm::Platform::macos && pcm::os_at_least(m->os_version(), 15, 0);
 #else
     return false;
+#endif
+}
+
+// Where the build cannot generate, the state and reason of the `none` route a
+// twin plans on an M2 brand with a cache directory, per configuration: no
+// Core ML runtime; the runtime without the generator (a prebuilt-only build:
+// no adjacent sidecar, so absent); the generator on an OS it does not run on.
+std::pair<std::string, std::string> no_generation_state() {
+#if defined(TTS_CPP_USE_COREML)
+    const auto m = pcm::Manager::instance();
+    if (m->platform() == pcm::Platform::other) return {"unsupported", "platform"};
+    if (!pcm::generation::built()) return {"absent", "no sidecar"};
+    return {"unsupported", "os"};
+#else
+    return {"unsupported", "build"};
 #endif
 }
 
@@ -167,8 +183,9 @@ void route_gates(const std::string & gguf, const std::string & want, const fs::p
     fs::create_directories(cache);
     const supertonic_vocoder_route r = supertonic_vocoder_plan_route(gguf, at(cache), "Apple M2");
     if (!generation_expected()) {
-        check(r.route == "none" && r.state == "unsupported",
-              "this build has no generated route: " + describe(r));
+        const auto [state, reason] = no_generation_state();
+        check(r.route == "none" && r.state == state && r.reason == reason,
+              "this build has no generated route (expected none|" + state + "|" + reason + "): " + describe(r));
         return;
     }
     check(r.route == "generate" && r.template_id == want && r.compute_units == "all",
