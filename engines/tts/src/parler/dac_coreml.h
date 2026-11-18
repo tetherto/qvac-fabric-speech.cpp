@@ -54,6 +54,15 @@ bool parler_coreml_strict();
 // in, not disabled, and `<stem>-dac.mlmodelc` present.
 bool parler_dac_sidecar_enabled(const std::string & gguf_path);
 
+// The identity of the GGUF parler_load_gguf read the weights from (Core ML
+// builds; nothing elsewhere). parler_load_gguf opens the file once and reads
+// its metadata, mapping and streamed weights through that one descriptor
+// (`fd`, -1 when it could not open one); this records fstat of it.
+// parler_dac_coreml::create generates only from that file, so a GGUF swapped
+// at the path at any point of the load, or since, is never generated from.
+struct parler_dac_source;
+void parler_dac_source_record(parler_model & model, int fd, const std::string & path);
+
 // One fixed-window DAC decode. Implementations: the Core ML model, and test
 // doubles that exercise the fallback without Core ML.
 class parler_dac_sidecar {
@@ -202,7 +211,8 @@ public:
     // limit) or `cancel` (optional) is set. True when it is ready. Returns
     // false at once while nothing has requested the sidecar (idle: prewarm
     // none before the first call) or it is deferred(memory).
-    bool wait(int64_t timeout_ms, const std::atomic<bool> * cancel = nullptr) const;
+    // `cancels` (when set) ends the wait once it differs from `since`.
+    bool wait(int64_t timeout_ms, const std::atomic<uint64_t> * cancels = nullptr, uint64_t since = 0) const;
 
     struct impl;
 private:

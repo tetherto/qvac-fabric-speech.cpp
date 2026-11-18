@@ -84,8 +84,39 @@ TestHooks & test_hooks() {
 }
 #endif
 
-std::string model_key(const std::string & artifact, const std::string & function, ComputeUnits units) {
-    return artifact + '\n' + function + '\n' + to_string(units);
+namespace {
+void key_field(std::string & k, const std::string & f) {
+    k += std::to_string(f.size());
+    k += ':';
+    k += f;
+}
+
+std::string retire_key_of(const SharedModel & m) {
+    const LoadRequest & r = m.request();
+    return retire_key(r.artifact_path, r.function, r.units);
+}
+
+bool has_prefix(const std::string & s, const std::string & p) { return s.compare(0, p.size(), p) == 0; }
+}  // namespace
+
+std::string retire_key(const std::string & artifact, const std::string & function, ComputeUnits units) {
+    std::string k;
+    key_field(k, artifact);
+    key_field(k, function);
+    key_field(k, to_string(units));
+    return k;
+}
+
+std::string model_key(const std::string & artifact, const std::string & function, ComputeUnits units,
+                      const std::vector<int64_t> & geometry) {
+    // The geometry is part of the sharing identity: an owner whose loader
+    // validates another geometry never adopts this model or joins its load,
+    // so every geometry is validated by its own LoadFn. Retirement ignores it.
+    std::string g;
+    for (int64_t v : geometry) key_field(g, std::to_string(v));
+    std::string k = retire_key(artifact, function, units);
+    key_field(k, g);
+    return k;
 }
 
 Runtime::Runtime(Config c) : cfg(std::move(c)) {
@@ -241,8 +272,9 @@ void Runtime::evict_locked(const std::shared_ptr<SlotCore> & c, Graveyard & gy) 
 }
 
 void Runtime::subscribe_load_locked(const std::shared_ptr<SlotCore> & c, Priority p, bool nd, Graveyard & gy) {
-    const std::string key = model_key(c->artifact_path, c->spec.function, c->spec.units);
-    if (auto r = retired_.find(key); r != retired_.end()) {
+    const std::string key = model_key(c->artifact_path, c->spec.function, c->spec.units, c->spec.geometry);
+    const std::string rkey = retire_key(c->artifact_path, c->spec.function, c->spec.units);
+    if (auto r = retired_.find(rkey); r != retired_.end()) {
         c->state = SlotState::retired;
         c->reason = r->second;
         return;
@@ -252,7 +284,7 @@ void Runtime::subscribe_load_locked(const std::shared_ptr<SlotCore> & c, Priorit
     // it through admission (evict or stay cap-blocked) and run_load()
     // publishes the existing instance without loading again. The only strong
     // reference taken here becomes the slot's own.
-    const SharedModel * existing = c->spec.shareable ? registered_locked(key) : nullptr;
+    const SharedModel * existing = c->spec.shareable ? registered_locked(key, rkey) : nullptr;
     if (existing && pool_takes_locked(*c, existing, gy)) {
         if (std::shared_ptr<SharedModel> m = registry_[key].model.lock()) {
             if (c->model != m) drop_model_locked(*c, gy);
@@ -283,6 +315,7 @@ void Runtime::subscribe_load_locked(const std::shared_ptr<SlotCore> & c, Priorit
     j->seq = ++seq_;
     j->dedup_key = dedup;
     j->model_key = key;
+    j->retire_key = rkey;
     j->load.engine = c->spec.engine;
     j->load.stage = c->spec.stage;
     j->load.artifact_path = c->artifact_path;
@@ -340,7 +373,7 @@ void Runtime::request_locked(const std::shared_ptr<SlotCore> & c, Priority p, bo
     if (c->model && c->model->retired()) {
         drop_model_locked(*c, gy);
         c->state = SlotState::retired;
-        if (auto r = retired_.find(model_key(c->artifact_path, c->spec.function, c->spec.units)); r != retired_.end()) {
+        if (auto r = retired_.find(retire_key(c->artifact_path, c->spec.function, c->spec.units)); r != retired_.end()) {
             c->reason = r->second;
         }
         return;
@@ -441,8 +474,8 @@ std::shared_ptr<PoolRef> Runtime::pool_ref_locked(const SlotCore & c) {
 
 // The identity of the live, non-retired registry instance for `key`, or null.
 // No strong reference: identity only, for comparisons under mu.
-const SharedModel * Runtime::registered_locked(const std::string & key) const {
-    if (retired_.count(key) != 0) return nullptr;
+const SharedModel * Runtime::registered_locked(const std::string & key, const std::string & retire) const {
+    if (retired_.count(retire) != 0) return nullptr;
     auto it = registry_.find(key);
     if (it == registry_.end() || it->second.model.expired()) return nullptr;
     return it->second.id;
@@ -455,7 +488,7 @@ const SharedModel * Runtime::registered_locked(const std::string & key) const {
 const SharedModel * Runtime::existing_locked(const Job & j) const {
     if (j.kind != JobKind::load || !j.shareable) return nullptr;
     if (j.started) return j.adopt.get();
-    return registered_locked(j.model_key);
+    return registered_locked(j.model_key, j.retire_key);
 }
 
 size_t Runtime::pool_live_locked(const PoolCore & p, Graveyard & gy) const {
@@ -914,7 +947,7 @@ void Runtime::fail_locked(const std::shared_ptr<Job> & j, const Error & e, SlotS
 void Runtime::requeue(const std::shared_ptr<Job> & j) {
     Graveyard gy;
     std::lock_guard<std::mutex> lk(mu);
-    if (auto r = retired_.find(j->model_key); j->kind == JobKind::load && r != retired_.end()) {
+    if (auto r = retired_.find(j->retire_key); j->kind == JobKind::load && r != retired_.end()) {
         // Retired while it ran: a retired key never has a queued load.
         fail_locked(j, Error::deterministic(r->second), SlotState::retired, gy);
         return;
@@ -971,7 +1004,7 @@ void Runtime::run_load(const std::shared_ptr<Job> & j) {
         std::string reason;
         {
             std::lock_guard<std::mutex> lk(mu);
-            if (auto r = retired_.find(j->model_key); r != retired_.end()) {
+            if (auto r = retired_.find(j->retire_key); r != retired_.end()) {
                 retired = true;
                 reason = r->second;
             } else {
@@ -1112,7 +1145,7 @@ void Runtime::publish(const std::shared_ptr<Job> & j, const std::shared_ptr<Shar
     gy.keep(j->adopt);  // released outside mu; subscribers hold `m` from here
     j->adopt.reset();
     if (auto f = inflight_.find(j->dedup_key); f != inflight_.end() && f->second == j) inflight_.erase(f);
-    if (auto r = retired_.find(j->model_key); r != retired_.end()) {
+    if (auto r = retired_.find(j->retire_key); r != retired_.end()) {
         // Retired while this load ran: deliver nothing. The instance is
         // released when the caller drops it, and reports the retirement
         // meanwhile, like every instance of the key.
@@ -1128,7 +1161,7 @@ void Runtime::publish(const std::shared_ptr<Job> & j, const std::shared_ptr<Shar
         return;
     }
     if (j->shareable) registry_[j->model_key] = RegEntry{m, m.get()};
-    if (loaded) instances_[j->model_key].push_back(m.get());  // an adopted instance is listed already
+    if (loaded) instances_[j->retire_key].push_back(m.get());  // an adopted instance is listed already
     const std::vector<Sub> subs = j->subs;  // a subscriber may move to a new job below
     for (const Sub & s : subs) {
         std::shared_ptr<SlotCore> c = live_core(s, *j, gy);
@@ -1368,10 +1401,14 @@ void Runtime::retire_model(SharedModel & m, const std::string & reason) {
 // could evict a resident for it; one already running completes without
 // delivering anything (publish()).
 void Runtime::retire_model_locked(SharedModel & m, const std::string & reason, Graveyard & gy) {
-    const std::string key = m.key_;
+    // By (artifact, function, units): every geometry's instances, queued
+    // loads and later acquisitions, not only the failing model's sharers.
+    const std::string key = retire_key_of(m);
     m.retired_ = true;
     retired_[key] = reason;
-    registry_.erase(key);
+    for (auto it = registry_.begin(); it != registry_.end();) {
+        it = has_prefix(it->first, key) ? registry_.erase(it) : std::next(it);
+    }
     if (auto it = instances_.find(key); it != instances_.end()) {
         for (SharedModel * i : it->second) i->retired_ = true;
     }
@@ -1379,14 +1416,14 @@ void Runtime::retire_model_locked(SharedModel & m, const std::string & reason, G
         std::shared_ptr<SlotCore> c = w.lock();
         if (!c) continue;
         gy.keep(c);
-        if (!c->model || c->model->key_ != key) continue;
+        if (!c->model || retire_key_of(*c->model) != key) continue;
         drop_model_locked(*c, gy);
         c->state = SlotState::retired;
         c->reason = reason;
     }
     std::vector<std::shared_ptr<Job>> unstarted;
     for (const std::shared_ptr<Job> & q : queue_) {
-        if (q->kind == JobKind::load && q->model_key == key) unstarted.push_back(q);
+        if (q->kind == JobKind::load && q->retire_key == key) unstarted.push_back(q);
     }
     for (const std::shared_ptr<Job> & q : unstarted) {
         fail_locked(q, Error::deterministic(reason), SlotState::retired, gy);
@@ -1411,10 +1448,11 @@ void Runtime::retire_slot(const std::shared_ptr<SlotCore> & c, const std::string
     bump_locked();
 }
 
-void Runtime::on_model_released(const std::string & key, const SharedModel * m) {
+void Runtime::on_model_released(const SharedModel & released) {
+    const SharedModel * m = &released;
     std::lock_guard<std::mutex> lk(mu);
-    if (auto it = registry_.find(key); it != registry_.end() && it->second.model.expired()) registry_.erase(it);
-    if (auto it = instances_.find(key); it != instances_.end()) {
+    if (auto it = registry_.find(released.key_); it != registry_.end() && it->second.model.expired()) registry_.erase(it);
+    if (auto it = instances_.find(retire_key_of(released)); it != instances_.end()) {
         std::vector<SharedModel *> & v = it->second;
         v.erase(std::remove(v.begin(), v.end(), m), v.end());
         if (v.empty()) instances_.erase(it);

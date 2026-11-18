@@ -89,10 +89,26 @@ route `generate`:
    `generate` is not `never`, the OS is macOS 15 or later and the resolved
    units are validated.
 3. The slot's `SlotSpec` gets `prepare = generation::prepare_request(...)`
-   (the template, the GGUF's stat tuple from `generation::source_stat`, the
-   cache directory), `prepare_fn = generation::prepare` (the cache pipeline
-   with the on-device compile) and `tmpl`. Its `artifact_path` stays empty:
-   the prepare job supplies the published bundle.
+   (the template, the identity of the GGUF the engine loaded its weights
+   from, the cache directory), `prepare_fn = generation::prepare` (the cache
+   pipeline with the on-device compile) and `tmpl`. Its `artifact_path` stays
+   empty: the prepare job supplies the published bundle. The identity comes
+   from `generation::source_stat_fd`: the engine opens the GGUF once, reads
+   its metadata, mapping and streamed weights through that one descriptor,
+   and records fstat of it, so the identity is the loaded file whatever the
+   path named during the load. The prepare job opens the path and fails with
+   `source_changed` unless it is that file; an identity marked `changed`
+   (no descriptor, or a request for another path than the load's) fails the
+   same way, and the stage stays on ggml. `generation::loaded_source` (stats
+   of the path before the first open and after the last read) is the weaker
+   form for an engine that cannot read through one descriptor: a file
+   swapped in and restored between its two samples passes unseen.
+   A stat taken only when the slot is made would follow a replacement.
+   Owners of one artifact share a loaded model, or a running load, only
+   with equal `SlotSpec::geometry`, so each geometry is validated by its own
+   `LoadFn`; a prediction failure retires the (artifact, function, units)
+   for every owner, whatever its geometry: their ready models, queued loads
+   and later acquisitions.
 4. The stage's `LoadFn` calls `generation::begin_load` before loading and
    `generation::end_load` after: a generated bundle loads under the shared
    lease of its cache entry, and `used/<key>` is touched after a successful
@@ -135,6 +151,10 @@ Parler DAC's. Its constants follow this convention:
     already cover it, as on the Neural Engine, which keeps the weights
     outside the process;
   - `ane_compile_reserve_bytes`: below.
+- A schedule run passes only when 1.25 times each phase it measured fits the
+  constant that charges it, so a run that sets a new maximum fails until the
+  constants are recomputed. The whole run is held to the envelope as
+  measured, since the envelope adds phases that each carry the margin.
 - Each constant carries its own 1.25, so the envelope adds none: `margin` 1.0
   and `coreml_bound: "measured"`. The runtime reads `margin`; `coreml_bound`
   and `measured` are records.
@@ -154,20 +174,22 @@ admission: a cold Neural Engine load waits until that much memory is free.
 schedule measures it in two ways:
 
 - its **growth** during the load: its peak while loading, less its size just
-  before the first load. The schedule holds the growth to the reserve, since
-  on a shared host the absolute size includes what other processes compiled.
-  The size is summed over every instance of the service, so another process
-  that compiles for the Neural Engine during the load counts as growth;
-- its **absolute** size while loading.
+  before the first load;
+- its **absolute** size while loading. On a shared host it includes what
+  other processes compiled, before the load or during it.
 
-A service that already holds memory from earlier compiles reuses it, so on
-such a dirty baseline the growth understates a cold compile on a clean host,
-where the growth is the whole size. The reserve is therefore 1.25 times the
-largest growth measured from a clean start (at most 32 MiB before the load,
-`ANE_COMPILER_CLEAN_BYTES` in `test/memory_probe.h`). Without clean starts,
-it is 1.25 times the largest absolute size on a host whose placement compiles
-the stage for the Neural Engine. Each run report prints the size before the
-load and labels that baseline clean, dirty or unknown (no sample before the
+Both sum every instance of the service, so another process that compiles
+for the Neural Engine during the load counts in both. A service that
+already holds memory from earlier compiles reuses it, so on such a dirty
+baseline the growth understates a cold compile on a clean host, where the
+growth is the whole size. The reserve is therefore 1.25 times the largest
+growth measured from a clean start (at most 32 MiB before the load,
+`ANE_COMPILER_CLEAN_BYTES` in `test/memory_probe.h`) on every validated
+host, when every host has such runs. Otherwise it is 1.25 times the largest
+absolute size while loading on any validated host, a conservative basis
+that compares across placements, and the schedule holds 1.25 times the
+absolute size to it. Each run report prints both, the size before the load,
+and labels that baseline clean, dirty or unknown (no sample before the
 load, in which case the growth is the whole size while loading).
 
 ## Building the tests and the tool
@@ -273,9 +295,15 @@ script).
    in place), `Manifest.json` and the computed `template.json` fields
    (`functions`, `stateful`, `weight_bin_size`, `generation_peak_bytes`,
    `patches`, the literals' offsets, the exporter's sha256, the toolchain
-   versions), and refreshes the header of `recipe.txt`. A rejected
-   extraction leaves the template's files untouched. A `model.mlmodel` that
-   equals the new spec (the coremltools conversion date aside) and a
+   versions), and refreshes the header of `recipe.txt`. Every output is
+   staged in a temporary copy of the template first, and the twin-A
+   `generate` runs on that copy; the template directory is written only after
+   every check has passed. A rejected extraction (a twin check, a recipe
+   header or body, a recipe with no `end` line for drafted patch lines, the
+   twin-A `generate`) therefore leaves the template's files untouched,
+   including `reference-gguf.json` when `--manifest` names another file. A
+   `model.mlmodel` that equals the
+   new spec (the coremltools conversion date aside, sentinels in place) and a
    `Manifest.json` that differs only in its random item identifiers are kept
    byte for byte, so extracting an unchanged template again leaves its files,
    and so its `template_sha256`, as they were.
@@ -429,7 +457,11 @@ qvac-coreml-tool twin --manifest <manifest.json> --seed <N> --types <type[,type.
 
 Writes a random GGUF with the same metadata and tensor geometry as the
 manifest. Each tensor's values are drawn from a normal distribution with the
-recorded mean and standard deviation, clamped to the recorded range. Tensors
+recorded mean and standard deviation, clamped to the recorded range. A tensor
+whose recorded values are all equal (a scalar bias, a constant vector) is drawn
+within ±25% of that value (±0.00025 around zero) instead, so every tensor
+differs between seeds and `extract` can see any value the exporter folds into
+the program. Tensors
 that are not f32 in the original (quantised, f16, bf16) take the `--types`
 entries in turn, quantised with ggml's own quantisers, when their row length is
 a multiple of that type's block size; the rest stay f32. `--set` sets a string

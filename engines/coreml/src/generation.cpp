@@ -266,6 +266,21 @@ bool source_stat(const std::string & path, SourceStat & out) {
     return true;
 }
 
+bool source_stat_fd(int fd, const std::string & path, SourceStat & out) {
+    if (fd < 0 || !stat_fd(fd, out)) return false;
+    out.path = real_path(path);
+    out.changed = false;
+    return true;
+}
+
+SourceStat loaded_source(const SourceStat & before, bool ok_before, const SourceStat & after, bool ok_after,
+                         const std::string & path) {
+    SourceStat s = after;
+    s.changed = !ok_before || !ok_after || before.changed || after.changed || !same_identity(before, after) ||
+                before.path != after.path || real_path(path) != after.path;
+    return s;
+}
+
 PrepareRequest prepare_request(const Candidate & c, const SourceStat & source, const Resolved & resolved) {
     PrepareRequest r;
     r.template_id = c.template_id;
@@ -273,6 +288,7 @@ PrepareRequest prepare_request(const Candidate & c, const SourceStat & source, c
     r.cache_dir = resolved.cache_dir;
     r.options = digest::DEFAULT_OPTIONS;
     r.tmpl = c.tmpl;
+    if (source.changed) return r;  // key "": fails on its own, never joins another engine's job
     // Two engines over the same file and template share one job.
     r.key = c.template_id + "\n" + c.sha256_hex + "\n" + resolved.cache_dir + "\n" + source.path + "\n" +
             std::to_string(source.size) + "\n" + std::to_string(source.mtime_ns) + "\n" + std::to_string(source.ino) +
@@ -364,6 +380,14 @@ std::vector<Candidate> probe(const std::vector<std::string> & template_ids, cons
 }
 
 bool source_stat(const std::string &, SourceStat &) { return false; }
+
+bool source_stat_fd(int, const std::string &, SourceStat &) { return false; }
+
+SourceStat loaded_source(const SourceStat &, bool, const SourceStat & after, bool, const std::string &) {
+    SourceStat s = after;
+    s.changed = true;
+    return s;
+}
 
 PrepareRequest prepare_request(const Candidate & c, const SourceStat & source, const Resolved & resolved) {
     PrepareRequest r;

@@ -63,6 +63,10 @@ std::string coreml_eu_other_sidecar_path(const std::string & gguf_path) {
     return coreml_sidecar_base(gguf_path) + "-encoder-other.mlmodelc";
 }
 
+std::string coreml_eu_shared_sidecar_path(const std::string & gguf_path) {
+    return coreml_sidecar_base(gguf_path) + "-encoder-shared.mlmodelc";
+}
+
 std::string coreml_eu_gate_sidecar_path(const std::string & gguf_path) {
     return coreml_sidecar_base(gguf_path) + "-encoder-gate.mlmodelc";
 }

@@ -87,6 +87,11 @@ struct SourceStat {
     int64_t mtime_ns = 0;
     uint64_t ino = 0;
     uint64_t dev = 0;
+    // The file at `path` is not certainly the one the engine loaded its
+    // weights from (it was replaced during the load, or the engine generates
+    // for another path): prepare fails with source_changed and generates
+    // nothing. See generation::loaded_source.
+    bool changed = false;
 };
 
 struct PrepareRequest {
@@ -119,7 +124,9 @@ struct PrepareResult {
 
 using PrepareFn = PrepareResult (*)(const PrepareRequest & req, PrepareContext & ctx);
 
-// One loaded MLModel instance (per (artifact, function, units) when shareable).
+// One loaded MLModel instance (per (artifact, function, units, geometry) when
+// shareable; a prediction failure retires every instance of the (artifact,
+// function, units), whatever its geometry).
 class SharedModel {
 public:
     SharedModel(const SharedModel &) = delete;
@@ -220,6 +227,8 @@ struct SlotSpec {
     LoadFn load_fn = nullptr;
     WarmFn warm_fn = nullptr;
     const void * tmpl = nullptr;
+    // What the LoadFn validates. Part of the model's identity: owners of one
+    // artifact share a ready model or a running load only with equal geometry.
     std::vector<int64_t> geometry;
     bool shareable = true;                   // false: stateful template, one model per owner
     uint64_t ane_compile_reserve_bytes = 0;  // memory admission for cold ANE loads; 0 = never deferred

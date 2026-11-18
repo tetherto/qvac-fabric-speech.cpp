@@ -14,6 +14,7 @@ requirement fails instead.
 import importlib.util
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -384,6 +385,13 @@ class PatchDraftTest(unittest.TestCase):
         self.assertEqual(ctpl.add_patch_drafts(out, drafts)[1], [])
 
 
+class PatchDraftEndTest(unittest.TestCase):
+    def test_recipe_without_end_is_a_template_error(self):
+        drafts = [(10, 'patch 10 fp16 1 f16(t("b"))', "p1")]
+        with self.assertRaisesRegex(ctpl.TemplateError, "no `end` line"):
+            ctpl.add_patch_drafts('mlrecipe 1\nblob 64 fp16 2 f16(t("a"))\n', drafts)
+
+
 class LiteralTest(unittest.TestCase):
     def test_extract_literals(self):
         rope = np.cos(np.arange(12, dtype=np.float64)).astype(np.float16)
@@ -414,6 +422,129 @@ TOY_DIR = HERE.parent / "test" / "toy"
 TOY_STATELESS = HERE.parent / "test" / "toy-templates" / "toy-stateless"
 TOY_ARGS = ["--kind", "stateless", "--gguf", "{gguf}", "--output", "{out}"]
 NEEDS_TOY = needs(HAVE_CT and HAVE_GGUF and TOOL and Path(TOOL).is_file(), "coremltools, gguf and $QVAC_COREML_TOOL")
+
+
+NEEDS_TOOL = needs(HAVE_GGUF and TOOL and Path(TOOL).is_file(), "gguf and $QVAC_COREML_TOOL")
+
+
+def write_gguf(path, tensors):
+    import gguf
+
+    w = gguf.GGUFWriter(str(path), "toy")
+    for name, arr in tensors.items():
+        w.add_tensor(name, np.asarray(arr, dtype=np.float32))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+
+
+def with_constant_stats(manifest, values):
+    """A copy of `manifest` whose tensors in `values` record that one value
+    for every element (as a scalar bias or a constant vector does)."""
+    m = json.loads(Path(manifest).read_text())
+    for t in m["tensors"]:
+        if t["name"] in values:
+            v = values[t["name"]]
+            t["stats"] = {"min": v, "max": v, "mean": v, "std": 0.0}
+    return m
+
+
+class TwinTest(unittest.TestCase):
+    """Twins differ on every tensor, and the extraction gates refuse twins
+    that hold the same values for a tensor."""
+
+    @NEEDS_TOOL
+    def test_constant_tensors_differ_between_seeds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            man = tmp / "reference-gguf.json"
+            man.write_text(json.dumps(with_constant_stats(TOY_STATELESS / "reference-gguf.json",
+                                                          {"toy.b1": 0.25, "toy.w1": 0.0})))
+            twins = []
+            for seed in (1, 2):
+                out = tmp / f"twin-{seed}.gguf"
+                subprocess.run([TOOL, "twin", "--manifest", man, "--seed", str(seed), "--types", "f32", "-o", out],
+                               check=True, capture_output=True)
+                twins.append(out)
+            self.assertEqual(ctpl.coinciding_tensors(*twins), [])
+            for twin in twins:
+                t = ctpl.gguf_tensors(twin)
+                b1, w1 = t["toy.b1"][1], t["toy.w1"][1]
+                self.assertTrue(np.all((b1 >= 0.1875) & (b1 <= 0.3125)), b1)  # within 25%, sign kept
+                self.assertTrue(np.all(np.abs(w1) <= 0.00025), w1)
+                self.assertGreater(np.ptp(b1), 0.0)
+
+    @needs(HAVE_GGUF, "gguf")
+    def test_equal_tensors_are_named(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a, b = Path(tmp) / "a.gguf", Path(tmp) / "b.gguf"
+            write_gguf(a, {"same": [0.5], "other": [1.0, 2.0]})
+            write_gguf(b, {"same": [0.5], "other": [1.0, 2.5]})
+            self.assertEqual(ctpl.coinciding_tensors(a, b), ["same"])
+            with self.assertRaisesRegex(ctpl.TemplateError, r"same values for 1 tensor\(s\).*: same"):
+                ctpl.check_twins_differ(a, b, "extract")
+
+
+# Templates whose patch lines read GGUF tensors by name directly, with those
+# names. Other templates' patches may read metadata or resolve logical names,
+# so they are not listed here.
+PATCH_INPUT_TENSORS = {"parler-dac-w128": ["dac.dec.conv_out.bias"]}
+
+
+class RepoTemplatePatchTest(unittest.TestCase):
+    """For each template in PATCH_INPUT_TENSORS: two GGUFs that differ only in
+    a tensor its patch lines read get different artifact keys, and generated
+    programs that differ only at the patch sites. A program constant computed
+    from a tensor the recipe does not read would make both the same."""
+
+    def run_tool(self, *args):
+        p = subprocess.run([TOOL] + [str(a) for a in args], capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return p.stdout
+
+    @NEEDS_TOOL
+    def test_patch_tensors_reach_key_and_program(self):
+        import gguf
+
+        by_id = {d.name: d for d in ctpl.find_templates(ctpl.repo_root())}
+        for tid, names in PATCH_INPUT_TENSORS.items():
+            self.assertIn(tid, by_id, f"template {tid} is not in the repository")
+            tdir = by_id[tid]
+            patches = json.loads((tdir / "template.json").read_text()).get("patches", [])
+            self.assertTrue(patches, f"{tid}: no patch sites")
+            lines = [l for l in (tdir / "recipe.txt").read_text().splitlines() if l.startswith("patch ")]
+            for name in names:
+                self.assertIn(f't("{name}")', "\n".join(lines), f"{tid}: no patch line reads {name}")
+            sites = [(p["spec_offset"], p["spec_offset"] + p["len"]) for p in patches]
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                a = tmp / "a.gguf"
+                self.run_tool("twin", "--manifest", tdir / "reference-gguf.json", "--seed", "1", "--types", "f32",
+                              "-o", a)
+                key_a = json.loads(self.run_tool("digest", "--template", tdir, "--gguf", a))["artifact_key"]
+                self.run_tool("generate", "--template", tdir, "--gguf", a, "-o", tmp / "a.mlpackage")
+                spec_a = ctpl.package_parts(tmp / "a.mlpackage")["spec"].read_bytes()
+                for name in names:
+                    b = tmp / "b.gguf"
+                    shutil.copyfile(a, b)
+                    r = gguf.GGUFReader(str(b), "r+")
+                    t = next(x for x in r.tensors if x.name == name)
+                    t.data[...] = np.asarray(t.data) * -1.5 - 0.125
+                    del t, r
+                    others = sorted(set(ctpl.gguf_tensors(a)) - {name})
+                    self.assertEqual(ctpl.coinciding_tensors(a, b), others)  # only `name` differs
+                    key_b = json.loads(self.run_tool("digest", "--template", tdir, "--gguf", b))["artifact_key"]
+                    self.assertNotEqual(key_a, key_b, f"{tdir.name}: {name} is not in the artifact key")
+                    gen_b = tmp / "b.mlpackage"
+                    shutil.rmtree(gen_b, ignore_errors=True)
+                    self.run_tool("generate", "--template", tdir, "--gguf", b, "-o", gen_b)
+                    spec_b = ctpl.package_parts(gen_b)["spec"].read_bytes()
+                    self.assertEqual(len(spec_a), len(spec_b))
+                    diff = [i for i, (x, y) in enumerate(zip(spec_a, spec_b)) if x != y]
+                    self.assertTrue(diff, f"{tdir.name}: {name} does not reach the program")
+                    for i in diff:
+                        self.assertTrue(any(lo <= i < hi for lo, hi in sites), f"{tdir.name}: byte {i} is no patch site")
 
 
 def run_ctpl(*args):
@@ -489,6 +620,24 @@ if mode == "spec":
     w1 = export_toy.read_weights(gguf, "stateless")["toy.w1"]
     spec.description.metadata.userDefined["qvac.toy.w1_sum"] = repr(float(w1.sum()))
     (data / "model.mlmodel").write_bytes(spec.SerializeToString(deterministic=True))
+elif mode == "patch":
+    # An inline fp16 constant that depends on the weights (minus toy.b1): a
+    # patch site that `extract` can explain and draft a patch line for.
+    import numpy as np
+    from coremltools.proto import Model_pb2
+
+    spec = Model_pb2.Model()
+    spec.ParseFromString((data / "model.mlmodel").read_bytes())
+    b1 = export_toy.read_weights(gguf, "stateless")["toy.b1"]
+    block = next(iter(spec.mlProgram.functions["main"].block_specializations.values()))
+    op = block.operations.add()
+    op.type = "const"
+    op.outputs.add().name = "qvac_toy_neg_b1"
+    val = op.attributes["val"]
+    val.type.tensorType.dataType = 10  # fp16
+    val.immediateValue.tensor.bytes.values = (-np.asarray(b1, dtype=np.float32)).astype("<f2").tobytes()
+    op.attributes["name"].immediateValue.tensor.strings.values.append("qvac_toy_neg_b1")
+    (data / "model.mlmodel").write_bytes(spec.SerializeToString(deterministic=True))
 elif mode == "layout":
     n = int(Path(state).read_text()) if Path(state).is_file() else 0
     Path(state).write_text(str(n + 1))
@@ -552,6 +701,106 @@ class ToyExtractTest(unittest.TestCase):
         self.assertIn("weight.bin layout differs between twin A and twin B", p.stderr)
         self.assertEqual((self.tmp / "layout.state").read_text(), "2")  # both twins were exported
         self.assertEqual(snapshot(self.tdir), before)
+
+    @NEEDS_TOY
+    def test_rejected_literal_writes_nothing(self):
+        # A literal declared on a weight blob depends on the weights, so the
+        # extraction is rejected after the specs compared equal. A stale
+        # model.mlmodel (a spec the exporter no longer writes, which a passing
+        # extraction would replace) must survive the rejection.
+        from coremltools.proto import Model_pb2
+
+        spec = Model_pb2.Model()
+        spec.ParseFromString((self.tdir / "model.mlmodel").read_bytes())
+        spec.description.metadata.userDefined["qvac.toy.stale"] = "1"
+        (self.tdir / "model.mlmodel").write_bytes(spec.SerializeToString(deterministic=True))
+        tj = json.loads((self.tdir / "template.json").read_text())
+        tj["literals"] = [{"id": "w1", "dtype": "fp16", "shape": [32, 8], "exporter_blob": 64}]
+        (self.tdir / "template.json").write_text(json.dumps(tj, indent=2) + "\n")
+        before = snapshot(self.tdir)
+        p = run_ctpl("extract", "--template-dir", self.tdir)
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertIn("depends on the weights", p.stderr)
+        self.assertEqual(snapshot(self.tdir), before)
+
+    def make_spec_stale(self):
+        # A model.mlmodel the exporter no longer writes, so a passing
+        # extraction would replace it: a rejection must leave it in place.
+        from coremltools.proto import Model_pb2
+
+        spec = Model_pb2.Model()
+        spec.ParseFromString((self.tdir / "model.mlmodel").read_bytes())
+        spec.description.metadata.userDefined["qvac.toy.stale"] = "1"
+        (self.tdir / "model.mlmodel").write_bytes(spec.SerializeToString(deterministic=True))
+
+    def edit_recipe(self, edit):
+        recipe = self.tdir / "recipe.txt"
+        recipe.write_text(edit(recipe.read_text()))
+
+    @NEEDS_TOY
+    def test_recipe_header_without_blobs_writes_nothing(self):
+        self.make_spec_stale()
+        self.edit_recipe(lambda t: "".join(l for l in t.splitlines(True) if not l.startswith("blobs ")))
+        before = snapshot(self.tdir)
+        p = run_ctpl("extract", "--template-dir", self.tdir)
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertIn("header lacks blobs", p.stderr)
+        self.assertEqual(snapshot(self.tdir), before)
+
+    @NEEDS_TOY
+    def test_recipe_that_fails_to_generate_writes_nothing(self):
+        # The recipe body names a tensor the GGUF lacks, so the twin-A
+        # generate fails after every twin check passed.
+        self.make_spec_stale()
+        self.edit_recipe(lambda t: t.replace("toy.w1", "toy.nope", 1))
+        before = snapshot(self.tdir)
+        p = run_ctpl("extract", "--template-dir", self.tdir)
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertIn("generate (twin A) failed", p.stderr)
+        self.assertEqual(snapshot(self.tdir), before)
+
+    @NEEDS_TOY
+    def test_manifest_elsewhere_with_a_rejected_extraction_writes_nothing(self):
+        # --manifest outside the template directory would be copied in as
+        # reference-gguf.json, but only by an extraction that passes.
+        other = json.loads((self.tdir / "reference-gguf.json").read_text())
+        other["review_probe"] = True
+        (self.tmp / "other.json").write_text(json.dumps(other))
+        tj = json.loads((self.tdir / "template.json").read_text())
+        tj["literals"] = [{"id": "w1", "dtype": "fp16", "shape": [32, 8], "exporter_blob": 64}]
+        (self.tdir / "template.json").write_text(json.dumps(tj, indent=2) + "\n")
+        before = snapshot(self.tdir)
+        p = run_ctpl("extract", "--template-dir", self.tdir, "--manifest", self.tmp / "other.json")
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertIn("depends on the weights", p.stderr)
+        self.assertEqual(snapshot(self.tdir), before)
+
+    @NEEDS_TOY
+    def test_recipe_without_end_writes_nothing(self):
+        # A weight-dependent inline constant gives a patch line to draft into
+        # the recipe; with no `end` line there is nowhere to put it.
+        self.edit_recipe(lambda t: "".join(l for l in t.splitlines(True) if l.strip() != "end"))
+        before = snapshot(self.tdir)
+        p = self.extract_variant("patch")
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertIn("patch sites", p.stderr)
+        self.assertIn("no `end` line", p.stderr)
+        self.assertEqual(snapshot(self.tdir), before)
+
+    @NEEDS_TOY
+    def test_constant_tensor_folded_into_the_program_becomes_a_patch_site(self):
+        # toy.b1 recorded as one repeated value, as a scalar bias is. The
+        # `patch` exporter folds -b1 into the program, so it must still become
+        # a patch site, which it can only when the twins differ on it.
+        man = with_constant_stats(self.tdir / "reference-gguf.json", {"toy.b1": 0.25})
+        (self.tdir / "reference-gguf.json").write_text(json.dumps(man, indent=1) + "\n")
+        p = self.extract_variant("patch")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("1 weight-dependent inline constant(s) become patch sites", p.stderr)
+        self.assertEqual(len(json.loads((self.tdir / "template.json").read_text())["patches"]), 1)
+        patch_lines = [l for l in (self.tdir / "recipe.txt").read_text().splitlines() if l.startswith("patch ")]
+        self.assertEqual(len(patch_lines), 1)
+        self.assertIn('t("toy.b1")', patch_lines[0])
 
     @NEEDS_TOY
     def test_unchanged_reextraction_keeps_template_bytes(self):

@@ -16,7 +16,9 @@ compares is written by the C++ interpreter through `qvac-coreml-tool`).
             structurally equal and that their weight.bin layouts agree, then
             writes model.mlmodel (deterministic serialisation of A's spec),
             Manifest.json and template.json, and refreshes the header of an
-            existing recipe.txt. Inline spec constants whose values differ
+            existing recipe.txt. Every tensor must differ between A and B
+            (one equal in both would hide whether the exporter folds it into
+            the program). Inline spec constants whose values differ
             between A and B (weights folded into the spec) become patch sites:
             model.mlmodel holds a sentinel there and template.json `patches`
             records it; the recipe's patch lines compute the values. The same
@@ -507,6 +509,28 @@ def gguf_tensors(path):
     return out
 
 
+def coinciding_tensors(twin_a, twin_b):
+    """Names of the tensors whose bytes are the same in two twins. Extraction
+    finds the weights an exporter folds into its program by the differences
+    between twins A and B, so a tensor equal in both is a blind spot: a
+    program constant computed from it would be taken for a fixed one."""
+    import gguf
+
+    def raw(path):
+        return {t.name: np.asarray(t.data).tobytes() for t in gguf.GGUFReader(str(path)).tensors}
+
+    a, b = raw(twin_a), raw(twin_b)
+    return sorted(n for n in a if n in b and a[n] == b[n])
+
+
+def check_twins_differ(twin_a, twin_b, what):
+    same = coinciding_tensors(twin_a, twin_b)
+    if same:
+        raise TemplateError(f"{what}: twin A and twin B hold the same values for {len(same)} tensor(s), so the "
+                            "exporter's use of them cannot be checked: " + ", ".join(same[:20]) +
+                            (" ..." if len(same) > 20 else ""))
+
+
 # ---- the exporter ---------------------------------------------------------------------------
 
 
@@ -872,7 +896,10 @@ def add_patch_drafts(text, drafts):
     if not add:
         return text, []
     lines = text.rstrip("\n").split("\n")
-    end = max(i for i, l in enumerate(lines) if l.strip() == "end")
+    ends = [i for i, l in enumerate(lines) if l.strip() == "end"]
+    if not ends:
+        raise TemplateError("recipe.txt has no `end` line, so the drafted patch lines have nowhere to go")
+    end = ends[-1]
     ins = []
     for _, line, path in add:
         ins += [f"# drafted by extract from twin A ({path}): confirm against the exporter", line]
@@ -880,14 +907,20 @@ def add_patch_drafts(text, drafts):
     return "\n".join(lines) + "\n", add
 
 
+def _promote(out, writes):
+    """Writes the staged template files into `out`, each through a temporary file and a rename."""
+    out.mkdir(parents=True, exist_ok=True)
+    for name, data in writes.items():
+        tmp = out / f".{name}.extract-tmp"
+        tmp.write_bytes(data)
+        os.replace(tmp, out / name)
+
+
 def cmd_extract(a):
     tool = find_tool(a.tool)
     out = Path(a.template_dir)
-    out.mkdir(parents=True, exist_ok=True)
     manifest_path = Path(a.manifest) if a.manifest else out / "reference-gguf.json"
     manifest = load_manifest(manifest_path)
-    if manifest_path.resolve() != (out / "reference-gguf.json").resolve():
-        shutil.copyfile(manifest_path, out / "reference-gguf.json")
     existing = json.loads((out / "template.json").read_text()) if (out / "template.json").is_file() else {}
     exporter = exporter_from_args(a) if a.exporter else existing.get("exporter")
     if not exporter or "path" not in exporter:
@@ -900,10 +933,24 @@ def cmd_extract(a):
     str_keys = recipe_str_metas(recipe_path.read_text() if recipe_path.is_file() else "")
     with tempfile.TemporaryDirectory(prefix="qvac-coreml-extract-") as tmp:
         work = Path(tmp)
+        # Every output is staged first: `writes` holds the files to replace,
+        # `stage` the template as it will be once they are written (the
+        # twin-A generate runs on it). The template directory is written only
+        # after every check has passed, so a rejected extraction leaves its
+        # files as they were.
+        writes = {}
+        stage = work / "stage" / (out.name or "template")
+        if out.is_dir():
+            shutil.copytree(out, stage)
+        else:
+            stage.mkdir(parents=True)
+        if manifest_path.resolve() != (out / "reference-gguf.json").resolve():
+            writes["reference-gguf.json"] = manifest_path.read_bytes()
         sets_a, sets_b = twin_sets(manifest, str_keys, "a"), twin_sets(manifest, str_keys, "b")
-        _, pkg_a = _export_twin(tool, manifest_path, exporter, SEED_A, "f32", work, a.python, root, "a", sets_a)
-        _, pkg_b = _export_twin(tool, manifest_path, exporter, SEED_B, "f32", work, a.python, root, "b", sets_b)
+        twin_a, pkg_a = _export_twin(tool, manifest_path, exporter, SEED_A, "f32", work, a.python, root, "a", sets_a)
+        twin_b, pkg_b = _export_twin(tool, manifest_path, exporter, SEED_B, "f32", work, a.python, root, "b", sets_b)
         strings = [(k, va.split("=", 1)[1], vb.split("=", 1)[1]) for k, va, vb in zip(str_keys, sets_a, sets_b)]
+        check_twins_differ(twin_a, twin_b, "extract")
         pa, pb = package_parts(pkg_a), package_parts(pkg_b)
         spec_a, spec_b = load_spec(pa["spec"]), load_spec(pb["spec"])
         # Weight-dependent inline constants become patch sites (sentinels in
@@ -931,13 +978,14 @@ def cmd_extract(a):
         if reuse:
             spec_bytes = old_spec.read_bytes()
         else:
-            old_spec.write_bytes(spec_bytes)
+            writes["model.mlmodel"] = spec_bytes
         patch_sites = find_sites(spec_bytes, sentinels)
         literals_bin = extract_literals(existing.get("literals", []), blobs_a, blobs_b)
+        drafts = patch_drafts(sites, patch_sites, gguf_tensors(work / "twin-a.gguf")) if sites else []
         new_manifest = pa["manifest"].read_text()
         old_manifest = out / "Manifest.json"
         if not (old_manifest.is_file() and manifest_equivalent(old_manifest.read_text(), new_manifest)):
-            old_manifest.write_text(new_manifest)
+            writes["Manifest.json"] = new_manifest.encode()
         functions, stateful = spec_summary(spec_a)
         spec_sha = hashlib.sha256(spec_bytes).hexdigest()
         script = Path(exporter["path"])
@@ -949,33 +997,39 @@ def cmd_extract(a):
                     "toolchain": toolchain_versions(), "functions": functions, "stateful": stateful,
                     "weight_bin_size": len(wa), "patches": patch_sites}
         recipe = out / "recipe.txt"
+        recipe_text = None
         if recipe.is_file():
-            recipe.write_text(refresh_recipe_header(recipe.read_text(), template_id, spec_sha, len(wa), len(la)))
+            recipe_text = refresh_recipe_header(recipe.read_text(), template_id, spec_sha, len(wa), len(la))
         j = merge_template_json(existing, computed, manifest)
         j.setdefault("generation_peak_bytes", 0)
         if literals_bin is not None:
             data, entries = literals_bin
-            (out / "literals.bin").write_bytes(data)
+            writes["literals.bin"] = data
             j["literals"] = entries
+        added = []
         if sites:
-            drafts = patch_drafts(sites, patch_sites, gguf_tensors(work / "twin-a.gguf"))
             print(f"extract: {len(sites)} weight-dependent inline constant(s) become patch sites:", file=sys.stderr)
             for _, line, path in drafts:
                 print(f"  {line}   # {path}", file=sys.stderr)
-            if recipe.is_file():
-                text, added = add_patch_drafts(recipe.read_text(), drafts)
-                if added:
-                    recipe.write_text(text)
-                    print(f"extract: added {len(added)} drafted patch line(s) to {recipe}", file=sys.stderr)
-        (out / "template.json").write_text(json.dumps(j, indent=2) + "\n")
-        if recipe.is_file():
-            # Generate from twin A once: the recipe must parse and match; the
-            # generator's peak memory goes into template.json.
-            gen = json.loads(run([tool, "generate", "--template", out, "--gguf", work / "twin-a.gguf",
+            if recipe_text is not None:
+                recipe_text, added = add_patch_drafts(recipe_text, drafts)
+        if recipe_text is not None:
+            writes["recipe.txt"] = recipe_text.encode()
+        writes["template.json"] = (json.dumps(j, indent=2) + "\n").encode()
+        for name, data in writes.items():
+            (stage / name).write_bytes(data)
+        if recipe_text is not None:
+            # Generate from twin A once, on the staged template: the recipe must
+            # parse and match; the generator's peak memory goes into template.json.
+            gen = json.loads(run([tool, "generate", "--template", stage, "--gguf", work / "twin-a.gguf",
                                   "-o", work / "gen-a.mlpackage"], "generate (twin A)"))
             j["generation_peak_bytes"] = int(gen["generation_peak_bytes"])
-            (out / "template.json").write_text(json.dumps(j, indent=2) + "\n")
-        else:
+            writes["template.json"] = (json.dumps(j, indent=2) + "\n").encode()
+        # Every check has passed: write the template.
+        _promote(out, writes)
+        if added:
+            print(f"extract: added {len(added)} drafted patch line(s) to {recipe}", file=sys.stderr)
+        if recipe_text is None:
             print(f"extract: no recipe.txt in {out}; run `suggest`, complete it, then extract again",
                   file=sys.stderr)
     print(f"extract: {template_id}: spec {spec_sha[:16]}, {len(la)} blobs, weight.bin {len(wa)} bytes -> {out}",
@@ -998,11 +1052,18 @@ def check_template(tool, tdir, python=None, root=None, quant_types="q8_0", work=
     owned = work is None
     work = Path(work or tempfile.mkdtemp(prefix="qvac-coreml-report-"))
     try:
+        twins = {}
         for label, seed, types in cases:
             r = {"template": tj.get("id", tdir.name), "twin": label, "seed": seed, "types": types}
             twin, pkg = _export_twin(tool, tdir / "reference-gguf.json", exporter, seed, types, work, python, root,
                                      label.lower())
+            twins[label] = twin
             r.update(compare_packages(tool, tdir, twin, pkg, work, label.lower()))
+            if label == "B":
+                # A tensor equal in twins A and B is one these gates cannot
+                # check (the exporter may fold it into the program).
+                r["coinciding"] = coinciding_tensors(twins["A"], twin)
+                r["pass"] = r["pass"] and not r["coinciding"]
             results.append(r)
     finally:
         if owned:
@@ -1090,6 +1151,8 @@ def cmd_report(a):
             ok &= r["pass"]
             status = "PASS" if r["pass"] else "FAIL"
             extra = r.get("error") or (f"spec differs at {r['spec_diff'][:3]}" if r.get("spec_diff") else
+                                       f"tensors equal in twins A and B: {r['coinciding'][:5]}"
+                                       if r.get("coinciding") else
                                        (r["verify"][-1] if r.get("verify") else r.get("verify_stderr", "")))
             print(f"{status} {r['template']} twin {r['twin']} ({r.get('types', '-')}): {extra}")
             if not r["pass"] and r.get("verify"):
