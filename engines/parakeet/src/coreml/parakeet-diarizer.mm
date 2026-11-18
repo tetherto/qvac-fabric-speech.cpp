@@ -466,6 +466,7 @@ struct CoremlDiarizers::State {
     bool strict = false;               // use = require
     std::vector<Capacity> capacities;  // ascending
     std::mutex mutex;                  // label and call stats
+    const std::atomic<bool> * cancel = nullptr;  // the owning engine's
     std::string label;
     CoremlDiarizerCallStats stats;
 };
@@ -492,6 +493,8 @@ CoremlDiarizers::CoremlDiarizers(std::string gguf_path, std::vector<int> capacit
 }
 
 CoremlDiarizers::~CoremlDiarizers() = default;
+
+void CoremlDiarizers::set_cancel(const std::atomic<bool> * cancel) { state_->cancel = cancel; }
 
 bool CoremlDiarizers::covers(int frames) {
     if (frames <= 0) return false;
@@ -526,7 +529,7 @@ int CoremlDiarizers::run(int valid_frames,
         // One acquisition per pass (a chunk or block is the unit).
         pcm::Acquired acquired;
         try {
-            acquired = c.slot->acquire(pcm::Demand::now);
+            acquired = c.slot->acquire(pcm::Demand::now, std::nullopt, state_->cancel);
         } catch (const pcm::CoremlError & error) {
             // A failed capacity gives way to the next covering one; a timeout
             // or a memory deferral refuses the pass at once.

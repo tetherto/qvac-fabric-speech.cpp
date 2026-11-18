@@ -909,6 +909,7 @@ Engine::Engine(const EngineOptions & opts) : pimpl_(std::make_unique<Impl>()) {
                                  opts.model_gguf_path +
                                  "' with backend '" + opts.backend + "' (rc=" + std::to_string(rc) + ")");
     }
+    model_set_cancel_flag(pimpl_->model, &pimpl_->cancel_flag);
 
     if (pimpl_->model.model_type == ParakeetModelType::NEMOTRON) {
         pimpl_->nemotron_prompt_id = resolve_nemotron_prompt_id(
@@ -2500,7 +2501,7 @@ void StreamSession::Impl::process_window(const float * window_samples, int windo
 
     // Each streaming window is its own unit: it acquires its route
     // here, so a sidecar that becomes ready is picked up at the next window.
-    const EncoderRoute route = acquire_encoder_route(engine_impl->model);
+    const EncoderRoute route = acquire_encoder_route(engine_impl->model, &engine_impl->cancel_flag);
     EncoderOutputs enc_out;
     const LongFormPlan plan = resolve_long_form_plan(
         engine_impl->model, engine_impl->opts, n_mel_frames, route, true);

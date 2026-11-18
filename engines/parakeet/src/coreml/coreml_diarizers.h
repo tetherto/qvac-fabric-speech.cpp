@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 #include "coreml/parakeet-diarizer.h"
 #include "parakeet_coreml_path.h"
 
@@ -49,6 +51,9 @@ public:
     int run(int valid_frames,
             const parakeet_coreml_rows * inputs, int n_inputs,
             const parakeet_coreml_rows_out * outputs, int n_outputs);
+    // The owning engine's cancel flag: a pass waiting for a capacity stops
+    // waiting when it is set.
+    void set_cancel(const std::atomic<bool> * cancel);
     std::string label();
     std::vector<int> capacities() const;
 

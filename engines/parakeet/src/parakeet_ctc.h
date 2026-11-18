@@ -729,6 +729,10 @@ bool        model_selected_encoder_on_coreml(const ParakeetCtcModel & m, int n_m
 // wait. Builds without Core ML always return the ggml route.
 EncoderRoute acquire_encoder_route(ParakeetCtcModel & m,
                                    const std::atomic<bool> * cancel = nullptr);
+// The engine's cancel flag for every Core ML acquisition a unit makes on this
+// model (encoder windows, diarizer passes, AOSC steps), so a cancelled call
+// stops waiting for a sidecar that is still loading.
+void model_set_cancel_flag(ParakeetCtcModel & m, const std::atomic<bool> * cancel);
 // The route only if the sidecar is ready now; requests nothing, never waits
 // (the ggml prewarm pass).
 EncoderRoute encoder_route_if_ready(ParakeetCtcModel & m);

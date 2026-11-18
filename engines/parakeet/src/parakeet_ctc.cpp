@@ -372,6 +372,9 @@ struct ParakeetCtcModel::Impl {
     // streaming paths keep the sequential decoder.
     parakeet_coreml_decoder * ctx_coreml_dec = nullptr;
     std::unique_ptr<CoremlDiarizers> coreml_diarizers;
+    // The owning engine's cancel flag: every unit's acquisition (an
+    // encoder window, a diarizer pass, an AOSC step) stops waiting on it.
+    const std::atomic<bool> * unit_cancel = nullptr;
 #endif
     // Set when the encoder sidecar loaded before weight allocation and the
     // `encoder.*` tensors were therefore never given memory: the GGUF has no
@@ -3405,6 +3408,7 @@ EncoderRoute ready_encoder_route(const ParakeetCtcModel & m) {
 EncoderRoute acquire_encoder_route(ParakeetCtcModel & m, const std::atomic<bool> * cancel) {
 #ifdef PARAKEET_USE_COREML
     if (!m.impl) return {};
+    if (cancel == nullptr) cancel = m.impl->unit_cancel;
     if (m.impl->ctx_coreml != nullptr) return synchronous_route(m, resolved_strict(m));
     if (!m.impl->encoder_slot) return {};
     // One acquisition per unit: raised to `now`, then the resolved wait mode
@@ -3415,6 +3419,17 @@ EncoderRoute acquire_encoder_route(ParakeetCtcModel & m, const std::atomic<bool>
     (void) m;
     (void) cancel;
     return {};
+#endif
+}
+
+void model_set_cancel_flag(ParakeetCtcModel & m, const std::atomic<bool> * cancel) {
+#ifdef PARAKEET_USE_COREML
+    if (!m.impl) return;
+    m.impl->unit_cancel = cancel;
+    if (m.impl->coreml_diarizers) m.impl->coreml_diarizers->set_cancel(cancel);
+#else
+    (void) m;
+    (void) cancel;
 #endif
 }
 
@@ -6284,7 +6299,8 @@ int run_encoder_bypass_pre_encode(ParakeetCtcModel & model,
         model.model_type == ParakeetModelType::SORTFORMER &&
         model.model_variant == "sortformer-streaming-v2.1-aosc" &&
         max_layers < 0) {
-        pcm::Acquired acquired = model.impl->bypass_slot->acquire(pcm::Demand::now);
+        pcm::Acquired acquired =
+            model.impl->bypass_slot->acquire(pcm::Demand::now, std::nullopt, model.impl->unit_cancel);
         auto * ctx = acquired.model ? acquired.model->as<parakeet_coreml_context>() : nullptr;
         const int fixed_frames = ctx ? (int) parakeet_coreml_fixed_mel_frames(ctx, d_model) : 0;
         const bool strict = model.impl->coreml->resolved().strict();

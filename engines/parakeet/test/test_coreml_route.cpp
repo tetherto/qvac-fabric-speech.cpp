@@ -28,6 +28,9 @@
 //                         different directories get distinct absolute paths:
 //                         two shared models, each loaded from its own
 //                         directory even after the process changes directory
+//   cancel-wait           a unit acquisition waiting (wait = call) on a load
+//                         that is still running returns, pending, once its
+//                         cancel flag is set
 //   strict-probe          a readiness probe on a strict slot whose load
 //                         failed returns no model and does not throw (only
 //                         the unit's own acquisition does)
@@ -770,6 +773,33 @@ pcm::LoadResult broken_load(const pcm::LoadRequest &) {
     return r;
 }
 
+void case_cancel_wait() {
+    const fs::path dir = make_temp_dir("cancel-wait");
+    auto m = pcm::Manager::create(fast_config());
+    if (m->platform() == pcm::Platform::other) {
+        fs::remove_all(dir);
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_gate_mu);
+        g_gate_open = false;
+    }
+    auto slot = make_encoder_slot(*m, &gated_load, pcm::Wait::call, dir);
+    std::atomic<bool> cancel{false};
+    std::thread canceller([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        cancel = true;
+    });
+    const auto t0 = std::chrono::steady_clock::now();
+    const pcm::Acquired got = slot->acquire(pcm::Demand::now, std::nullopt, &cancel);
+    const auto waited = std::chrono::steady_clock::now() - t0;
+    canceller.join();
+    CHECK(!got.model && got.pending && waited < std::chrono::seconds(2),
+          "cancel-wait: a waiting acquisition returns pending once the call is cancelled");
+    open_gate();
+    fs::remove_all(dir);
+}
+
 void case_strict_probe() {
     const fs::path dir = make_temp_dir("strict-probe");
     auto m = pcm::Manager::create(fast_config());
@@ -1028,6 +1058,7 @@ int main() {
     case_pending_route();
     case_sidecar_groups();
     case_relative_paths();
+    case_cancel_wait();
     case_strict_probe();
     case_loader_geometry();
     case_load_error_class();
