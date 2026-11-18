@@ -954,6 +954,19 @@ int pending_fixture() {
         }
         require(error.find("cannot serve") != std::string::npos, "use = require refuses a lone unusable sidecar");
         auto lenient = cb::s3gen_sidecars::create(gguf, routing_options());
+        // Preparation never reports success for it.
+        const std::string prepared = lenient->prewarm(CoremlOptions::Prewarm::all, true);
+        lenient->start_construction();
+        const std::string constructed = lenient->construction_json();
+        for (const std::string & json : {prepared, constructed}) {
+            require(json.find("\"success\":false") != std::string::npos &&
+                        json.find("\"nothing_to_prepare\":false") != std::string::npos &&
+                        json.find("\"stage\":\"cfm\"") != std::string::npos &&
+                        json.find("\"state\":\"failed\"") != std::string::npos,
+                    "a lone unusable CFM sidecar fails preparation with its diagnostic: " + json);
+        }
+        require(!lenient->wait(0) && lenient->status_json().find("\"construction\":") != std::string::npos,
+                "waiting fails, and the status carries the construction result");
         auto plan = lenient->acquire(shape(8), steady::now());
         require(view(plan, S::cfm).present && !view(plan, S::cfm).model && !cb::plan_pending(*plan),
                 "without require the unusable stage runs on ggml");
@@ -1270,6 +1283,11 @@ void slow_load_checks(const std::string & t3, const std::string & s3gen, const s
     require(off_engine.coreml_wait(0) && off_group.find("\"nothing_to_prepare\":true") != std::string::npos &&
                 off_group.find("\"success\":true") != std::string::npos,
             "use = off: waiting and prewarming succeed with nothing to prepare");
+    const std::string off_construction = off_engine.coreml_construction();
+    require(off_construction.find("\"nothing_to_prepare\":true") != std::string::npos &&
+                off_construction.find("\"success\":true") != std::string::npos &&
+                off_engine.coreml_status().find("\"construction\":") != std::string::npos,
+            "use = off: the construction result is empty, successful and in the status");
 
     hooks.hold_loads = true;
     EngineOptions slow_opts = engine_options(t3, s3gen);
@@ -1299,8 +1317,14 @@ void slow_load_checks(const std::string & t3, const std::string & s3gen, const s
     require(slow_labels == std::set<std::string>{cb::GGML_STAGE_BACKEND}, "tts-cli's first call runs on ggml");
     require(!read_file(off_wav).empty() && read_file(off_wav) == read_file(slow_wav),
             "tts-cli's first call equals its use = off run");
-    require(run_cli(cli, t3, s3gen, warm_wav, root / "cli-warm.log", "--coreml-wait call" + cache) == 0,
+    const fs::path status = root / "cli-warm-status.json";
+    require(run_cli(cli, t3, s3gen, warm_wav, root / "cli-warm.log",
+                    "--coreml-wait call --coreml-status-json '" + status.string() + "'" + cache) == 0,
             "tts-cli once loaded");
+    const std::string status_text = read_file(status);
+    require(status_text.find("\"construction\":{") != std::string::npos &&
+                status_text.find("\"group\":\"construction\"") != std::string::npos,
+            "tts-cli's status JSON carries the construction result");
     const std::set<std::string> warm_labels = cli_labels(read_file(root / "cli-warm.log"));
     std::printf("[slow-load cli] first call ggml and equal to use = off; loaded call labels:");
     for (const auto & l : warm_labels) std::printf(" %s", l.c_str());
@@ -1650,6 +1674,14 @@ int engine_fixture(bool slow_load) {
     waited_opts.coreml.prewarm = CoremlOptions::Prewarm::all;
     Engine engine(waited_opts);
     require(engine.coreml_wait(0), "every function is loaded at construction");
+    const std::string constructed = engine.coreml_construction();
+    std::printf("[construction] success=%d nothing_to_prepare=%d\n",
+                (int) (constructed.find("\"success\":true") != std::string::npos),
+                (int) (constructed.find("\"nothing_to_prepare\":true") != std::string::npos));
+    require(constructed.find("\"success\":true") != std::string::npos &&
+                constructed.find("\"nothing_to_prepare\":false") != std::string::npos &&
+                constructed.find("\"state\":\"ready\"") != std::string::npos,
+            "the construction result lists every function ready");
     fit_check(t3, s3gen, root.path, true, &fit_before);
     const SynthesisResult overlapped = engine.synthesize(OVERLAP_TEXT);
     // Timed again once every function is compiled and loaded, so the cancel
@@ -1722,7 +1754,12 @@ int engine_fixture(bool slow_load) {
     // Its own encoder and HiFT functions load before each sentence (an
     // Engine shares no slots with the one above).
     lenient_opts.coreml.wait = CoremlOptions::Wait::call;
-    const SynthesisResult mixed = Engine(lenient_opts).synthesize(OVERLAP_TEXT);
+    Engine lenient(lenient_opts);
+    const std::string broken_construction = lenient.coreml_construction();
+    require(broken_construction.find("\"success\":false") != std::string::npos &&
+                broken_construction.find("\"stage\":\"cfm\"") != std::string::npos,
+            "a CFM sidecar without usable functions fails the construction result");
+    const SynthesisResult mixed = lenient.synthesize(OVERLAP_TEXT);
     std::printf("[fallback] %zu samples, backend=%s\n", mixed.pcm.size(), mixed.s3gen_backend.c_str());
     require(!mixed.pcm.empty() && mixed.s3gen_backend == cb::MIXED_STAGE_BACKEND,
             "a CFM fallback aggregates as mixed");

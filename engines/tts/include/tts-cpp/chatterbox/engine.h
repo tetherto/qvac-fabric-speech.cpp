@@ -422,8 +422,17 @@ public:
 
     // Core ML sidecar status as JSON: per function its state ("queued",
     // "loading", "ready", "failed", ...), route, compute units, label, warm
-    // hint and load timings. "{}" when no sidecar is in use.
+    // hint and load timings, and the construction group's result as
+    // "construction" (see coreml_construction()). Without a sidecar in use,
+    // only that (empty) construction result.
     std::string coreml_status() const;
+
+    // The construction group's result as JSON (the functions requested at
+    // construction, each with its final state; "success"; and
+    // "nothing_to_prepare", true when the group was empty, e.g. no sidecar
+    // in use). wait = construct returns from the constructor once it
+    // finished; a sidecar that lists no usable function makes it fail.
+    std::string coreml_construction() const;
 
     // Waits until the construction group (the functions requested at
     // construction) finished; timeout_ms < 0 waits without limit. True when

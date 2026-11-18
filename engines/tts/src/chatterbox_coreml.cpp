@@ -755,6 +755,16 @@ std::string coreml_empty_group_json(const char * group) {
 #endif
 }
 
+std::string with_construction(std::string status, const std::string & construction) {
+    // `status` is a JSON object: the construction result becomes its
+    // "construction" member.
+    const size_t close = status.rfind('}');
+    if (close == std::string::npos) return status;
+    const bool empty = status.find_first_not_of(" \t\n{", 0) == close;
+    status.insert(close, std::string(empty ? "" : ",") + "\"construction\":" + construction);
+    return status;
+}
+
 // ----------------------------------------------------------- the sidecars --
 
 #ifdef TTS_CPP_USE_COREML
@@ -762,6 +772,7 @@ std::string coreml_empty_group_json(const char * group) {
 struct s3gen_sidecars::impl {
     struct stage_slots {
         bool present = false;  // the sidecar exists and Core ML may use it
+        std::string unusable;  // present but lists no usable function: why
         std::string path;
         std::vector<int> widths;                          // empty for HiFT
         std::map<int, std::shared_ptr<pcm::Slot>> slots;  // HiFT: key 0
@@ -819,6 +830,54 @@ struct s3gen_sidecars::impl {
             out.push_back(pcm::GroupRequest{slot, min ? pcm::Priority::minimal : pcm::Priority::prewarm});
         }
         return out;
+    }
+
+    // Present sidecars that list no usable function, as failed slots: a
+    // request group never reports success (or nothing_to_prepare) with one.
+    std::vector<pcm::SlotStatus> discovery_failures() const {
+        std::vector<pcm::SlotStatus> out;
+        for (int s = 0; s < S3GEN_STAGES; ++s) {
+            const auto & st = stages[s];
+            if (!st.present || st.unusable.empty()) continue;
+            pcm::SlotStatus f;
+            f.stage = STAGE_NAMES[s];
+            f.state = pcm::SlotState::failed;
+            f.reason = st.unusable;
+            f.error = st.unusable;
+            f.error_class = pcm::ErrorClass::deterministic;
+            f.route = pcm::StatusRoute::prebuilt;
+            f.compute_units = pcm::to_string(units);
+            f.label = GGML_STAGE_BACKEND;
+            f.path = st.path;
+            out.push_back(std::move(f));
+        }
+        return out;
+    }
+
+    pcm::PrewarmResult with_discovery(pcm::PrewarmResult r) const {
+        const auto failures = discovery_failures();
+        if (failures.empty()) return r;
+        r.slots.insert(r.slots.end(), failures.begin(), failures.end());
+        r.success = false;
+        r.nothing_to_prepare = false;
+        return r;
+    }
+
+    std::string construction_json() const {
+        std::shared_ptr<pcm::Group> group;
+        {
+            std::lock_guard<std::mutex> lock(mu);
+            group = construction;
+        }
+        pcm::PrewarmResult r;
+        if (group) {
+            r = group->result();
+        } else {
+            r.group = "construction";
+            r.success = true;
+            r.nothing_to_prepare = true;
+        }
+        return pcm::to_json(with_discovery(std::move(r)));
     }
 
     std::shared_ptr<pcm::Slot> slot(s3gen_stage s, int width) const {
@@ -905,14 +964,16 @@ std::shared_ptr<s3gen_sidecars> s3gen_sidecars::create(const std::string & s3gen
         if (prefixes[s] != nullptr) {
             char names[FUNCTION_LIST_BYTES] = {};
             if (moss_coreml_function_names(st.path.c_str(), names, sizeof(names)) <= 0) {
-                std::fprintf(stderr, "chatterbox: cannot list the functions of %s (needs macOS 15 / iOS 18), "
-                                     "retaining ggml for the %s\n", st.path.c_str(), STAGE_NAMES[s]);
+                st.unusable = "cannot list the functions of " + st.path + " (needs macOS 15 / iOS 18)";
+                std::fprintf(stderr, "chatterbox: %s, retaining ggml for the %s\n", st.unusable.c_str(),
+                             STAGE_NAMES[s]);
                 continue;
             }
             st.widths = coreml_buckets(names, prefixes[s]);
             if (st.widths.empty()) {
-                std::fprintf(stderr, "chatterbox: %s has no %s* functions, retaining ggml for the %s\n",
-                             st.path.c_str(), prefixes[s], STAGE_NAMES[s]);
+                st.unusable = st.path + " has no " + prefixes[s] + "* functions";
+                std::fprintf(stderr, "chatterbox: %s, retaining ggml for the %s\n", st.unusable.c_str(),
+                             STAGE_NAMES[s]);
                 continue;
             }
             for (int w : st.widths) functions.emplace_back(w, prefixes[s] + std::to_string(w));
@@ -991,10 +1052,7 @@ void s3gen_sidecars::start_construction(const std::atomic<bool> * cancel) {
     if (waited) group->wait(std::nullopt, cancel);
 }
 
-std::string s3gen_sidecars::construction_json() const {
-    std::lock_guard<std::mutex> lock(p_->mu);
-    return p_->construction ? pcm::to_json(p_->construction->result()) : std::string("{}");
-}
+std::string s3gen_sidecars::construction_json() const { return p_->construction_json(); }
 
 void s3gen_sidecars::predict(const std::vector<s3gen_call_shape> & calls) {
     std::vector<std::shared_ptr<pcm::Slot>> predicted[S3GEN_STAGES];
@@ -1030,6 +1088,10 @@ void s3gen_sidecars::end_call() {
 }
 
 bool s3gen_sidecars::predicting() const { return p_->predicting.load(); }
+
+std::string coreml_status_without_sidecars() {
+    return with_construction("{}", coreml_empty_group_json("construction"));
+}
 
 std::shared_ptr<S3genCoremlPlan> s3gen_sidecars::acquire(const s3gen_call_shape & shape,
                                                          std::chrono::steady_clock::time_point deadline,
@@ -1116,7 +1178,7 @@ std::shared_ptr<S3genCoremlPlan> s3gen_sidecars::acquire(const s3gen_call_shape 
 
 std::string s3gen_sidecars::prewarm(CoremlOptions::Prewarm scope, bool wait, const std::atomic<bool> * cancel) {
     auto group = p_->manager->issue_group(pcm::GroupKind::prewarm, p_->group(scope, pcm::GroupKind::prewarm), wait);
-    return pcm::to_json(wait ? group->wait(std::nullopt, cancel) : group->result());
+    return pcm::to_json(p_->with_discovery(wait ? group->wait(std::nullopt, cancel) : group->result()));
 }
 
 bool s3gen_sidecars::wait(int64_t timeout_ms, const std::atomic<bool> * cancel) {
@@ -1128,14 +1190,17 @@ bool s3gen_sidecars::wait(int64_t timeout_ms, const std::atomic<bool> * cancel) 
     if (!group) return false;
     std::optional<pcm::Clock::duration> timeout;
     if (timeout_ms >= 0) timeout = std::chrono::milliseconds(timeout_ms);
-    return group->wait(timeout, cancel).success;
+    return p_->with_discovery(group->wait(timeout, cancel)).success;
 }
 
 std::string s3gen_sidecars::status_json() const {
     pcm::GenerationStatus generation;
     generation.supported = false;
     generation.reason = "no_template";
-    return pcm::to_json(p_->manager->status(ENGINE_NAME, p_->resolved.cache_dir, p_->all_slots(), generation));
+    pcm::EngineStatus status = p_->manager->status(ENGINE_NAME, p_->resolved.cache_dir, p_->all_slots(), generation);
+    const auto failures = p_->discovery_failures();
+    status.stages.insert(status.stages.end(), failures.begin(), failures.end());
+    return with_construction(pcm::to_json(status), construction_json());
 }
 
 size_t s3gen_sidecars::live(s3gen_stage stage) const {
@@ -1184,6 +1249,9 @@ std::shared_ptr<S3genCoremlPlan> s3gen_sidecars::acquire(const s3gen_call_shape 
 std::string s3gen_sidecars::prewarm(CoremlOptions::Prewarm, bool, const std::atomic<bool> *) { return "{}"; }
 bool s3gen_sidecars::wait(int64_t, const std::atomic<bool> *) { return false; }
 std::string s3gen_sidecars::status_json() const { return "{}"; }
+std::string coreml_status_without_sidecars() {
+    return with_construction("{}", coreml_empty_group_json("construction"));
+}
 size_t s3gen_sidecars::live(s3gen_stage) const { return 0; }
 std::string s3gen_sidecars::state(s3gen_stage, int) const { return {}; }
 

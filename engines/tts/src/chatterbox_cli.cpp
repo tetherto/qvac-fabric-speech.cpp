@@ -1199,7 +1199,8 @@ struct coreml_status_on_exit {
     std::string path;
     ~coreml_status_on_exit() {
         if (path.empty()) return;
-        const std::string json = sidecars ? sidecars->status_json() : std::string("{}");
+        const std::string json = sidecars ? sidecars->status_json()
+                                          : tts_cpp::chatterbox::detail::coreml_status_without_sidecars();
         if (path == "-") {
             std::printf("%s\n", json.c_str());
             return;

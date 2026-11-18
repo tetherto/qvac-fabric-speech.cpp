@@ -1118,7 +1118,12 @@ bool Engine::gpu_unsupported() const {
 }
 
 std::string Engine::coreml_status() const {
-    return pimpl_ && pimpl_->sidecars ? pimpl_->sidecars->status_json() : std::string("{}");
+    return pimpl_ && pimpl_->sidecars ? pimpl_->sidecars->status_json() : detail::coreml_status_without_sidecars();
+}
+
+std::string Engine::coreml_construction() const {
+    return pimpl_ && pimpl_->sidecars ? pimpl_->sidecars->construction_json()
+                                      : detail::coreml_empty_group_json("construction");
 }
 
 bool Engine::coreml_wait(int64_t timeout_ms) {

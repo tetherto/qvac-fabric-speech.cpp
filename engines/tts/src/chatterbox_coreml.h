@@ -179,6 +179,13 @@ double s3gen_estimate_metal_ms_frames(bool meanflow, int frames);
 // "prewarm".
 std::string coreml_empty_group_json(const char * group);
 
+// Adds `construction` (a group JSON) to the JSON object `status` as its
+// "construction" member.
+std::string with_construction(std::string status, const std::string & construction);
+// The status JSON without a sidecar in use: only the construction group,
+// empty, which succeeded with nothing_to_prepare.
+std::string coreml_status_without_sidecars();
+
 // ----------------------------------------------------------- the sidecars --
 
 enum class s3gen_stage { encoder = 0, cfm = 1, hift = 2 };
@@ -222,6 +229,9 @@ public:
     // per stage) or every function (all). With wait = construct, blocks until
     // the group finished.
     void start_construction(const std::atomic<bool> * cancel = nullptr);
+    // The construction group's result (JSON): its slots' final states,
+    // success and nothing_to_prepare, failed when a present sidecar lists no
+    // usable function. Also the "construction" member of status_json().
     std::string construction_json() const;
 
     // A call is starting: mark the widths `calls` need, plus HiFT,
