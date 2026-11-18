@@ -2206,6 +2206,8 @@ static SidecarRequest encoder_sidecar_request(const char * stage, const std::str
         ? pcm::ComputeUnits::cpu_and_ane
         : pcm::ComputeUnits::all;
     request.load_fn = &load_encoder_sidecar;
+    request.geometry = sidecar_geometry(std::string(stage) == "bypass-encoder" ? SidecarLoader::bypass_encoder
+                                                                               : SidecarLoader::encoder);
     request.minimal = minimal;
     return request;
 }

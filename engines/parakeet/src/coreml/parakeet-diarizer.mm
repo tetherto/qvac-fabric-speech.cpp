@@ -424,7 +424,8 @@ namespace {
 // the environment. The capacity the bundle reports must match its file name.
 pcm::LoadResult load_diarizer(const pcm::LoadRequest & request) {
     pcm::LoadResult result;
-    const int64_t capacity = request.geometry.empty() ? 0 : request.geometry.front();
+    // sidecar_geometry(diarizer, {capacity})
+    const int64_t capacity = request.geometry.size() == 2 ? request.geometry[1] : 0;
     parakeet_coreml_load_error error{};
     parakeet_coreml_diarizer * context = parakeet_coreml_diarizer_init_with_units_error(
         request.artifact_path.c_str(), pcm::to_string(request.units), &error);
@@ -482,7 +483,7 @@ CoremlDiarizers::CoremlDiarizers(std::string gguf_path, std::vector<int> capacit
         request.present = true;
         request.stage_default = pcm::ComputeUnits::cpu_and_ane;
         request.load_fn = &load_diarizer;
-        request.geometry = {capacity};
+        request.geometry = sidecar_geometry(SidecarLoader::diarizer, {capacity});
         // The smallest capacity is the minimal set; larger ones are
         // requested by the call that needs them (or by prewarm = all).
         request.minimal = state_->capacities.empty();

@@ -261,6 +261,9 @@ void case_diarizer_load_errors(const std::string & gguf) {
     fs::create_directory_symlink(fs::canonical(smallest),
                                  dir / (base + "-diarizer-" + std::to_string(renamed) + ".mlmodelc"));
     write_corrupt_bundle(dir / (base + "-diarizer-" + std::to_string(corrupt) + ".mlmodelc"));
+    // An engine on the original bundle stays alive: the alias at the same
+    // canonical path must still be loaded and validated for its own capacity.
+    parakeet::Engine original(engine_options(gguf, coreml_ready_options()));
     parakeet::Engine engine(engine_options(staged.string(), coreml_ready_options()));
     const std::string status = engine.coreml_status_json();
     const std::string wrong = stage_status(status, "diarizer-" + std::to_string(renamed));

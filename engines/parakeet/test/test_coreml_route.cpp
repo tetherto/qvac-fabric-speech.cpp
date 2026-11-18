@@ -28,6 +28,9 @@
 //                         different directories get distinct absolute paths:
 //                         two shared models, each loaded from its own
 //                         directory even after the process changes directory
+//   loader-geometry       an encoder and a bypass encoder, or two diarizer
+//                         capacities, registered at one bundle path load two
+//                         models even while the first owner is alive
 //   load-error-class      a framework load failure is transient and keeps its
 //                         domain and code; a verified incompatibility is
 //                         deterministic
@@ -749,6 +752,53 @@ void case_relative_paths() {
     fs::remove_all(root);
 }
 
+std::atomic<int> g_typed_loads{0};
+
+pcm::LoadResult typed_load(const pcm::LoadRequest & req) {
+    ++g_typed_loads;
+    pcm::LoadResult r;
+    r.model = std::make_shared<std::vector<int64_t>>(req.geometry);  // what this loader validated
+    return r;
+}
+
+void case_loader_geometry() {
+    const fs::path dir = make_temp_dir("loader-geometry");
+    write_text(dir / "m.mlmodelc" / "weights" / "weight.bin", std::string(10, 'x'));
+    auto m = pcm::Manager::create(fast_config());
+    if (m->platform() == pcm::Platform::other) {
+        fs::remove_all(dir);
+        return;  // no routes off Apple platforms
+    }
+    CoremlOptions opts;
+    opts.prewarm = CoremlOptions::Prewarm::none;
+    opts.wait = CoremlOptions::Wait::call;
+    auto request = [&](std::vector<int64_t> geometry) {
+        SidecarRequest r;
+        r.stage = "stage";
+        r.path = (dir / "m.mlmodelc").string();
+        r.present = true;
+        r.stage_default = pcm::ComputeUnits::cpu_and_ane;
+        r.load_fn = &typed_load;
+        r.geometry = std::move(geometry);
+        return r;
+    };
+    CoremlSidecars first(opts, m), second(opts, m);
+    auto encoder = first.add(request(sidecar_geometry(SidecarLoader::encoder)));
+    const pcm::Acquired held = encoder->acquire(pcm::Demand::now);  // the first owner stays alive
+    auto bypass = second.add(request(sidecar_geometry(SidecarLoader::bypass_encoder)));
+    const pcm::Acquired other = bypass->acquire(pcm::Demand::now);
+    CHECK(held.model && other.model && held.model->get() != other.model->get() && g_typed_loads.load() == 2,
+          "loader-geometry: an encoder and a bypass encoder at one path are two models");
+    auto d358 = first.add(request(sidecar_geometry(SidecarLoader::diarizer, {358})));
+    auto d745 = second.add(request(sidecar_geometry(SidecarLoader::diarizer, {745})));
+    const pcm::Acquired a = d358->acquire(pcm::Demand::now);
+    const pcm::Acquired b = d745->acquire(pcm::Demand::now);
+    CHECK(a.model && b.model && a.model->get() != b.model->get() &&
+              static_cast<std::vector<int64_t> *>(b.model->get())->back() == 745,
+          "loader-geometry: a diarizer capacity alias of one bundle is loaded and validated for its own capacity");
+    fs::remove_all(dir);
+}
+
 void case_load_error_class() {
     parakeet_coreml_load_error framework{};
     std::snprintf(framework.domain, sizeof(framework.domain), "%s", "com.apple.CoreML");
@@ -933,6 +983,7 @@ int main() {
     case_pending_route();
     case_sidecar_groups();
     case_relative_paths();
+    case_loader_geometry();
     case_load_error_class();
     case_options();
     case_fit_envelope();

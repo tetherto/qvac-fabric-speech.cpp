@@ -75,6 +75,15 @@ pcm::Error sidecar_load_error(const std::string & what, const parakeet_coreml_lo
 // default 1.6 x weights/weight.bin), or 0 when `units` cannot use the ANE.
 uint64_t ane_compile_reserve_bytes(const std::string & mlmodelc, pcm::ComputeUnits units);
 
+// The loader that opens a sidecar, first in its geometry: an encoder, bypass
+// encoder and diarizer bundle at one path are never one shared model.
+enum class SidecarLoader : int64_t { encoder = 1, bypass_encoder = 2, diarizer = 3 };
+
+inline std::vector<int64_t> sidecar_geometry(SidecarLoader loader, std::vector<int64_t> rest = {}) {
+    rest.insert(rest.begin(), static_cast<int64_t>(loader));
+    return rest;
+}
+
 // One sidecar to register (route from plan(): prebuilt when present).
 struct SidecarRequest {
     std::string stage;          // status "stage": encoder, bypass-encoder, diarizer-<frames>
@@ -82,7 +91,10 @@ struct SidecarRequest {
     bool present = false;       // the directory exists (today's path rules)
     pcm::ComputeUnits stage_default = pcm::ComputeUnits::all;
     pcm::LoadFn load_fn = nullptr;
-    std::vector<int64_t> geometry;  // validated by the loader (diarizer capacity)
+    // Validated by the loader and part of the runtime's sharing key: the
+    // loader kind first (sidecar_geometry), then e.g. the diarizer capacity,
+    // so two owners share a model only when the same loader would accept it.
+    std::vector<int64_t> geometry;
     bool minimal = false;       // part of the minimal (construction) set
 };
 
