@@ -740,6 +740,8 @@ EncoderRoute encoder_route_if_ready(ParakeetCtcModel & m);
 // encoder sidecar cannot serve, before any audio is fed: under use = require
 // (the Core ML error each of those windows would throw), and on an encoder
 // Core ML owns under any policy (there are no ggml weights to run them on).
+// TranscribePsy EU picks its program per window (a flexible one for long
+// windows) and is not checked here.
 // Acquires the encoder route like a call does, so under require it waits for
 // the sidecar and throws when it failed. No-op otherwise and on builds
 // without Core ML.

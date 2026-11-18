@@ -32,9 +32,9 @@ struct CoremlEncoderEnvelopeInputs {
 // The client-side load transient (`load_peak`) by compute-unit class, until
 // the model's own measurement replaces it:
 //  - cpu_and_ane: 0.25 x weight file (cold ANE load peaked at 0.19x);
-//  - all, cpu_and_gpu: 1.0 x weight file (update 2026-11-11: Parakeet TDT
-//    0.6B fp16 measured +1.08 GiB over a 1.2 GB weight file, ~0.9x, and the
-//    palettized prebuilt ~0.95x);
+//  - all, cpu_and_gpu: 1.0 x weight file (Parakeet TDT 0.6B fp16 measured
+//    +1.08 GiB over a 1.2 GB weight file on an M2, ~0.9x, and the palettized
+//    prebuilt ~0.95x);
 //  - cpu_only: 1.0 x as well. The CPU load builds the same expanded weights
 //    and nothing has measured it lower, so it is charged like `all`.
 inline uint64_t coreml_encoder_load_transient_bytes(uint64_t weight_file_bytes, CoremlFitUnits units) {

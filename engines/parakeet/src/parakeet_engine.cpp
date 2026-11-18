@@ -4,6 +4,7 @@
 // Engine: GGUF load, transcribe, streaming sessions, diarization, timing and options.
 
 #include "parakeet/engine.h"
+#include "fit_util.h"
 #include "parakeet/streaming.h"
 #include "streaming_defaults.h"
 #include "parakeet/diarization.h"
@@ -856,7 +857,7 @@ static bool coreml_memory_degraded(const EngineOptions & opts) {
     }
     const uint64_t budget = static_cast<uint64_t>(*opts.coreml.memory_budget_bytes);
     const bool ggml_fits = totals.ggml_required_bytes <= budget;
-    const bool coreml_fits = totals.ggml_required_bytes + totals.coreml_bytes <= budget;
+    const bool coreml_fits = fitutil::sat_add(totals.ggml_required_bytes, totals.coreml_bytes) <= budget;
     return ggml_fits && !coreml_fits;
 #else
     (void) opts;

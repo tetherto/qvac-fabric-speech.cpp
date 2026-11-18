@@ -48,6 +48,8 @@
 #include <string>
 #include <vector>
 
+#include <unistd.h>
+
 using namespace parakeet;
 
 namespace {
@@ -156,7 +158,7 @@ void check_owned_encoder_runs(const std::string & coreml_gguf, const std::string
 std::filesystem::path stage_full_gguf_with_sidecar(const std::string & full_gguf,
                                                    const std::string & coreml_gguf) {
     const std::filesystem::path dir =
-        std::filesystem::temp_directory_path() / "parakeet-coreml-owner-test";
+        std::filesystem::temp_directory_path() / ("parakeet-coreml-owner-test-" + std::to_string(::getpid()));
     std::filesystem::remove_all(dir);
     std::filesystem::create_directories(dir);
     const std::filesystem::path staged = dir / "staged.gguf";
@@ -198,7 +200,7 @@ void check_standard_tdt_rejects_encoderless(const std::string & gguf) {
     std::unique_ptr<gguf_context, decltype(&gguf_free)> stripped(gguf_init_empty(), gguf_free);
     gguf_set_kv(stripped.get(), source.get());
 
-    const auto dir = std::filesystem::temp_directory_path() / "parakeet-standard-tdt-owner-test";
+    const auto dir = std::filesystem::temp_directory_path() / ("parakeet-standard-tdt-owner-test-" + std::to_string(::getpid()));
     std::filesystem::create_directories(dir);
     const auto path = dir / "encoderless.gguf";
     expect(gguf_write_to_file(stripped.get(), path.string().c_str(), false),
@@ -226,7 +228,7 @@ void check_coreml_only_full_keeps_encoder(const std::string & gguf) {
                "PARAKEET_COREML_ONLY with use = off keeps the GGUF's ggml encoder");
     }
     {
-        const auto dir = std::filesystem::temp_directory_path() / "parakeet-coreml-only-no-sidecar";
+        const auto dir = std::filesystem::temp_directory_path() / ("parakeet-coreml-only-no-sidecar-" + std::to_string(::getpid()));
         std::filesystem::remove_all(dir);
         std::filesystem::create_directories(dir);
         const auto staged = dir / std::filesystem::path(gguf).filename();
@@ -298,7 +300,7 @@ void write_text(const std::filesystem::path & path, const std::string & text) {
 // stub bundle fails to load). The encoder-less GGUF is rejected either way.
 void check_stub_tdt_skips_throwaway_load() {
     namespace fs = std::filesystem;
-    const fs::path dir = fs::temp_directory_path() / "parakeet-stub-tdt-skip-load";
+    const fs::path dir = fs::temp_directory_path() / ("parakeet-stub-tdt-skip-load-" + std::to_string(::getpid()));
     fs::remove_all(dir);
     fs::create_directories(dir);
     const fs::path gguf = dir / "stub.gguf";
@@ -330,8 +332,6 @@ void check_stub_tdt_skips_throwaway_load() {
                log.find(kFailedLoad) != std::string::npos,
            "no metadata: the loader still loads the sidecar to find out");
 
-    // Metadata that does not show the export (unparsable, or no input names)
-    // is inconclusive: only the model's own description can rule ownership
     // The Neural Engine inputs named with JSON escapes: the decoded names are
     // what counts, so the loader still loads the bundle to read its seams.
     write_text(bundle / "metadata.json",
@@ -347,6 +347,8 @@ void check_stub_tdt_skips_throwaway_load() {
                log.find("no validated seam policy") != std::string::npos,
            "a schema with only one Neural Engine input is another export: the load is skipped");
 
+    // Metadata that does not show the export (unparsable, or no input names)
+    // is inconclusive: only the model's own description can rule ownership
     // out, so the bundle is loaded, as with no metadata.
     for (const char * inconclusive : {"not json", "{}", R"([{"inputSchema":[]}])",
                                       R"([{"shortDescription":"encoder"}])"}) {
