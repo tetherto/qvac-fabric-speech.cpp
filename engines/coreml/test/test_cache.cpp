@@ -1560,6 +1560,30 @@ void case_loaded_source() {
     CHECK(o.kind == PrepareOutcome::Kind::failed && o.reason == "source_changed");
     CHECK(o.error.code == failed::SOURCE_CHANGED && o.error.cls == ErrorClass::transient);
     CHECK(env.artifacts() == 0 && env.memos() == 0 && g_compiles == 0);
+    // Identity from the descriptor the engine read through: a file swapped in
+    // at the path after the open (and restored later) does not change it, and
+    // prepare refuses the path while it holds the other file.
+    {
+        const int fd = ::open(a.c_str(), O_RDONLY | O_CLOEXEC);
+        CHECK(fd >= 0);
+        const std::string held = a + ".held";
+        CHECK(::rename(a.c_str(), held.c_str()) == 0 && ::rename(b.c_str(), a.c_str()) == 0);  // B at the path
+        SourceStat by_fd;
+        CHECK(generation::source_stat_fd(fd, a, by_fd) && same_identity(by_fd, before) && !by_fd.changed);
+        cache::PrepareInputs swapped = env.inputs(a);
+        swapped.expected = by_fd;
+        swapped.expected.path = a;
+        PrepareOutcome so = cache::prepare(swapped);
+        CHECK(so.kind == PrepareOutcome::Kind::failed && so.reason == "source_changed");
+        CHECK(::rename(a.c_str(), b.c_str()) == 0 && ::rename(held.c_str(), a.c_str()) == 0);  // A back
+        SourceStat again;
+        CHECK(generation::source_stat_fd(fd, a, again) && same_identity(again, before));
+        swapped.expected = again;
+        swapped.expected.path = a;
+        CHECK(ready(cache::prepare(swapped)));
+        ::close(fd);
+        CHECK(!generation::source_stat_fd(-1, a, again));
+    }
     // Its request never joins another engine's job for the same file.
     generation::Candidate c;
     c.template_id = env.tpl->id();
