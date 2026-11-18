@@ -714,6 +714,18 @@ class PowerParseTest(unittest.TestCase):
         with mock.patch.object(blt.subprocess, "run", side_effect=FileNotFoundError("pmset")):
             self.assertEqual(blt.pmset("-g", "batt"), "")
 
+    def test_pmset_output_that_is_not_utf8_still_reads(self):
+        # A device name in MacRoman (byte 0x8e is "é"): a strict decode would
+        # raise UnicodeDecodeError and stop the run.
+        with tempfile.TemporaryDirectory() as d:
+            fake = Path(d) / "pmset"
+            fake.write_bytes(b"#!/bin/sh\nprintf \"Now drawing from 'AC Power'\\n -caf\\216 UPS\\t100%%\\n\"\n")
+            fake.chmod(0o755)
+            with mock.patch.dict(os.environ, {"PATH": d + os.pathsep + os.environ.get("PATH", "")}):
+                out = blt.pmset("-g", "batt")
+        self.assertIn("�", out)
+        self.assertEqual(blt.parse_power_source(out), "ac")
+
     def test_labels(self):
         self.assertEqual(blt.power_label(AC), "AC")
         self.assertEqual(blt.power_label(AC_LOW_POWER), "AC, Low Power Mode")

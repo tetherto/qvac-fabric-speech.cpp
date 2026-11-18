@@ -496,9 +496,10 @@ def wait_quiet(proto: dict, enabled: bool) -> float:
 
 
 def pmset(*args) -> str:
-    """`pmset` output, or "" where there is no pmset (not macOS) or it fails."""
+    """`pmset` output, or "" where there is no pmset (not macOS) or it fails.
+    Bytes that are not UTF-8 (a device name in another encoding) are replaced."""
     try:
-        p = subprocess.run(["pmset", *args], capture_output=True, text=True, timeout=30)
+        p = subprocess.run(["pmset", *args], capture_output=True, text=True, errors="replace", timeout=30)
     except (OSError, subprocess.SubprocessError):
         return ""
     return p.stdout if p.returncode == 0 else ""
