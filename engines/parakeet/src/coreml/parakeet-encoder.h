@@ -65,6 +65,11 @@ bool parakeet_coreml_encoder_prefers_ane(const char * path_mlmodelc);
 // unreadable or incomplete metadata; load the model to find out).
 int parakeet_coreml_encoder_export_kind(const char * path_mlmodelc);
 
+// Bytes of every fixed-shape input and output metadata.json declares (one
+// function's I/O arrays, which the wrapper allocates at their declared
+// shape), or 0 when the metadata does not declare complete fixed shapes.
+uint64_t parakeet_coreml_declared_io_bytes(const char * path_mlmodelc);
+
 // Release a context created by parakeet_coreml_init. Safe to call with nullptr.
 void parakeet_coreml_free(struct parakeet_coreml_context * ctx);
 

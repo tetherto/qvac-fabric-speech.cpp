@@ -21,6 +21,9 @@
 #include "parakeet_sortformer.h"
 #include "parakeet_tdt.h"
 #ifdef PARAKEET_USE_COREML
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 #include "coreml/coreml_diarizers.h"
 #include "coreml/parakeet-encoder.h"
 #include "coreml/parakeet_coreml_shape.h"
@@ -34,6 +37,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <limits>
@@ -209,57 +213,52 @@ bool bundle_present(const std::string & bundle) {
     return std::filesystem::is_directory(bundle, ec);
 }
 
-// The largest TranscribePsy EU fp32 precise program next to the GGUF
-// (`-encoder-fp32-<frames>` / `-encoder-other-fp32-<frames>`): one of them
-// is loaded on demand, replacing the flexible programs.
-uint64_t largest_eu_precise_bytes(const std::string & gguf_path) {
-    const std::string probe = coreml_eu_precise_sidecar_path(gguf_path, false, 0);
-    const std::filesystem::path dir = std::filesystem::path(probe).parent_path();
-    const std::string base = std::filesystem::path(probe).filename().string();
-    const std::string stem = base.substr(0, base.rfind("-encoder-fp32-"));
-    uint64_t largest = 0;
-    std::error_code ec;
-    for (const auto & entry : std::filesystem::directory_iterator(dir.empty() ? "." : dir, ec)) {
-        const std::string name = entry.path().filename().string();
-        if (name.rfind(stem + "-encoder-fp32-", 0) != 0 && name.rfind(stem + "-encoder-other-fp32-", 0) != 0) continue;
-        if (entry.path().extension() != ".mlmodelc") continue;
-        largest = std::max(largest, bundle_weight_bytes(entry.path().string()));
-    }
-    return largest;
-}
 #endif
 
-// The diarizer sidecars' charge: the bundles construction loads for the
-// resolved prewarm scope (prewarm all loads every capacity) together with
-// the ones the workload's calls can load, resident together, plus the
-// largest of their load transients once (the runtime loads one at a time).
-uint64_t coreml_diarizer_bytes(const std::string & gguf_path,
-                               std::vector<CoremlFrameRange> ranges, const FitOptions & opts) {
+// Today's diarizer charge (FitResult::coreml_bytes, part of the top-level
+// verdict): the bundles the workload's calls can load, resident. Zero when
+// Core ML is off for this projection (use = off, a disable variable).
+uint64_t legacy_diarizer_bytes(const std::string & gguf_path, const std::vector<CoremlFrameRange> & ranges,
+                               const FitOptions & opts) {
 #ifdef PARAKEET_USE_COREML
-    if (coreml_diarizers_disabled()) return 0;
-    const auto resolved = resolve_parakeet_coreml(opts.coreml);
-    const std::vector<CoremlDiarizerBundle> bundles = list_coreml_diarizer_bundles(gguf_path);
-    if (resolved.enabled()) {
-        const CoremlDiarizerPrewarm prewarm =
-            resolved.prewarm == pcm::Prewarm::all ? CoremlDiarizerPrewarm::all
-            : resolved.prewarm == pcm::Prewarm::none ? CoremlDiarizerPrewarm::none
-                                                     : CoremlDiarizerPrewarm::minimal;
-        for (const CoremlFrameRange & r : coreml_diarizer_construction_ranges(prewarm)) ranges.push_back(r);
-    }
-    const uint64_t resident = coreml_diarizer_resident_bytes(bundles, ranges);
-    if (resident == 0) return 0;
-    const CoremlFitUnits units = fit_units(resolved.units_or(pcm::ComputeUnits::cpu_and_ane));
-    uint64_t transient = 0;
-    for (const CoremlDiarizerBundle & b : coreml_diarizer_loaded_bundles(bundles, ranges)) {
-        transient = std::max(transient, coreml_encoder_load_transient_bytes(b.weights_bytes, units));
-    }
-    return sat_add(resident, transient);
+    if (coreml_diarizers_disabled() || !resolve_parakeet_coreml(opts.coreml).enabled()) return 0;
+    return coreml_diarizer_resident_bytes(list_coreml_diarizer_bundles(gguf_path), ranges);
 #else
     (void) gguf_path;
     (void) ranges;
     (void) opts;
     return 0;
 #endif
+}
+
+// The diarizers' Core ML charge: the bundles construction loads for the
+// resolved prewarm scope (prewarm all loads every capacity) together with
+// the ones the workload's calls can load, resident; and the largest of their
+// load transients.
+CoremlCharge coreml_diarizer_charge(const std::string & gguf_path, std::vector<CoremlFrameRange> ranges,
+                                    const FitOptions & opts) {
+    CoremlCharge charge;
+#ifdef PARAKEET_USE_COREML
+    const auto resolved = resolve_parakeet_coreml(opts.coreml);
+    if (coreml_diarizers_disabled() || !resolved.enabled()) return charge;
+    const std::vector<CoremlDiarizerBundle> bundles = list_coreml_diarizer_bundles(gguf_path);
+    const CoremlDiarizerPrewarm prewarm =
+        resolved.prewarm == pcm::Prewarm::all ? CoremlDiarizerPrewarm::all
+        : resolved.prewarm == pcm::Prewarm::none ? CoremlDiarizerPrewarm::none
+                                                 : CoremlDiarizerPrewarm::minimal;
+    for (const CoremlFrameRange & r : coreml_diarizer_construction_ranges(prewarm)) ranges.push_back(r);
+    charge.resident = coreml_diarizer_resident_bytes(bundles, ranges);
+    if (charge.resident == 0) return charge;
+    const CoremlFitUnits units = fit_units(resolved.units_or(pcm::ComputeUnits::cpu_and_ane));
+    for (const CoremlDiarizerBundle & b : coreml_diarizer_loaded_bundles(bundles, ranges)) {
+        charge.transient = std::max(charge.transient, coreml_encoder_load_transient_bytes(b.weights_bytes, units));
+    }
+#else
+    (void) gguf_path;
+    (void) ranges;
+    (void) opts;
+#endif
+    return charge;
 }
 
 // Core ML enablement for the projection: resolved from FitOptions::coreml
@@ -317,7 +316,9 @@ std::vector<CoremlFitProgram> coreml_encoder_fit_programs(const ParakeetCtcModel
         CoremlFitProgram p;
         p.weight_file_bytes = bundle_weight_bytes(bundle);
         p.runtime_floor_bytes = runtime_floor;
-        p.io_bytes = io;
+        // A fixed-shape export allocates its declared I/O whatever the input
+        // length; a flexible one is charged the worst window.
+        p.io_bytes = std::max(io, parakeet_coreml_declared_io_bytes(bundle.c_str()));
         p.functions = functions;
         p.units = units;
         programs.push_back(p);
@@ -332,45 +333,60 @@ std::vector<CoremlFitProgram> coreml_encoder_fit_programs(const ParakeetCtcModel
     const std::string & gguf = opts.model_gguf_path;
     if (model.model_variant == "transcribepsy-250m-eu") {
         // The fixed programs load at construction: on the Neural Engine, or on
-        // the CPU when the units exclude it (then only the English one).
-        const bool auxiliaries = coreml_eu_loads_fixed_auxiliaries(loader_units(resolved));
+        // the CPU when the units exclude it (then only the English one). An
+        // owner load (no ggml encoder weights, or PARAKEET_COREML_ONLY) loads
+        // all three whatever the units.
+        const char * units = loader_units(resolved);
+        const bool owner = gguf_encoder_parameters(model) == 0 || std::getenv("PARAKEET_COREML_ONLY") != nullptr;
+        const bool auxiliaries = coreml_eu_loads_fixed_auxiliaries(units);
+        const int fixed_functions = auxiliaries || owner ? 3 : 1;
         const CoremlFitUnits fixed = auxiliaries ? CoremlFitUnits::cpu_and_ane : CoremlFitUnits::cpu_only;
-        bool gate_loaded = false;
-        if (add(coreml_eu_shared_sidecar_path(gguf), floor, auxiliaries ? 3 : 1, fixed)) {
-            gate_loaded = auxiliaries;
-        } else {
-            add(coreml_encoder_sidecar_path(gguf), floor, 1, fixed);
-            if (auxiliaries) {
-                add(coreml_eu_other_sidecar_path(gguf), floor, 1, fixed);
-                gate_loaded = add(coreml_eu_gate_sidecar_path(gguf), 0, 1, fixed);
-            }
+        // A shared bundle that fails its checks falls back to the separate
+        // programs, so with both present the larger set is charged.
+        std::vector<CoremlFitProgram> shared;
+        std::swap(shared, programs);
+        add(coreml_eu_shared_sidecar_path(gguf), floor, fixed_functions, fixed);
+        std::swap(shared, programs);
+        add(coreml_encoder_sidecar_path(gguf), floor, 1, fixed);
+        if (fixed_functions == 3) {
+            add(coreml_eu_other_sidecar_path(gguf), floor, 1, fixed);
+            add(coreml_eu_gate_sidecar_path(gguf), 0, 1, fixed);
         }
-        // On demand, kept until replaced: the flexible CPU pair or one precise
-        // GPU program, whichever is larger; the flexible gate when no fixed
-        // gate loaded.
-        std::vector<CoremlFitProgram> flexible;
-        std::swap(flexible, programs);
+        if (!shared.empty() && coreml_programs_charge(shared).resident >= coreml_programs_charge(programs).resident) {
+            programs = shared;
+        }
+        // On demand, kept until replaced: one main program (a flexible CPU
+        // program replaces the other one and any precise one, and a precise GPU
+        // program replaces the flexible ones), the largest reachable; and the
+        // flexible gate, which the precise streaming path can keep beside the
+        // fixed gate.
+        std::vector<CoremlFitProgram> mains;
+        std::swap(mains, programs);
         add(coreml_eu_flexible_sidecar_path(gguf, false), floor, 1, CoremlFitUnits::cpu_only);
         add(coreml_eu_flexible_sidecar_path(gguf, true), floor, 1, CoremlFitUnits::cpu_only);
-        std::swap(flexible, programs);
-        uint64_t flexible_bytes = 0;
-        for (const CoremlFitProgram & p : flexible) flexible_bytes = sat_add(flexible_bytes, std::max(p.weight_file_bytes, p.runtime_floor_bytes));
-        const uint64_t precise = largest_eu_precise_bytes(gguf);
-        if (precise > 0 && precise > flexible_bytes) {
-            CoremlFitProgram p;
-            p.weight_file_bytes = precise;
-            p.runtime_floor_bytes = floor;
-            p.io_bytes = io;
-            p.units = CoremlFitUnits::cpu_and_gpu;
-            programs.push_back(p);
-        } else {
-            programs.insert(programs.end(), flexible.begin(), flexible.end());
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+        constexpr bool kMobilePrecise = true;
+#else
+        constexpr bool kMobilePrecise = false;
+#endif
+        if (coreml_eu_allows_gpu_precision(units, kMobilePrecise)) {
+            for (int capacity : {1500, 6008}) {
+                for (bool adapters : {false, true}) {
+                    add(coreml_eu_precise_sidecar_path(gguf, adapters, capacity), floor, 1, CoremlFitUnits::cpu_and_gpu);
+                }
+            }
         }
-        if (!gate_loaded) {
-            std::string gate_flexible = coreml_eu_gate_sidecar_path(gguf);
-            gate_flexible.insert(gate_flexible.size() - std::string(".mlmodelc").size(), "-flexible");
-            add(gate_flexible, 0, 1, CoremlFitUnits::cpu_only);
+        std::swap(mains, programs);
+        const CoremlFitProgram * largest = nullptr;
+        for (const CoremlFitProgram & p : mains) {
+            if (largest == nullptr || coreml_programs_charge({p}).resident > coreml_programs_charge({*largest}).resident) {
+                largest = &p;
+            }
         }
+        if (largest != nullptr) programs.push_back(*largest);
+        std::string gate_flexible = coreml_eu_gate_sidecar_path(gguf);
+        gate_flexible.insert(gate_flexible.size() - std::string(".mlmodelc").size(), "-flexible");
+        add(gate_flexible, 0, 1, CoremlFitUnits::cpu_only);
         return programs;
     }
     const std::string encoder = coreml_encoder_sidecar_path(gguf);
@@ -390,14 +406,14 @@ std::vector<CoremlFitProgram> coreml_encoder_fit_programs(const ParakeetCtcModel
     return programs;
 }
 
-// Encoder sidecar envelope for the worst window (0 with no encoder route).
-uint64_t coreml_encoder_fit_bytes(const ParakeetCtcModel & model, const FitOptions & opts,
-                                  bool enabled, long long window_mel, int window_enc,
-                                  bool & prebuilt) {
+// The encoder sidecars' charge for the worst window (zero with no route).
+CoremlCharge coreml_encoder_fit_charge(const ParakeetCtcModel & model, const FitOptions & opts,
+                                       bool enabled, long long window_mel, int window_enc,
+                                       bool & prebuilt) {
     const std::vector<CoremlFitProgram> programs =
         coreml_encoder_fit_programs(model, opts, enabled, window_mel, window_enc);
     prebuilt = !programs.empty();
-    return prebuilt ? coreml_programs_envelope_bytes(programs) : 0;
+    return prebuilt ? coreml_programs_charge(programs) : CoremlCharge{};
 }
 
 std::string coreml_fit_report(const FitResult & r) {
@@ -488,6 +504,14 @@ long long nemotron_workload_mel_frames(const ParakeetCtcModel & model, float aud
     return nemotron_diarization_mel_frames(model, (long long) samples);
 }
 
+// A long-form diarization's passes demand every capacity up to the largest
+// (observed: a 75 s call loads the 1125-frame bundle), so the Core ML charge
+// counts them all; today's charge keeps the block's range.
+std::vector<CoremlFrameRange> long_form_charge_ranges(std::vector<CoremlFrameRange> ranges, bool long_form) {
+    if (long_form) ranges.push_back(CoremlFrameRange{1, std::numeric_limits<int>::max()});
+    return ranges;
+}
+
 void project_nemotron_diarization(const ParakeetCtcModel & model, const GgufLoadMeasure & lm,
                                   const FitOptions & opts, FitResult & r) {
     const long long total_mel = nemotron_workload_mel_frames(model, opts.audio_seconds);
@@ -512,12 +536,14 @@ void project_nemotron_diarization(const ParakeetCtcModel & model, const GgufLoad
     r.device.total_bytes = sat_add(r.device.weights_bytes, r.device.encoder_compute_bytes);
     r.host_bytes = nemotron_diarization_host_bytes(
         model, opts, total_mel, offline_frames, largest_host_input_bytes(graphs));
-    r.coreml_bytes = coreml_diarizer_bytes(opts.model_gguf_path,
-                                           nemotron_coreml_ranges(graphs, long_form), opts);
+    const std::vector<CoremlFrameRange> ranges = nemotron_coreml_ranges(graphs, long_form);
+    r.coreml_bytes = legacy_diarizer_bytes(opts.model_gguf_path, ranges, opts);
     const uint64_t required = apply_fit_verdict(r, opts.margin_bytes);
     std::string disabled_reason;
     const bool enabled = coreml_fit_enabled(opts, disabled_reason);
-    apply_coreml_verdicts(r, required, enabled, disabled_reason, /*encoder_prebuilt=*/false, 0);
+    apply_coreml_verdicts(r, required, enabled, disabled_reason,
+                          coreml_diarizer_charge(opts.model_gguf_path, long_form_charge_ranges(ranges, long_form), opts),
+                          /*encoder_prebuilt=*/false, CoremlCharge{});
     r.report = model_device_report(r) + nemotron_diarization_report(graphs, long_form) +
                device_projection_report(r, opts.margin_bytes, required,
                                         "every diarization graph shares one buffer") +
@@ -842,7 +868,7 @@ FitResult fit_params(const FitOptions & opts) {
         r.host_bytes = host;
     }
     if (model.model_type == ParakeetModelType::SORTFORMER) {
-        r.coreml_bytes = coreml_diarizer_bytes(opts.model_gguf_path,
+        r.coreml_bytes = legacy_diarizer_bytes(opts.model_gguf_path,
                                                {CoremlFrameRange{total_enc, total_enc}}, opts);
     }
 
@@ -859,9 +885,13 @@ FitResult fit_params(const FitOptions & opts) {
         std::string disabled_reason;
         const bool enabled = coreml_fit_enabled(opts, disabled_reason);
         bool encoder_prebuilt = false;
-        const uint64_t envelope = coreml_encoder_fit_bytes(model, opts, enabled, window_mel,
-                                                           window_enc, encoder_prebuilt);
-        apply_coreml_verdicts(r, required, enabled, disabled_reason, encoder_prebuilt, envelope);
+        const CoremlCharge encoder = coreml_encoder_fit_charge(model, opts, enabled, window_mel,
+                                                               window_enc, encoder_prebuilt);
+        const CoremlCharge diarizers =
+            model.model_type == ParakeetModelType::SORTFORMER
+                ? coreml_diarizer_charge(opts.model_gguf_path, {CoremlFrameRange{total_enc, total_enc}}, opts)
+                : CoremlCharge{};
+        apply_coreml_verdicts(r, required, enabled, disabled_reason, diarizers, encoder_prebuilt, encoder);
     }
 
     // ── Report ─────────────────────────────────────────────────────────────

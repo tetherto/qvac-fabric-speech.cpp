@@ -823,6 +823,57 @@ int parakeet_coreml_encoder_export_kind(const char * path_mlmodelc) {
     }
 }
 
+namespace {
+
+// Bytes of one schema entry: "shape" like "[1, 128, 1, 2001]" times its
+// "dataType" width; 0 when either is missing or not fixed.
+uint64_t schema_entry_bytes(id entry) {
+    if (![entry isKindOfClass:[NSDictionary class]]) return 0;
+    id shape = ((NSDictionary *) entry)[@"shape"];
+    id type = ((NSDictionary *) entry)[@"dataType"];
+    if (![shape isKindOfClass:[NSString class]] || ![type isKindOfClass:[NSString class]]) return 0;
+    uint64_t width = 0;
+    if ([type isEqualToString:@"Float16"]) width = 2;
+    else if ([type isEqualToString:@"Float32"] || [type isEqualToString:@"Int32"]) width = 4;
+    else if ([type isEqualToString:@"Float64"]) width = 8;
+    if (width == 0) return 0;
+    NSString * body = [[(NSString *) shape stringByReplacingOccurrencesOfString:@"[" withString:@""]
+        stringByReplacingOccurrencesOfString:@"]" withString:@""];
+    uint64_t elements = 1;
+    for (NSString * part in [body componentsSeparatedByString:@","]) {
+        NSString * dim = [part stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        const long long n = dim.longLongValue;
+        if (n <= 0) return 0;  // flexible or malformed
+        elements *= (uint64_t) n;
+    }
+    return elements * width;
+}
+
+}  // namespace
+
+uint64_t parakeet_coreml_declared_io_bytes(const char * path_mlmodelc) {
+    if (path_mlmodelc == nullptr) return 0;
+    @autoreleasepool {
+        NSString * path = [[NSString alloc] initWithUTF8String:path_mlmodelc];
+        NSData * data = path ? [NSData dataWithContentsOfFile:[path stringByAppendingPathComponent:@"metadata.json"]] : nil;
+        if (data == nil) return 0;
+        id root = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+        id description = [root isKindOfClass:[NSArray class]] && [(NSArray *) root count] > 0 ? ((NSArray *) root)[0] : root;
+        if (![description isKindOfClass:[NSDictionary class]]) return 0;
+        uint64_t total = 0;
+        for (NSString * key in @[@"inputSchema", @"outputSchema"]) {
+            id schema = ((NSDictionary *) description)[key];
+            if (![schema isKindOfClass:[NSArray class]] || [(NSArray *) schema count] == 0) return 0;
+            for (id entry in (NSArray *) schema) {
+                const uint64_t bytes = schema_entry_bytes(entry);
+                if (bytes == 0) return 0;
+                total += bytes;
+            }
+        }
+        return total;
+    }
+}
+
 bool parakeet_coreml_encoder_prefers_ane(const char * path_mlmodelc) {
     if (path_mlmodelc == nullptr) return false;
     @autoreleasepool {

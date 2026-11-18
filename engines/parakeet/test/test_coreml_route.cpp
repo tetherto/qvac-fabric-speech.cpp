@@ -971,8 +971,14 @@ void case_fit_envelope() {
         r.device_free_bytes = 15000;  // ggml-only (10000) fits; + Core ML (9080) does not
         r.device_shares_host_memory = true;
         r.coreml_bytes = 50;
+        CoremlFitProgram program;
+        program.weight_file_bytes = in.weight_file_bytes;
+        program.runtime_floor_bytes = in.encoder_parameters * 2;
+        program.io_bytes = in.io_bytes;
+        program.units = in.units;
         apply_coreml_verdicts(r, /*required=*/10050, resolved.enabled(), resolved.disabled_reason,
-                              route.prebuilt, route.prebuilt ? coreml_encoder_envelope_bytes(in) : 0);
+                              CoremlCharge{50, 0}, route.prebuilt,
+                              route.prebuilt ? coreml_programs_charge({program}) : CoremlCharge{});
         return r;
     };
     auto same = [](const FitResult & a, const FitResult & b) {

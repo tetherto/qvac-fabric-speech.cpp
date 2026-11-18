@@ -351,48 +351,107 @@ void case_eu_labels(const std::string & gguf, const std::string & wav) {
     }
 }
 
-// A bundle fit can size: weights/weight.bin of `bytes` (sparse), no model.
-void write_sized_bundle(const fs::path & bundle, uint64_t bytes) {
+// A bundle fit can size: weights/weight.bin of `bytes` (sparse) and, when
+// given, a metadata.json declaring one fixed Float32 input and output of
+// `io_floats` elements each. Never loaded.
+void write_sized_bundle(const fs::path & bundle, uint64_t bytes, uint64_t io_floats = 0) {
     fs::create_directories(bundle / "weights");
     std::ofstream(bundle / "weights" / "weight.bin").close();
     fs::resize_file(bundle / "weights" / "weight.bin", bytes);
+    if (io_floats > 0) {
+        const std::string shape = "[1, " + std::to_string(io_floats) + "]";
+        std::ofstream(bundle / "metadata.json")
+            << R"([{"inputSchema":[{"name":"x","shape":")" << shape << R"(","dataType":"Float32"}],)"
+            << R"("outputSchema":[{"name":"y","shape":")" << shape << R"(","dataType":"Float32"}]}])";
+    }
 }
 
-void check_layout(const char * name, const fs::path & staged, uint64_t bundle_bytes) {
+uint64_t with_margin(uint64_t x) { return x + x / 4; }
+
+parakeet::FitResult fit_at(const fs::path & staged, float seconds) {
     parakeet::FitOptions fo;
     fo.model_gguf_path = staged.string();
     fo.n_gpu_layers = 99;
-    fo.audio_seconds = 60.0f;
-    const parakeet::FitResult r = parakeet::fit_params(fo);
-    std::printf("       %s: status=%s route=%s ggml=%llu coreml=%llu\n", name, parakeet::fit_status_name(r.status),
-                r.coreml.encoder_route.c_str(), (unsigned long long) r.ggml_required_bytes,
-                (unsigned long long) r.coreml.bytes);
-    expect(r.status != parakeet::FitStatus::Error && r.coreml.encoder_route == "prebuilt" &&
-               r.coreml.bytes >= bundle_bytes,
-           (std::string("fit-layouts: ") + name + " charges the Core ML programs its loader opens").c_str());
-    // A budget between the ggml-only and the inclusive totals: ggml fits, Core ML does not.
-    const uint64_t budget = r.ggml_required_bytes + r.coreml.bytes / 2;
-    expect(r.ggml_required_bytes <= budget && r.ggml_required_bytes + r.coreml.bytes > budget,
-           (std::string("fit-layouts: ") + name + " separates the two verdicts at a budget between them").c_str());
+    fo.audio_seconds = seconds;
+    return parakeet::fit_params(fo);
+}
+
+// Construction at the inclusive boundary: one byte under it the engine
+// degrades (its sidecar slots are disabled), at it it does not.
+void check_boundary(const char * name, const fs::path & staged, const parakeet::FitResult & r) {
+    auto encoder_state = [&](uint64_t budget) {
+        CoremlOptions coreml;
+        coreml.memory_budget_bytes = (int64_t) budget;
+        coreml.prewarm = CoremlOptions::Prewarm::none;
+        parakeet::EngineOptions o = engine_options(staged.string(), coreml);
+        o.coreml_fit = parakeet::CoremlFitTotals{r.ggml_required_bytes, r.coreml.bytes};
+        parakeet::Engine engine(o);
+        return engine.coreml_status_json();
+    };
+    const uint64_t total = r.ggml_required_bytes + r.coreml.bytes;
+    expect(has(encoder_state(total - 1), "\"disabled\"") && !has(encoder_state(total), "\"disabled\""),
+           (std::string("fit-layouts: ") + name + " degrades construction exactly below its inclusive total").c_str());
 }
 
 void case_fit_layouts(const std::string & eu_gguf, const std::string & sortformer_gguf) {
-    constexpr uint64_t kBundle = 64ull << 20;
+    constexpr uint64_t kMiB = 1ull << 20;
     {
+        // TranscribePsy EU with only the shared bundle: three fixed functions
+        // (default units reach the Neural Engine), each charged its weights and
+        // its declared I/O, plus one Neural Engine load transient.
+        constexpr uint64_t kWeights = 1024 * kMiB;  // above the GGUF's fp16 encoder floor
+        constexpr uint64_t kIoFloats = 8 * 1024 * 1024;
         const fs::path dir = fresh_dir("fit-eu-shared");
         const fs::path staged = dir / "transcribepsy-250m-eu.gguf";
         fs::create_symlink(fs::canonical(eu_gguf), staged);
-        write_sized_bundle(dir / "transcribepsy-250m-eu-encoder-shared.mlmodelc", kBundle);
-        check_layout("EU shared bundle only", staged, kBundle);
+        write_sized_bundle(dir / "transcribepsy-250m-eu-encoder-shared.mlmodelc", kWeights, kIoFloats);
+        const uint64_t io = 2 * kIoFloats * 4;
+        const uint64_t expected = with_margin(3 * (kWeights + 2 * io)) + with_margin(kWeights / 4);
+        const parakeet::FitResult r = fit_at(staged, 60.0f);
+        const parakeet::FitResult short_clip = fit_at(staged, 5.0f);
+        std::printf("       EU shared: coreml=%llu expected=%llu short=%llu\n", (unsigned long long) r.coreml.bytes,
+                    (unsigned long long) expected, (unsigned long long) short_clip.coreml.bytes);
+        expect(r.coreml.encoder_route == "prebuilt" && r.coreml.bytes == expected,
+               "fit-layouts: EU shared bundle only charges three functions' weights and declared I/O plus one transient");
+        expect(short_clip.coreml.bytes == expected, "fit-layouts: a shorter clip does not shrink the fixed programs' charge");
         std::error_code ec;
         fs::remove_all(dir, ec);
     }
     {
+        // Sortformer v2.1 with only the bypass bundle and two diarizer
+        // capacities below the input: construction loads the smallest, the
+        // input itself runs on ggml. Bypass (all units: 1.0x transient) and
+        // diarizer (Neural Engine: 0.25x) are resident together; one transient.
+        constexpr uint64_t kBypass = 64 * kMiB, kSmall = 32 * kMiB, kLarge = 48 * kMiB;
+        constexpr uint64_t kIoFloats = 4 * 1024 * 1024;
         const fs::path dir = fresh_dir("fit-sortformer-bypass");
         const fs::path staged = dir / "sortformer.gguf";
         fs::create_symlink(fs::canonical(sortformer_gguf), staged);
-        write_sized_bundle(dir / "sortformer-encoder-bypass-pre-encode.mlmodelc", kBundle);
-        check_layout("Sortformer v2.1 bypass bundle only", staged, kBundle);
+        write_sized_bundle(dir / "sortformer-encoder-bypass-pre-encode.mlmodelc", kBypass, kIoFloats);
+        write_sized_bundle(dir / "sortformer-diarizer-100.mlmodelc", kSmall);
+        write_sized_bundle(dir / "sortformer-diarizer-200.mlmodelc", kLarge);
+        const uint64_t bypass_resident = with_margin(kBypass + 2 * (2 * kIoFloats * 4));
+        const uint64_t bypass_transient = with_margin(kBypass);
+        const uint64_t diarizer_resident = 2 * kSmall + 160 * kMiB;  // two weight copies + runtime, measured
+        const uint64_t diarizer_transient = kSmall / 4;
+        const uint64_t expected =
+            bypass_resident + diarizer_resident + std::max(bypass_transient, diarizer_transient);
+        const parakeet::FitResult r = fit_at(staged, 60.0f);
+        std::printf("       Sortformer bypass + diarizers: coreml=%llu expected=%llu legacy=%llu\n",
+                    (unsigned long long) r.coreml.bytes, (unsigned long long) expected,
+                    (unsigned long long) r.coreml_bytes);
+        expect(r.coreml.encoder_route == "prebuilt" && r.coreml.bytes == expected,
+               "fit-layouts: Sortformer bypass and construction diarizer resident together with one transient");
+        expect(r.coreml_bytes == 0, "fit-layouts: today's diarizer charge stays the workload's (none covers 60 s)");
+        check_boundary("Sortformer", staged, r);
+        parakeet::FitOptions off;
+        off.model_gguf_path = staged.string();
+        off.n_gpu_layers = 99;
+        off.audio_seconds = 60.0f;
+        off.coreml.use = CoremlOptions::Use::off;
+        const parakeet::FitResult disabled = parakeet::fit_params(off);
+        expect(disabled.coreml.bytes == 0 && disabled.coreml_bytes == 0,
+               "fit-layouts: use = off charges no sidecar");
         std::error_code ec;
         fs::remove_all(dir, ec);
     }

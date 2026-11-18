@@ -58,9 +58,15 @@ parakeet::FitResult project(const std::string & gguf, float seconds, uint64_t ma
     return parakeet::fit_params(opts);
 }
 
-// The charge of the bundles resident together: their resident bytes plus
-// the largest one's load transient (a quarter of its weights on the default
-// CPU and Neural Engine units).
+// Today's charge (FitResult::coreml_bytes, part of the top-level verdict):
+// the bundles the workload can load, resident.
+uint64_t legacy(const std::vector<parakeet::CoremlDiarizerBundle> & bundles, int frames = kAllFrames) {
+    return parakeet::coreml_diarizer_resident_bytes(bundles, {{1, frames}});
+}
+
+// The Core ML-inclusive charge (FitResult::coreml.bytes) of bundles resident
+// together: their resident bytes plus the largest one's load transient (a
+// quarter of its weights on the default CPU and Neural Engine units).
 uint64_t charge(const std::vector<parakeet::CoremlDiarizerBundle> & bundles,
                 int frames = kAllFrames) {
     uint64_t transient = 0;
@@ -116,20 +122,34 @@ void check_cli_json(const std::string & gguf, uint64_t expected) {
 void check_workloads(const std::string & gguf,
                      const std::vector<parakeet::CoremlDiarizerBundle> & bundles) {
     const parakeet::FitResult offline = project(gguf, kShortSeconds, kDefaultMargin);
-    check(offline.coreml_bytes == charge({bundles.front()}), "short input charges the smallest bundle");
+    check(offline.coreml_bytes == legacy({bundles.front()}), "short input: today's charge is the smallest bundle");
+    check(offline.coreml.bytes == charge({bundles.front()}),
+          "short input: the Core ML charge is the smallest bundle and its transient");
     check(reports_sidecars(offline), "report lists the sidecar charge");
     check_cli_json(gguf, offline.coreml_bytes);
     const parakeet::FitResult long_input = project(gguf, kLongSeconds, kDefaultMargin);
     const bool nemotron = long_input.model_type == kNemotronType;
-    check(long_input.coreml_bytes == (nemotron ? charge(bundles, kLongFormBlockFrames) : charge({bundles.front()})),
-          nemotron ? "long-form input charges every bundle up to its block"
-                   : "input above every bundle charges only the construction bundle");
-    // prewarm all loads every capacity at construction, whatever the input.
+    check(long_input.coreml_bytes == (nemotron ? legacy(bundles, kLongFormBlockFrames) : 0),
+          nemotron ? "long-form input: today's charge is every bundle up to its block"
+                   : "input above every bundle: today's charge is none");
+    check(long_input.coreml.bytes == (nemotron ? charge(bundles) : charge({bundles.front()})),
+          nemotron ? "long-form input: the Core ML charge is every bundle (its passes reach the largest)"
+                   : "input above every bundle: the Core ML charge is the construction bundle");
+    // prewarm all loads every capacity at construction, whatever the input;
+    // today's charge does not change with prewarm.
     const parakeet::FitResult all = project(gguf, kShortSeconds, kDefaultMargin, parakeet::CoremlOptions::Prewarm::all);
-    check(all.coreml_bytes == charge(bundles), "prewarm all charges every bundle for a short input");
+    check(all.coreml.bytes == charge(bundles) && all.coreml_bytes == offline.coreml_bytes,
+          "prewarm all: the Core ML charge is every bundle for a short input; today's charge is unchanged");
     const parakeet::FitResult none = project(gguf, kLongSeconds, kDefaultMargin, parakeet::CoremlOptions::Prewarm::none);
-    check(none.coreml_bytes == (nemotron ? charge(bundles, kLongFormBlockFrames) : 0),
-          "prewarm none charges only what the workload loads");
+    check(none.coreml.bytes == (nemotron ? charge(bundles) : 0),
+          "prewarm none: the Core ML charge is only what the workload loads");
+    parakeet::FitOptions off;
+    off.model_gguf_path = gguf;
+    off.audio_seconds = kShortSeconds;
+    off.n_gpu_layers = kGpuLayers;
+    off.coreml.use = parakeet::CoremlOptions::Use::off;
+    const parakeet::FitResult disabled = parakeet::fit_params(off);
+    check(disabled.coreml_bytes == 0 && disabled.coreml.bytes == 0, "use = off charges no diarizer sidecar");
 }
 
 void check_verdict(const std::string & gguf) {
