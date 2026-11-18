@@ -113,6 +113,17 @@ route `generate`:
    `generation::end_load` after: a generated bundle loads under the shared
    lease of its cache entry, and `used/<key>` is touched after a successful
    load. Both do nothing for a prebuilt bundle.
+5. Each unit acquires its slot once with `Demand::now` and one deadline: the
+   time the unit would take on ggml on this host. With `wait = none` the
+   slot waits only on a non-stale warm hint (`<cache>/qvac-coreml-v1/hints`),
+   and only while 1.5 x the hinted warm load fits before the deadline. A wait
+   that expires while the slot's own load runs past 1.5 x its warm time marks
+   the hint stale for 24 hours; a stale hint is never waited on. The next load
+   that started on the stale hint and finishes within 1.5 x the hinted warm
+   time ends the cooldown and records its time as warm, since the plan is
+   evidently cached again. An engine that reloads at every unit (ACE-Step's
+   low-memory mode) would otherwise not wait for a day. A `stale_until`
+   written while that load ran is kept.
 
 Fit charges a generated stage with `generation::envelope_bytes(memory,
 units)`: resident (runtime weights, twice the function I/O, state,
