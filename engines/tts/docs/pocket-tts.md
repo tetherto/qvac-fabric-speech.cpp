@@ -527,21 +527,27 @@ failed footprint sample, no compiler reading while Mimi loads) or that never
 sampled a phase fails. Each constant is 1.25 times the largest value over
 every run on every validated host (`template.json` `memory`), rounded up to
 1 MiB, so a run that sets a new maximum fails until the constants are
-recomputed. On an Apple M2 (macOS 27.2.1, 25 runs):
+recomputed. Validated on an Apple M2 (macOS 27.2.1, 27 runs) and the CI
+runner's Apple M4 Max (macOS 26.7.2, 3 runs), MiB:
 
-| Phase | Step (`cpu_and_gpu`) | Mimi (`cpu_and_ane`) |
-|---|---|---|
-| prepare (generate + compile) | 57.8–79.7 MiB, charged 100 | 21.1–62.5 MiB, charged 79 |
-| load + warm-up | 30.3–95.7 MiB, charged 120 | 0.8–49.9 MiB, charged 63 |
-| steady, both running | 48.0–103.3 MiB, charged 212.9 (both resident parts) | |
-| whole run | 140.3–152.2 MiB, envelope 332.9 | |
-| ANECompilerService while Mimi loads | | absolute 83.3–400.2 MiB (growth 19.8–28.0 MiB over a dirty 61.7–380.4 MiB baseline); reserve 501 MiB (1.25 x 400.2) |
+| Phase | M2 | M4 Max | Charged |
+|---|---|---|---|
+| step prepare (generate + compile) | 57.8–80.5 | 67.8–82.5 | 104 |
+| step load + warm-up (`cpu_and_gpu`) | 30.3–95.7 | 207.0–250.8 | 314 |
+| Mimi prepare | 21.1–62.5 | 8.1–45.3 | 79 |
+| Mimi load + warm-up (`cpu_and_ane`) | 0.8–49.9 | 39.1–50.4 | 64 |
+| steady, both running | 48.0–103.3 | 256.6–274.9 | 344 (both resident parts, with the step's `workspace_bytes` 131.1) |
+| whole run | 139.8–152.2 | 313.2–320.8 | envelope 658.0 |
+| ANECompilerService while Mimi loads (absolute) | 83.3–400.2 | 431.2–434.1 | reserve 543 |
 
-The compiler's absolute size includes whatever else compiled for the Neural
-Engine on the same Mac (no run found the service clean), so the reserve is
-conservative; it only gates when a cold Neural Engine load may start, and is
-not part of fit. The CI macOS runner (M4 Max) runs the same schedule three
-times on every pull request (`tts-ci.yml`).
+On the M4 Max the step on `cpu_and_gpu` holds GPU working memory the M2 does
+not, so every device is charged that larger footprint (the envelope is the
+largest placement's, not each chip's). The compiler's absolute size includes
+whatever else compiled for the Neural Engine on the same Mac (no run found
+the service clean; its growth while Mimi loaded was 1.2–41.6), so the reserve
+is conservative; it only gates when a cold Neural Engine load may start, and
+is not part of fit. The CI macOS runner runs the schedule three times on
+every pull request (`tts-ci.yml`).
 
 Preflight is a memory projection, not a
 validation of tensor contents, checkpoint encoder capability, or speech quality.

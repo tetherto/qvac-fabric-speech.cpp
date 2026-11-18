@@ -285,9 +285,9 @@
     "runtime_weight_bytes": 20621824,
     "workspace_bytes": 0,
     "compile_peak_bytes": 59768832,
-    "ane_compile_reserve_bytes": 525336576,
+    "ane_compile_reserve_bytes": 569376768,
     "load_peak_bytes": {
-      "cpu_and_ane": 66060288,
+      "cpu_and_ane": 67108864,
       "all": null,
       "cpu_and_gpu": null,
       "cpu_only": null
@@ -299,13 +299,18 @@
         "units": "cpu_and_ane",
         "os": "27.2.1",
         "chip": "M2"
+      },
+      {
+        "units": "cpu_and_ane",
+        "os": "26.7.2",
+        "chip": "M4 Max"
       }
     ],
     "measured": {
       "margin": 1.25,
-      "runs": 25,
+      "runs": 30,
       "resident_bytes": 28926848,
-      "basis": "Each constant is 1.25 x the largest value measured over every overlapped generated-schedule run on the validated_for hosts (25 run reports: 25 on an Apple M2, macOS 27.2.1), rounded up to 1 MiB, so the envelope's own margin is 1.0. The schedule (test-pocket-coreml --generated BUNDLE --memory-schedule DIR) generates, compiles, loads and warms both Pocket sidecars in the background (one Core ML job at a time) while ggml FlowLM and Mimi keep working: the prepare charge (generation_peak_bytes + 8 MiB + compile_peak_bytes) covers this stage's prepare over the footprint just before it began, and load_peak_bytes its load and warm-up over the footprint just before the load. The two templates' resident parts (weights, 2 x I/O and the step's KV state, workspace 0) together cover 1.25 x the largest steady state with both sidecars running, over the footprint just before the first load: the step's weights on the GPU and the decoder's on the Neural Engine stay below their weight.bin sizes in this process. ane_compile_reserve_bytes is 1.25 x ANECompilerService's largest absolute size while the decoder loaded on any host: no run could start the service clean (it runs as root under aned and does not exit when idle), so its growth over a service that already held memory (at most 28.0 MiB) understates a cold compile; the absolute size, which includes other processes' compiles on the same Mac, is the conservative basis."
+      "basis": "Each constant is 1.25 x the largest value measured over every overlapped generated-schedule run on the validated_for hosts (30 run reports: 27 on an Apple M2, macOS 27.2.1; 3 on the CI runner's Apple M4 Max, macOS 26.7.2), rounded up to 1 MiB, so the envelope's own margin is 1.0. The schedule (test-pocket-coreml --generated BUNDLE --memory-schedule DIR) generates, compiles, loads and warms both Pocket sidecars in the background (one Core ML job at a time) while ggml FlowLM and Mimi keep working: the prepare charge (generation_peak_bytes + 8 MiB + compile_peak_bytes) covers this stage's prepare over the footprint just before it began, and load_peak_bytes its load and warm-up over the footprint just before the load. The two templates' resident parts (weights, 2 x I/O, the step's KV state and the step's workspace_bytes) together cover 1.25 x the largest steady state with both sidecars running, over the footprint just before the first load (274.9 MiB, M4 Max): on the M4 Max the step on cpu_and_gpu holds GPU working memory the M2 does not (steady 2.6 x the M2's largest, 103.3 MiB), which the step's workspace_bytes carries; Mimi's workspace is 0. ane_compile_reserve_bytes is 1.25 x ANECompilerService's largest absolute size while the decoder loaded on any host: no run could start the service clean (it runs as root under aned and does not exit when idle), so its growth over a service that already held memory (at most 41.6 MiB) understates a cold compile; the absolute size, which includes other processes' compiles on the same Mac, is the conservative basis."
     }
   },
   "prefer_ggml_on": [],
