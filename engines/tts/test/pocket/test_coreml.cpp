@@ -56,6 +56,7 @@
 #include <thread>
 
 #if defined(__APPLE__)
+#include <sys/clonefile.h>
 #include <sys/sysctl.h>
 #endif
 #ifndef _WIN32
@@ -716,11 +717,62 @@ int stage_phase(const std::string & state) {
     return 0;
 }
 
+// The GGUF is replaced, or removed, after the ggml weights were loaded and
+// before the sidecars are made: FlowLM is loaded through a symlink, which is
+// then pointed at a clone of the file (same bytes, another inode), and Mimi
+// through a clone that is then deleted. Generation must not follow either
+// path: both stages fail with source_changed, nothing is generated, and the
+// construction does not throw.
+void source_changed_gate(const EngineOptions & bundle) {
+    std::puts("[source] replaced and removed GGUFs");
+    const fs::path dir = fs::temp_directory_path() / ("pocket-source-changed-" + test_process_tag());
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir / "cache");
+    const fs::path link = dir / "flow-lm.gguf", clone = dir / "flow-lm-clone.gguf", mimi_copy = dir / "mimi.gguf";
+    fs::create_symlink(fs::absolute(bundle.flow_lm_path), link);
+    require(::clonefile(fs::absolute(bundle.mimi_path).c_str(), mimi_copy.c_str(), 0) == 0, "clone of mimi.gguf");
+    EngineOptions opts = bundle;
+    opts.flow_lm_path = link.string();
+    opts.mimi_path = mimi_copy.string();
+    opts.coreml.cache_dir = (dir / "cache").string();
+    opts.coreml.wait = CoremlOptions::Wait::construct;
+    auto co = pd::coreml_engine_options(opts);
+    pd::FlowLM lm(opts.flow_lm_path, 2048, 4, nullptr,
+                  [&](int fd, const std::string & p) { co.step_source = pd::coreml_loaded_source(fd, p); });
+    pd::Mimi mimi(opts.mimi_path, 4, nullptr,
+                  [&](int fd, const std::string & p) { co.decoder_source = pd::coreml_loaded_source(fd, p); });
+    require(co.step_source && co.decoder_source, "both loads record the file they read");
+    require(::clonefile(fs::absolute(bundle.flow_lm_path).c_str(), clone.c_str(), 0) == 0, "clone of flow-lm.gguf");
+    fs::remove(link);
+    fs::create_symlink(clone, link);
+    fs::remove(mimi_copy);
+    std::unique_ptr<pd::CoremlStages> stages;
+    try {
+        stages = pd::CoremlStages::create(co, lm.config(), lm.source_hash(), 64, false);
+    } catch (const std::exception & e) {
+        require(false, std::string("construction after the replacement throws: ") + e.what());
+    }
+    require(stages != nullptr, "stages are made");
+    const Json st = Json::parse(stages->status_json());
+    std::printf("[source] step %s, mimi %s\n", stage_status(st, "step").dump().substr(0, 160).c_str(),
+                stage_status(st, "mimi").dump().substr(0, 160).c_str());
+    require(!stages->step_ready() && !stages->decoder_ready() &&
+                stage_status(st, "step").dump().find("source_changed") != std::string::npos &&
+                stage_status(st, "mimi").dump().find("source_changed") != std::string::npos,
+            "a replaced or removed GGUF is not generated from: " + st.dump());
+    require(!fs::exists(dir / "cache" / "qvac-coreml-v1" / "artifacts") ||
+                fs::is_empty(dir / "cache" / "qvac-coreml-v1" / "artifacts"),
+            "nothing is published");
+    stages.reset();
+    fs::remove_all(dir, ec);
+}
+
 void memory_schedule(const EngineOptions & bundle, const std::string & cache_dir) {
     std::printf("[memory] schedule (cache %s)\n", cache_dir.c_str());
     EngineOptions opts = bundle;
     opts.coreml.cache_dir = cache_dir;
-    const auto co = pd::coreml_engine_options(opts);
+    auto co = pd::coreml_engine_options(opts);
     const auto step_route = pd::coreml_plan_route(pd::CoremlStage::step, co);
     const auto decoder_route = pd::coreml_plan_route(pd::CoremlStage::decoder, co);
     require(step_route.route == "generate" && decoder_route.route == "generate",
@@ -730,8 +782,10 @@ void memory_schedule(const EngineOptions & bundle, const std::string & cache_dir
     // loaded and their arenas warmed before the baseline, then the sidecars
     // are generated, compiled, loaded and warmed in the background (prewarm
     // predicted requests both at once) while ggml keeps working.
-    pd::FlowLM lm(opts.flow_lm_path, 2048, 4);
-    pd::Mimi mimi(opts.mimi_path, 4);
+    pd::FlowLM lm(opts.flow_lm_path, 2048, 4, nullptr,
+                  [&](int fd, const std::string & p) { co.step_source = pd::coreml_loaded_source(fd, p); });
+    pd::Mimi mimi(opts.mimi_path, 4, nullptr,
+                  [&](int fd, const std::string & p) { co.decoder_source = pd::coreml_loaded_source(fd, p); });
     const auto voice = lm.read_voice(opts.voice_path);
     const auto tokens = pd::Frontend(opts.frontend_path).encode("The quick brown fox jumps over the lazy dog.");
     constexpr int FRAMES = 16;
@@ -1018,6 +1072,7 @@ int generated_fixture(const std::string & bundle, const std::string & cache_dir,
     // gates, on the generated bundles).
     check_stage_parity(plain, step_path);
     check_decoder_parity(plain, decoder_path);
+    source_changed_gate(plain);
 
     // Fit is the same with a populated cache.
     const auto fit_after = tts_cpp::pocket::fit_params(fit);

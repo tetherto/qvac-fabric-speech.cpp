@@ -6,6 +6,7 @@
 #include "backend_util.h"
 #include "pocket/backend.h"
 #include "gguf_stream.h"
+#include "pocket/gguf_file.h"
 #include "ggml-alloc.h"
 
 #include <algorithm>
@@ -134,12 +135,16 @@ struct FlowLM::Impl {
     }
 
     void load(const std::string & path, int context, int threads, MemoryMeasure * price = nullptr,
-              ggml_backend_dev_t device = nullptr) {
+              ggml_backend_dev_t device = nullptr, const LoadedFileRecorder & on_open = {}) {
         measure = price; n_threads = threads;
         if (context < 1 || context > 8192 || threads < 1 || threads > 1024)
             fail("context must be 1..8192 and threads 1..1024");
         capacity = context;
-        file = gguf_init_from_file(path.c_str(), {true, &metadata});
+        // A real load reads the metadata and every weight through one
+        // descriptor; a measure reads metadata only, by path.
+        const GgufFile source(price ? std::string() : path);
+        if (on_open && source.fd >= 0) on_open(source.fd, path);
+        file = source.init(path, {true, &metadata});
         if (!file || !metadata) fail("cannot read GGUF: " + path);
         text_is("general.architecture", "pocket-tts-flow-lm");
         if (integer("schema_version", 1) != 1) fail("unsupported schema version");
@@ -170,10 +175,9 @@ struct FlowLM::Impl {
         (void)price_hexagon_context(backend, weights);
         weights_buffer = ggml_backend_alloc_ctx_tensors(weights, backend);
         if (!weights_buffer) fail("weight allocation failed");
-        ::tts_cpp::detail::gguf_stream_reader reader(file, path);
+        const auto reader = source.stream(file, path);
         for (auto * t = ggml_get_first_tensor(weights); t; t = ggml_get_next_tensor(weights, t)) {
-            auto * source = ggml_get_tensor(metadata, ggml_get_name(t));
-            load_float_weight(reader, source, t);
+            load_float_weight(*reader, ggml_get_tensor(metadata, ggml_get_name(t)), t);
         }
         const auto scales = pocket_read(tensor("emb_std"));
         for (float x : scales) if (!std::isfinite(x) || x <= 0) fail("invalid latent normalization");
@@ -349,8 +353,9 @@ struct FlowLM::Impl {
     }
 };
 
-FlowLM::FlowLM(const std::string & path, int context, int threads, ggml_backend_dev_t device) : impl_(std::make_unique<Impl>()) {
-    impl_->load(path, context, threads, nullptr, device);
+FlowLM::FlowLM(const std::string & path, int context, int threads, ggml_backend_dev_t device,
+               const LoadedFileRecorder & on_open) : impl_(std::make_unique<Impl>()) {
+    impl_->load(path, context, threads, nullptr, device, on_open);
 }
 FlowMemory FlowLM::measure(const std::string & path, int context, int prefill_frames, int threads, ggml_backend_dev_t device) {
     if (prefill_frames < 1 || prefill_frames > context) fail("invalid prefill shape");

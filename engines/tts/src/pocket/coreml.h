@@ -225,12 +225,23 @@ struct CoremlRoute {
 // coreml_compute_units / coreml_strict as fallbacks for its unset fields.
 CoremlOptions coreml_stage_options(const struct CoremlEngineOptions & opts, CoremlStage stage);
 
+// The identity of the file a stage's ggml load read its GGUF from (fstat of
+// the load's one descriptor). Generation asks for that file: prepare fails
+// with source_changed, generating nothing, when the path names another file.
+struct CoremlLoadedSource;
+// From the descriptor of a LoadedFileRecorder call; null in builds without
+// TTS_CPP_COREML.
+std::shared_ptr<const CoremlLoadedSource> coreml_loaded_source(int fd, const std::string & path);
+
 // What the Engine passes: the options and paths of both stages.
 struct CoremlEngineOptions {
     std::string flow_lm_path, mimi_path;
     CoremlOptions coreml;
     std::string step_units, decoder_units, legacy_units;
     std::optional<bool> legacy_strict;
+    // The files FlowLM and Mimi were loaded from. A generated stage without
+    // one (or whose path no longer names it) fails with source_changed.
+    std::shared_ptr<const CoremlLoadedSource> step_source, decoder_source;
 };
 
 // From the Engine's options (EngineOptions::coreml, coreml_step_units,

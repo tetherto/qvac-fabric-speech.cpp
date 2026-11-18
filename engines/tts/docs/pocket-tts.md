@@ -264,6 +264,10 @@ step's folded time embedding is computed in C++
 exporter's: byte for byte except one folded bias value one fp16 ulp away on
 the English 2026-04 checkpoint. A generated artifact is shared by every
 process using the same cache directory and weights; later engines adopt it.
+Generation reads the file the ggml stage loaded: FlowLM and Mimi each read
+their GGUF through one descriptor, and a GGUF replaced or removed after that
+load fails the stage with `source_changed` (it stays on ggml) instead of
+generating from other weights.
 
 Until a sidecar is ready, its stage runs on ggml. Each chunk takes its
 backends once, at its start (the step on the producer thread, the decoder on

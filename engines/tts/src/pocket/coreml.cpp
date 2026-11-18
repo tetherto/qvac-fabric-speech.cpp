@@ -497,6 +497,17 @@ uint64_t coreml_envelope_bytes(const CoremlRoute & step, const CoremlRoute & dec
 
 namespace pcm = QVAC_COREML_NS;
 
+struct CoremlLoadedSource {
+    pcm::SourceStat stat;
+    bool ok = false;
+};
+
+std::shared_ptr<const CoremlLoadedSource> coreml_loaded_source(int fd, const std::string & path) {
+    auto s = std::make_shared<CoremlLoadedSource>();
+    s->ok = pcm::generation::source_stat_fd(fd, path, s->stat);
+    return s;
+}
+
 namespace {
 
 template <class E, class F> F map_enum(E v) { return static_cast<F>(static_cast<int>(v)); }
@@ -794,9 +805,18 @@ void make_stage_slot(stage_slot & s, CoremlStage stage, const CoremlEngineOption
                 : 0;
     } else {
         const pcm::generation::Candidate & c = *s.plan.candidate;
-        pcm::SourceStat source;
+        // The file the stage's weights were read from (fstat of the load's
+        // one descriptor), not whatever the path names now: prepare opens the
+        // path and fails with source_changed unless it is that file. A
+        // missing identity or a path that no longer resolves fails the same
+        // way, and the stage stays on ggml.
         const std::string & gguf = step ? opts.flow_lm_path : opts.mimi_path;
-        if (!pcm::generation::source_stat(gguf, source)) throw std::runtime_error("Pocket TTS: cannot stat " + gguf);
+        const std::shared_ptr<const CoremlLoadedSource> & loaded = step ? opts.step_source : opts.decoder_source;
+        pcm::SourceStat source;
+        pcm::SourceStat asked;
+        const bool ok = loaded && loaded->ok;
+        if (ok) source = loaded->stat;
+        source.changed = !ok || !pcm::generation::source_stat(gguf, asked) || asked.path != source.path;
         spec.tmpl = c.tmpl;
         spec.prepare = pcm::generation::prepare_request(c, source, s.plan.resolved);
         spec.prepare_fn = &pcm::generation::prepare;
@@ -990,6 +1010,10 @@ bool CoremlStages::wait(int64_t timeout_ms, const std::atomic<bool> * cancel) co
 }
 
 #else  // !TTS_CPP_USE_COREML
+
+struct CoremlLoadedSource {};
+
+std::shared_ptr<const CoremlLoadedSource> coreml_loaded_source(int, const std::string &) { return nullptr; }
 
 CoremlRoute coreml_plan_route(CoremlStage stage, const CoremlEngineOptions & opts) {
     validate_fields(opts);
