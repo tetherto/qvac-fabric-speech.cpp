@@ -1212,6 +1212,9 @@ EngineResult Engine::transcribe_mel_impl(PrecomputedMel && precomputed, double p
             result.coreml_pending = route.pending();
             return result;
         }
+        // The segment attempt gave way to the windowed path; the dispatches it
+        // ran (one may have fallen back to ggml) still count for this call.
+        tally.merge(seg.tally);
     }
 #endif
 
