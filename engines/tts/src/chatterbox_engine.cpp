@@ -268,7 +268,10 @@ struct Engine::Impl {
     // wait for a warm-hinted load never makes the sentence slower than ggml.
     std::shared_ptr<const S3genCoremlPlan> acquire_plan(const s3gen_synthesize_opts & sopts,
                                                         const std::vector<int32_t> & speech_tokens) {
-        if (!sidecars) return nullptr;
+        // No sidecar for this Engine (Core ML not built, off or absent at
+        // construction): an explicit empty plan, so the call never resolves
+        // Core ML again on its own.
+        if (!sidecars) return detail::empty_coreml_plan();
         const detail::s3gen_call_shape shape = detail::s3gen_call_shape_for(sopts, speech_tokens, sidecars->facts());
         const auto budget = std::chrono::duration<double, std::milli>(
             detail::s3gen_estimate_metal_ms_frames(sidecars->facts().meanflow, shape.frames));

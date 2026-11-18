@@ -267,6 +267,11 @@ struct plan_stage_view {
 };
 
 plan_stage_view plan_view(const S3genCoremlPlan & plan, s3gen_stage stage);
+// A plan without Core ML models: every stage of the call runs on ggml and
+// the call acquires nothing itself. An Engine whose options left Core ML off
+// at construction passes it, so its calls never fall back to a plan of their
+// own (which would re-resolve the options and the environment).
+std::shared_ptr<const S3genCoremlPlan> empty_coreml_plan();
 // Any stage runs on ggml only because its function was not ready.
 bool plan_pending(const S3genCoremlPlan & plan);
 // A failing prediction of the plan's models makes s3gen_synthesize_to_wav

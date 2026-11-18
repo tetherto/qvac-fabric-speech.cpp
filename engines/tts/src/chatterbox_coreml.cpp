@@ -731,6 +731,10 @@ bool plan_strict(const S3genCoremlPlan & plan) {
     return plan.strict;
 }
 
+std::shared_ptr<const S3genCoremlPlan> empty_coreml_plan() {
+    return std::make_shared<const S3genCoremlPlan>();
+}
+
 std::shared_ptr<const S3genCoremlPlan> replay_plan(std::shared_ptr<const S3genCoremlPlan> plan) {
     if (plan) plan->defer.store(false, std::memory_order_release);
     return plan;

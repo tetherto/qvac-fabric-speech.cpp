@@ -1392,6 +1392,27 @@ void two_engines_check(const std::string & t3, const std::string & s3gen) {
     hooks.tracing = false;
 }
 
+// An Engine constructed while CHATTERBOX_COREML_DISABLE is set stays on ggml
+// for its whole life, even once the variable is cleared: its calls carry the
+// Engine's own (empty) plan and never acquire Core ML models through the
+// shared table, so no load starts.
+void disabled_engine_check(const std::string & t3, const std::string & s3gen) {
+    auto & hooks = cb::coreml_test();
+    setenv(cb::COREML_DISABLE_ENV, "1", 1);
+    Engine engine(engine_options(t3, s3gen));
+    unsetenv(cb::COREML_DISABLE_ENV);
+    hooks.clear_loads();
+    hooks.tracing = true;
+    const SynthesisResult result = engine.synthesize("Core ML stays off for this engine.");
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    hooks.tracing = false;
+    const auto loads = hooks.loads();
+    std::printf("[disabled engine] backend=%s, loads started after the variable was cleared: %zu\n",
+                result.s3gen_backend.c_str(), loads.size());
+    require(loads.empty() && result.s3gen_backend == cb::GGML_STAGE_BACKEND && !result.coreml_pending,
+            "an Engine constructed with Core ML disabled never loads a sidecar function");
+}
+
 // The real CFM latch: a Core ML failure at the second Euler step restores the
 // initial noise and integrates on ggml, so the call equals use = off sample
 // for sample (only the CFM sidecar is present, so the encoder and HiFT run
@@ -1550,6 +1571,7 @@ int engine_fixture(bool slow_load) {
     const tts_cpp::FitResult fit_before = fit_check(t3, s3gen, root.path, false, nullptr);
     if (slow_load) slow_load_checks(t3, s3gen, cli_env, root.path);
     two_engines_check(t3, s3gen);
+    disabled_engine_check(t3, s3gen);
     if (slow_load) cli_replay_check(t3, s3gen, cli_env, root.path);
 
     // Overlapped synthesis equals the segments synthesized one call at a time
@@ -1632,6 +1654,9 @@ int engine_fixture(bool slow_load) {
     require(error.find("cannot serve") != std::string::npos, "the worker's strict-mode error reaches the caller");
     EngineOptions lenient_opts = engine_options(t3, broken_gguf);
     lenient_opts.coreml_strict = false;
+    // Its own encoder and HiFT functions load before each sentence (an
+    // Engine shares no slots with the one above).
+    lenient_opts.coreml.wait = CoremlOptions::Wait::call;
     const SynthesisResult mixed = Engine(lenient_opts).synthesize(OVERLAP_TEXT);
     std::printf("[fallback] %zu samples, backend=%s\n", mixed.pcm.size(), mixed.s3gen_backend.c_str());
     require(!mixed.pcm.empty() && mixed.s3gen_backend == cb::MIXED_STAGE_BACKEND,
