@@ -1578,6 +1578,9 @@ def cmd_smoke(args, m) -> int:
 
 
 REPORT_BLOCK_RE = re.compile(r"^<!-- report:([a-z0-9-]+) -->\n.*?^<!-- /report:\1 -->$", re.S | re.M)
+# Generated blocks added after reports were first written, and the existing
+# block each goes in front of when a report being refreshed lacks it.
+REPORT_NEW_BLOCKS = {"power": "setup"}
 
 
 class ReportError(Exception):
@@ -1595,6 +1598,11 @@ def merge_report(existing: str, rendered: str) -> str:
     dup = sorted({n for n in old if old.count(n) > 1})
     missing = [n for n in new if n not in old]
     unknown = [n for n in old if n not in new]
+    if not dup and not unknown and missing and all(REPORT_NEW_BLOCKS.get(n) in old for n in missing):
+        for n in missing:  # a report written before the block existed: add it, keep the hand-written text
+            at = next(m.start() for m in REPORT_BLOCK_RE.finditer(existing) if m.group(1) == REPORT_NEW_BLOCKS[n])
+            existing = existing[:at] + new[n] + "\n\n" + existing[at:]
+        missing = []
     if dup or missing or unknown:
         raise ReportError(f"generated sections do not match the report: duplicated {dup}, missing {missing}, "
                           f"unknown {unknown}; add or remove the markers by hand")

@@ -399,6 +399,22 @@ class ReportMergeTest(unittest.TestCase):
             self.assertIn(kept, merged)
         self.assertIn("Not measured yet.", merged)
 
+    def test_refresh_adds_the_power_block_to_a_report_written_without_it(self):
+        # A report written before the power block existed: refreshing it adds
+        # the block in front of the setup block and keeps the hand-written text.
+        committed = (blt.REPO / "docs" / "COREML-LOAD-TIME.md").read_text()
+        old = re.sub(r"<!-- report:power -->\n.*?<!-- /report:power -->\n\n", "", committed, flags=re.S)
+        self.assertNotIn("report:power", old)
+        merged = blt.merge_report(old, blt.render(blt.summarize([])) + "\n")
+        self.assertIn("<!-- /report:power -->\n\n<!-- report:setup -->", merged)
+        self.assertEqual(merged.count("<!-- report:power -->"), 1)
+        for kept in ("## Reading the numbers", "Limits of this run", "on battery from 12:35 to 14:41"):
+            self.assertIn(kept, merged)
+        # Any other missing block still needs the markers added by hand.
+        no_sizes = re.sub(r"<!-- report:sizes -->\n.*?<!-- /report:sizes -->\n\n", "", old, flags=re.S)
+        with self.assertRaisesRegex(blt.ReportError, r"missing \['power', 'sizes'\]"):
+            blt.merge_report(no_sizes, blt.render(blt.summarize([])) + "\n")
+
 
 class DriverSourceTest(unittest.TestCase):
     """The ttr readings the driver emits go through bench_ttr::with_readings
