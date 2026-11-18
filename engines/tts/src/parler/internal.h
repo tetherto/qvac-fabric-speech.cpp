@@ -182,6 +182,8 @@ struct parler_model {
     // The DAC on the shared Core ML runtime (parler_dac_coreml) or a test
     // double: acquired once per decode call when no sidecar is attached.
     std::shared_ptr<parler_dac_pending> dac_pending;
+    // The file the weights were loaded from (parler_dac_source_record).
+    std::shared_ptr<parler_dac_source> dac_source;
 
     // decoder self-attention KV cache (token-major slab, one per K/V):
     // [d_model, n_ctx] rows per layer, stacked layer-major.
@@ -218,6 +220,11 @@ struct parler_model {
 };
 
 // ---- parler_gguf.cpp ----
+// Test seam: called by parler_load_gguf after it parsed the metadata
+// ("metadata") and after it read the last weight ("weights"). Null outside
+// tests.
+extern void (*parler_gguf_load_hook)(const char * stage);
+
 bool parler_load_gguf(const std::string & path, parler_model & model,
                       int n_gpu_layers = 0, std::string * error = nullptr,
                       const std::string & backend = {});

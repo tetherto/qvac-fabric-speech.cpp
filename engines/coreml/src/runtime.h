@@ -53,7 +53,8 @@ struct Job {
     JobKind kind = JobKind::load;
     uint64_t seq = 0;
     std::string dedup_key;  // key in Runtime::inflight
-    std::string model_key;  // (artifact, function, units): registry and retirement key
+    std::string model_key;   // (artifact, function, units, geometry): registry and load-sharing key
+    std::string retire_key;  // (artifact, function, units): retirement key
     LoadRequest load;
     LoadFn load_fn = nullptr;
     WarmFn warm_fn = nullptr;
@@ -180,7 +181,7 @@ public:
     size_t pool_live(const PoolCore & p);
     // Instance `m` of `key` is being destroyed (its destructor, before its
     // memory goes).
-    void on_model_released(const std::string & key, const SharedModel * m);
+    void on_model_released(const SharedModel & m);
     // A pending release of instance `m` from pool `p` (drop_model_locked)
     // completed outside mu: its reference is gone.
     void on_pool_released(const std::weak_ptr<PoolCore> & p, const SharedModel * m);
@@ -257,7 +258,7 @@ private:
     void reserve_locked(Job & j, const SlotCore & c, Graveyard & gy);
     bool sub_denied_locked(const Job & j, const SlotCore & c, const std::vector<std::shared_ptr<SlotCore>> & own,
                            Graveyard & gy) const;
-    const SharedModel * registered_locked(const std::string & key) const;
+    const SharedModel * registered_locked(const std::string & key, const std::string & retire) const;
     const SharedModel * existing_locked(const Job & j) const;
     void job_pools_locked(const Job & j, std::vector<std::shared_ptr<SlotCore>> & own,
                           std::vector<std::shared_ptr<PoolCore>> & pools, Graveyard & gy) const;
@@ -295,9 +296,9 @@ private:
         const SharedModel * id = nullptr;
     };
     std::unordered_map<std::string, RegEntry> registry_;
-    // Every published instance by model key, shareable or not (a stateful
-    // template has one per owner), identity only: retirement reaches each of
-    // them. An instance's destructor removes its entry under mu before its
+    // Every published instance by retirement key, shareable or not (a
+    // stateful template has one per owner; owners of other geometries have
+    // their own), identity only: retirement reaches each of them. An instance's destructor removes its entry under mu before its
     // memory goes, so an identity read under mu is alive.
     std::unordered_map<std::string, std::vector<SharedModel *>> instances_;
     std::unordered_map<std::string, std::string> retired_;
@@ -316,7 +317,15 @@ private:
     std::mutex hint_mu_;  // serialises hint read-modify-write within this image
 };
 
-std::string model_key(const std::string & artifact, const std::string & function, ComputeUnits units);
+// Retirement key: (artifact, function, units). A prediction failure retires
+// every instance of it, whatever geometry its owner's loader validated.
+std::string retire_key(const std::string & artifact, const std::string & function, ComputeUnits units);
+// Registry and load-sharing key: the retirement key and the geometry, so an
+// owner shares a model or a running load only with owners of its geometry.
+// Fields are length-prefixed, so no two tuples share a key, and a model key
+// starts with its retirement key.
+std::string model_key(const std::string & artifact, const std::string & function, ComputeUnits units,
+                      const std::vector<int64_t> & geometry);
 
 }  // namespace detail
 }  // namespace QVAC_COREML_NS

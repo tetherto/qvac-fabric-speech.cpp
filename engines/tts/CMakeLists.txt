@@ -360,6 +360,7 @@ set(TTS_CPP_LIB_SOURCES
     src/parler/dac.cpp
     src/parler/dac_accel.cpp
     src/parler/dac_coreml.cpp
+    src/parler/dac_source.cpp
     src/parler/engine.cpp
     # Audio8 engine (DualAR semantic LM + DAC-style codec with in-process cloning).
     src/audio8/unicode.cpp
@@ -1912,7 +1913,12 @@ if (TTS_CPP_BUILD_TESTS)
     # memory_probe.h: the shared probes of the Core ML memory schedules.
     target_include_directories(test-parler-dac-coreml PRIVATE src ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/test)
     if (TTS_CPP_COREML)
-        target_compile_definitions(test-parler-dac-coreml PRIVATE TTS_CPP_USE_COREML)
+        # The descriptor-load gate reads the recorded source identity, a
+        # stat tuple of the shared runtime (same namespace).
+        get_target_property(_tcb_coreml_ns tts-cpp QVAC_COREML_NS)
+        target_compile_definitions(test-parler-dac-coreml PRIVATE TTS_CPP_USE_COREML
+                                   QVAC_COREML_NS=${_tcb_coreml_ns})
+        target_include_directories(test-parler-dac-coreml PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/include)
     endif()
     tts_cpp_apply_ccache(test-parler-dac-coreml)
     tts_cpp_register_test(test-parler-dac-coreml LABEL "fixture"
@@ -2591,6 +2597,7 @@ if (TTS_CPP_BUILD_TESTS)
     # ---- Parler-TTS tests (fixtures from scripts/parler/dump-reference.py) ----
     set(_tcb_parler_core_srcs
         src/parler/gguf.cpp
+        src/parler/dac_source.cpp
         src/backend_selection.cpp
         src/sched_dispatch.cpp
         src/log.cpp)
