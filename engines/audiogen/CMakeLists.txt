@@ -422,6 +422,19 @@ if (AUDIOGEN_BUILD_TESTS)
         add_test(NAME test-acestep-vae-fit-stable
                  COMMAND test-acestep-vae-coreml --fit-stable --vae "${_acestep_vae_twin}" ${_acestep_vae_require})
         set_tests_properties(test-acestep-vae-fit-stable PROPERTIES LABELS "unit" FIXTURES_REQUIRED acestep-vae-twin)
+        # A second twin (other weights, same shapes) replaces the first under
+        # a live decoder slot: the reloaded ggml VAE must not decode on the
+        # decoder generated from the first.
+        set(_acestep_vae_twin_b "${CMAKE_CURRENT_BINARY_DIR}/acestep-vae-t64-twin-b.gguf")
+        add_test(NAME test-acestep-vae-twin-b
+                 COMMAND qvac-coreml-tool twin
+                         --manifest "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/acestep-vae-t64/reference-gguf.json"
+                         --seed 2 --types bf16 -o "${_acestep_vae_twin_b}")
+        set_tests_properties(test-acestep-vae-twin-b PROPERTIES LABELS "unit" FIXTURES_SETUP acestep-vae-twin-b)
+        add_test(NAME test-acestep-vae-source-swap
+                 COMMAND test-acestep-vae-coreml --vae "${_acestep_vae_twin}" --source-swap "${_acestep_vae_twin_b}")
+        set_tests_properties(test-acestep-vae-source-swap PROPERTIES LABELS "unit"
+                             FIXTURES_REQUIRED "acestep-vae-twin;acestep-vae-twin-b")
     endif()
 
     # Core ML VAE decode benchmark (ggml GPU vs sidecar, markdown to stdout).

@@ -138,6 +138,14 @@ public:
     // runs on, writes its hint and never repopulates the slot.
     void evict();
 
+    // Whether a ggml VAE whose weights were read through `fd` (-1: unknown)
+    // loaded the file the decoder is generated from. The generated route's
+    // slot takes the identity (fstat tuple) of the GGUF when it is made; a
+    // load that read another file (the path was replaced since) must not
+    // decode on that decoder, or the two backends would run different
+    // weights. True for the prebuilt route and without a slot.
+    bool serves_loaded_source(int fd) const;
+
     bool strict() const;
     // Whether a slot exists (route != none).
     bool active() const;

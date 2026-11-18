@@ -258,6 +258,8 @@ struct vae_coreml_stage::impl {
     planned plan;
     std::shared_ptr<rt::Manager> manager;
     std::shared_ptr<rt::Slot> slot;
+    // Route generate: the identity of the GGUF the slot generates from.
+    std::optional<rt::SourceStat> source;
     rt::SlotStatus none_status;
     std::shared_ptr<rt::Group> construction;
     const std::atomic<bool> * cancel = nullptr;
@@ -341,6 +343,7 @@ std::shared_ptr<vae_coreml_stage> vae_coreml_stage::create(const std::string & g
         if (!rt::generation::source_stat(gguf_path, source)) {
             throw std::runtime_error("acestep: cannot stat " + gguf_path);
         }
+        p->source    = source;
         spec.tmpl    = c.tmpl;
         spec.prepare = rt::generation::prepare_request(c, source, p->resolved);
         spec.prepare_fn = &rt::generation::prepare;
@@ -436,6 +439,14 @@ void vae_coreml_stage::evict() {
     if (p_->slot) p_->slot->evict();
 }
 
+bool vae_coreml_stage::serves_loaded_source(int fd) const {
+    if (!p_->slot || !p_->source) return true;
+    rt::SourceStat loaded;
+    if (fd < 0 || !rt::generation::source_stat_fd(fd, p_->source->path, loaded)) return false;
+    const rt::SourceStat & s = *p_->source;
+    return loaded.size == s.size && loaded.mtime_ns == s.mtime_ns && loaded.ino == s.ino && loaded.dev == s.dev;
+}
+
 bool vae_coreml_stage::strict() const { return p_->resolved.strict(); }
 bool vae_coreml_stage::active() const { return p_->slot != nullptr; }
 const vae_coreml_route & vae_coreml_stage::route() const { return p_->plan.route; }
@@ -501,6 +512,7 @@ vae_coreml_stage::vae_coreml_stage(std::unique_ptr<impl> p) : p_(std::move(p)) {
 vae_coreml_stage::~vae_coreml_stage() = default;
 vae_coreml_call vae_coreml_stage::acquire(int) { return {}; }
 void vae_coreml_stage::evict() {}
+bool vae_coreml_stage::serves_loaded_source(int) const { return true; }
 bool vae_coreml_stage::strict() const { return false; }
 bool vae_coreml_stage::active() const { return false; }
 const vae_coreml_route & vae_coreml_stage::route() const { return p_->route; }

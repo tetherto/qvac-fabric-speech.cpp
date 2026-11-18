@@ -235,7 +235,8 @@ static ggml_tensor * build_encode(ggml_context * ctx, Encoder * m, ggml_tensor *
 // `measure` is non-null the load is metadata-only: the weight allocation is
 // sized into `measure` instead of performed and no tensor data is read.
 static VaeModel * vae_model_load_impl(const std::string & path, ggml_backend_t backend, bool with_encoder,
-                                      bool verbose, AcestepStageMeasure * measure) {
+                                      bool verbose, AcestepStageMeasure * measure,
+                                      const std::function<void(int fd)> & on_read) {
     VaeGGUF g;
     if (!vae_gguf_open(g, path)) return nullptr;
     const std::string refusal = dit_gguf_hexagon_refusal(g.ctx, path, backend, "acestep-vae");
@@ -287,6 +288,13 @@ static VaeModel * vae_model_load_impl(const std::string & path, ggml_backend_t b
 
     decoder_load(m->dec, g);
     if (with_encoder) encoder_load(m->enc, g);
+    if (on_read) {
+#ifdef _WIN32
+        on_read(-1);
+#else
+        on_read(g.file.fd);
+#endif
+    }
     vae_gguf_close(g);
 
     if (verbose) {
@@ -297,14 +305,15 @@ static VaeModel * vae_model_load_impl(const std::string & path, ggml_backend_t b
     return m;
 }
 
-VaeModel * vae_model_load(const std::string & path, ggml_backend_t backend, bool with_encoder, bool verbose) {
-    return vae_model_load_impl(path, backend, with_encoder, verbose, /*measure=*/nullptr);
+VaeModel * vae_model_load(const std::string & path, ggml_backend_t backend, bool with_encoder, bool verbose,
+                          const std::function<void(int fd)> & on_read) {
+    return vae_model_load_impl(path, backend, with_encoder, verbose, /*measure=*/nullptr, on_read);
 }
 
 VaeModel * vae_model_load_metadata_only(const std::string & path, ggml_backend_t backend, bool with_encoder,
                                         bool verbose, AcestepStageMeasure & measure) {
     measure = AcestepStageMeasure{};
-    return vae_model_load_impl(path, backend, with_encoder, verbose, &measure);
+    return vae_model_load_impl(path, backend, with_encoder, verbose, &measure, {});
 }
 
 size_t vae_model_compute_buffer_bytes(const VaeModel * m) {

@@ -25,6 +25,10 @@ struct Vae::Impl {
     // The decoder's Core ML stage: owned by this Vae when loaded standalone,
     // shared with the Engine otherwise. Null: ggml only.
     std::shared_ptr<detail::vae_coreml_stage> coreml;
+    // The ggml weights came from the file the Core ML decoder is generated
+    // from (vae_coreml_stage::serves_loaded_source). When false, no decode of
+    // this Vae acquires the decoder.
+    bool coreml_source_ok = true;
 
     mutable std::mutex  last_mu;
     mutable std::string last_backend = detail::VAE_GGML_BACKEND;
@@ -105,13 +109,28 @@ std::unique_ptr<Vae> detail::VaeAccess::load(const std::string & gguf_path, cons
     if (!backend) throw std::runtime_error("acestep-vae: failed to init backend '" + opts.backend + "'");
     v->impl_->backend = backend;
 
-    VaeModel * model = vae_model_load(gguf_path, backend, opts.with_encoder, opts.verbose);
+    // The identity of the file the weights were read from, compared with the
+    // one the decoder's slot generates from, at every (re)load.
+    const std::shared_ptr<detail::vae_coreml_stage> & stage_ref = v->impl_->coreml;
+    bool source_ok = true;
+    VaeModel * model = vae_model_load(gguf_path, backend, opts.with_encoder, opts.verbose, [&](int fd) {
+        if (stage_ref && stage_ref->active()) source_ok = stage_ref->serves_loaded_source(fd);
+    });
     if (!model) throw std::runtime_error("acestep-vae: failed to load VAE GGUF: " + gguf_path);
     v->impl_->model = model;
+    v->impl_->coreml_source_ok = source_ok;
+    if (!source_ok) {
+        fprintf(stderr,
+                "[acestep-vae] %s is not the file the Core ML VAE decoder is generated from (it was replaced "
+                "after the engine was created); this VAE decodes on ggml%s\n",
+                gguf_path.c_str(), v->impl_->coreml->strict() ? ", which the Core ML strict policy refuses" : "");
+    }
     const char * bn   = ggml_backend_name(backend);
     v->impl_->backend_name = bn ? bn : "CPU";
     return v;
 }
+
+bool detail::VaeAccess::coreml_source_ok(const Vae & v) { return v.impl_->coreml_source_ok; }
 
 std::unique_ptr<Vae> Vae::load(const std::string & gguf_path, const VaeOptions & opts) {
     // The Core ML stage first: it validates the options, may throw under
@@ -143,9 +162,16 @@ std::vector<float> Vae::decode(const std::vector<float> & latent, int T_latent,
         return pcm;
     };
 
-    // The backend of the whole decode is chosen here, once: the decoder this
-    // acquisition returns, or ggml.
-    if (impl_->coreml && impl_->coreml->active()) {
+    // A VAE loaded from another file than the decoder's never acquires it.
+    if (impl_->coreml && impl_->coreml->active() && !impl_->coreml_source_ok) {
+        if (impl_->coreml->strict()) {
+            fprintf(stderr, "[acestep-vae] the loaded VAE GGUF is not the file the Core ML decoder is generated "
+                            "from and Core ML strict policy is enabled; failing instead of the ggml decode\n");
+            return finish({});
+        }
+    } else if (impl_->coreml && impl_->coreml->active()) {
+        // The backend of the whole decode is chosen here, once: the decoder
+        // this acquisition returns, or ggml.
         detail::vae_coreml_call call;
         try {
             call = impl_->coreml->acquire(T_latent);

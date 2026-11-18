@@ -14,7 +14,18 @@ namespace tts_cpp::acestep {
 bool vae_gguf_open(VaeGGUF & g, const std::string & path) {
     if (!mapped_file_open(g.file, path, "acestep-vae")) return false;
     struct gguf_init_params p = { /*no_alloc=*/true, /*ctx=*/&g.meta };
+#ifdef _WIN32
     g.ctx = gguf_init_from_file(path.c_str(), p);
+#else
+    // The metadata is parsed through the descriptor the weights are mapped
+    // from, so both come from one file even when `path` is replaced meanwhile,
+    // and fstat of that descriptor is the identity of the file loaded.
+    const int dup_fd = dup(g.file.fd);
+    FILE *    f      = dup_fd >= 0 ? fdopen(dup_fd, "rb") : nullptr;
+    if (f == nullptr && dup_fd >= 0) close(dup_fd);
+    g.ctx = f ? gguf_init_from_file_ptr(f, p) : nullptr;
+    if (f) fclose(f);
+#endif
     if (!g.ctx) {
         fprintf(stderr, "[acestep-vae] failed to parse %s\n", path.c_str());
         vae_gguf_close(g);

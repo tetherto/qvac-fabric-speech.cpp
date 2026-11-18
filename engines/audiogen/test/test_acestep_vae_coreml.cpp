@@ -39,6 +39,11 @@
 //                and the decoder is released without any generate();
 //       evict    an eviction while a job is unstarted cancels it;
 //       degrade  memory-degrade near the budget, in fit and in the Engine.
+//   test-acestep-vae-coreml --vae GGUF_A --source-swap GGUF_B
+//       The VAE GGUF replaced in place after the decoder's slot was made: a
+//       ggml VAE loaded from the other file decodes on ggml without
+//       requesting the decoder (strict: fails); one loaded after the original
+//       file is renamed back serves it again. Needs no device.
 //   test-acestep-vae-coreml --vae GGUF --memory-schedule DIR [--late]
 //       The overlapped memory schedule: ggml decodes run on this thread while
 //       the decoder is generated, compiled, loaded and warmed into DIR; each
@@ -58,6 +63,7 @@
 
 #include "fit_coreml.h"
 #include "music_cli_coreml.h"
+#include "vae_access.h"
 #include "vae_coreml.h"
 #include "vae_coreml_path.h"
 #include "memory_probe.h"
@@ -576,6 +582,81 @@ void route_none_construction(const std::string & vae, const std::string & root) 
     (void) vae;
     (void) root;
 #endif
+}
+
+// Links (or copies) `from` to `to` through a temporary name and renames it
+// over `to`, so `to` names the other file in one step, as a replacement in
+// place would.
+void replace_with(const fs::path & from, const fs::path & to) {
+    const fs::path tmp = to.string() + ".swap";
+    std::error_code ec;
+    fs::remove(tmp, ec);
+    fs::create_hard_link(from, tmp, ec);
+    if (ec) fs::copy_file(from, tmp, ec);
+    if (!ec) fs::rename(tmp, to, ec);
+    check(!ec, "replace " + to.string() + " with " + from.string() + (ec ? ": " + ec.message() : std::string()));
+}
+
+// The VAE GGUF replaced under a live decoder slot: the slot was made for file
+// A; a ggml VAE (re)loaded after `path` names twin B must decode on ggml
+// without requesting the decoder (strict: fail), and one loaded after A is
+// renamed back serves it again. Requests nothing from Core ML, so it runs
+// without a device; any request it made would show as a non-idle slot.
+void source_swap(const std::string & vae_a, const std::string & vae_b, const std::string & root) {
+    std::fprintf(stderr, "source identity: the VAE GGUF replaced after the slot was made\n");
+    const fs::path dir = fresh_dir(root, "source-swap");
+    const fs::path a = dir / "a.gguf", b = dir / "b.gguf";
+    std::error_code ec;
+    fs::create_hard_link(vae_a, a, ec);
+    if (ec) fs::copy_file(vae_a, a, ec);
+    fs::create_hard_link(vae_b, b, ec);
+    if (ec) fs::copy_file(vae_b, b, ec);
+    VaeOptions vo;
+    vo.n_gpu_layers = 0;  // CPU: nothing here needs a device
+    const int T = 64;
+    const std::vector<float> latent((size_t) T * 64, 0.0f);
+    const size_t expected = (size_t) T * 1920 * 2;
+    for (const bool strict : {false, true}) {
+        const fs::path path = dir / (strict ? "strict.gguf" : "vae.gguf");
+        replace_with(a, path);
+        CoremlOptions o;
+        o.cache_dir = (dir / "cache").string();
+        if (strict) o.use = CoremlOptions::Use::require;
+        std::shared_ptr<detail::vae_coreml_stage> stage;
+        try {
+            stage = detail::vae_coreml_stage::create(path.string(), o, false, true);
+        } catch (const std::exception & e) {
+            std::fprintf(stderr, "  stage: %s\n", e.what());
+        }
+        if (!stage || stage->route().route != "generate") {
+            std::fprintf(stderr, "  route %s: case skipped\n", stage ? stage->route().route.c_str() : "none");
+            break;
+        }
+        const std::string mode = strict ? "strict: " : "";
+        auto loaded_a = detail::VaeAccess::load(path.string(), vo, stage);
+        check(detail::VaeAccess::coreml_source_ok(*loaded_a), mode + "a VAE loaded from the slot's file serves it");
+        replace_with(b, path);
+        auto loaded_b = detail::VaeAccess::load(path.string(), vo, stage);
+        check(!detail::VaeAccess::coreml_source_ok(*loaded_b), mode + "a VAE loaded after the replacement does not");
+        const std::vector<float> pcm = loaded_b->decode(latent, T);
+        const std::string st = state_of(stage->status_json());
+        std::fprintf(stderr, "  %sdecode after the replacement: %zu samples, backend %s, pending %d, slot %s\n",
+                     mode.c_str(), pcm.size(), loaded_b->last_decode_backend().c_str(),
+                     (int) loaded_b->last_decode_coreml_pending(), st.c_str());
+        if (strict) {
+            check(pcm.empty(), "strict: the replaced VAE's decode fails");
+        } else {
+            check(pcm.size() == expected && loaded_b->last_decode_backend() == "ggml" &&
+                      !loaded_b->last_decode_coreml_pending(),
+                  "the replaced VAE decodes on ggml, not pending");
+        }
+        check(st == "idle", mode + "the decoder was never requested (slot idle)");
+        // A renamed back (the same file): its identity again.
+        replace_with(a, path);
+        auto reloaded = detail::VaeAccess::load(path.string(), vo, stage);
+        check(detail::VaeAccess::coreml_source_ok(*reloaded), mode + "a VAE loaded after A is restored serves it");
+    }
+    fs::remove_all(dir, ec);
 }
 
 // The same comparison on a cache a real run populated (a compiled artifact and
@@ -1402,7 +1483,7 @@ void memory_schedule(const std::string & vae, const std::string & cache, bool la
 
 int main(int argc, char ** argv) {
     bool self = false, fit = false, require = false, late = false, host_route = false;
-    std::string models, vae, cache_root, memory_dir, first_decode, cases = "encode,lowmem,cached,cancel,repaint,prewarm,prewarm-async,evict,degrade";
+    std::string models, vae, vae_b, cache_root, memory_dir, first_decode, cases = "encode,lowmem,cached,cancel,repaint,prewarm,prewarm-async,evict,degrade";
     float duration = 20.0f;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -1417,6 +1498,7 @@ int main(int argc, char ** argv) {
         else if (a == "--late") late = true;
         else if (a == "--models") models = next();
         else if (a == "--vae") vae = next();
+        else if (a == "--source-swap") vae_b = next();
         else if (a == "--cache-root") cache_root = next();
         else if (a == "--cases") cases = next();
         else if (a == "--duration") duration = std::stof(next());
@@ -1441,6 +1523,13 @@ int main(int argc, char ** argv) {
         fit_stable(vae, models, cache_root.empty() ? fs::temp_directory_path().string() : cache_root, require,
                    host_route);
         route_none_construction(vae, cache_root.empty() ? fs::temp_directory_path().string() : cache_root);
+    }
+    if (!vae_b.empty()) {
+        if (vae.empty()) {
+            std::fprintf(stderr, "--source-swap needs --vae\n");
+            return 2;
+        }
+        source_swap(vae, vae_b, cache_root.empty() ? fs::temp_directory_path().string() : cache_root);
     }
 #ifdef AUDIOGEN_USE_COREML
     if (!first_decode.empty()) {
