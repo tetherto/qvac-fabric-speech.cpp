@@ -34,7 +34,9 @@ compares is written by the C++ interpreter through `qvac-coreml-tool`).
             exporter sees `qvac-coreml-tool f32 Q`), generates the package with
             the C++ generator (`qvac-coreml-tool generate`) and compares its
             weight.bin blob by blob (`qvac-coreml-tool verify`); the generated
-            spec, patches applied, must equal the exporter's.
+            spec, patches applied, must equal the exporter's. Each twin
+            carries its own value of every GGUF string the recipe declares
+            (`meta "<key>" str`), so a string baked into the spec fails B and Q.
   real      The real-weights gate on one GGUF (a production model): the
             exporter runs on `qvac-coreml-tool f32` of it, the C++ generator
             reads the GGUF itself, and the two packages are compared as in
@@ -380,20 +382,68 @@ def twin_string(key, label, n):
     return out[:n]
 
 
+def recipe_logical_lines(recipe_text):
+    """The recipe's logical lines, as the C++ parser reads them: `#` comments
+    removed (outside strings), a newline inside an open `(` or `[` is
+    whitespace, each line trimmed of spaces, tabs and CRs, blank lines dropped."""
+    out, cur, depth, in_str, in_comment = [], [], 0, False, False
+
+    def flush():
+        line = "".join(cur).strip(" \t\r")
+        if line:
+            out.append(line)
+        cur.clear()
+
+    for c in recipe_text or "":
+        if c == "\n":
+            in_comment = False
+            if depth > 0:
+                cur.append(" ")
+            else:
+                flush()
+            continue
+        if in_comment:
+            continue
+        if in_str:
+            in_str = c != '"'
+            cur.append(c)
+            continue
+        if c == "#":
+            in_comment = True
+            continue
+        if c == '"':
+            in_str = True
+        elif c in "([":
+            depth += 1
+        elif c in ")]":
+            depth = max(depth - 1, 0)
+        cur.append(c)
+    flush()
+    return out
+
+
 def recipe_str_metas(recipe_text):
-    """The keys of the recipe's `meta "<key>" str` lines."""
-    return re.findall(r'^meta\s+"([^"]+)"\s+str\s*$', recipe_text or "", re.M)
+    """The keys of the recipe's `meta "<key>" str` declarations, in any
+    spacing the recipe grammar accepts (indented, tabs, a trailing comment)."""
+    keys = []
+    for line in recipe_logical_lines(recipe_text):
+        m = re.fullmatch(r'meta[ \t]+"([^"]+)"[ \t]+str', line)
+        if m:
+            keys.append(m.group(1))
+    return keys
 
 
 def twin_sets(manifest, keys, label):
-    """`twin --set` values giving each GGUF string in `keys` a twin-specific value of its reference length."""
+    """`twin --set` values giving each GGUF string in `keys` a twin-specific
+    ASCII value of its reference value's UTF-8 byte length (a `patch str`
+    site's length is in bytes)."""
     ref = {m.get("key"): m.get("value") for m in manifest.get("metadata", [])}
     sets = []
     for k in keys:
         v = ref.get(k)
         if not isinstance(v, str) or not v:
             raise TemplateError(f"extract: the recipe reads GGUF string {k}, which the reference manifest lacks")
-        sets.append(f"{k}={twin_string(k, label, len(v))}")
+        sets.append(f"{k}={twin_string(k, label, len(v.encode('utf-8')))}")
     return sets
 
 
@@ -1049,6 +1099,12 @@ def check_template(tool, tdir, python=None, root=None, quant_types="q8_0", work=
         raise TemplateError(f"{tdir}: template.json has no exporter")
     results = []
     cases = [("A", SEED_A, "f32"), ("B", SEED_B, "f32"), ("Q", SEED_Q, quant_types)]
+    # Each twin also gets its own value of every GGUF string the recipe
+    # declares (as `extract` does for A and B), so a template that baked one
+    # checkpoint's string into its spec instead of patching it fails B and Q.
+    recipe = tdir / "recipe.txt"
+    str_keys = recipe_str_metas(recipe.read_text())
+    manifest = load_manifest(tdir / "reference-gguf.json") if str_keys else {}
     owned = work is None
     work = Path(work or tempfile.mkdtemp(prefix="qvac-coreml-report-"))
     try:
@@ -1056,7 +1112,7 @@ def check_template(tool, tdir, python=None, root=None, quant_types="q8_0", work=
         for label, seed, types in cases:
             r = {"template": tj.get("id", tdir.name), "twin": label, "seed": seed, "types": types}
             twin, pkg = _export_twin(tool, tdir / "reference-gguf.json", exporter, seed, types, work, python, root,
-                                     label.lower())
+                                     label.lower(), twin_sets(manifest, str_keys, label.lower()))
             twins[label] = twin
             r.update(compare_packages(tool, tdir, twin, pkg, work, label.lower()))
             if label == "B":

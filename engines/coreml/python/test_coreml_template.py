@@ -345,6 +345,13 @@ class StringPatchSiteTest(unittest.TestCase):
     def test_twin_strings(self):
         text = 'mlrecipe 1\nsource "w" f32 [2]\nmeta "toy.sha" str\nmeta "toy.n" u32\nmeta  "toy.other"  str\nend\n'
         self.assertEqual(ctpl.recipe_str_metas(text), ["toy.sha", "toy.other"])
+        # Every spelling the recipe grammar accepts: indented, tabs, a
+        # trailing comment, CRLF, a `#` inside the key; never a commented-out
+        # line or another type.
+        text = ('mlrecipe 1\r\n  meta "a.sha" str   # the checkpoint\r\n\tmeta\t"b#c"\tstr\n'
+                '# meta "commented" str\nmeta "d" str_x\nmeta "e" u32 # str\nblob 64 fp16 1 f16(add(\n'
+                't("w"), 1.0))  # meta "f" str\nend\n')
+        self.assertEqual(ctpl.recipe_str_metas(text), ["a.sha", "b#c"])
         manifest = {"metadata": [{"key": "toy.sha", "value": "x" * 64}, {"key": "toy.other", "value": "abc"}]}
         sa = ctpl.twin_sets(manifest, ["toy.sha", "toy.other"], "a")
         sb = ctpl.twin_sets(manifest, ["toy.sha", "toy.other"], "b")
@@ -354,6 +361,12 @@ class StringPatchSiteTest(unittest.TestCase):
         self.assertEqual(sa, ctpl.twin_sets(manifest, ["toy.sha", "toy.other"], "a"))
         with self.assertRaisesRegex(ctpl.TemplateError, "lacks"):
             ctpl.twin_sets(manifest, ["toy.nope"], "a")
+        # A patch str site's length is in bytes: a non-ASCII reference value
+        # gets a twin value of its UTF-8 byte length.
+        wide = {"metadata": [{"key": "toy.name", "value": "caf\u00e9\u00e9"}]}
+        value = ctpl.twin_sets(wide, ["toy.name"], "a")[0].split("=", 1)[1]
+        self.assertEqual(len(value.encode("utf-8")), len("caf\u00e9\u00e9".encode("utf-8")))
+        self.assertTrue(value.isascii())
 
     def test_exporter_gguf_name(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -620,6 +633,17 @@ if mode == "spec":
     w1 = export_toy.read_weights(gguf, "stateless")["toy.w1"]
     spec.description.metadata.userDefined["qvac.toy.w1_sum"] = repr(float(w1.sum()))
     (data / "model.mlmodel").write_bytes(spec.SerializeToString(deterministic=True))
+elif mode == "hash":
+    # A spec string copied from a GGUF string (qvac_toy.source), as an
+    # exporter records a checkpoint hash.
+    import gguf as gguf_py
+    from coremltools.proto import Model_pb2
+
+    field = gguf_py.GGUFReader(gguf).fields["qvac_toy.source"]
+    spec = Model_pb2.Model()
+    spec.ParseFromString((data / "model.mlmodel").read_bytes())
+    spec.description.metadata.userDefined["qvac.toy.source"] = bytes(field.parts[field.data[0]]).decode()
+    (data / "model.mlmodel").write_bytes(spec.SerializeToString(deterministic=True))
 elif mode == "patch":
     # An inline fp16 constant that depends on the weights (minus toy.b1): a
     # patch site that `extract` can explain and draft a patch line for.
@@ -801,6 +825,60 @@ class ToyExtractTest(unittest.TestCase):
         patch_lines = [l for l in (self.tdir / "recipe.txt").read_text().splitlines() if l.startswith("patch ")]
         self.assertEqual(len(patch_lines), 1)
         self.assertIn('t("toy.b1")', patch_lines[0])
+
+    SOURCE = "0123456789abcdef"  # the reference checkpoint's identity string
+
+    def add_source_string(self):
+        """Gives the toy's reference GGUF a string, qvac_toy.source, the template does not match on."""
+        path = self.tdir / "reference-gguf.json"
+        man = json.loads(path.read_text())
+        man["metadata"].append({"gguf_type": 8, "key": "qvac_toy.source", "value": self.SOURCE})
+        path.write_text(json.dumps(man, indent=1) + "\n")
+
+    def declare_source(self, comment):
+        """Declares GGUF string qvac_toy.source in the toy's recipe, after its sources."""
+        lines = (self.tdir / "recipe.txt").read_text().splitlines()
+        at = max(i for i, l in enumerate(lines) if l.startswith("source ")) + 1
+        lines.insert(at, '  meta  "qvac_toy.source"\tstr' + ("   # the checkpoint's identity" if comment else ""))
+        (self.tdir / "recipe.txt").write_text("\n".join(lines) + "\n")
+
+    def report(self):
+        p = run_ctpl("report", "--template-dir", self.tdir)
+        return p, {l.split()[2] + l.split()[3]: l.split()[0] for l in p.stdout.splitlines()
+                   if l.startswith(("PASS ", "FAIL ")) and " twin " in l}
+
+    @NEEDS_TOY
+    def test_declared_string_becomes_a_patch_site_and_report_varies_it(self):
+        # Declared indented, with tabs and a trailing comment: the twins still
+        # vary it, so the exporter's copy becomes a str patch site, and the
+        # report's three twins (each with its own value) all pass.
+        self.add_source_string()
+        self.declare_source(comment=True)
+        p = self.extract_variant("hash")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        patches = json.loads((self.tdir / "template.json").read_text())["patches"]
+        self.assertEqual([x["len"] for x in patches], [len(self.SOURCE)])
+        self.assertIn(f'str {len(self.SOURCE)} meta_s("qvac_toy.source")', (self.tdir / "recipe.txt").read_text())
+        p, twins = self.report()
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(twins, {"twinA": "PASS", "twinB": "PASS", "twinQ": "PASS"}, p.stdout)
+
+    @NEEDS_TOY
+    def test_report_rejects_a_baked_string(self):
+        # Extracted without the declaration, the template bakes the reference
+        # string into its spec. Once the recipe declares the string, the
+        # report gives every twin another value (another source hash), and
+        # the baked spec no longer equals the exporter's.
+        self.add_source_string()
+        p = self.extract_variant("hash")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(json.loads((self.tdir / "template.json").read_text()).get("patches", []), [])
+        self.declare_source(comment=False)
+        p, twins = self.report()
+        self.assertNotEqual(p.returncode, 0, p.stdout)
+        self.assertEqual(twins.get("twinB"), "FAIL", p.stdout)
+        self.assertEqual(twins.get("twinQ"), "FAIL", p.stdout)
+        self.assertIn("qvac.toy.source", p.stdout)
 
     @NEEDS_TOY
     def test_unchanged_reextraction_keeps_template_bytes(self):
