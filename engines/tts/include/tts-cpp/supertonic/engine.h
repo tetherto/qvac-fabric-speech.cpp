@@ -394,6 +394,17 @@ struct EngineOptions {
     // serve a call an error. Unset fields fall back to the SUPERTONIC_COREML_*
     // environment. Supertonic's minimal set is the vocoder.
     CoremlOptions coreml;
+
+    // The workload and headroom of the fit_params call that assessed this
+    // engine (the FitOptions fields text_tokens, audio_seconds and
+    // margin_bytes; the defaults are FitOptions'). With
+    // coreml.memory_budget_bytes set, the constructor repeats that fit to
+    // decide memory-degrade (Core ML off when only the ggml projection fits
+    // the budget), so these must match the assessment, or the engine can keep
+    // Core ML where that fit dropped it.
+    int fit_text_tokens = 128;
+    float fit_audio_seconds = 10.0f;
+    uint64_t fit_margin_bytes = 256ull * 1024 * 1024;
 };
 
 // Per-chunk PCM callback for streaming synthesis.  Receives a pointer to

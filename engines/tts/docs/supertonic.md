@@ -332,7 +332,11 @@ two.
   generated route adds the template's Core ML memory envelope to the
   projection (`FitResult::coreml`); with `coreml.memory_budget_bytes`, a budget
   only the ggml projection fits makes the Engine resolve `use = off`
-  (memory-degrade) instead of refusing.
+  (memory-degrade) instead of refusing. The constructor repeats the fit to
+  decide this, with `EngineOptions::fit_text_tokens`, `fit_audio_seconds` and
+  `fit_margin_bytes` (defaults 128, 10 s and 256 MiB, as in `FitOptions`): set
+  them to the workload and headroom of the `fit_params` call that assessed the
+  engine, so the engine reaches the same decision.
 
 Accuracy on an M2 (macOS 27.2.1, `all`, which places the program on the
 Neural Engine), waveform cosine against the ggml vocoder of the same GGUF on a

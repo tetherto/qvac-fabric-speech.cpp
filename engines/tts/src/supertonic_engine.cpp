@@ -227,8 +227,9 @@ struct Engine::Impl {
         // Fit's memory-degrade: with a budget, Core ML is dropped when only
         // the ggml verdict fits. Decided before the weights load, so it reads
         // the same free memory fit_params reports, with the allocation inputs
-        // this engine loads and runs with (precision, steps), so it reaches
-        // the verdict fit_params gave the caller for the same options.
+        // this engine loads and runs with (precision, steps) and the workload
+        // and headroom the caller's fit assessed, so it reaches the verdict
+        // fit_params gave the caller for the same options.
         bool coreml_degrade = false;
         if (opts.coreml.memory_budget_bytes) {
             FitOptions fit;
@@ -243,6 +244,9 @@ struct Engine::Impl {
                 case Precision::Auto: fit.precision = "auto"; break;
             }
             fit.steps = opts.steps;
+            fit.text_tokens = opts.fit_text_tokens;
+            fit.audio_seconds = opts.fit_audio_seconds;
+            fit.margin_bytes = opts.fit_margin_bytes;
             fit.f16_weights = opts.f16_weights;
             fit.backends_dir = opts.backends_dir;
             fit.coreml = opts.coreml;

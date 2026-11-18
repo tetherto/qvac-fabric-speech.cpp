@@ -522,7 +522,8 @@ void check_cpu_warm_up_requests_idle_sidecar(const std::string & gguf, const tts
 // ggml projection fits, it degrades to ggml (use = off) instead of refusing,
 // and an Engine with that budget synthesizes on ggml. Fit runs with a
 // precision and a step count other than the defaults, and the Engine with the
-// same ones must reach the same degrade. With `required` (the
+// same ones must reach the same degrade, as must one given the larger
+// headroom a fit was assessed with. With `required` (the
 // generated route is required on this host) a fit that cannot be projected or
 // a host without the free memory the near-budget case needs fails instead of
 // skipping.
@@ -564,6 +565,51 @@ void check_fit(const std::string & gguf, const tts_cpp::CoremlOptions & o, const
                  mib(r.coreml.bytes));
     check_ggml_route_ignores_strict_env(gguf, near.coreml, "memory-degrade", tts_cpp::supertonic::Precision::F32,
                                         DEGRADE_STEPS);
+
+    // A fit assessed with a larger headroom than the default: the budget
+    // holds ggml + Core ML with the default 256 MiB margin, but only ggml
+    // with this one. The Engine, given the same margin, must reach the same
+    // verdict (memory-degrade) as that fit.
+    tts_cpp::supertonic::FitOptions wide = f;
+    wide.margin_bytes = f.margin_bytes + r.coreml.bytes;
+    wide.coreml.memory_budget_bytes = (int64_t) (required_bytes + r.coreml.bytes + (64ull << 20));
+    if ((uint64_t) wide.coreml.memory_budget_bytes > r.device_free_bytes) {
+        if (required) {
+            fail("fit with a larger margin: free memory " + std::to_string(r.device_free_bytes) + " is below " +
+                 std::to_string(wide.coreml.memory_budget_bytes));
+        } else {
+            std::fprintf(stderr, "[supertonic-coreml-parity] fit with a larger margin: not run (free memory too low)\n");
+        }
+        return;
+    }
+    const tts_cpp::FitResult assessed = tts_cpp::supertonic::fit_params(wide);
+    tts_cpp::supertonic::FitOptions as_default = wide;
+    as_default.margin_bytes = f.margin_bytes;
+    const tts_cpp::FitResult by_default = tts_cpp::supertonic::fit_params(as_default);
+    expect(assessed.coreml.disabled_reason == "memory" && by_default.coreml.disabled_reason.empty(),
+           "a budget only the larger margin degrades: '" + assessed.coreml.disabled_reason + "' with it, '" +
+               by_default.coreml.disabled_reason + "' with the default");
+    try {
+        tts_cpp::supertonic::EngineOptions eo;
+        eo.model_gguf_path = gguf;
+        eo.n_threads = N_THREADS;
+        eo.n_gpu_layers = 99;
+        eo.precision = tts_cpp::supertonic::Precision::F32;
+        eo.steps = DEGRADE_STEPS;
+        eo.coreml = wide.coreml;
+        eo.fit_margin_bytes = wide.margin_bytes;
+        tts_cpp::supertonic::Engine engine(eo);
+        const std::string status = engine.coreml_status();
+        auto result = engine.synthesize("The larger margin keeps the vocoder on ggml.");
+        expect(status_field(status, "state") == "disabled" && result.vocoder_synthesis_backend == "ggml" &&
+                   !result.pcm.empty(),
+               "Engine with the fit's nondefault margin: memory-degrade as that fit (vocoder on '" +
+                   result.vocoder_synthesis_backend + "'), " + status.substr(0, 200));
+        std::fprintf(stderr, "[supertonic-coreml-parity] fit with a %.0f MiB margin: Engine degraded as the fit, "
+                     "vocoder on %s\n", mib(wide.margin_bytes), result.vocoder_synthesis_backend.c_str());
+    } catch (const std::exception & e) {
+        fail(std::string("Engine with the fit's nondefault margin: ") + e.what());
+    }
 }
 
 // A generated sidecar stays off on the device classes the template prefers
