@@ -573,11 +573,12 @@ void check_fit(const std::string & gguf, const tts_cpp::CoremlOptions & o, const
     // verdict (memory-degrade) as that fit.
     tts_cpp::supertonic::FitOptions wide = f;
     wide.margin_bytes = f.margin_bytes + r.coreml.bytes;
-    wide.coreml.memory_budget_bytes = (int64_t) (required_bytes + r.coreml.bytes + (64ull << 20));
-    if ((uint64_t) wide.coreml.memory_budget_bytes > r.device_free_bytes) {
+    const uint64_t wide_budget = required_bytes + r.coreml.bytes + (64ull << 20);
+    wide.coreml.memory_budget_bytes = (int64_t) wide_budget;
+    if (wide_budget > r.device_free_bytes) {
         if (required) {
             fail("fit with a larger margin: free memory " + std::to_string(r.device_free_bytes) + " is below " +
-                 std::to_string(wide.coreml.memory_budget_bytes));
+                 std::to_string(wide_budget));
         } else {
             std::fprintf(stderr, "[supertonic-coreml-parity] fit with a larger margin: not run (free memory too low)\n");
         }
