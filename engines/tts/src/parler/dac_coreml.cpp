@@ -585,13 +585,16 @@ std::shared_ptr<parler_dac_coreml> parler_dac_coreml::create(parler_model & mode
                 : 0;
     } else {
         const pcm::generation::Candidate & c = *p->plan.candidate;
-        // The file the weights were loaded from, not whatever `gguf_path`
-        // names now: a GGUF replaced since the load (or another path) fails
-        // the prepare job with source_changed, and the DAC stays on ggml.
-        const parler_dac_source none;
-        const parler_dac_source & ls = model.dac_source ? *model.dac_source : none;
-        const pcm::SourceStat source =
-            pcm::generation::loaded_source(ls.before, ls.ok_before, ls.after, ls.ok_after, gguf_path);
+        // The file the weights were read from (fstat of the load's one
+        // descriptor), not whatever `gguf_path` names now: prepare opens the
+        // path and fails with source_changed unless it is that file, and
+        // asking for another path than the load's is refused here; the DAC
+        // then stays on ggml.
+        pcm::SourceStat source;
+        pcm::SourceStat asked;
+        const bool loaded = model.dac_source && model.dac_source->ok;
+        if (loaded) source = model.dac_source->stat;
+        source.changed = !loaded || !pcm::generation::source_stat(gguf_path, asked) || asked.path != source.path;
         spec.tmpl = c.tmpl;
         spec.prepare = pcm::generation::prepare_request(c, source, p->resolved);
         spec.prepare_fn = &pcm::generation::prepare;

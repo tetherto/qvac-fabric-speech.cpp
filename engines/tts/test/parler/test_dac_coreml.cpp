@@ -74,6 +74,10 @@
 #include "tts-cpp/parler/engine.h"
 #include "tts-cpp/parler/fit.h"
 #include "parler/internal.h"
+#ifdef TTS_CPP_USE_COREML
+#include "parler/dac_source.h"
+#endif
+#include "gguf.h"
 #include "coreml_sidecar_path.h"
 #include "memory_probe.h"
 #include "memory_schedule.h"
@@ -91,7 +95,10 @@
 #include <thread>
 
 #if defined(__APPLE__)
+#include <fcntl.h>
 #include <sys/clonefile.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <sys/sysctl.h>
 #endif
 #include <memory>
@@ -310,6 +317,14 @@ bool sweep_case_holds(bool ref_ok, const std::string & ref_backend, bool ok, con
     return ref_ok && ref_backend == PARLER_DAC_GGML_BACKEND && ok && backend == label && snr >= gate;
 }
 
+// The backend label a sidecar opened for `units` must report.
+std::string label_for_units(const std::string & units) {
+    if (units == "cpu_and_ane") return "coreml-ane";
+    if (units == "cpu_and_gpu") return "coreml-gpu";
+    if (units == "cpu_only") return "coreml-cpu";
+    return "coreml-all";
+}
+
 // A chip with a gated row needs the sweep: a sweep that cannot find, link or
 // load the artifact fails there instead of reporting nothing.
 bool sweep_required(const std::string & chip, double min_snr) {
@@ -349,6 +364,11 @@ void parity_floor_gates() {
               !sweep_case_holds(true, "ggml", false, "coreml-ane", "coreml-ane", 60, 54) &&
               !sweep_case_holds(true, "ggml", true, "coreml-ane", "coreml-ane", 53.9, 54),
           "units sweep: a fallback to ggml, another sidecar, a failed decode or a low SNR fails the case");
+    check(label_for_units("cpu_and_ane") == "coreml-ane" && label_for_units("cpu_and_gpu") == "coreml-gpu" &&
+              label_for_units("cpu_only") == "coreml-cpu" && label_for_units("all") == "coreml-all",
+          "units sweep: the expected label comes from the requested units");
+    check(!sweep_case_holds(true, "ggml", true, "coreml-gpu", label_for_units("cpu_and_ane"), 68.3, 54),
+          "units sweep: a cpu_and_ane row decoded by a GPU sidecar fails although its SNR is high");
     check(sweep_required("Apple M4 Max", 54) && !sweep_required("Apple M2", 54) && !sweep_required("Apple M4 Max", 45),
           "units sweep: required where a row is gated");
     check(sweep_row_gated("cpu_and_ane", "Apple M4 Max", 54) && !sweep_row_gated("all", "Apple M4 Max", 54) &&
@@ -359,6 +379,7 @@ void parity_floor_gates() {
 }
 
 // The memory schedule's phase attribution and charges: engines/coreml/test/memory_schedule.h.
+using qvac_coreml_memory::ane_query_loading;
 using qvac_coreml_memory::mem_breakdown;
 using qvac_coreml_memory::mem_breakdown_of;
 using qvac_coreml_memory::mem_charges;
@@ -368,9 +389,27 @@ using qvac_coreml_memory::mem_phase;
 using qvac_coreml_memory::mem_phase_of;
 using qvac_coreml_memory::mem_sample;
 using qvac_coreml_memory::probe_failures;
+using qvac_coreml_memory::schedule_call;
+
+// The charges of a run of the generated route `r`. The resident charge for
+// the steady state is the template's alone: the host quantizer copy
+// (`adapter_bytes`, inside r.resident_bytes) is built at construction, before
+// the load, so the footprint the steady state is measured from already holds
+// it. The envelope keeps it, since the whole run starts before construction.
+mem_charges charges_of(const parler_dac_route & r, uint64_t adapter_bytes) {
+    return {r.prepare_peak_bytes, r.load_peak_bytes,
+            r.resident_bytes > adapter_bytes ? r.resident_bytes - adapter_bytes : 0, r.ane_compile_reserve_bytes,
+            r.envelope_bytes};
+}
+
+// One decode of the overlapped schedule, classified against the DAC's ggml
+// label (qvac_coreml_memory::classify_call).
+schedule_call classify_call(bool ok, const std::string & backend, const std::string & coreml_label) {
+    return qvac_coreml_memory::classify_call(ok, backend, PARLER_DAC_GGML_BACKEND, coreml_label);
+}
 
 void memory_schedule_gates() {
-    check(mem_phase_of("digesting") == mem_phase::generate && mem_phase_of("generating") == mem_phase::generate &&
+    check(mem_phase_of("digesting") == mem_phase::digest && mem_phase_of("generating") == mem_phase::generate &&
               mem_phase_of("compiling") == mem_phase::compile && mem_phase_of("loading") == mem_phase::load &&
               mem_phase_of("warming") == mem_phase::warm && mem_phase_of("ready") == mem_phase::ready,
           "memory schedule: slot states map to phases");
@@ -407,6 +446,26 @@ void memory_schedule_gates() {
     }
     check(mem_failures(b, 999, {70, 98, 93, 0, 100}, 1.0).empty(),
           "memory schedule: no compiler check without the Neural Engine");
+    {
+        // The steady state is charged against the template's resident part
+        // alone: 327.5 MiB needs 409.375, over the 409 MiB charged, although
+        // the route's resident figure with the quantizer copy would allow it.
+        constexpr uint64_t MB = 1ull << 20;
+        parler_dac_route r;
+        r.resident_bytes = 409 * MB + 626688;
+        r.envelope_bytes = 2000 * MB;
+        r.prepare_peak_bytes = 553 * MB;
+        r.load_peak_bytes = 409 * MB;
+        const mem_charges ch = charges_of(r, 626688);
+        check(ch.resident == 409 * MB && ch.envelope == r.envelope_bytes,
+              "memory schedule: the steady-state charge leaves out the quantizer copy, the envelope keeps it");
+        mem_breakdown steady327{};
+        steady327.generated = steady327.compiled = steady327.loaded = steady327.warmed = steady327.ready = true;
+        steady327.steady = (uint64_t) (327.5 * MB);
+        const std::vector<std::string> f = mem_failures(steady327, 0, ch);
+        check(f.size() == 1 && f[0].find("steady state") != std::string::npos,
+              "memory schedule: 327.5 MiB of steady state fails a 409 MiB resident charge");
+    }
     // With the template's 1.25 margin each phase needs 1.25 x its measurement
     // (rounded up); the whole run is held to the envelope as measured.
     const mem_charges margined{88, 123, 117, 500, 100};  // 87.5, 122.5, 116.25, 500 rounded up
@@ -451,7 +510,14 @@ void memory_schedule_gates() {
         const auto none = growth({{700, false, true}, {0, true, false}, {0, true, false}});
         check(!qvac_coreml_memory::ane_compiler_measured(none) && !qvac_coreml_memory::ane_compiler_measured(growth({})),
               "memory schedule: no successful query while loading is no compiler measurement");
-        check(probe_failures(true, 0, true, f).size() == 1 && probe_failures(true, 0, false, f).empty() &&
+        check(classify_call(true, "ggml", "coreml-all") == schedule_call::ggml &&
+              classify_call(true, "coreml-all", "coreml-all") == schedule_call::coreml &&
+              classify_call(false, "ggml", "coreml-all") == schedule_call::bad &&
+              classify_call(false, "coreml-all", "coreml-all") == schedule_call::bad &&
+              classify_call(true, "coreml-gpu", "coreml-all") == schedule_call::bad &&
+              classify_call(true, "mixed", "coreml-all") == schedule_call::bad,
+          "memory schedule: a failed decode, or one on another backend, is not a ggml or Core ML call");
+    check(probe_failures(true, 0, true, f).size() == 1 && probe_failures(true, 0, false, f).empty() &&
                   probe_failures(true, 0, true, growth({{700, false}, {900, true}})).empty(),
               "memory schedule: failed compiler queries fail a Neural Engine run");
         check(probe_failures(false, 0, false, none).size() == 1 && probe_failures(true, 3, false, none).size() == 1 &&
@@ -473,6 +539,24 @@ void memory_schedule_gates() {
               !qvac_coreml_memory::ane_compiler_clean_start(growth({{900, true}})) &&
               std::string(qvac_coreml_memory::ane_baseline_name(AneBaseline::unknown)) == "unknown",
           "memory schedule: no sample before the load is reported unknown, not clean");
+    {
+        // A digest sampled but no generation: the generation was not covered.
+        const std::vector<mem_sample> no_gen = {{100, P::ggml}, {120, P::digest}, {130, P::compile}, {150, P::load},
+                                                {160, P::warm}, {170, P::ready}};
+        const mem_breakdown nb = mem_breakdown_of(no_gen, 100);
+        const std::vector<std::string> fg = mem_failures(nb, 0, {1000, 1000, 1000, 0, 1000});
+        check(!nb.generated && nb.prepare == 30 && fg.size() == 1 && fg[0].find("generating") != std::string::npos,
+              "memory schedule: a digest sample is not a generation sample (a missed generation fails)");
+        const mem_breakdown both = mem_breakdown_of({{100, P::ggml}, {120, P::digest}, {150, P::generate}}, 100);
+        check(both.generated && both.generate == 50 && both.prepare == 50,
+              "memory schedule: digest and generation share one increment");
+        check(ane_query_loading(P::load, P::load) == std::optional<bool>(true) &&
+                  ane_query_loading(P::warm, P::load) == std::optional<bool>(true) &&
+                  ane_query_loading(P::compile, P::compile) == std::optional<bool>(false) &&
+                  !ane_query_loading(P::compile, P::load).has_value() &&
+                  !ane_query_loading(P::warm, P::ready).has_value(),
+              "memory schedule: a compiler query that crosses the load's start or end has no label");
+    }
     const std::vector<mem_sample> no_warm = {{100, P::ggml}, {120, P::generate}, {130, P::compile}, {150, P::load},
                                              {160, P::ready}};
     const std::vector<std::string> f = mem_failures(mem_breakdown_of(no_warm, 100), 0, {1000, 1000, 1000, 0, 1000});
@@ -952,9 +1036,12 @@ void units_sweep(parler_model & model, const std::string & cache_dir, double min
         }
         const int window = sidecar->window();
         const int keep = window - 2 * parler_dac_rf_frames(model);
-        const std::string label = sidecar->label();
-        std::string line;
-        bool row_holds = true;
+        // The label the requested units must give, not the one the opened
+        // sidecar reports: a sidecar opened on other units fails the row.
+        const std::string label = label_for_units(units);
+        const std::string opened = sidecar->label();
+        std::string line = opened == label ? std::string() : "  opened as " + opened;
+        bool row_holds = opened == label;
         for (const int n_frames : {2 * keep + keep / 2, window / 3, 1}) {
             const std::vector<int32_t> codes = random_codes(hp, n_frames, 100 + n_frames);
             model.dac_sidecar.reset();
@@ -1399,7 +1486,14 @@ void memory_schedule(parler_model & model, const std::string & gguf, const std::
     model.dac_sidecar.reset();
     model.dac_pending.reset();
     std::vector<float> pcm;
-    for (int i = 0; i < 2; ++i) decode(model, codes, n_frames, pcm);  // warm the ggml arena
+    for (int i = 0; i < 2; ++i) {  // warm the ggml arena
+        std::string warm_backend;
+        const bool ok = decode(model, codes, n_frames, pcm, nullptr, 0, -1, &warm_backend);
+        if (classify_call(ok, warm_backend, "") != schedule_call::ggml) {
+            check(false, "memory schedule: the ggml warm-up decode succeeds (" + warm_backend + ")");
+            return;
+        }
+    }
     uint64_t base = 0;
     const bool base_ok = qvac_coreml_memory::phys_footprint(base);
     size_t footprint_failures = 0;
@@ -1422,28 +1516,51 @@ void memory_schedule(parler_model & model, const std::string & gguf, const std::
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
     });
+    // Each compiler query is bracketed by its own reads of the slot state
+    // (not the footprint sampler's cached phase): a query that crossed the
+    // load's start or end is dropped (counted, reported).
+    size_t ane_crossing = 0;
     std::thread ane_sampler([&] {
+        const auto slot_phase = [&] {
+            const parler_dac_coreml * d = watched.load();
+            return d ? mem_phase_of(status_state(d->status_json())) : mem_phase::ggml;
+        };
         while (!stop.load()) {
+            const mem_phase before = slot_phase();
             uint64_t a = 0;
             const bool ok = qvac_coreml_memory::ane_compiler_rss(a);
-            const auto p = (mem_phase) phase.load();
-            ane_samples.push_back({a, p == mem_phase::load || p == mem_phase::warm, ok});
+            const std::optional<bool> loading = ane_query_loading(before, slot_phase());
+            if (loading) {
+                ane_samples.push_back({a, *loading, ok});
+            } else {
+                ++ane_crossing;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
     });
     const auto t0 = std::chrono::steady_clock::now();
     auto dac = parler_dac_coreml::create(model, gguf, opts);
     watched.store(dac.get());
-    int ggml_calls = 0, coreml_calls = 0;
-    std::string backend;
+    int ggml_calls = 0, coreml_calls = 0, bad_calls = 0;
+    std::string backend, bad_backend;
+    const std::string coreml_label = label_for_units(route.compute_units);
     while (std::chrono::steady_clock::now() - t0 < std::chrono::minutes(5)) {
-        decode(model, codes, n_frames, pcm, nullptr, 0, -1, &backend);
-        if (backend == "ggml") {
+        backend.clear();
+        const bool ok = decode(model, codes, n_frames, pcm, nullptr, 0, -1, &backend);
+        const schedule_call k = classify_call(ok, backend, coreml_label);
+        if (k == schedule_call::bad) {
+            ++bad_calls;
+            bad_backend = (ok ? "" : "failed on ") + backend;
+            break;
+        }
+        if (k == schedule_call::ggml) {
             ++ggml_calls;
         } else if (++coreml_calls >= 5) {
             break;
         }
     }
+    if (bad_calls > 0) check(false, "memory schedule: every overlapped decode succeeds on ggml or " + coreml_label +
+                                        " (" + bad_backend + ")");
     const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     stop.store(true);
     sampler.join();
@@ -1463,11 +1580,10 @@ void memory_schedule(parler_model & model, const std::string & gguf, const std::
     }
     uint64_t ane_peak = 0;
     for (const auto & a : ane_samples) ane_peak = std::max(ane_peak, a.rss);
-    const mem_charges c{route.prepare_peak_bytes, route.load_peak_bytes, route.resident_bytes,
-                        route.ane_compile_reserve_bytes, route.envelope_bytes};
+    const mem_charges c = charges_of(route, parler_dac_rvq_bytes(model));
     // The prediction workspace this run implies: the steady state above the
     // template's other resident charges.
-    const uint64_t other_resident = route.resident_bytes - route.workspace_bytes;
+    const uint64_t other_resident = c.resident - route.workspace_bytes;
     const uint64_t workspace = b.steady > other_resident ? b.steady - other_resident : 0;
     fprintf(stderr,
             "  memory (MiB; each phase over the footprint just before it began, steady over the footprint just "
@@ -1498,13 +1614,14 @@ void memory_schedule(parler_model & model, const std::string & gguf, const std::
             "  memory report: {\"chip\":\"%s\",\"units\":\"%s\",\"base\":%llu,\"prepare\":%llu,\"generate\":%llu,"
             "\"compile\":%llu,\"load_warm\":%llu,\"load\":%llu,\"warm\":%llu,\"steady\":%llu,\"steady_over_base\":%llu,\"workspace\":%llu,"
             "\"total\":%llu,\"ane_compiler_load_peak\":%llu,\"ane_compiler_before_load\":%llu,"
-            "\"ane_compiler_growth\":%llu,\"ane_compiler_peak\":%llu,\"ane_compiler_baseline\":\"%s\",\"samples\":%zu}\n",
+            "\"ane_compiler_growth\":%llu,\"ane_compiler_peak\":%llu,\"ane_compiler_baseline\":\"%s\",\"samples\":%zu,"
+            "\"ane_compiler_loading_samples\":%zu,\"ane_compiler_crossing\":%zu}\n",
             host_chip().c_str(), route.compute_units.c_str(), (unsigned long long) base,
             (unsigned long long) b.prepare, (unsigned long long) b.generate, (unsigned long long) b.compile,
             (unsigned long long) b.load_warm, (unsigned long long) b.load, (unsigned long long) b.warm,
             (unsigned long long) b.steady, (unsigned long long) b.steady_over_base, (unsigned long long) workspace, (unsigned long long) b.total,
             (unsigned long long) ane.peak, (unsigned long long) ane.before, (unsigned long long) ane.growth,
-            (unsigned long long) ane_peak, baseline_name, samples.size());
+            (unsigned long long) ane_peak, baseline_name, samples.size(), ane.loading_samples, ane_crossing);
     const bool ane_units = route.compute_units == "all" || route.compute_units == "cpu_and_ane";
     std::vector<std::string> failures = probe_failures(base_ok, footprint_failures, ane_units, ane);
     for (const std::string & f : mem_failures(b, ane.peak, c)) failures.push_back(f);
@@ -1515,7 +1632,7 @@ void memory_schedule(parler_model & model, const std::string & gguf, const std::
                   "(envelope %.1f MiB, units %s); ANECompilerService %.1f MiB while loading, grew %.1f MiB (%s)",
                   ggml_calls, coreml_calls, secs, mib(base), mib(b.total), mib(route.envelope_bytes),
                   route.compute_units.c_str(), mib(ane.peak), mib(ane.growth), before_load);
-    check(coreml_calls >= 5 && ggml_calls >= 1 && failures.empty(), line);
+    check(coreml_calls >= 5 && ggml_calls >= 1 && bad_calls == 0 && failures.empty(), line);
     model.dac_pending.reset();
 }
 #endif
@@ -1543,6 +1660,108 @@ void fallback_gates(const std::string & gguf) {
 }
 
 } // namespace
+
+#if defined(__APPLE__)
+// The GGUF at a path is swapped while parler_load_gguf runs: B replaces A
+// once the metadata is parsed, and A is back before the load ends (A/B/A).
+// The load reads through one descriptor, so it must hold A's weights, and
+// its recorded identity must be A's.
+struct swap_paths {
+    std::filesystem::path path, held, other;
+};
+swap_paths g_swap;
+int g_swap_stages = 0;  // stages the hook ran at (both must, or nothing was swapped)
+
+void swap_during_load(const char * stage) {
+    std::error_code ec;
+    ++g_swap_stages;
+    if (std::string(stage) == "metadata") {
+        std::filesystem::rename(g_swap.path, g_swap.held, ec);
+        if (!ec) std::filesystem::rename(g_swap.other, g_swap.path, ec);
+    } else if (std::string(stage) == "weights") {
+        std::filesystem::rename(g_swap.path, g_swap.other, ec);
+        if (!ec) std::filesystem::rename(g_swap.held, g_swap.path, ec);
+    }
+    if (ec) fprintf(stderr, "  swap at %s: %s\n", stage, ec.message().c_str());
+}
+
+// The file offset of `tensor`'s data in the GGUF at `path`, or -1.
+int64_t gguf_tensor_offset(const std::string & path, const char * tensor) {
+    gguf_init_params gp = {/*.no_alloc=*/true, /*.ctx=*/nullptr};
+    gguf_context * g = gguf_init_from_file(path.c_str(), gp);
+    if (!g) return -1;
+    const int64_t i = gguf_find_tensor(g, tensor);
+    const int64_t off = i < 0 ? -1 : (int64_t) (gguf_get_data_offset(g) + gguf_get_tensor_offset(g, i));
+    gguf_free(g);
+    return off;
+}
+
+void descriptor_load_gate(const std::string & gguf) {
+    fprintf(stderr, "GGUF swapped during the load (A/B/A)\n");
+    namespace fs = std::filesystem;
+    const char * TENSOR = "dac.dec.conv_out.bias";
+    const fs::path dir = fs::temp_directory_path() /
+                         ("parler-aba-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    g_swap = {dir / "model.gguf", dir / "held.gguf", dir / "other.gguf"};
+    const std::string src = fs::absolute(gguf).string();
+    const int64_t off = gguf_tensor_offset(src, TENSOR);
+    float bias_a = 0;
+    bool ready = off >= 0 && ::clonefile(src.c_str(), g_swap.path.c_str(), 0) == 0 &&
+                 ::clonefile(src.c_str(), g_swap.other.c_str(), 0) == 0;
+    if (ready) {
+        const int fa = ::open(g_swap.path.c_str(), O_RDONLY);
+        const int fb = ::open(g_swap.other.c_str(), O_RDWR);
+        const float bias_b_value = 0.25f;
+        ready = fa >= 0 && fb >= 0 && ::pread(fa, &bias_a, 4, off) == 4 && bias_a != bias_b_value &&
+                ::pwrite(fb, &bias_b_value, 4, off) == 4;
+        if (fa >= 0) ::close(fa);
+        if (fb >= 0) ::close(fb);
+    }
+    check(ready, "two GGUFs differing only in conv_out's bias");
+    if (!ready) {
+        fs::remove_all(dir, ec);
+        return;
+    }
+    struct stat sa {};
+    ::stat(g_swap.path.c_str(), &sa);
+    // On the CPU every weight is mapped; with the GPU every weight is
+    // streamed into a device buffer. Both readers must use the descriptor.
+    for (const int ngl : {0, 99}) {
+        const std::string path_kind = ngl == 0 ? "CPU, mapped weights" : "GPU, streamed weights";
+        parler_model m;
+        std::string err;
+        g_swap_stages = 0;
+        parler_gguf_load_hook = &swap_during_load;
+        const bool loaded = parler_load_gguf(g_swap.path.string(), m, ngl, &err);
+        parler_gguf_load_hook = nullptr;
+        const std::string backend = loaded && m.backend ? ggml_backend_name(m.backend) : "";
+        if (ngl > 0 && loaded && backend.rfind("CPU", 0) == 0) {
+            fprintf(stderr, "  %s: not run (backend %s)\n", path_kind.c_str(), backend.c_str());
+            parler_free_model(m);
+            continue;
+        }
+        struct stat now {};
+        const bool a_back = ::stat(g_swap.path.c_str(), &now) == 0 && now.st_ino == sa.st_ino &&
+                            fs::exists(g_swap.other) && !fs::exists(g_swap.held);
+        float got = NAN;
+        if (loaded && m.dac_conv_out_b) ggml_backend_tensor_get(m.dac_conv_out_b, &got, 0, sizeof(float));
+        check(loaded && g_swap_stages == 2 && a_back && got == bias_a,
+              path_kind + " (" + backend + "): the load reads A's weights although B held the path in between "
+              "(conv_out bias " + std::to_string(got) + ", A's " + std::to_string(bias_a) + "; hook stages " +
+                  std::to_string(g_swap_stages) + " of 2" + (a_back ? "" : "; the swap did not restore A") + ")" +
+                  (loaded ? "" : ": " + err));
+#ifdef TTS_CPP_USE_COREML
+        const bool identity = m.dac_source && m.dac_source->ok && m.dac_source->stat.ino == (uint64_t) sa.st_ino &&
+                              !m.dac_source->stat.changed;
+        check(identity, path_kind + ": the recorded identity is the file the load read (A's inode)");
+#endif
+        parler_free_model(m);
+    }
+    fs::remove_all(dir, ec);
+}
+#endif
 
 int main(int argc, char ** argv) {
     std::string gguf, fallback, ref_dir, cache_dir, memory_dir;
@@ -1586,6 +1805,9 @@ int main(int argc, char ** argv) {
     model_free_gates();
     fake_sidecar_gates(model);
     pending_seam_gates(model);
+#if defined(__APPLE__)
+    if (memory_dir.empty()) descriptor_load_gate(gguf);
+#endif
 #ifdef TTS_CPP_USE_COREML
     idle_slot_gates(model, gguf);
     if (!memory_dir.empty()) memory_schedule(model, gguf, memory_dir);

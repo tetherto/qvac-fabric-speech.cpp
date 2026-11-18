@@ -286,6 +286,13 @@ bool source_stat(const std::string & path, SourceStat & out) {
     return true;
 }
 
+bool source_stat_fd(int fd, const std::string & path, SourceStat & out) {
+    if (fd < 0 || !stat_fd(fd, out)) return false;
+    out.path = real_path(path);
+    out.changed = false;
+    return true;
+}
+
 SourceStat loaded_source(const SourceStat & before, bool ok_before, const SourceStat & after, bool ok_after,
                          const std::string & path) {
     SourceStat s = after;
@@ -393,6 +400,8 @@ std::vector<Candidate> probe(const std::vector<std::string> & template_ids, cons
 }
 
 bool source_stat(const std::string &, SourceStat &) { return false; }
+
+bool source_stat_fd(int, const std::string &, SourceStat &) { return false; }
 
 SourceStat loaded_source(const SourceStat &, bool, const SourceStat & after, bool, const std::string &) {
     SourceStat s = after;

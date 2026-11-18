@@ -54,10 +54,13 @@ namespace qvac_coreml_memory {
 // instead of counting the missing readings as 0 (probe_failures).
 // generate, compile, load and warm are also reported on their own, each over
 // the footprint just before that state began.
-enum class mem_phase { ggml, generate, compile, load, warm, ready };
+// `digest` is charged with the generation (one prepare charge) but is not
+// evidence that the schedule sampled the generation itself.
+enum class mem_phase { ggml, digest, generate, compile, load, warm, ready };
 
 inline mem_phase mem_phase_of(const std::string & state) {
-    if (state == "digesting" || state == "generating") return mem_phase::generate;
+    if (state == "digesting") return mem_phase::digest;
+    if (state == "generating") return mem_phase::generate;
     if (state == "compiling") return mem_phase::compile;
     if (state == "loading") return mem_phase::load;
     if (state == "warming") return mem_phase::warm;
@@ -78,9 +81,9 @@ struct mem_breakdown {
 };
 
 inline mem_breakdown mem_breakdown_of(const std::vector<mem_sample> & samples, uint64_t base) {
-    // 1: prepare (generate, compile); 2: load and warm-up; 0: the rest.
+    // 1: prepare (digest, generate, compile); 2: load and warm-up; 0: the rest.
     const auto group = [](mem_phase p) {
-        if (p == mem_phase::generate || p == mem_phase::compile) return 1;
+        if (p == mem_phase::digest || p == mem_phase::generate || p == mem_phase::compile) return 1;
         if (p == mem_phase::load || p == mem_phase::warm) return 2;
         return 0;
     };
@@ -92,12 +95,17 @@ inline mem_breakdown mem_breakdown_of(const std::vector<mem_sample> & samples, u
     // load begins counts as the prepare's, not as resident.
     std::optional<uint64_t> load_start;
     mem_phase last = mem_phase::ggml;
+    // The digest and the generation share one increment (from the
+    // footprint before the digest), as one state did before they were told
+    // apart; only a generating sample marks the generation sampled.
+    const auto merged = [](mem_phase p) { return p == mem_phase::digest ? mem_phase::generate : p; };
     for (const mem_sample & s : samples) {
-        if (s.phase != last) phase_start = prev;
+        if (merged(s.phase) != merged(last)) phase_start = prev;
         if (group(s.phase) != group(last)) group_start = prev;
         if (group(s.phase) == 2 && !load_start) load_start = group_start;
         const uint64_t inc = over(s.footprint, phase_start);
         switch (s.phase) {
+            case mem_phase::digest: b.generate = std::max(b.generate, inc); break;
             case mem_phase::generate: b.generated = true; b.generate = std::max(b.generate, inc); break;
             case mem_phase::compile: b.compiled = true; b.compile = std::max(b.compile, inc); break;
             case mem_phase::load: b.loaded = true; b.load = std::max(b.load, inc); break;
@@ -157,6 +165,31 @@ inline std::vector<std::string> mem_failures(const mem_breakdown & b, uint64_t a
         over("ANECompilerService size while loading (reserve)", ane_compiler_load_peak, c.ane_reserve, margin);
     }
     return out;
+}
+
+// The label of an ANECompilerService query bracketed by two slot-state
+// reads: while loading when both reads are the load or the warm-up, before
+// or after it when neither is, and no label (the sample is dropped) when the
+// query crossed the start or the end of the load, so a size read before the
+// load never stands for one during it, nor the reverse.
+inline std::optional<bool> ane_query_loading(mem_phase before, mem_phase after) {
+    const auto loading = [](mem_phase p) { return p == mem_phase::load || p == mem_phase::warm; };
+    if (loading(before) != loading(after)) return std::nullopt;
+    return loading(before);
+}
+
+// One call of the overlapped schedule: it counts as a ggml call or a Core ML
+// call only when it succeeded on that backend (`ggml_label` being the stage's
+// ggml label, `coreml_label` the route's own); a failed call, or one on any
+// other backend, is bad and fails the run instead of filling the call counts.
+enum class schedule_call { ggml, coreml, bad };
+
+inline schedule_call classify_call(bool ok, const std::string & backend, const std::string & ggml_label,
+                                   const std::string & coreml_label) {
+    if (!ok) return schedule_call::bad;
+    if (backend == ggml_label) return schedule_call::ggml;
+    if (backend == coreml_label) return schedule_call::coreml;
+    return schedule_call::bad;
 }
 
 // What the probes failed to measure: the baseline, footprint samples, or (on

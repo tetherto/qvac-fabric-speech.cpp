@@ -97,6 +97,34 @@ inline bool mapped_file_open(MappedFile & m, const std::string & path, const cha
 #endif
 }
 
+#ifndef _WIN32
+// Maps the file open on `fd` (duplicated; the caller keeps its descriptor), so
+// the mapping is that file whatever its path names meanwhile.
+inline bool mapped_file_open_fd(MappedFile & m, int fd, const char * tag) {
+    const int own = fd >= 0 ? dup(fd) : -1;
+    if (own < 0) {
+        fprintf(stderr, "[%s] cannot duplicate descriptor %d\n", tag, fd);
+        return false;
+    }
+    struct stat sb;
+    if (fstat(own, &sb) != 0) {
+        fprintf(stderr, "[%s] fstat failed\n", tag);
+        close(own);
+        return false;
+    }
+    void * base = mmap(nullptr, (size_t) sb.st_size, PROT_READ, MAP_PRIVATE, own, 0);
+    if (base == MAP_FAILED) {
+        fprintf(stderr, "[%s] mmap failed\n", tag);
+        close(own);
+        return false;
+    }
+    m.fd   = own;
+    m.data = (const uint8_t *) base;
+    m.size = (size_t) sb.st_size;
+    return true;
+}
+#endif
+
 inline void mapped_file_close(MappedFile & m) {
 #ifdef _WIN32
     if (m.data) UnmapViewOfFile((void *) m.data);

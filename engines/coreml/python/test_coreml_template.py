@@ -455,12 +455,22 @@ def stored_tensor_name(template, gguf_path, name):
     return stored.get(name, name)
 
 
+# Templates whose patch lines read GGUF tensors by name, with those names (a
+# logical name resolves through the template's `names` table,
+# stored_tensor_name). Other templates' patches may read metadata only, so
+# they are not listed here.
+PATCH_INPUT_TENSORS = {
+    "parler-dac-w128": ["dac.dec.conv_out.bias"],
+    "supertonic-vocoder-w64": ["vocoder:node:/decoder/head/act/PRelu#1"],
+    "supertonic-vocoder-pw2d-w64": ["vocoder:node:/decoder/head/act/PRelu#1"],
+}
+
+
 class RepoTemplatePatchTest(unittest.TestCase):
-    """For every template in the repository with patch sites: two GGUFs that
-    differ only in a tensor its patch lines read get different artifact keys,
-    and generated programs that differ only at the patch sites. A program
-    constant computed from a tensor the recipe does not read would make both
-    the same."""
+    """For each template in PATCH_INPUT_TENSORS: two GGUFs that differ only in
+    a tensor its patch lines read get different artifact keys, and generated
+    programs that differ only at the patch sites. A program constant computed
+    from a tensor the recipe does not read would make both the same."""
 
     def run_tool(self, *args):
         p = subprocess.run([TOOL] + [str(a) for a in args], capture_output=True, text=True)
@@ -471,15 +481,16 @@ class RepoTemplatePatchTest(unittest.TestCase):
     def test_patch_tensors_reach_key_and_program(self):
         import gguf
 
-        checked = 0
-        for tdir in ctpl.find_templates(ctpl.repo_root()):
+        by_id = {d.name: d for d in ctpl.find_templates(ctpl.repo_root())}
+        for tid, names in PATCH_INPUT_TENSORS.items():
+            self.assertIn(tid, by_id, f"template {tid} is not in the repository")
+            tdir = by_id[tid]
             template = json.loads((tdir / "template.json").read_text())
             patches = template.get("patches", [])
-            if not patches:
-                continue
+            self.assertTrue(patches, f"{tid}: no patch sites")
             lines = [l for l in (tdir / "recipe.txt").read_text().splitlines() if l.startswith("patch ")]
-            names = sorted(set(re.findall(r't\("([^"]+)"\)', "\n".join(lines))))
-            self.assertTrue(names, f"{tdir.name}: patch lines read no tensor")
+            for name in names:
+                self.assertIn(f't("{name}")', "\n".join(lines), f"{tid}: no patch line reads {name}")
             sites = [(p["spec_offset"], p["spec_offset"] + p["len"]) for p in patches]
             with tempfile.TemporaryDirectory() as tmp:
                 tmp = Path(tmp)
@@ -510,8 +521,6 @@ class RepoTemplatePatchTest(unittest.TestCase):
                     self.assertTrue(diff, f"{tdir.name}: {name} does not reach the program")
                     for i in diff:
                         self.assertTrue(any(lo <= i < hi for lo, hi in sites), f"{tdir.name}: byte {i} is no patch site")
-            checked += 1
-        self.assertGreater(checked, 0, "no template in the repository has patch sites")
 
 
 def run_ctpl(*args):

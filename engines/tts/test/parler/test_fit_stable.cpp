@@ -86,7 +86,7 @@ using qvac_coreml_fit_stable::write_hints;
 // copy. Each charge is 1.25 x the largest value measured over every
 // overlapped generated-schedule run on the validated hosts, rounded up to
 // 1 MiB, so the envelope's own margin is 1.0 (template.json memory.measured):
-// prepare 1.25 x 441.6 MiB (M2, macOS 27.2.1); the compiler reserve 1.25 x
+// prepare 1.25 x 442.0 MiB (M2, macOS 27.2.1); the compiler reserve 1.25 x
 // 821.2 MiB, the largest absolute size of ANECompilerService while loading on
 // any host (M4 Max; no run found the service clean, so its growth would
 // understate a clean host); load and warm-up 1.25 x 326.4 MiB and the resident part
@@ -96,12 +96,12 @@ using qvac_coreml_fit_stable::write_hints;
 constexpr uint64_t MIB = 1ull << 20;
 constexpr uint64_t DAC_WEIGHTS = 108316032;                    // weight.bin
 constexpr uint64_t DAC_IO = 2 * 393472;                        // latent, valid and pcm, twice
-constexpr uint64_t DAC_PREPARE = 552 * MIB;                    // generation_peak 216 + 8 + compile_peak 328
+constexpr uint64_t DAC_PREPARE = 553 * MIB;                    // generation_peak 216 + 8 + compile_peak 329
 constexpr uint64_t DAC_LOAD = 409 * MIB;                       // load_peak_bytes.all
 constexpr uint64_t DAC_RESIDENT = 409 * MIB;                   // runtime weights + 2 x I/O + workspace
 constexpr uint64_t DAC_WORKSPACE = DAC_RESIDENT - DAC_WEIGHTS - DAC_IO;
 constexpr uint64_t DAC_ANE_RESERVE = 1027 * MIB;               // ane_compile_reserve_bytes
-constexpr uint64_t DAC_ENVELOPE = DAC_RESIDENT + DAC_PREPARE;  // margin 1.0: 961 MiB
+constexpr uint64_t DAC_ENVELOPE = DAC_RESIDENT + DAC_PREPARE;  // margin 1.0: 962 MiB
 
 void template_charges(const parler_dac_route & r) {
 #if defined(TTS_CPP_USE_COREML) && defined(__APPLE__) && TARGET_OS_OSX
