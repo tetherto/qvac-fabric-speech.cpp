@@ -54,9 +54,6 @@ public:
     }
 };
 
-// The text fit prices when the constructor decides memory-degrade: one short
-// sentence, so the decision covers the resident models and one chunk.
-constexpr const char * DEGRADE_FIT_TEXT = "Hello.";
 }
 
 struct Engine::Impl {
@@ -94,12 +91,14 @@ struct Engine::Impl {
 #ifdef TTS_CPP_USE_COREML
         // Fit's memory-degrade: with a budget, Core ML is dropped when only the
         // ggml projection fits. Decided before the weights load, so it reads
-        // the same free memory fit_params reports.
+        // the same free memory fit_params reports, for the workload and
+        // headroom the caller's fit assessed.
         bool degrade = false;
         if (o.coreml.memory_budget_bytes) {
             FitOptions fit;
             fit.engine = o;
-            fit.text = DEGRADE_FIT_TEXT;
+            fit.text = o.fit_text;
+            fit.margin_bytes = o.fit_margin_bytes;
             degrade = fit_params(fit).coreml.disabled_reason == "memory";
         }
 #endif

@@ -484,10 +484,20 @@ first generation) adds the templates' Core ML envelope to the projection: the
 two resident parts (weights, I/O and the step's KV state) plus the larger of
 the stages' prepare and load transients (one Core ML job runs at a time).
 `FitResult::coreml` reports the route, the envelope, whether it was measured
-for the resolved units, and the ggml-only verdict; with
-`engine.coreml.memory_budget_bytes`, a budget only the ggml projection fits
-reports `disabled_reason = "memory"` and the ggml verdict (memory-degrade),
-and the Engine then runs ggml only.
+for the resolved units, and the ggml-only verdict. A budget, either
+`FitOptions::memory_budget_bytes` or `engine.coreml.memory_budget_bytes`
+(the smaller when both are set), caps the available memory for every
+verdict; a budget only the ggml projection fits reports
+`disabled_reason = "memory"` and the ggml verdict (memory-degrade), and the
+Engine then runs ggml only.
+
+With `coreml.memory_budget_bytes` set, the Engine's constructor repeats the
+fit to decide memory-degrade. It uses `EngineOptions::fit_text` and
+`fit_margin_bytes` (defaults `"Hello."` and 256 MiB, the `FitOptions`
+margin): set them to the text and headroom of the `fit_params` call that
+assessed the engine, so the engine reaches the same decision. `pocket-cli`
+does this for its `--text`, `--fit-budget-mib` and `--fit-margin-mib`, in
+`--fit` and in synthesis alike.
 
 The envelope's constants are measured by `test-pocket-coreml --generated
 BUNDLE --memory-schedule DIR`: ggml FlowLM and Mimi work while both sidecars

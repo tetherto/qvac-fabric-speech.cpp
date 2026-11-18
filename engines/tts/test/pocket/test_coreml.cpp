@@ -58,7 +58,11 @@
 #if defined(__APPLE__)
 #include <sys/sysctl.h>
 #endif
+#ifndef _WIN32
+#include <sys/wait.h>
+#endif
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -302,9 +306,22 @@ void check_coreml_options() {
     v = pd::decide_coreml_fit(100, 50, true, 120, int64_t(1) << 50);
     require(v.degraded && v.fits, "degrade is decided on min(free, budget)");
     v = pd::decide_coreml_fit(100, 50, true, 1000, int64_t(90));
-    require(!v.degraded && v.fits && v.charged == 150, "a budget nothing fits leaves the Core ML verdict");
+    require(!v.degraded && !v.ggml_only_fits && !v.coreml_fits && !v.fits,
+            "a budget below the ggml projection refuses, however much memory is free");
+    v = pd::decide_coreml_fit(100, 50, true, 1000, int64_t(160));
+    require(!v.degraded && v.fits && v.charged == 150, "a budget both fit keeps Core ML");
     v = pd::decide_coreml_fit(100, 50, false, 120, int64_t(110));
     require(!v.degraded && v.fits && v.charged == 100, "no generated stage, no degrade");
+    v = pd::decide_coreml_fit(100, 50, false, 1000, int64_t(90));
+    require(!v.fits, "without a generated stage the budget still caps the ggml verdict");
+    // One ceiling: the smaller of the fit's budget and the Core ML budget.
+    require(!pd::effective_fit_budget(0, std::nullopt), "no budget set");
+    require(pd::effective_fit_budget(0, int64_t(70)) == int64_t(70), "the Core ML budget alone");
+    require(pd::effective_fit_budget(80, std::nullopt) == int64_t(80), "the fit's budget alone enables degrade");
+    require(pd::effective_fit_budget(80, int64_t(70)) == int64_t(70) &&
+                pd::effective_fit_budget(60, int64_t(70)) == int64_t(60),
+            "both set: the smaller");
+    require(pd::effective_fit_budget(~uint64_t(0), std::nullopt) == INT64_MAX, "a huge fit budget saturates");
     std::puts("[options] Core ML options, routes and fit arithmetic: ok");
 }
 
@@ -1032,6 +1049,7 @@ int generated_fixture(const std::string & bundle, const std::string & cache_dir,
                     degraded.reason.c_str(), degraded.coreml.disabled_reason.c_str());
         require(degraded.coreml.disabled_reason == "memory" && degraded.fits, "a near budget degrades to ggml in fit");
         degrade.coreml.memory_budget_bytes = f.engine.coreml.memory_budget_bytes;
+        degrade.fit_text = text;
     }
     Engine degraded_engine(degrade);
     const Json dst = status_of(degraded_engine);
@@ -1039,10 +1057,136 @@ int generated_fixture(const std::string & bundle, const std::string & cache_dir,
                 stage_status(dst, "mimi").at("state") == "disabled" && stage_status(dst, "mimi").at("route") == "none",
             "the Engine resolves use = off under memory-degrade: " + dst.dump());
     require(degraded_engine.synthesize(text).flow_lm_backend == "ggml", "a degraded Engine runs ggml");
+    {
+        // A fit assessed with a larger headroom than the default: the budget
+        // holds ggml + Core ML with the default margin, but only ggml with
+        // this one. The Engine, given the same text and margin, must reach
+        // that fit's verdict (memory-degrade) and run ggml.
+        tts_cpp::pocket::FitOptions wide = fit;
+        wide.engine.coreml.memory_budget_bytes = int64_t(1) << 50;
+        const auto probe = tts_cpp::pocket::fit_params(wide);
+        const uint64_t ggml_required =
+            probe.device.total_bytes + (probe.device_shares_host_memory ? probe.host_bytes : 0) + fit.margin_bytes;
+        wide.margin_bytes = fit.margin_bytes + probe.coreml.bytes;
+        wide.engine.coreml.memory_budget_bytes = int64_t(ggml_required + probe.coreml.bytes + (64ull << 20));
+        const auto assessed = tts_cpp::pocket::fit_params(wide);
+        tts_cpp::pocket::FitOptions as_default = wide;
+        as_default.margin_bytes = fit.margin_bytes;
+        const auto by_default = tts_cpp::pocket::fit_params(as_default);
+        require(assessed.coreml.disabled_reason == "memory" && by_default.coreml.disabled_reason.empty(),
+                "a budget only the larger margin degrades: '" + assessed.coreml.disabled_reason + "' with it, '" +
+                    by_default.coreml.disabled_reason + "' with the default");
+        EngineOptions low = opts;
+        low.coreml.wait = CoremlOptions::Wait::construct;
+        low.coreml.memory_budget_bytes = wide.engine.coreml.memory_budget_bytes;
+        low.fit_text = text;
+        low.fit_margin_bytes = wide.margin_bytes;
+        Engine engine_low(low);
+        const Json lst = status_of(engine_low);
+        const auto low_result = engine_low.synthesize(text);
+        std::printf("[degrade] margin %.1f MiB: Engine FlowLM %s, Mimi %s\n", mib(wide.margin_bytes),
+                    low_result.flow_lm_backend.c_str(), low_result.mimi_backend.c_str());
+        require(stage_status(lst, "step").at("state") == "disabled" &&
+                    stage_status(lst, "mimi").at("state") == "disabled" && low_result.flow_lm_backend == "ggml" &&
+                    low_result.mimi_backend == "ggml",
+                "Engine with the fit's nondefault margin: memory-degrade as that fit (" + low_result.flow_lm_backend +
+                    " / " + low_result.mimi_backend + "), " + lst.dump());
+    }
     std::puts("test-pocket-coreml --generated: ok");
     return 0;
 }
 #endif
+
+// Budgets below the ggml projection, between it and the Core ML-inclusive
+// one, and above both, through the public fit (each budget source, and both
+// with the smaller winning) and, with `cli`, through pocket-cli --fit. One
+// ceiling holds every verdict: below refuses, between degrades, above keeps
+// Core ML (when the build generates).
+int fit_budgets(const fs::path & bundle, const std::string & cli) {
+    EngineOptions e = bundle_options(bundle);
+    const fs::path cache = fs::temp_directory_path() / ("pocket-fit-budgets-" + test_process_tag());
+    e.coreml.cache_dir = cache.string();
+    tts_cpp::pocket::FitOptions f;
+    f.engine = e;
+    f.text = "The quick brown fox jumps over the lazy dog.";
+    const auto probe = tts_cpp::pocket::fit_params(f);
+    require(probe.status != tts_cpp::FitStatus::Error, "fit of the bundle: " + probe.report);
+    if (!probe.device_shares_host_memory) {
+        std::puts("SKIP: the selected device does not share host memory");
+        return SKIP;
+    }
+    const uint64_t MIB = 1ull << 20;
+    const uint64_t required = probe.device.total_bytes + probe.host_bytes + f.margin_bytes;
+    const uint64_t envelope = probe.coreml.route == "generate" ? probe.coreml.bytes : 0;
+    std::printf("[budgets] ggml %.1f MiB, Core ML envelope %.1f MiB (route %s), free %.1f MiB\n",
+                double(required) / MIB, double(envelope) / MIB, probe.coreml.route.c_str(),
+                double(probe.device_free_bytes) / MIB);
+    const uint64_t below = required - 16 * MIB, between = required + envelope / 2,
+                   above = required + envelope + 64 * MIB;
+    if (probe.device_free_bytes < above + 256 * MIB) {
+        std::puts("SKIP: not enough free memory for the budget above both projections");
+        return SKIP;
+    }
+    struct Case {
+        const char * name;
+        uint64_t budget;
+        bool fits;
+        bool degraded;
+    };
+    std::vector<Case> cases = {{"below", below, false, false}, {"above", above, true, false}};
+    if (envelope) cases.push_back({"between", between, true, true});
+    for (const Case & c : cases) {
+        for (int source = 0; source < 4; ++source) {
+            tts_cpp::pocket::FitOptions g = f;
+            const char * label = "";
+            if (source == 0) { g.memory_budget_bytes = c.budget; label = "fit budget"; }
+            if (source == 1) { g.engine.coreml.memory_budget_bytes = int64_t(c.budget); label = "Core ML budget"; }
+            if (source == 2) {
+                g.memory_budget_bytes = c.budget;
+                g.engine.coreml.memory_budget_bytes = int64_t(c.budget);
+                label = "both";
+            }
+            if (source == 3) {
+                g.memory_budget_bytes = c.budget;
+                g.engine.coreml.memory_budget_bytes = int64_t(c.budget + envelope + 1024 * MIB);
+                label = "both, fit's smaller";
+            }
+            const auto r = tts_cpp::pocket::fit_params(g);
+            const bool degraded = r.coreml.disabled_reason == "memory";
+            std::printf("[budgets] %s (%s): %s%s\n", c.name, label, r.reason.c_str(), degraded ? ", memory-degrade" : "");
+            require(r.fits == c.fits && degraded == c.degraded && r.device_free_bytes <= c.budget,
+                    std::string("budget ") + c.name + " via " + label + ": " + r.report);
+        }
+    }
+#ifndef _WIN32
+    if (!cli.empty()) {
+        const fs::path report = cache.string() + "-report.json";
+        for (const Case & c : cases) {
+            const uint64_t budget_mib = c.name == std::string("below") ? required / MIB - 16
+                                        : c.name == std::string("between") ? (required + envelope / 2) / MIB
+                                                                           : (required + envelope) / MIB + 64;
+            const std::string cmd = "'" + cli + "' --fit --model-dir '" + bundle.string() + "' --text '" + f.text +
+                                    "' --coreml-cache-dir '" + cache.string() + "' --fit-budget-mib " +
+                                    std::to_string(budget_mib) + " --report '" + report.string() + "' > /dev/null";
+            const int status = std::system(cmd.c_str());
+            const int code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+            const nlohmann::json j = nlohmann::json::parse(std::ifstream(report));
+            const bool degraded = j.at("coreml").at("disabled_reason") == "memory";
+            std::printf("[budgets] pocket-cli %s (%llu MiB): exit %d%s\n", c.name, (unsigned long long) budget_mib, code,
+                        degraded ? ", memory-degrade" : "");
+            require(code == (c.fits ? 0 : 1) && j.at("fits") == c.fits && degraded == c.degraded,
+                    std::string("pocket-cli --fit budget ") + c.name + ": " + j.dump());
+        }
+        fs::remove(report);
+    }
+#else
+    (void) cli;
+#endif
+    std::error_code ec;
+    fs::remove_all(cache, ec);
+    std::puts("test-pocket-coreml --fit-budgets: ok");
+    return 0;
+}
 
 int engine_fixture() {
 #ifndef TTS_CPP_USE_COREML
@@ -1072,6 +1216,8 @@ int main(int argc, char ** argv) {
     try {
         if (argc > 1 && std::string(argv[1]) == "--shape-fixture") return shape_fixture();
         if (argc > 1 && std::string(argv[1]) == "--engine-fixture") return engine_fixture();
+        if (argc > 2 && std::string(argv[1]) == "--fit-budgets")
+            return fit_budgets(argv[2], argc > 4 && std::string(argv[3]) == "--cli" ? argv[4] : "");
         if (argc > 1 && std::string(argv[1]) == "--generated") {
 #ifndef TTS_CPP_USE_COREML
             std::puts("SKIP: built without Core ML (TTS_CPP_COREML=OFF)");

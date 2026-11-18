@@ -261,6 +261,10 @@ struct CoremlFitVerdict {
 };
 CoremlFitVerdict decide_coreml_fit(uint64_t required, uint64_t coreml_bytes, bool generate, uint64_t free,
                                    const std::optional<int64_t> & budget);
+// The budget fit applies to every verdict and to memory-degrade: the smaller
+// of FitOptions::memory_budget_bytes (0: unset) and the engine's
+// coreml.memory_budget_bytes; nullopt when neither is set.
+std::optional<int64_t> effective_fit_budget(uint64_t fit_budget, const std::optional<int64_t> & coreml_budget);
 
 // One chunk's step, acquired once at the chunk's start on the producer thread.
 struct CoremlStepUse {

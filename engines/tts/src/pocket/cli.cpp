@@ -67,15 +67,22 @@ void print_help() {
               "DIR contains flow-lm.gguf, mimi.gguf, frontend.json, voice.gguf. Individual asset paths can override DIR.\n"
               "--runs greater than 1 includes one untimed warmup and records each warm run.\n"
               "--fit estimates memory on the selected backend without loading weights; optional --fit-budget-mib and --fit-margin-mib.\n"
+              "  Synthesis uses the same budget, text and margin to decide whether Core ML fits (memory-degrade).\n"
               "--coreml-cache-dir DIR generates the Core ML sidecars from the GGUFs into DIR when none is prebuilt (macOS 15+);\n"
               "  --coreml-wait none|construct|call, --coreml-prewarm none|minimal|predicted|all,\n"
               "  --coreml-step-units / --coreml-decoder-units all|cpu_and_ane|cpu_and_gpu|cpu_only,\n"
               "  --coreml-status-json FILE writes the Core ML status after the runs.\n"
               "Fit exit status: 0 fits, 1 does not fit, 2 measurement error.");
 }
-EngineOptions engine_options(const Arguments & args) {
+EngineOptions engine_options(const Arguments & args, const std::string & text) {
     const auto dir = args.get("--model-dir", ".");
     EngineOptions opts;
+    // The fit that assesses this run (--fit) and the Engine's own
+    // memory-degrade decision use one budget, text and margin.
+    const uint64_t budget = args.mib("--fit-budget-mib", 0);
+    if (budget) opts.coreml.memory_budget_bytes = int64_t(budget);
+    opts.fit_text = text;
+    opts.fit_margin_bytes = args.mib("--fit-margin-mib", 256);
     opts.use_gpu = args.has("--gpu");
     opts.backends_dir = args.get("--backends-dir", "");
     opts.backend = args.get("--backend", "");
@@ -120,7 +127,7 @@ void write_report(const std::string & path, const Json & report) {
 }
 int run_fit(const Arguments & args, const EngineOptions & opts, const std::string & text) {
     FitOptions fit; fit.engine = opts; fit.text = text;
-    fit.margin_bytes = args.mib("--fit-margin-mib", 256);
+    fit.margin_bytes = opts.fit_margin_bytes;
     fit.memory_budget_bytes = args.mib("--fit-budget-mib", 0);
     const auto result = fit_params(fit);
     std::puts(result.report.c_str());
@@ -132,7 +139,11 @@ int run_fit(const Arguments & args, const EngineOptions & opts, const std::strin
         {"lm_compute_bytes", result.device.lm_compute_bytes}, {"codec_compute_bytes", result.device.codec_compute_bytes},
         {"device_bytes", result.device.total_bytes}, {"host_bytes", result.host_bytes},
         {"available_bytes", result.device_free_bytes}, {"total_memory_bytes", result.device_total_bytes},
-        {"margin_bytes", fit.margin_bytes}, {"report", result.report}});
+        {"margin_bytes", fit.margin_bytes}, {"budget_bytes", fit.memory_budget_bytes},
+        {"coreml", {{"route", result.coreml.route}, {"bytes", result.coreml.bytes}, {"fits", result.coreml.fits},
+                    {"validated", result.coreml.validated}, {"disabled_reason", result.coreml.disabled_reason},
+                    {"ggml_only_fits", result.coreml.ggml_only_fits}}},
+        {"report", result.report}});
     return int(result.status);
 }
 void write_wav(const std::string & path, const SynthesisResult & result) {
@@ -203,9 +214,9 @@ int main(int argc, char ** argv) {
     try {
         const auto args = parse_arguments(argc, argv);
         if (args.has("--help")) { print_help(); return 0; }
-        const auto opts = engine_options(args);
         const auto text = args.get("--text", "");
         if (text.empty()) throw std::runtime_error("--text is required");
+        const auto opts = engine_options(args, text);
         return args.has("--fit") ? run_fit(args, opts, text) : run_synthesis(args, opts, text);
     } catch (const std::exception & e) { std::fprintf(stderr, "%s\n", e.what()); return 1; }
 }

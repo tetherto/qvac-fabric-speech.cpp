@@ -56,6 +56,16 @@ struct EngineOptions {
     // Per-stage compute units; override coreml.compute_units for their stage.
     std::string coreml_step_units;
     std::string coreml_decoder_units;
+
+    // The workload and headroom of the fit_params call that assessed this
+    // engine (FitOptions::text and FitOptions::margin_bytes; the defaults are
+    // one short sentence and FitOptions' margin). With
+    // coreml.memory_budget_bytes set, the constructor repeats that fit to
+    // decide memory-degrade (Core ML off when only the ggml projection fits
+    // the budget), so these must match the assessment, or the engine can keep
+    // Core ML where that fit dropped it.
+    std::string fit_text = "Hello.";
+    uint64_t fit_margin_bytes = 256ull * 1024 * 1024;
 };
 struct SynthesisResult {
     std::vector<float> pcm; // populated by synthesize(); streaming uses the callback
