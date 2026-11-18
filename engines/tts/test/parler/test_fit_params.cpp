@@ -43,6 +43,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <limits>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -523,6 +524,39 @@ void run_weightless_description_gates() {
     fs::remove(path);
 }
 
+// Fit's Core ML verdicts and memory-degrade for a generated DAC, on chosen
+// numbers: memory-degrade decides on the capacity the verdicts use, so a
+// budget never turns a ggml verdict that fits the free memory into a refusal.
+void run_coreml_verdict_gates() {
+    const uint64_t MiB = 1024ull * 1024;
+    const uint64_t required = 800 * MiB, envelope = 480 * MiB;
+    const auto decide = [&](uint64_t free, std::optional<int64_t> budget, bool generate = true) {
+        return parler_decide_coreml_fit(required, envelope, generate, free, budget);
+    };
+    // No budget: no memory-degrade; Core ML is charged and may refuse.
+    auto v = decide(1000 * MiB, std::nullopt);
+    expect(v.ggml_only_fits && !v.coreml_fits && !v.degraded && !v.fits,
+           "no budget: the Core ML-inclusive verdict refuses without memory-degrade");
+    // A budget above the free memory, which fits ggml but not ggml + Core ML:
+    // memory-degrade on the free memory, and the ggml verdict stands.
+    v = decide(1000 * MiB, (int64_t) (64 * 1024 * MiB));
+    expect(v.ggml_only_fits && !v.coreml_fits && v.degraded && v.fits,
+           "a huge budget with required <= free < required + envelope degrades and fits");
+    // A budget below the free memory decides the same way on the budget.
+    v = decide(64 * 1024 * MiB, (int64_t) (1000 * MiB));
+    expect(v.coreml_fits && v.degraded && v.fits,
+           "a budget that fits only ggml degrades even with free memory to spare");
+    // Room for both: Core ML kept.
+    v = decide(2000 * MiB, (int64_t) (64 * 1024 * MiB));
+    expect(v.coreml_fits && !v.degraded && v.fits, "room for Core ML keeps it");
+    // ggml alone does not fit: no memory-degrade, refusal.
+    v = decide(700 * MiB, (int64_t) (64 * 1024 * MiB));
+    expect(!v.ggml_only_fits && !v.degraded && !v.fits, "ggml alone over the free memory refuses");
+    // No generated route: nothing charged, nothing degraded.
+    v = decide(1000 * MiB, (int64_t) (900 * MiB), false);
+    expect(v.coreml_fits && !v.degraded && v.fits, "no generated route charges no envelope");
+}
+
 }  // namespace
 
 int main(int argc, char ** argv) {
@@ -547,6 +581,7 @@ int main(int argc, char ** argv) {
         run_fit_gates(path, /*n_gpu_layers=*/0);
         fs::remove(path);
         run_weightless_description_gates();
+        run_coreml_verdict_gates();
     }
     if (g_failures == 0) {
         std::printf("test-parler-fit-params: all checks passed\n");

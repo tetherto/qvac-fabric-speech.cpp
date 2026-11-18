@@ -138,9 +138,26 @@ speech tokenizer. Export, routing, fallback, and per-call status are documented 
 [Parler-TTS](docs/parler.md#core-ml-dac-sidecar-apple-neural-engine), and
 [MOSS](docs/backends.md#apple-core-ml-sidecars).
 
+The Parler-TTS DAC sidecar can also be generated on the device from the GGUF
+itself: with `EngineOptions::coreml.cache_dir` (or `QVAC_COREML_CACHE_DIR`)
+set, macOS 15 or later and no prebuilt sidecar next to the GGUF, the engine
+builds it from an embedded template, compiles it and keeps it in the cache;
+synthesis runs on the ggml DAC until it is ready. Its accuracy against the
+ggml DAC depends on how Core ML partitions it on the chip: 56 dB on an M2,
+where `all` runs it on the Neural Engine; 51 dB on an M4 Max, where `all`
+runs most of it on the GPU and the output stage on the Neural Engine. CI
+runs on an M4 Max: it holds `all` to that chip's recorded 50 dB floor and
+the same sidecar under `cpu_and_ane` to 54 dB. The M2's 54 dB gate under
+`all` is checked by the device run, not by CI. See
+[Parler-TTS generated sidecar](docs/parler.md#generated-sidecar-and-background-loading).
+
 CosyVoice3 HiFT sidecars use FP32 for waveform parity. With enabled Chatterbox,
-Pocket TTS, CosyVoice3 or Parler-TTS sidecars present, `fit_params` returns `Error` with
+Pocket TTS, CosyVoice3 or prebuilt Parler-TTS sidecars present, `fit_params` returns `Error` with
 `coreml-memory-estimate-unavailable`; it cannot project Core ML resident memory.
+A generated Parler-TTS DAC is projected: fit adds its template's Core ML memory envelope,
+963 MiB under `all` (1.25 times the largest values measured on an M2 and on the M4 Max CI
+runner, where `all` runs on the GPU, with no further margin). Phones are not affected today, since sidecars are generated
+on macOS only; see [Parler-TTS memory validation](docs/parler.md#generated-sidecar-and-background-loading).
 Re-export CosyVoice3 LM sidecars with the current exporter for correct cache
 feedback on macOS 15 and 26; see [CosyVoice3 Core ML](docs/cosyvoice3.md#core-ml-sidecars).
 

@@ -49,6 +49,23 @@ struct FitBreakdown {
     uint64_t total_bytes         = 0;  // sum of the above
 };
 
+// The Core ML part of a projection, for engines whose stages run on the
+// shared Core ML runtime (Parler's DAC today). The route is decided from the
+// options, OS, build, template match and prebuilt presence, never from the
+// cache, so a projection is the same before and after the first generation.
+struct FitCoreml {
+    std::string route = "none";  // "prebuilt" | "generate" | "none"
+    // The Core ML-inclusive verdict: the ggml projection (its residency kept)
+    // plus the stage's Core ML envelope.
+    bool        fits  = true;
+    uint64_t    bytes = 0;       // the envelope: resident + one transient, with its margin
+    bool        validated = false;  // the envelope was measured for the resolved compute units
+    // "memory" when memory-degrade (a budget, coreml.memory_budget_bytes,
+    // that only the ggml projection fits) makes the engine resolve use = off.
+    std::string disabled_reason;
+    bool        ggml_only_fits = true;  // today's verdict
+};
+
 struct FitResult {
     FitStatus   status = FitStatus::Error;
     bool        fits   = false;  // status == Success
@@ -88,6 +105,9 @@ struct FitResult {
 
     // Human-readable projection table (multi-line, suitable for logging).
     std::string report;
+
+    // Engines on the shared Core ML runtime only; route "none" elsewhere.
+    FitCoreml coreml;
 };
 
 }  // namespace tts_cpp

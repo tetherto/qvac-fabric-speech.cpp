@@ -44,10 +44,13 @@ std::vector<std::string> embedded_ids() {
 }
 
 std::shared_ptr<const recipe::Template> embedded(const std::string & id) {
-    static std::mutex mu;
-    static std::map<std::string, std::shared_ptr<const recipe::Template>> parsed;
-    std::lock_guard<std::mutex> lk(mu);
-    if (auto it = parsed.find(id); it != parsed.end()) return it->second;
+    // Leaked on purpose, like the manager: prepare jobs on the runtime's
+    // threads hold the templates through raw pointers and may still run
+    // while the process exits, after static destructors.
+    static auto * mu = new std::mutex();
+    static auto * parsed = new std::map<std::string, std::shared_ptr<const recipe::Template>>();
+    std::lock_guard<std::mutex> lk(*mu);
+    if (auto it = parsed->find(id); it != parsed->end()) return it->second;
 
     size_t n = 0;
     const EmbeddedFile * f = embedded_files(n);
@@ -66,7 +69,7 @@ std::shared_ptr<const recipe::Template> embedded(const std::string & id) {
     if (files.empty()) return nullptr;
     std::shared_ptr<const recipe::Template> t = recipe::Template::from_embedded(std::move(files));
     if (t->id() != id) throw std::runtime_error("embedded template " + id + ": template.json id is " + t->id());
-    parsed.emplace(id, t);
+    parsed->emplace(id, t);
     return t;
 }
 
