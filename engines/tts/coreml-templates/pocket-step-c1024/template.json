@@ -143,7 +143,7 @@
   "memory": {
     "runtime_weight_bytes": 169075712,
     "workspace_bytes": 0,
-    "compile_peak_bytes": 61865984,
+    "compile_peak_bytes": 71303168,
     "ane_compile_reserve_bytes": null,
     "load_peak_bytes": {
       "cpu_and_ane": null,
@@ -162,9 +162,9 @@
     ],
     "measured": {
       "margin": 1.25,
-      "runs": 11,
+      "runs": 25,
       "resident_bytes": 194267392,
-      "basis": "Each constant is 1.25 x the largest value measured over every overlapped generated-schedule run on the validated_for hosts, rounded up to 1 MiB, so the envelope's own margin is 1.0. The schedule generates, compiles, loads and warms both Pocket sidecars in the background (one Core ML job at a time) while ggml FlowLM and Mimi keep working: the prepare charge (generation_peak_bytes + 8 MiB + compile_peak_bytes) covers this stage's prepare over the footprint just before it began, and load_peak_bytes its load and warm-up over the footprint just before the load. The two templates' resident parts (weights, 2 x I/O and the step's KV state, workspace 0) together cover 1.25 x the largest steady state with both sidecars running, over the footprint just before the first load (136314880 bytes): the step's weights on the GPU and the decoder's on the Neural Engine stay below their weight.bin sizes in this process. The step runs on cpu_and_gpu, which never compiles for the Neural Engine."
+      "basis": "Each constant is 1.25 x the largest value measured over every overlapped generated-schedule run on the validated_for hosts (25 run reports: 25 on an Apple M2, macOS 27.2.1), rounded up to 1 MiB, so the envelope's own margin is 1.0. The schedule (test-pocket-coreml --generated BUNDLE --memory-schedule DIR) generates, compiles, loads and warms both Pocket sidecars in the background (one Core ML job at a time) while ggml FlowLM and Mimi keep working: the prepare charge (generation_peak_bytes + 8 MiB + compile_peak_bytes) covers this stage's prepare over the footprint just before it began, and load_peak_bytes its load and warm-up over the footprint just before the load. The two templates' resident parts (weights, 2 x I/O and the step's KV state, workspace 0) together cover 1.25 x the largest steady state with both sidecars running, over the footprint just before the first load: the step's weights on the GPU and the decoder's on the Neural Engine stay below their weight.bin sizes in this process. The step runs on cpu_and_gpu, which never compiles for the Neural Engine."
     }
   },
   "prefer_ggml_on": [],
