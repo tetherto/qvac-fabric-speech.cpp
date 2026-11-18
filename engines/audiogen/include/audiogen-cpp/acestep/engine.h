@@ -338,7 +338,10 @@ public:
     UnderstandResult understand(const UnderstandParams & params, const ProgressFn & progress = {}) const;
 
     // Cooperative cancel for an in-flight generate(), understand(),
-    // coreml_wait() or waited coreml_prewarm() on another thread.
+    // coreml_wait() or waited coreml_prewarm() on another thread. With nothing
+    // in flight it cancels the next generate() or understand(). A cancel that
+    // only interrupted a coreml_wait() or waited coreml_prewarm() (no
+    // generation in flight) is consumed by it: the next generate() runs.
     void cancel() const;
 
     // Core ML status of the VAE decoder as JSON (schema 1: engine, cache_dir,

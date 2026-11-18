@@ -151,11 +151,10 @@ struct Engine::Impl {
     BpeTokenizer bpe_lm;    // LM vocab (+ audio codes) — Phase-2 prompt
     BpeTokenizer bpe_text;  // text-encoder vocab — DiT prompt / lyric lookup
 
-    mutable std::atomic<bool> cancel_flag{ false };
-    // Set by Engine::cancel() with cancel_flag; a blocking coreml_wait()
-    // clears and watches only this one, so it never clears a cancel meant for
-    // a generation on another thread.
-    mutable std::atomic<bool> wait_cancel{ false };
+    // Engine::cancel(): the generations' flag (cancel_flag) and the blocking
+    // Core ML waits, each with its own flag.
+    mutable EngineCancel canceller;
+    std::atomic<bool> & cancel_flag = canceller.flag;
 
     // Sequential-loading state (see create()/generate()). In the default low-mem
     // mode no stage is resident after create(); generate() loads each stage right
@@ -2145,7 +2144,7 @@ GenerateResult Engine::generate(const GenerateParams & params, const ProgressFn 
 
 GenerateResult Engine::generate_unlabelled(const GenerateParams & params, const ProgressFn & progress) const {
     Impl & engine = *impl_;
-    CancellationScope cancellation_scope(engine.cancel_flag);
+    EngineCancel::Call cancellation_scope(engine.canceller);
 
     GenerateResult result;
     result.sample_rate = engine.sr;
@@ -2209,7 +2208,7 @@ static void validate_understand_request(const UnderstandParams & params) {
 
 UnderstandResult Engine::understand(const UnderstandParams & params, const ProgressFn & progress) const {
     Impl & engine = *impl_;
-    CancellationScope cancellation_scope(engine.cancel_flag);
+    EngineCancel::Call cancellation_scope(engine.canceller);
 
     UnderstandResult result;
     if (engine.cancel_flag.load()) {
@@ -2276,10 +2275,7 @@ UnderstandResult Engine::understand(const UnderstandParams & params, const Progr
     return result;
 }
 
-void        Engine::cancel() const {
-    impl_->cancel_flag.store(true);
-    impl_->wait_cancel.store(true);
-}
+void        Engine::cancel() const { impl_->canceller.cancel(); }
 
 std::string Engine::coreml_status() const {
     return impl_->vae_coreml ? impl_->vae_coreml->status_json() : std::string("{}");
@@ -2292,15 +2288,16 @@ std::string Engine::coreml_construction() const {
 std::string Engine::coreml_prewarm(CoremlOptions::Prewarm scope, bool wait) const {
     if (!impl_->vae_coreml) return "{}";
     if (!wait) return impl_->vae_coreml->prewarm(scope, false, !impl_->keep_stages);
-    impl_->wait_cancel.store(false);
-    return impl_->vae_coreml->prewarm(scope, true, !impl_->keep_stages, &impl_->wait_cancel);
+    const EngineCancel::Wait cancelled(impl_->canceller);
+    return impl_->vae_coreml->prewarm(scope, true, !impl_->keep_stages, cancelled.stop());
 }
 
 bool Engine::coreml_wait(int64_t timeout_ms) const {
     if (!impl_->vae_coreml) return false;
+    // A readiness poll has nothing to cancel.
     if (timeout_ms == 0) return impl_->vae_coreml->wait(0);
-    impl_->wait_cancel.store(false);
-    return impl_->vae_coreml->wait(timeout_ms, &impl_->wait_cancel);
+    const EngineCancel::Wait cancelled(impl_->canceller);
+    return impl_->vae_coreml->wait(timeout_ms, cancelled.stop());
 }
 int         Engine::sample_rate() const { return impl_->sr; }  // cached; VAE loaded lazily
 std::string Engine::backend_name() const { return impl_->backend ? ggml_backend_name(impl_->backend) : "cpu"; }
