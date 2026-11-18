@@ -30,6 +30,9 @@ namespace tts_cpp::acestep::detail {
 
 constexpr const char * VAE_COREML_ENV_PREFIX   = "ACESTEP";
 constexpr const char * VAE_COREML_TEMPLATE_ID  = "acestep-vae-t64";
+// The generated decoder's fixed window in latent frames (the template's
+// input [1, 64, 64]): a shorter latent cannot run on it.
+constexpr int          VAE_COREML_TEMPLATE_WINDOW = 64;
 constexpr const char * VAE_GGML_BACKEND        = "ggml";
 constexpr const char * VAE_MIXED_BACKEND       = "mixed";
 
@@ -60,6 +63,9 @@ struct vae_coreml_route {
     std::string compute_units;   // resolved
     bool        strict    = false;
     bool        validated = false;  // generate: the envelope is validated for compute_units
+    // generate: the decoder's window in latent frames, known before it loads;
+    // 0 when unknown until a load (prebuilt).
+    int         window_frames = 0;
     // generate: the parts of the envelope with the template's margin applied.
     uint64_t resident_bytes  = 0;  // weights, 2 x I/O, workspace
     uint64_t transient_bytes = 0;  // max(prepare, load) transient for compute_units
@@ -105,7 +111,14 @@ struct vae_coreml_call {
 using vae_coreml_completion_hook = void (*)();
 void vae_coreml_set_completion_hook(vae_coreml_completion_hook hook);
 
-class vae_coreml_stage {
+// Tests: called by the release of an un-waited group's decoder (low-memory
+// mode) with the stage still alive, just before it is released (null:
+// nothing, the default). It may block, which holds that release, so a test can
+// destroy the owner meanwhile.
+using vae_coreml_release_hook = void (*)();
+void vae_coreml_set_release_hook(vae_coreml_release_hook hook);
+
+class vae_coreml_stage : public std::enable_shared_from_this<vae_coreml_stage> {
 public:
     // Resolves `options` (with the ACESTEP_* environment) and plans the
     // route. Unless the route is none it creates the slot, requesting
@@ -114,13 +127,17 @@ public:
     // `release_after_construction` (the Engine's low-memory mode), evicts the
     // decoder again: the group recorded `ready` first, so it still reports
     // success. Without wait = construct, in that mode, a background thread
-    // waits for the group and evicts once it has finished, unless a decode
-    // has asked for the decoder since. `memory_degrade` resolves use = off
-    // (fit's memory-degrade).
+    // the decoder is released once the group has finished, unless a decode
+    // has asked for it since; that release runs on one process-wide thread
+    // that holds the stage only weakly, so destroying the stage (or its
+    // Engine) never waits for it. `memory_degrade` resolves use = off (fit's
+    // memory-degrade).
     // `cancel` (optional, must outlive the stage) interrupts waits.
-    // Returns null in builds without AUDIOGEN_COREML. Throws
-    // std::invalid_argument for invalid options and std::runtime_error when
-    // use = require cannot be met.
+    // In builds without AUDIOGEN_COREML the stage has route none
+    // (unsupported(build)), no slot, and reports that decoder status and an
+    // empty successful construction group. Throws std::invalid_argument for
+    // invalid options and (with the runtime) std::runtime_error when use =
+    // require cannot be met.
     static std::shared_ptr<vae_coreml_stage> create(const std::string & gguf_path, const CoremlOptions & options,
                                                     bool memory_degrade, bool release_after_construction,
                                                     const std::atomic<bool> * cancel = nullptr);
@@ -146,6 +163,11 @@ public:
     // weights. True for the prebuilt route and without a slot.
     bool serves_loaded_source(int fd) const;
 
+    // Whether a decode of `T_latent` frames can run on the decoder at all:
+    // false when it is shorter than the decoder's known window (such a decode
+    // runs on ggml without requesting the decoder, and is not pending).
+    bool eligible(int T_latent) const;
+
     bool strict() const;
     // Whether a slot exists (route != none).
     bool active() const;
@@ -155,6 +177,20 @@ public:
     // The construction group's result JSON; with route none an empty group
     // (success, nothing_to_prepare, the decoder under skipped_route_none).
     std::string construction_json() const;
+    // Issues another request group (kind prewarm) the way construction does:
+    // scope all requests the decoder; every other scope gives an empty group
+    // (ACE-Step's minimal set is empty). With `wait` it blocks until the group
+    // finishes or `cancel` (optional) is set, then, when `release_after` (the
+    // Engine's low-memory mode), releases the decoder; the group recorded
+    // `ready` first, so it still reports success. Without `wait`, in that
+    // mode, the decoder is released once the group has finished, as for the
+    // construction group. Returns the group's result JSON (when not waited,
+    // the snapshot at issue).
+    std::string prewarm(CoremlOptions::Prewarm scope, bool wait, bool release_after,
+                        const std::atomic<bool> * cancel = nullptr);
+    // The process-wide release of an un-waited group: releases the decoder
+    // unless a decode has asked for it since `demand` was taken.
+    void release_unless_demanded(uint64_t demand);
     // Blocks until the decoder is ready or terminal, `timeout_ms` passes (< 0:
     // no limit) or `cancel` (optional) is set. True when it is ready. Returns
     // false at once while nothing has requested it (idle: before the first

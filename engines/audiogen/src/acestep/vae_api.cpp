@@ -169,6 +169,15 @@ std::vector<float> Vae::decode(const std::vector<float> & latent, int T_latent,
                             "from and Core ML strict policy is enabled; failing instead of the ggml decode\n");
             return finish({});
         }
+    } else if (impl_->coreml && impl_->coreml->active() && !impl_->coreml->eligible(T_latent)) {
+        // Shorter than the decoder's window: it could not serve this decode
+        // even when ready, so it is neither requested nor pending.
+        if (impl_->coreml->strict()) {
+            fprintf(stderr, "[acestep-vae] T_latent=%d is shorter than the Core ML window (%d) and Core ML strict "
+                            "policy is enabled; failing instead of the ggml decode\n",
+                    T_latent, impl_->coreml->route().window_frames);
+            return finish({});
+        }
     } else if (impl_->coreml && impl_->coreml->active()) {
         // The backend of the whole decode is chosen here, once: the decoder
         // this acquisition returns, or ggml.

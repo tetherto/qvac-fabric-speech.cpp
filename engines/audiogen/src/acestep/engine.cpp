@@ -140,7 +140,8 @@ struct Engine::Impl {
 
     std::unique_ptr<Vae> vae;
     // The VAE decoder's Core ML stage: one slot for the Engine's lifetime,
-    // shared by every (re)load of the ggml VAE. Null without Core ML.
+    // shared by every (re)load of the ggml VAE (route none, with no slot,
+    // without Core ML).
     std::shared_ptr<detail::vae_coreml_stage> vae_coreml;
     // What this call's VAE decodes ran on (merged label) and whether one ran
     // on ggml only because the sidecar was not ready yet.
@@ -2286,6 +2287,13 @@ std::string Engine::coreml_status() const {
 
 std::string Engine::coreml_construction() const {
     return impl_->vae_coreml ? impl_->vae_coreml->construction_json() : std::string("{}");
+}
+
+std::string Engine::coreml_prewarm(CoremlOptions::Prewarm scope, bool wait) const {
+    if (!impl_->vae_coreml) return "{}";
+    if (!wait) return impl_->vae_coreml->prewarm(scope, false, !impl_->keep_stages);
+    impl_->wait_cancel.store(false);
+    return impl_->vae_coreml->prewarm(scope, true, !impl_->keep_stages, &impl_->wait_cancel);
 }
 
 bool Engine::coreml_wait(int64_t timeout_ms) const {

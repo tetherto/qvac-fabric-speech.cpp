@@ -337,21 +337,34 @@ public:
     // std::runtime_error on invalid input or a failed stage.
     UnderstandResult understand(const UnderstandParams & params, const ProgressFn & progress = {}) const;
 
-    // Cooperative cancel for an in-flight generate(), understand() or
-    // coreml_wait() on another thread.
+    // Cooperative cancel for an in-flight generate(), understand(),
+    // coreml_wait() or waited coreml_prewarm() on another thread.
     void cancel() const;
 
     // Core ML status of the VAE decoder as JSON (schema 1: engine, cache_dir,
     // generation, stages with state, route, compute units, label, artifact
-    // key, warm hint, timings and error); "{}" in builds without
-    // AUDIOGEN_COREML.
+    // key, warm hint, timings and error). In builds without AUDIOGEN_COREML
+    // the decoder is unsupported(build).
     std::string coreml_status() const;
     // The construction group's result as JSON: success, nothing_to_prepare
-    // and every slot's final state ("{}" without Core ML). With prewarm all
-    // and wait construct, success means the decoder was generated, loaded
-    // and warmed (its hint written), even though low-memory mode released it
-    // again before create() returned.
+    // and every slot's final state. With prewarm all and wait construct,
+    // success means the decoder was generated, loaded and warmed (its hint
+    // written), even though low-memory mode released it again before
+    // create() returned. With no usable route (including builds without
+    // AUDIOGEN_COREML) it is an empty, successful group with
+    // nothing_to_prepare and the decoder under skipped_route_none.
     std::string coreml_construction() const;
+    // Issues another request group on this engine, as construction does with
+    // coreml.prewarm: scope `all` generates (when needed), loads and warms the
+    // decoder; every other scope is an empty group (ACE-Step requests the
+    // decoder only on decode demand). With `wait` it blocks until the group
+    // finishes (or cancel() is called) and returns its result JSON (same shape
+    // as coreml_construction()); in low-memory mode the decoder is then
+    // released again, its warm hint kept, and the group still reports
+    // success. Without `wait` it returns the group's snapshot at once; in
+    // low-memory mode the decoder is released in the background once the
+    // group has finished, unless a decode has asked for it by then.
+    std::string coreml_prewarm(CoremlOptions::Prewarm scope = CoremlOptions::Prewarm::all, bool wait = true) const;
     // Waits until the VAE decoder is ready or has failed, `timeout_ms` passes
     // (< 0: no limit), or cancel() is called from another thread. True when
     // it is ready. Returns false at once while nothing has requested it

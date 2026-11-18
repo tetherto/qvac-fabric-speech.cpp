@@ -22,6 +22,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -50,9 +51,11 @@ bool valid_units(const std::string & u) {
 
 namespace {
 std::atomic<vae_coreml_completion_hook> g_completion_hook{nullptr};
+std::atomic<vae_coreml_release_hook>    g_release_hook{nullptr};
 }  // namespace
 
 void vae_coreml_set_completion_hook(vae_coreml_completion_hook hook) { g_completion_hook.store(hook); }
+void vae_coreml_set_release_hook(vae_coreml_release_hook hook) { g_release_hook.store(hook); }
 
 void vae_coreml_validate_options(const CoremlOptions & o) {
     if (o.compute_units && !valid_units(*o.compute_units)) {
@@ -232,6 +235,7 @@ planned plan_route(const std::string & gguf_path, const rt::Resolved & r) {
         }
     }
     if (out.plan.route == rt::Route::generate) {
+        out.route.window_frames = VAE_COREML_TEMPLATE_WINDOW;
         const rt::generation::TemplateMemory & m = out.candidate->memory;
         out.route.resident_bytes     = margined(rt::generation::resident_bytes(m), m.margin);
         out.route.transient_bytes    = margined(rt::generation::transient_bytes(m, out.units), m.margin);
@@ -264,21 +268,98 @@ struct vae_coreml_stage::impl {
     std::shared_ptr<rt::Group> construction;
     const std::atomic<bool> * cancel = nullptr;
     // Decode demand: bumped by every acquire() under demand_mu, so the
-    // release of an asynchronous construction load never evicts a decoder a
-    // decode has asked for since the group was issued.
+    // release of an un-waited group's load never evicts a decoder a decode
+    // has asked for since the group was issued.
     std::mutex demand_mu;
     uint64_t demand = 0;
-    // Low-memory mode, prewarm all without wait construct: waits for the
-    // construction group off the constructing thread and releases the model
-    // once the group recorded its result.
-    std::thread releaser;
-    std::atomic<bool> stop{false};
 
-    ~impl() {
-        stop.store(true);
-        if (releaser.joinable()) releaser.join();
+    uint64_t demand_now() {
+        std::lock_guard<std::mutex> lk(demand_mu);
+        return demand;
     }
 };
+
+namespace {
+
+// One per library image, never destroyed: releases the decoder a low-memory
+// stage loaded for an un-waited group once that group has finished. It holds
+// each stage weakly, so a stage (and the Engine owning it) is destroyed
+// without waiting for it; a release it has started holds the stage until it
+// returns. Polls the watched groups every 20 ms while any is unfinished.
+class group_releaser {
+public:
+    static group_releaser & instance() {
+        static group_releaser * r = new group_releaser();  // leaked: the thread outlives static destruction
+        return *r;
+    }
+
+    void watch(std::weak_ptr<vae_coreml_stage> owner, std::shared_ptr<rt::Group> group, uint64_t demand) {
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            entries_.push_back({std::move(owner), std::move(group), demand});
+            if (!started_) {
+                std::thread([this] { run(); }).detach();
+                started_ = true;
+            }
+        }
+        cv_.notify_one();
+    }
+
+private:
+    struct entry {
+        std::weak_ptr<vae_coreml_stage> owner;
+        std::shared_ptr<rt::Group> group;
+        uint64_t demand = 0;
+    };
+
+    void run() {
+        for (;;) {
+            std::vector<entry> work;
+            {
+                std::unique_lock<std::mutex> lk(mu_);
+                cv_.wait(lk, [this] { return !entries_.empty(); });
+                work.swap(entries_);
+            }
+            std::vector<entry> pending;
+            for (entry & e : work) {
+                if (e.owner.expired()) continue;  // destroyed: its slot released everything
+                if (!e.group->finished()) {
+                    pending.push_back(std::move(e));
+                    continue;
+                }
+                if (std::shared_ptr<vae_coreml_stage> s = e.owner.lock()) {
+                    if (const vae_coreml_release_hook hook = g_release_hook.load()) hook();
+                    s->release_unless_demanded(e.demand);
+                }
+            }
+            if (pending.empty()) continue;
+            {
+                std::lock_guard<std::mutex> lk(mu_);
+                for (entry & e : pending) entries_.push_back(std::move(e));
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+    }
+
+    std::mutex mu_;
+    std::condition_variable cv_;
+    std::vector<entry> entries_;
+    bool started_ = false;
+};
+
+// The requests of a group of `scope`: the decoder for all, nothing otherwise.
+std::vector<rt::GroupRequest> group_requests(const std::shared_ptr<rt::Slot> & slot, rt::Prewarm scope) {
+    std::vector<rt::GroupRequest> requests;
+    if (slot && scope == rt::Prewarm::all) requests.push_back({slot, rt::Priority::prewarm});
+    return requests;
+}
+
+}  // namespace
+
+void vae_coreml_stage::release_unless_demanded(uint64_t demand) {
+    std::lock_guard<std::mutex> lk(p_->demand_mu);
+    if (p_->demand == demand && p_->slot) p_->slot->evict();
+}
 
 vae_coreml_route vae_coreml_plan_route(const std::string & gguf_path, const CoremlOptions & options) {
     vae_coreml_validate_options(options);
@@ -359,28 +440,17 @@ std::shared_ptr<vae_coreml_stage> vae_coreml_stage::create(const std::string & g
 
     // ACE-Step's minimal set is empty: the decoder is requested by decode
     // demand. Only prewarm all loads it at construction.
-    std::vector<rt::GroupRequest> requests;
-    if (p->resolved.prewarm == rt::Prewarm::all) requests.push_back({p->slot, rt::Priority::prewarm});
+    const std::vector<rt::GroupRequest> requests = group_requests(p->slot, p->resolved.prewarm);
     const bool waited = p->resolved.wait == rt::Wait::construct;
-    p->construction   = p->manager->issue_group(rt::GroupKind::construction, requests, waited);
+    const uint64_t issued_demand = p->demand_now();
+    p->construction = p->manager->issue_group(rt::GroupKind::construction, requests, waited);
     auto out = std::shared_ptr<vae_coreml_stage>(new vae_coreml_stage(std::move(p)));
     if (!waited && !requests.empty() && release_after_construction) {
         // Asynchronous install-time preparation in low-memory mode: once the
         // group has recorded the decoder's ready (or terminal) state, the
         // model is released, unless a decode has asked for it meanwhile (the
         // decode's VAE stage boundary releases it then).
-        impl * ip = out->p_.get();
-        uint64_t issued_demand = 0;
-        {
-            std::lock_guard<std::mutex> lk(ip->demand_mu);
-            issued_demand = ip->demand;
-        }
-        ip->releaser = std::thread([ip, issued_demand] {
-            ip->construction->wait(std::nullopt, &ip->stop);
-            if (ip->stop.load()) return;
-            std::lock_guard<std::mutex> lk(ip->demand_mu);
-            if (ip->demand == issued_demand) ip->slot->evict();
-        });
+        group_releaser::instance().watch(out, out->p_->construction, issued_demand);
     }
     if (waited && !requests.empty()) {
         const rt::PrewarmResult result = out->p_->construction->wait(std::nullopt, cancel);
@@ -447,6 +517,10 @@ bool vae_coreml_stage::serves_loaded_source(int fd) const {
     return loaded.size == s.size && loaded.mtime_ns == s.mtime_ns && loaded.ino == s.ino && loaded.dev == s.dev;
 }
 
+bool vae_coreml_stage::eligible(int T_latent) const {
+    return p_->plan.route.window_frames <= 0 || T_latent >= p_->plan.route.window_frames;
+}
+
 bool vae_coreml_stage::strict() const { return p_->resolved.strict(); }
 bool vae_coreml_stage::active() const { return p_->slot != nullptr; }
 const vae_coreml_route & vae_coreml_stage::route() const { return p_->plan.route; }
@@ -473,6 +547,26 @@ std::string vae_coreml_stage::construction_json() const {
     return p_->construction ? rt::to_json(p_->construction->result()) : std::string("{}");
 }
 
+std::string vae_coreml_stage::prewarm(CoremlOptions::Prewarm scope, bool wait, bool release_after,
+                                      const std::atomic<bool> * cancel) {
+    const rt::Prewarm s = map_enum<CoremlOptions::Prewarm, rt::Prewarm>(scope);
+    if (!p_->slot) {
+        return rt::to_json(p_->manager->issue_group(rt::GroupKind::prewarm, {}, wait, {p_->none_status})->result());
+    }
+    const std::vector<rt::GroupRequest> requests = group_requests(p_->slot, s);
+    const uint64_t issued_demand = p_->demand_now();
+    std::shared_ptr<rt::Group> group = p_->manager->issue_group(rt::GroupKind::prewarm, requests, wait);
+    if (requests.empty()) return rt::to_json(group->result());
+    if (!wait) {
+        const std::string snapshot = rt::to_json(group->result());
+        if (release_after) group_releaser::instance().watch(weak_from_this(), group, issued_demand);
+        return snapshot;
+    }
+    const rt::PrewarmResult result = group->wait(std::nullopt, cancel);
+    if (release_after) release_unless_demanded(issued_demand);
+    return rt::to_json(result);
+}
+
 bool vae_coreml_stage::wait(int64_t timeout_ms, const std::atomic<bool> * cancel) const {
     if (!p_->slot) return false;
     const auto start = rt::Clock::now();
@@ -490,22 +584,60 @@ bool vae_coreml_stage::wait(int64_t timeout_ms, const std::atomic<bool> * cancel
 
 #else  // !AUDIOGEN_USE_COREML
 
+// Without the runtime: the decoder's route is none (unsupported(build)), and
+// the stage only reports it, in the runtime's JSON shapes.
 struct vae_coreml_stage::impl {
     vae_coreml_route route;
+    std::string cache_dir;
 };
+
+namespace {
+
+std::string json_quote(const std::string & s) {
+    std::string out = "\"";
+    for (const char ch : s) {
+        const unsigned char c = (unsigned char) ch;
+        if (c == '"' || c == '\\') {
+            out += '\\';
+            out += ch;
+        } else if (c < 0x20) {
+            char buf[8];
+            std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+            out += buf;
+        } else {
+            out += ch;
+        }
+    }
+    return out + "\"";
+}
+
+// The decoder's status (the runtime's slot JSON, keys in its order).
+std::string none_slot_json(const vae_coreml_route & r) {
+    return "{\"artifact_key\":null,\"bytes_on_disk\":0,\"compute_units\":" + json_quote(r.compute_units) +
+           ",\"error\":null,\"error_class\":null,\"function\":\"main\",\"hint\":null,\"label\":\"" +
+           std::string(VAE_GGML_BACKEND) + "\",\"path\":null,\"route\":\"none\",\"stage\":\"vae\",\"state\":" +
+           json_quote(r.state + "(" + r.reason + ")") +
+           ",\"timings_ms\":{\"compile\":0,\"digest\":0,\"load\":0,\"queued\":0,\"warm\":0,\"write\":0}}";
+}
+
+}  // namespace
 
 vae_coreml_route vae_coreml_plan_route(const std::string &, const CoremlOptions & options) {
     vae_coreml_validate_options(options);
     vae_coreml_route r;
-    r.state  = "unsupported";
-    r.reason = "build";
+    r.state         = "unsupported";
+    r.reason        = "build";
+    r.compute_units = options.compute_units.value_or("all");
     return r;
 }
 
-std::shared_ptr<vae_coreml_stage> vae_coreml_stage::create(const std::string &, const CoremlOptions & options, bool,
-                                                           bool, const std::atomic<bool> *) {
-    vae_coreml_validate_options(options);
-    return nullptr;
+std::shared_ptr<vae_coreml_stage> vae_coreml_stage::create(const std::string & gguf_path,
+                                                           const CoremlOptions & options, bool, bool,
+                                                           const std::atomic<bool> *) {
+    auto p       = std::make_unique<impl>();
+    p->route     = vae_coreml_plan_route(gguf_path, options);
+    p->cache_dir = options.cache_dir.value_or(std::string());
+    return std::shared_ptr<vae_coreml_stage>(new vae_coreml_stage(std::move(p)));
 }
 
 vae_coreml_stage::vae_coreml_stage(std::unique_ptr<impl> p) : p_(std::move(p)) {}
@@ -513,11 +645,26 @@ vae_coreml_stage::~vae_coreml_stage() = default;
 vae_coreml_call vae_coreml_stage::acquire(int) { return {}; }
 void vae_coreml_stage::evict() {}
 bool vae_coreml_stage::serves_loaded_source(int) const { return true; }
+bool vae_coreml_stage::eligible(int) const { return true; }
 bool vae_coreml_stage::strict() const { return false; }
 bool vae_coreml_stage::active() const { return false; }
 const vae_coreml_route & vae_coreml_stage::route() const { return p_->route; }
-std::string vae_coreml_stage::status_json() const { return "{}"; }
-std::string vae_coreml_stage::construction_json() const { return "{}"; }
+std::string vae_coreml_stage::status_json() const {
+    return "{\"cache_dir\":" + json_quote(p_->cache_dir) +
+           ",\"engine\":\"acestep\",\"generation\":{\"reason\":\"build\",\"supported\":false},\"schema\":1,"
+           "\"stages\":[" + none_slot_json(p_->route) + "]}";
+}
+// The construction group with no usable route: empty, successful, nothing to
+// prepare, the decoder under skipped_route_none.
+std::string vae_coreml_stage::construction_json() const {
+    return "{\"group\":\"construction\",\"nothing_to_prepare\":true,\"skipped_route_none\":[" +
+           none_slot_json(p_->route) + "],\"slots\":[],\"success\":true}";
+}
+std::string vae_coreml_stage::prewarm(CoremlOptions::Prewarm, bool, bool, const std::atomic<bool> *) {
+    return "{\"group\":\"prewarm\",\"nothing_to_prepare\":true,\"skipped_route_none\":[" +
+           none_slot_json(p_->route) + "],\"slots\":[],\"success\":true}";
+}
+void vae_coreml_stage::release_unless_demanded(uint64_t) {}
 bool vae_coreml_stage::wait(int64_t, const std::atomic<bool> *) const { return false; }
 
 #endif

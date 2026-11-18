@@ -281,6 +281,17 @@ sidecar failure. The sidecar loads through the shared Core ML runtime
   element (the template's `real` gate on `vae-BF16.gguf`), and
   `test-vae-coreml-parity --cache-dir` holds the generated decoder to cosine
   0.999 against the ggml decode (measured 0.99999 on an M2).
+- The generated decoder belongs to the VAE file the engine was created with
+  (its size, modification time, inode and device). Every load of the ggml VAE
+  (low-memory mode reloads it at each VAE phase) reads the metadata and the
+  weights through one descriptor and compares that file with the decoder's:
+  a VAE GGUF replaced in place under a live engine decodes on ggml from then
+  on (`coreml_pending` false; strict fails the decode) instead of running the
+  old decoder next to the new ggml weights.
+- The ggml VAE reads its weights as BF16 (the converter keeps the VAE BF16),
+  so a VAE GGUF with a tensor of any other type is refused at load with the
+  tensor's name and type. The template accepts other source types only for
+  its own generator gates.
 
 Either way the sidecar loads in the background and nothing waits for it:
 
@@ -292,7 +303,9 @@ Either way the sidecar loads in the background and nothing waits for it:
   (`GenerateResult::coreml_pending`). It waits for a load only when this host
   loaded the sidecar quickly before (a warm hint under the cache directory)
   and the load would finish before the ggml decode would (about 3 ms per latent
-  frame). `GenerateResult::vae_backend` reports `ggml`, `coreml-all`,
+  frame). A latent shorter than the generated decoder's 64-frame window
+  never requests it and is not pending (strict fails it).
+  `GenerateResult::vae_backend` reports `ggml`, `coreml-all`,
   `coreml-ane`, `coreml-gpu`, `coreml-cpu` or `mixed` (an edit plan whose
   decodes ran on different backends).
 - **Low-memory mode** (the default; `ACESTEP_KEEP_STAGES` unset) releases the
@@ -312,11 +325,19 @@ Either way the sidecar loads in the background and nothing waits for it:
   low-memory mode) releases it again. Without `coreml.wait = construct` the
   same happens in the background: in low-memory mode the decoder is released
   as soon as the construction group has finished, unless a decode has asked
-  for it by then. `Engine::coreml_construction()` reports
-  the group's success (with no usable route, an empty group with
-  `nothing_to_prepare` and the decoder under `skipped_route_none`);
-  `Engine::coreml_status()` and `Engine::coreml_wait()` report and wait for the
-  decoder.
+  for it by then. That release runs on one process-wide thread that holds the
+  engine's decoder stage only weakly, so destroying the engine never waits
+  for it. `Engine::coreml_construction()` reports
+  the group's success (with no usable route, including a build without
+  `AUDIOGEN_COREML`, an empty successful group with `nothing_to_prepare` and
+  the decoder under `skipped_route_none`); `Engine::coreml_status()` and
+  `Engine::coreml_wait()` report and wait for the decoder.
+- `Engine::coreml_prewarm(scope, wait)` issues the same kind of group on an
+  existing engine: `all` prepares, loads and warms the decoder (in low-memory
+  mode it is released again and the group still reports success), any other
+  scope is an empty group. With `wait` it returns the group's result JSON
+  once the group has finished (`cancel()` interrupts it); without, the
+  snapshot at once.
 - `coreml.memory_budget_bytes` with `coreml.memory_degrade`: pass the budget
   the memory-fit preflight was assessed against and its decision
   (`FitResult::coreml.disabled_reason == "memory"`), and `create()` runs the
