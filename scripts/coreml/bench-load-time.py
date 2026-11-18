@@ -1578,6 +1578,7 @@ def cmd_smoke(args, m) -> int:
 
 
 REPORT_BLOCK_RE = re.compile(r"^<!-- report:([a-z0-9-]+) -->\n.*?^<!-- /report:\1 -->$", re.S | re.M)
+REPORT_MARKER_RE = re.compile(r"^<!-- (/?)report:([a-z0-9-]+) -->$", re.M)
 # Generated blocks added after reports were first written, and the existing
 # block each goes in front of when a report being refreshed lacks it.
 REPORT_NEW_BLOCKS = {"power": "setup"}
@@ -1592,6 +1593,15 @@ def merge_report(existing: str, rendered: str) -> str:
     `rendered`; text outside the blocks is kept as it is."""
     new = {m.group(1): m.group(0) for m in REPORT_BLOCK_RE.finditer(rendered)}
     old = [m.group(1) for m in REPORT_BLOCK_RE.finditer(existing)]
+    # Every marker must belong to exactly one well-formed block: an opening
+    # marker whose closing one was deleted would otherwise look like a missing
+    # block, and the replacement would then swallow the text after it.
+    markers = [(m.group(2), m.group(1)) for m in REPORT_MARKER_RE.finditer(existing)]
+    broken = sorted({n for n, _ in markers
+                     if markers.count((n, "")) != old.count(n) or markers.count((n, "/")) != old.count(n)})
+    if broken:
+        raise ReportError(f"unpaired or nested markers for the generated sections {broken}; each needs one "
+                          f"<!-- report:NAME --> line and one <!-- /report:NAME --> line. Fix them by hand")
     if not old:
         raise ReportError("no generated sections (<!-- report:NAME --> ... <!-- /report:NAME -->); refusing to "
                           "replace hand-written text. Write the report to a new file instead")

@@ -415,6 +415,27 @@ class ReportMergeTest(unittest.TestCase):
         with self.assertRaisesRegex(blt.ReportError, r"missing \['power', 'sizes'\]"):
             blt.merge_report(no_sizes, blt.render(blt.summarize([])) + "\n")
 
+    def test_refresh_refuses_a_power_block_that_lost_a_marker(self):
+        # A damaged pair is not a report written before the block existed:
+        # refusing leaves the file as it was instead of inserting a second
+        # block whose closing marker would swallow the text in between.
+        committed = (blt.REPO / "docs" / "COREML-LOAD-TIME.md").read_text()
+        self.assertEqual(committed.count("<!-- /report:power -->\n"), 1)
+        for damaged in (committed.replace("<!-- /report:power -->\n", ""),
+                        committed.replace("<!-- report:power -->\n", "")):
+            with tempfile.TemporaryDirectory() as d:
+                a = self.results(Path(d) / "a", 12000.0)
+                doc = Path(d) / "doc.md"
+                doc.write_bytes(damaged.encode())
+                rc, err = self.report("--results", a, "--out", doc)
+                self.assertEqual(rc, 1)
+                self.assertIn("unpaired or nested markers for the generated sections ['power']", err)
+                self.assertEqual(doc.read_bytes(), damaged.encode())
+        nested = committed.replace("<!-- /report:power -->\n", "<!-- report:power -->\n<!-- /report:power -->\n"
+                                   "<!-- /report:power -->\n")
+        with self.assertRaisesRegex(blt.ReportError, r"unpaired or nested markers"):
+            blt.merge_report(nested, blt.render(blt.summarize([])) + "\n")
+
 
 class DriverSourceTest(unittest.TestCase):
     """The ttr readings the driver emits go through bench_ttr::with_readings
