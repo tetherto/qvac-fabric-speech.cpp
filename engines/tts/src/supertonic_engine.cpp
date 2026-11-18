@@ -948,6 +948,17 @@ bool Engine::coreml_wait(int64_t timeout_ms) const {
     return pimpl_->vocoder_coreml->wait(timeout_ms, &pimpl_->wait_cancels, pimpl_->wait_cancels.load());
 }
 
+std::string Engine::coreml_construction() const {
+    return pimpl_ && pimpl_->vocoder_coreml ? pimpl_->vocoder_coreml->construction_json() : std::string("{}");
+}
+
+std::string Engine::coreml_prewarm(CoremlOptions::Prewarm scope, bool wait) const {
+    if (!pimpl_ || !pimpl_->vocoder_coreml) return "{}";
+    // A waited prewarm ends early on any Engine::cancel() made after it
+    // started, as a blocking coreml_wait() does.
+    return pimpl_->vocoder_coreml->prewarm(scope, wait, &pimpl_->wait_cancels, pimpl_->wait_cancels.load());
+}
+
 // Convenience one-shot wrapper.  Pays the full GGUF load + free per
 // call; use Engine directly for repeated synthesis.
 SynthesisResult synthesize(const EngineOptions & opts, const std::string & text) {

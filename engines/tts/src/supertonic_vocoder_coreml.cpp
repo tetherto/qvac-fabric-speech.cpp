@@ -379,6 +379,12 @@ std::shared_ptr<supertonic_vocoder_coreml> supertonic_vocoder_coreml::create(sup
                                      p->plan.route.reason + "); Core ML strict policy is enabled (use = require / " +
                                      STRICT_ENV + ")");
         }
+        // An empty construction group: the prewarm scope's vocoder is listed
+        // as skipped (route none), and the group reports nothing_to_prepare.
+        std::vector<pcm::SlotStatus> skipped;
+        if (p->resolved.prewarm != pcm::Prewarm::none) skipped.push_back(p->none_status);
+        p->construction = p->manager->issue_group(pcm::GroupKind::construction, {},
+                                                  p->resolved.wait == pcm::Wait::construct, std::move(skipped));
         // Installed on the none route too: every call then takes the
         // resolved policy from it (no slot: ggml, never strict) instead of
         // reading the environment.
@@ -491,6 +497,26 @@ std::string supertonic_vocoder_coreml::status_json() const {
     return pcm::to_json(st);
 }
 
+std::string supertonic_vocoder_coreml::construction_json() const {
+    return p_->construction ? pcm::to_json(p_->construction->result()) : std::string("{}");
+}
+
+std::string supertonic_vocoder_coreml::prewarm(CoremlOptions::Prewarm scope, bool wait,
+                                               const std::atomic<uint64_t> * cancels, uint64_t since) const {
+    const bool wanted = scope != CoremlOptions::Prewarm::none;
+    std::vector<pcm::GroupRequest> requests;
+    std::vector<pcm::SlotStatus> skipped;
+    if (wanted && p_->slot) requests.push_back({p_->slot, pcm::Priority::minimal});
+    if (wanted && !p_->slot) skipped.push_back(p_->none_status);
+    const std::shared_ptr<pcm::Group> group =
+        p_->manager->issue_group(pcm::GroupKind::prewarm, requests, wait, std::move(skipped));
+    if (!wait || requests.empty()) return pcm::to_json(group->result());
+    for (;;) {
+        pcm::PrewarmResult r = group->wait(std::chrono::milliseconds(50));
+        if (group->finished() || (cancels && cancels->load() != since)) return pcm::to_json(r);
+    }
+}
+
 bool supertonic_vocoder_coreml::wait(int64_t timeout_ms, const std::atomic<uint64_t> * cancels, uint64_t since) const {
     if (!p_->slot) return false;
     return supertonic_wait_until_ready(
@@ -540,6 +566,11 @@ const supertonic_vocoder_route & supertonic_vocoder_coreml::route() const { retu
 std::string supertonic_vocoder_coreml::state() const { return {}; }
 std::string supertonic_vocoder_coreml::status_json() const { return "{}"; }
 bool supertonic_vocoder_coreml::wait(int64_t, const std::atomic<uint64_t> *, uint64_t) const { return false; }
+std::string supertonic_vocoder_coreml::construction_json() const { return "{}"; }
+std::string supertonic_vocoder_coreml::prewarm(CoremlOptions::Prewarm, bool, const std::atomic<uint64_t> *,
+                                               uint64_t) const {
+    return "{}";
+}
 
 #endif
 

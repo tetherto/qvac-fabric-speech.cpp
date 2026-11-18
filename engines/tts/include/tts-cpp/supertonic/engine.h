@@ -540,10 +540,31 @@ public:
     // passes (< 0: no limit), or cancel() is called from another thread
     // after the wait started. True when it is ready. Returns false at once
     // while nothing has requested the sidecar (prewarm none before the first
-    // synthesis) or it waits for memory
-    // (deferred). coreml_wait(0) only polls; a wait never takes back a
-    // cancel() meant for another wait or for a synthesis.
+    // synthesis or coreml_prewarm) or it waits for memory (deferred).
+    // coreml_wait(0) only polls; a wait never takes back a cancel() meant for
+    // another wait or for a synthesis.
     bool coreml_wait(int64_t timeout_ms = -1) const;
+    // The construction group's result as JSON (group, success,
+    // nothing_to_prepare, slots with each stage's final state,
+    // skipped_route_none): with wait = construct the finished result,
+    // otherwise the group's state now. With prewarm none the group is empty;
+    // with no usable route (use = off, no cache directory, a build without
+    // generation, ...) it is empty, succeeds with nothing_to_prepare and lists
+    // the vocoder under skipped_route_none. "{}" in builds without
+    // TTS_CPP_COREML.
+    std::string coreml_construction() const;
+    // Issues another request group, as construction does with
+    // coreml.prewarm: every scope but none requests the vocoder (Supertonic's
+    // minimal, predicted and all sets are the vocoder), so an idle sidecar
+    // (prewarm none) is generated, compiled and loaded without a synthesis;
+    // none is an empty group. With `wait` it blocks until the group finishes
+    // or cancel() is called after it started, and returns the result JSON
+    // (as coreml_construction(); success means the vocoder is ready);
+    // without, the group's state at once. With no usable route the group
+    // succeeds with nothing_to_prepare and lists the vocoder under
+    // skipped_route_none. "{}" in builds without TTS_CPP_COREML.
+    std::string coreml_prewarm(CoremlOptions::Prewarm scope = CoremlOptions::Prewarm::minimal,
+                               bool wait = true) const;
 
 private:
     struct Impl;

@@ -14,7 +14,8 @@
 // next to it) and holds it to the ggml vocoder of the same GGUF at
 // --min-cosine on a padded, an exact-window and a stitched multi-window
 // latent; then a second owner adopts the artifact (route cached), a GGUF
-// replaced after the load is not generated from, an Engine synthesizes on it, fit charges the template's envelope (and degrades to
+// replaced after the load is not generated from, an Engine synthesizes on it,
+// coreml_prewarm brings an idle sidecar to ready (and a cancelled wait ends), fit charges the template's envelope (and degrades to
 // ggml near a budget, with the F16 weight deny list projected), and a Max or Ultra brand string keeps a generated
 // sidecar off unless use = require. --require-coreml fails (instead of
 // skipping, 77) when the route is not generate. --memory-schedule runs the
@@ -452,6 +453,93 @@ void check_engine_generated(const std::string & gguf, const tts_cpp::CoremlOptio
     } catch (const std::exception & e) {
         fail(std::string("engine on the generated sidecar: ") + e.what());
     }
+}
+
+// With prewarm none the vocoder stays idle (an empty construction group)
+// until coreml_prewarm requests it, without a synthesis. While it is being
+// generated a blocking wait asleep across cancel() and the start of another
+// wait ends on that cancel; a later waited prewarm (started after it) brings
+// the sidecar to ready. An Engine with no usable route (use = off) gets an
+// empty group: nothing_to_prepare, the vocoder listed as skipped.
+void check_prewarm_from_idle(const std::string & gguf, const tts_cpp::CoremlOptions & o,
+                             const std::string & cache_dir) {
+    using tts_cpp::supertonic::Engine;
+    using tts_cpp::supertonic::EngineOptions;
+    const std::string fresh = cache_dir + "-prewarm";
+    std::error_code ec;
+    fs::remove_all(fresh, ec);
+    try {
+        EngineOptions opts;
+        opts.model_gguf_path = gguf;
+        opts.n_threads = N_THREADS;
+        opts.coreml = o;
+        opts.coreml.cache_dir = fresh;
+        opts.coreml.prewarm = tts_cpp::CoremlOptions::Prewarm::none;
+        opts.coreml.wait = tts_cpp::CoremlOptions::Wait::none;
+        Engine engine(opts);
+        const std::string construction = engine.coreml_construction();
+        expect(construction.find("\"nothing_to_prepare\":true") != std::string::npos &&
+                   construction.find("\"skipped_route_none\":[]") != std::string::npos &&
+                   status_field(engine.coreml_status(), "state") == "idle" && !engine.coreml_wait(0),
+               "prewarm none: an empty construction group and an idle vocoder: " + construction);
+        const std::string issued = engine.coreml_prewarm(tts_cpp::CoremlOptions::Prewarm::minimal, false);
+        const std::string after = status_field(engine.coreml_status(), "state");
+        expect(issued.find("\"group\":\"prewarm\"") != std::string::npos &&
+                   issued.find("\"nothing_to_prepare\":false") != std::string::npos && after != "idle",
+               "coreml_prewarm requests the idle vocoder without a synthesis: state " + after + ", " + issued);
+
+        using clock = std::chrono::steady_clock;
+        bool a_ready = true;
+        double a_ms = 0.0;
+        std::string a_state;
+        std::atomic<bool> a_started{false};
+        std::thread a([&] {
+            const auto t0 = clock::now();
+            a_started.store(true);
+            a_ready = engine.coreml_wait(-1);
+            a_ms = std::chrono::duration<double, std::milli>(clock::now() - t0).count();
+            a_state = status_field(engine.coreml_status(), "state");
+        });
+        while (!a_started.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        engine.cancel();
+        const bool b_ready = engine.coreml_wait(10);
+        a.join();
+        expect(!a_ready && a_state != "ready" && a_ms < 1500.0 && !b_ready,
+               "a wait asleep across cancel() and another wait's start ends on that cancel: ready " +
+                   std::to_string(a_ready) + ", state " + a_state + ", " + std::to_string(a_ms) + " ms");
+        const std::string waited = engine.coreml_prewarm(tts_cpp::CoremlOptions::Prewarm::minimal, true);
+        expect(waited.find("\"success\":true") != std::string::npos &&
+                   waited.find("\"nothing_to_prepare\":false") != std::string::npos && engine.coreml_wait(0),
+               "a waited prewarm after the cancel brings the vocoder to ready: " + waited);
+        std::fprintf(stderr,
+                     "[supertonic-coreml-parity] prewarm from idle: requested without a synthesis (state %s), a "
+                     "cancelled wait ended after %.0f ms (state %s), waited prewarm ready\n",
+                     after.c_str(), a_ms, a_state.c_str());
+    } catch (const std::exception & e) {
+        fail(std::string("prewarm from idle: ") + e.what());
+    }
+    try {
+        EngineOptions opts;
+        opts.model_gguf_path = gguf;
+        opts.n_threads = N_THREADS;
+        opts.coreml = o;
+        opts.coreml.use = tts_cpp::CoremlOptions::Use::off;
+        Engine engine(opts);
+        const std::string construction = engine.coreml_construction();
+        const std::string r = engine.coreml_prewarm(tts_cpp::CoremlOptions::Prewarm::all, true);
+        for (const std::string & g : {construction, r}) {
+            expect(g.find("\"nothing_to_prepare\":true") != std::string::npos &&
+                       g.find("\"success\":true") != std::string::npos &&
+                       g.find("\"skipped_route_none\":[{") != std::string::npos &&
+                       g.find("\"stage\":\"vocoder\"") != std::string::npos &&
+                       g.find("\"state\":\"disabled\"") != std::string::npos,
+                   "use = off: an empty group with the vocoder skipped: " + g);
+        }
+    } catch (const std::exception & e) {
+        fail(std::string("prewarm with use = off: ") + e.what());
+    }
+    fs::remove_all(fresh, ec);
 }
 
 // An Engine whose vocoder resolved to ggml synthesizes on ggml with
@@ -983,6 +1071,7 @@ int generated_main(const std::string & gguf, const std::string & cache_dir, doub
     check_replaced_gguf(gguf, cache_dir);
     check_engine_generated(gguf, o);
     check_cpu_warm_up_requests_idle_sidecar(gguf, o);
+    check_prewarm_from_idle(gguf, o, cache_dir);
     tts_cpp::CoremlOptions off = o;
     off.use = tts_cpp::CoremlOptions::Use::off;
     check_ggml_route_ignores_strict_env(gguf, off, "use = off");

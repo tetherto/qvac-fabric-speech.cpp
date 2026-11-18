@@ -157,7 +157,8 @@ class supertonic_vocoder_coreml final : public supertonic_vocoder_pending {
 public:
     // Resolves `options` (with the SUPERTONIC_* environment), plans the route,
     // creates the slot and issues the construction group (prewarm none:
-    // nothing until the first call), waiting for it with wait = construct.
+    // nothing until the first call or a prewarm; no usable route: an empty
+    // group), waiting for it with wait = construct.
     // `memory_degrade` resolves use = off (fit's memory-degrade). Returns null
     // in builds without TTS_CPP_COREML. Throws std::invalid_argument for
     // invalid options and std::runtime_error when use = require cannot be
@@ -184,6 +185,20 @@ public:
     // once while nothing has requested the sidecar (prewarm none before the
     // first call) or it waits for memory.
     bool wait(int64_t timeout_ms, const std::atomic<uint64_t> * cancels = nullptr, uint64_t since = 0) const;
+    // The construction group's result as JSON (group, success,
+    // nothing_to_prepare, slots, skipped_route_none): with wait = construct
+    // the finished result, otherwise its state now. With no usable route the
+    // group is empty and, unless prewarm is none, lists the vocoder under
+    // skipped_route_none.
+    std::string construction_json() const;
+    // Issues a prewarm group for `scope`: every scope but none is the vocoder
+    // (Supertonic's minimal, predicted and all sets); none is an empty group.
+    // With `wait` it blocks until the group finishes or `cancels` moves past
+    // `since`; it returns the result JSON (as construction_json), without
+    // `wait` the group's state at once. With no usable route the group is
+    // empty and lists the vocoder under skipped_route_none.
+    std::string prewarm(CoremlOptions::Prewarm scope, bool wait, const std::atomic<uint64_t> * cancels = nullptr,
+                        uint64_t since = 0) const;
 
     struct impl;
 

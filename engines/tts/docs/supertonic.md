@@ -323,11 +323,17 @@ two.
 - **Options and status.** `EngineOptions::coreml` (`tts-cpp/coreml_options.h`):
   `wait = construct` makes the constructor wait for the sidecar, `prewarm =
   none` defers it to the first synthesis (an Engine `prewarm_text` or
-  `warm_up()` call is one, on a CPU backend too), `use = require` makes a sidecar that
+  `warm_up()` call is one, on a CPU backend too) or to
+  `Engine::coreml_prewarm(scope, wait)`, `use = require` makes a sidecar that
   cannot serve a call an error, `use = off` keeps ggml. `Engine::coreml_status()`
   returns the stage's status JSON (route `generated` or `cached`, state,
   timings, artifact key) and `Engine::coreml_wait(timeout_ms)` waits for it
-  (`Engine::cancel()` ends the wait).
+  (`Engine::cancel()` ends a wait that started before it).
+  `Engine::coreml_construction()` returns the construction group's result and
+  `coreml_prewarm` issues another group (every scope but `none` is the
+  vocoder; with `wait` it returns once the sidecar is ready or failed):
+  `success`, `nothing_to_prepare` (no usable route, or prewarm `none`), each
+  slot's final state and the stages skipped for having no route.
 - **Fit.** `supertonic::FitOptions::coreml` mirrors the Engine's options. A
   generated route adds the template's Core ML memory envelope to the
   projection (`FitResult::coreml`); with `coreml.memory_budget_bytes`, every

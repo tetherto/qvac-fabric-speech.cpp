@@ -255,6 +255,22 @@ void strict_environment_gates() {
 // each installs itself, is not strict, and leaves every call to ggml.
 void stage_route_gates() {
     std::fprintf(stderr, "the stage on a none route\n");
+    {
+        // prewarm none: the construction group lists nothing as skipped.
+        shape_model m;
+        m.model.vocoder_coreml_managed = true;
+        tts_cpp::CoremlOptions o;
+        o.use = tts_cpp::CoremlOptions::Use::off;
+        o.prewarm = tts_cpp::CoremlOptions::Prewarm::none;
+        auto stage = supertonic_vocoder_coreml::create(m.model, "no-such-model.gguf", o, false, "Apple M2");
+#ifdef TTS_CPP_USE_COREML
+        check(stage && stage->construction_json().find("\"skipped_route_none\":[]") != std::string::npos &&
+                  stage->construction_json().find("\"nothing_to_prepare\":true") != std::string::npos,
+              "prewarm none, no route: an empty construction group with nothing skipped");
+#else
+        check(!stage, "a build without Core ML has no stage");
+#endif
+    }
     scoped_env strict("SUPERTONIC_COREML_STRICT", "1");
     struct route_case {
         const char * what;
@@ -283,6 +299,24 @@ void stage_route_gates() {
                   m.model.vocoder_pending == stage,
               std::string(c.what) + ": constructs, not strict, installed on the model" +
                   (threw.empty() ? "" : " (threw: " + threw + ")"));
+        if (stage) {
+            // No usable route: the construction group and a prewarm are empty
+            // groups that succeed with nothing to prepare and list the vocoder
+            // as skipped, in its route-none state.
+            const std::string st = stage->route().state;
+            for (const std::string & g : {stage->construction_json(),
+                                          stage->prewarm(tts_cpp::CoremlOptions::Prewarm::minimal, true)}) {
+                check(g.find("\"nothing_to_prepare\":true") != std::string::npos &&
+                          g.find("\"success\":true") != std::string::npos &&
+                          g.find("\"skipped_route_none\":[{") != std::string::npos &&
+                          g.find("\"stage\":\"vocoder\"") != std::string::npos &&
+                          g.find("\"state\":\"" + st) != std::string::npos,
+                      std::string(c.what) + ": an empty group with the vocoder skipped: " + g);
+            }
+            check(stage->prewarm(tts_cpp::CoremlOptions::Prewarm::none, true).find("\"skipped_route_none\":[]") !=
+                      std::string::npos,
+                  std::string(c.what) + ": a prewarm of scope none lists nothing");
+        }
 #else
         check(threw.empty() && !stage, std::string(c.what) + ": a build without Core ML has no stage");
 #endif
