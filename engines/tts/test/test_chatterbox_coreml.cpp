@@ -1071,6 +1071,46 @@ int pending_fixture() {
         std::printf("[scope %s] no speculative loads; the demanded widths loaded\n", name);
     }
 
+    // 13. A full resident pool: CFM frames_16 and frames_24 are held by
+    //     running calls and frames_40 is ready; a call of 32 frames takes
+    //     frames_40 at once, and requesting its exact frames_32 neither
+    //     evicts frames_40 nor makes the call wait, under wait = call and
+    //     under use = require.
+    for (const bool strict_mode : {false, true}) {
+        const char * name = strict_mode ? "full-pool-require" : "full-pool-call";
+        CoremlOptions full_opts = routing_options();
+        if (strict_mode) {
+            full_opts.use = CoremlOptions::Use::require;
+        } else {
+            full_opts.wait = CoremlOptions::Wait::call;
+        }
+        auto set = cb::s3gen_sidecars::create(routing_case(fixture, root.path, name, all), full_opts);
+        set->predict({shape(8), shape(12), shape(20)});
+        settle(*set, name);
+        set->end_call();  // nothing is predicted any more: frames_40 is evictable
+        auto held16 = set->acquire(shape(8), steady::now());
+        auto held24 = set->acquire(shape(12), steady::now());
+        require(view(held16, S::cfm).bucket == 16 && view(held24, S::cfm).bucket == 24 &&
+                    set->state(S::cfm, 40) == "ready" && set->live(S::cfm) == cb::COREML_RESIDENT_CAP,
+                std::string(name) + ": frames_16 and frames_24 held, frames_40 ready, the pool full");
+        hooks.load_delay_ms = 3000;
+        const auto t0 = steady::now();
+        auto plan = set->acquire(shape(16), steady::now() + std::chrono::milliseconds(10));
+        const double took = ms_since(t0);
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        const std::string state40 = set->state(S::cfm, 40);
+        std::printf("[%s] frames_%d in %.0f ms; frames_40 %s, frames_32 %s\n", name, view(plan, S::cfm).bucket,
+                    took, state40.c_str(), set->state(S::cfm, 32).c_str());
+        require(view(plan, S::cfm).bucket == 40 && took < 1000,
+                std::string(name) + ": the ready frames_40 serves at once");
+        require(state40 == "ready", std::string(name) + ": requesting frames_32 does not evict the held frames_40");
+        plan.reset();
+        held16.reset();
+        held24.reset();
+        hooks.load_delay_ms = 0;
+        settle(*set, name);
+    }
+
     // 11. A ready function covers the call: it serves at once. wait = call
     //     does not wait through the exact function's slow load, and
     //     use = require does not refuse a call whose exact function retired.

@@ -1026,71 +1026,79 @@ std::shared_ptr<S3genCoremlPlan> s3gen_sidecars::acquire(const s3gen_call_shape 
     auto plan = std::make_shared<S3genCoremlPlan>();
     plan->strict = p_->resolved.strict();
     const s3gen_stage order[] = {s3gen_stage::encoder, s3gen_stage::cfm, s3gen_stage::hift};
-    // Raise every exact function first, so the load lane serves all three
-    // against the one shared deadline.
-    for (s3gen_stage s : order) {
-        const int exact = p_->exact_of(s, impl::need_of(s, shape));
-        if (exact >= 0) p_->slot(s, exact)->request(pcm::Priority::now);
-    }
+    int exact[S3GEN_STAGES] = {-2, -2, -2};
     for (s3gen_stage s : order) {
         auto & out = plan->stages[(int) s];
         const int need = impl::need_of(s, shape);
-        const int exact = p_->exact_of(s, need);
-        if (exact == -2) continue;  // no sidecar for the stage
+        exact[(int) s] = p_->exact_of(s, need);
+        if (exact[(int) s] == -2) continue;  // no sidecar for the stage
         out.present = true;
-        if (exact == -1) {
-            if (plan->strict) {
-                const auto & widths = p_->stages[(int) s].widths;
-                const std::string detail = widths.empty()
-                    ? std::string("it lists no usable function")
-                    : std::to_string(need) + (s == s3gen_stage::encoder ? " tokens" : " frames") + ", widest " +
-                          std::to_string(widths.back());
-                throw std::runtime_error(std::string("s3gen: the Core ML ") + STAGE_NAMES[(int) s] +
-                                         " sidecar cannot serve this call (" + detail + ") and use = require / " +
-                                         COREML_STRICT_ENV + " is set");
-            }
-            continue;  // wider than every function, or unusable: ggml
+        if (exact[(int) s] == -1 && plan->strict) {
+            const auto & widths = p_->stages[(int) s].widths;
+            const std::string detail = widths.empty()
+                ? std::string("it lists no usable function")
+                : std::to_string(need) + (s == s3gen_stage::encoder ? " tokens" : " frames") + ", widest " +
+                      std::to_string(widths.back());
+            throw std::runtime_error(std::string("s3gen: the Core ML ") + STAGE_NAMES[(int) s] +
+                                     " sidecar cannot serve this call (" + detail + ") and use = require / " +
+                                     COREML_STRICT_ENV + " is set");
         }
-        // The narrowest ready function that covers the call serves it (the
-        // padding is masked) without waiting; the exact one keeps loading at
-        // `now` for later calls. Only when none is ready does the call wait,
-        // as the wait mode allows, for the exact one.
-        auto ready_covering = [&] {
-            for (const auto & [width, slot] : p_->stages[(int) s].slots) {
-                if (width < exact) continue;
-                pcm::Acquired ready;
-                try {
-                    ready = slot->acquire(pcm::Demand::if_ready);
-                } catch (const pcm::CoremlError &) {
-                    continue;  // strict: this one is retired or failed; try the next
-                }
-                if (ready.model) {
-                    out.model = std::move(ready.model);
-                    out.bucket = width;
-                    out.pending = false;
-                    return true;
-                }
+    }
+    // The narrowest ready function that covers the call serves it (the
+    // padding is masked) without waiting.
+    auto ready_covering = [&](s3gen_stage s) {
+        auto & out = plan->stages[(int) s];
+        for (const auto & [width, slot] : p_->stages[(int) s].slots) {
+            if (width < exact[(int) s]) continue;
+            pcm::Acquired ready;
+            try {
+                ready = slot->acquire(pcm::Demand::if_ready);
+            } catch (const pcm::CoremlError &) {
+                continue;  // strict: this one is retired or failed; try the next
             }
-            return false;
-        };
-        if (ready_covering()) continue;
+            if (ready.model) {
+                out.model = std::move(ready.model);
+                out.bucket = width;
+                out.pending = false;
+                return true;
+            }
+        }
+        return false;
+    };
+    // Every stage first retains its ready covering function, so the exact
+    // requests below can never evict one this call is about to use (a full
+    // resident pool then has nothing evictable and the exact load waits for
+    // room).
+    bool covered[S3GEN_STAGES] = {false, false, false};
+    for (s3gen_stage s : order) {
+        if (exact[(int) s] >= 0) covered[(int) s] = ready_covering(s);
+    }
+    // Then raise every exact function to `now` (for later calls when
+    // covered), so the load lane serves the uncovered ones against the one
+    // shared deadline; only those wait, as the wait mode allows.
+    for (s3gen_stage s : order) {
+        if (exact[(int) s] >= 0) p_->slot(s, exact[(int) s])->request(pcm::Priority::now);
+    }
+    for (s3gen_stage s : order) {
+        if (exact[(int) s] < 0 || covered[(int) s]) continue;
+        auto & out = plan->stages[(int) s];
         pcm::Acquired got;
         try {
-            got = p_->slot(s, exact)->acquire(pcm::Demand::now, deadline, cancel);
+            got = p_->slot(s, exact[(int) s])->acquire(pcm::Demand::now, deadline, cancel);
         } catch (const pcm::CoremlError &) {
             // Strict: the exact function cannot serve (retired, failed, at the
             // resident cap, timed out); a covering one that became ready
             // meanwhile still can.
-            if (ready_covering()) continue;
+            if (ready_covering(s)) continue;
             throw;
         }
         if (got.model) {
             out.model = std::move(got.model);
-            out.bucket = exact;
+            out.bucket = exact[(int) s];
             continue;
         }
         out.pending = got.pending;
-        ready_covering();
+        ready_covering(s);
     }
     return plan;
 }
