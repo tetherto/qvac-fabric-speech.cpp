@@ -293,9 +293,22 @@ Unset fields fall back to `coreml_compute_units` / `coreml_strict`, then to
 the `POCKET_COREML_*` environment. `Engine::coreml_status()` returns both
 stages' state, route (`prebuilt`, `cached`, `generated` or `none`), units,
 label, artifact and timings as JSON; `Engine::coreml_wait(timeout_ms)` waits
-for both. `pocket-cli` takes `--coreml-cache-dir`, `--coreml-wait`,
+for both (`Engine::cancel()` ends a blocking wait). `Engine::coreml_construction()`
+returns the construction group's result as JSON (`success` when every requested
+sidecar reached ready; `nothing_to_prepare` for an empty group, which
+succeeds; each slot's final state; the stages with no route under
+`skipped_route_none`). `Engine::coreml_prewarm(scope, wait)` requests both
+sidecars after construction (scope `none` requests nothing), for example with
+`prewarm = none` to prepare them before the first synthesis, and returns that
+group's result the same way. `pocket-cli` takes `--coreml-cache-dir`, `--coreml-wait`,
 `--coreml-prewarm`, `--coreml-step-units`, `--coreml-decoder-units` and
-`--coreml-status-json`.
+`--coreml-status-json`. Unlike the library (whose default is no cache, so no
+generation), `pocket-cli` generates by default: without `--coreml-cache-dir`
+or `QVAC_COREML_CACHE_DIR` it uses `~/Library/Application
+Support/qvac-speech/coreml` (not `Library/Caches`, which macOS may purge,
+costing a cold compile). `--coreml-status-json` refuses a path that names the
+output WAV, the report or a model input (also through a symlink or another
+spelling of the same file) before synthesizing.
 
 A generated route needs the stage's units to be validated for memory (see
 fit below); otherwise the stage reports `unsupported(unvalidated_units)` and
@@ -505,20 +518,30 @@ does this for its `--text`, `--fit-budget-mib` and `--fit-margin-mib`, in
 
 The envelope's constants are measured by `test-pocket-coreml --generated
 BUNDLE --memory-schedule DIR`: ggml FlowLM and Mimi work while both sidecars
-are generated, compiled, loaded and warmed in the background, and each phase
-is held to its constant. Each constant is 1.25 times the largest value over
+are generated, compiled, loaded and warmed in the background. Each stage's
+prepare and load and warm-up, the steady state with both ready and
+ANECompilerService's absolute size while Mimi loads need 1.25 times their
+measurement within the constant that charges them, and the whole run its
+measurement within the envelope; a run whose probes failed (no baseline, a
+failed footprint sample, no compiler reading while Mimi loads) or that never
+sampled a phase fails. Each constant is 1.25 times the largest value over
 every run on every validated host (`template.json` `memory`), rounded up to
-1 MiB. On an Apple M2 (macOS 27.2.1, 11 runs):
+1 MiB, so a run that sets a new maximum fails until the constants are
+recomputed. On an Apple M2 (macOS 27.2.1, 25 runs):
 
 | Phase | Step (`cpu_and_gpu`) | Mimi (`cpu_and_ane`) |
 |---|---|---|
-| prepare (generate + compile) | 57.8–72.8 MiB, charged 91 | 21.1–62.5 MiB, charged 79 |
-| load + warm-up | 52.0–95.3 MiB, charged 120 | 0.8–49.9 MiB, charged 63 |
-| steady, both running | 79.1–103.3 MiB, charged 212.9 (both resident parts) | |
-| whole run | 143.1–152.2 MiB, envelope 332.9 | |
-| ANECompilerService while Mimi loads | | growth 19.8–24.6 MiB over a dirty 62–69 MiB baseline; reserve 114 MiB (1.25 x the largest absolute size, 90.6 MiB) |
+| prepare (generate + compile) | 57.8–79.7 MiB, charged 100 | 21.1–62.5 MiB, charged 79 |
+| load + warm-up | 30.3–95.7 MiB, charged 120 | 0.8–49.9 MiB, charged 63 |
+| steady, both running | 48.0–103.3 MiB, charged 212.9 (both resident parts) | |
+| whole run | 140.3–152.2 MiB, envelope 332.9 | |
+| ANECompilerService while Mimi loads | | absolute 83.3–400.2 MiB (growth 19.8–28.0 MiB over a dirty 61.7–380.4 MiB baseline); reserve 501 MiB (1.25 x 400.2) |
 
-The M4 Max CI runner is not measured yet.
+The compiler's absolute size includes whatever else compiled for the Neural
+Engine on the same Mac (no run found the service clean), so the reserve is
+conservative; it only gates when a cold Neural Engine load may start, and is
+not part of fit. The CI macOS runner (M4 Max) runs the same schedule three
+times on every pull request (`tts-ci.yml`).
 
 Preflight is a memory projection, not a
 validation of tensor contents, checkpoint encoder capability, or speech quality.

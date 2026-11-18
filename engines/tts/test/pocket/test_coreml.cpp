@@ -37,6 +37,7 @@
 #include "pocket/coreml.h"
 #include "pocket/flow_lm.h"
 #include "pocket/frontend.h"
+#include "pocket/generation.h"
 #include "pocket/mimi.h"
 #include "coreml_sidecar_path.h"
 #include "json.hpp"
@@ -247,6 +248,10 @@ std::vector<std::string> pocket_mem_failures(const pocket_mem & m, const pocket_
     const auto stage = [&](const char * name, qm::mem_breakdown b, const pocket_stage_charges & c, uint64_t ane) {
         b.ready = true;  // the steady state is both stages' (below)
         b.steady = b.total = 0;
+        // The load and the warm-up are one charged phase; a sample of either
+        // is a sample of it. Mimi's warm-up prediction on the Neural Engine
+        // takes about a millisecond, shorter than the sampling period.
+        b.loaded = b.warmed = b.loaded || b.warmed;
         for (const std::string & f : qm::mem_failures(b, ane, {c.prepare, c.load, 0, c.ane_reserve, 0}))
             out.push_back(std::string(name) + " " + f);
     };
@@ -301,6 +306,15 @@ void check_memory_schedule_attribution() {
     require(contains_text(pocket_mem_failures(pocket_mem_of(partial, 100), step, mimi, 100, 44, 90),
                           "step the schedule never sampled the slot generating"),
             "memory schedule: a digest alone does not count as the generation");
+    // The load+warm phase needs a sample of either state, not of both.
+    partial = run;
+    partial[8].mimi = P::load;
+    require(pocket_mem_failures(pocket_mem_of(partial, 100), step, mimi, 100, 44, 90).empty(),
+            "memory schedule: a load sampled without its (short) warm-up is the load+warm phase");
+    partial[7].mimi = partial[8].mimi = P::compile;
+    require(contains_text(pocket_mem_failures(pocket_mem_of(partial, 100), step, mimi, 100, 44, 90),
+                          "mimi the schedule never sampled the slot loading"),
+            "memory schedule: a stage never sampled loading or warming fails");
     partial = run;
     partial.resize(9);
     require(contains_text(pocket_mem_failures(pocket_mem_of(partial, 100), step, mimi, 100, 44, 90),
@@ -834,8 +848,8 @@ const Json & stage_status(const Json & status, const std::string & stage) {
 // before the sidecars are made: FlowLM is loaded through a symlink, which is
 // then pointed at a clone of the file (same bytes, another inode), and Mimi
 // through a clone that is then deleted. Generation must not follow either
-// path: both stages fail with source_changed, nothing is generated, and the
-// construction does not throw.
+// path: the step fails with source_changed, Mimi stays on ggml, nothing is
+// generated, and the construction does not throw.
 void source_changed_gate(const EngineOptions & bundle) {
     std::puts("[source] replaced and removed GGUFs");
     const fs::path dir = fs::temp_directory_path() / ("pocket-source-changed-" + test_process_tag());
@@ -870,14 +884,83 @@ void source_changed_gate(const EngineOptions & bundle) {
     const Json st = Json::parse(stages->status_json());
     std::printf("[source] step %s, mimi %s\n", stage_status(st, "step").dump().substr(0, 160).c_str(),
                 stage_status(st, "mimi").dump().substr(0, 160).c_str());
+    // The removed Mimi GGUF no longer matches a template when the stages are
+    // planned (no_template); had it vanished after that, its prepare would
+    // fail with source_changed. Either way it stays on ggml.
+    const std::string mimi_state = stage_status(st, "mimi").at("state");
     require(!stages->step_ready() && !stages->decoder_ready() &&
+                stage_status(st, "step").at("state") == "failed" &&
                 stage_status(st, "step").dump().find("source_changed") != std::string::npos &&
-                stage_status(st, "mimi").dump().find("source_changed") != std::string::npos,
+                (mimi_state == "no_template" ||
+                 (mimi_state == "failed" && stage_status(st, "mimi").dump().find("source_changed") != std::string::npos)),
             "a replaced or removed GGUF is not generated from: " + st.dump());
+    // The construction group reports the failed step (and lists the decoder,
+    // with no route, separately): it did not succeed.
+    const Json construction = Json::parse(stages->construction_json());
+    bool all_failed = !construction.at("slots").empty();
+    for (const Json & slot : construction.at("slots")) all_failed = all_failed && slot.at("state") == "failed";
+    require(construction.at("success") == false && construction.at("nothing_to_prepare") == false && all_failed &&
+                construction.at("slots").size() + construction.at("skipped_route_none").size() == 2,
+            "the construction group reports the failed slot: " + construction.dump());
     require(!fs::exists(dir / "cache" / "qvac-coreml-v1" / "artifacts") ||
                 fs::is_empty(dir / "cache" / "qvac-coreml-v1" / "artifacts"),
             "nothing is published");
     stages.reset();
+    fs::remove_all(dir, ec);
+}
+
+// A chunk needing more positions than the generated step holds (1024) runs
+// on ggml whatever the step's readiness, so it neither requests the step nor
+// reports coreml_pending; a chunk that fits requests it and, while it is
+// still being generated, reports pending. Mimi is kept out of the picture:
+// cpu_only is not a validated decoder placement, so its route is none.
+void capacity_gate(const EngineOptions & bundle) {
+    std::puts("[capacity] oversized and fitting chunks against a pending step");
+    const fs::path dir = fs::temp_directory_path() / ("pocket-capacity-" + test_process_tag());
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    EngineOptions opts = bundle;
+    opts.coreml.cache_dir = (dir / "cache").string();
+    opts.coreml.prewarm = CoremlOptions::Prewarm::none;
+    opts.coreml.wait = CoremlOptions::Wait::none;
+    opts.coreml_decoder_units = "cpu_only";
+    opts.max_tokens = 1024;
+    // A one-chunk text whose positions (voice, tokens and frame budget) exceed
+    // the step's 1024 but fit the Engine's context.
+    const int voice_frames = pd::FlowLM(opts.flow_lm_path, 2048, 4).read_voice(opts.voice_path).frames;
+    const pd::Frontend frontend(opts.frontend_path);
+    std::string text = "Pocket reads this long sentence";
+    size_t positions = 0;
+    while (positions <= 1100) {
+        text += " and then the quick brown fox jumps over the lazy dog";
+        const auto chunks = frontend.split(text + ".", opts.max_tokens);
+        require(chunks.size() == 1, "the long text stays one chunk");
+        const auto tokens = frontend.encode(chunks[0].text);
+        positions = size_t(voice_frames) + tokens.size() + pd::frame_budget(tokens.size(), chunks[0].tail_frames).max_frames();
+    }
+    text += ".";
+    require(positions <= size_t(opts.context), "the long chunk fits the Engine's context");
+    Engine engine(opts);
+    const Json st = status_of(engine);
+    require(stage_status(st, "mimi").at("route") == "none" && stage_status(st, "step").at("state") == "idle",
+            "Mimi has no route (cpu_only unvalidated) and the step is idle: " + st.dump());
+    // Only the chunk's start matters (the step is acquired there), so the
+    // call is cancelled at its first audio instead of synthesizing the whole
+    // long text.
+    const auto oversized = engine.synthesize_stream(text, [](const float *, size_t, int) { return false; });
+    const Json after = status_of(engine);
+    std::printf("[capacity] %zu positions: FlowLM %s, pending %d, step %s\n", positions,
+                oversized.flow_lm_backend.c_str(), int(oversized.coreml_pending),
+                stage_status(after, "step").at("state").get<std::string>().c_str());
+    require(oversized.cancelled && oversized.flow_lm_backend == "ggml" && !oversized.coreml_pending &&
+                stage_status(after, "step").at("state") == "idle",
+            "an oversized chunk runs ggml without requesting the step or reporting pending: " + after.dump());
+    const auto fitting = engine.synthesize("Hello there.");
+    std::printf("[capacity] fitting chunk: FlowLM %s, pending %d\n", fitting.flow_lm_backend.c_str(),
+                int(fitting.coreml_pending));
+    require(fitting.flow_lm_backend == "ggml" && fitting.coreml_pending,
+            "a fitting chunk requests the step and reports pending while it is generated");
+    engine.coreml_wait(-1);
     fs::remove_all(dir, ec);
 }
 
@@ -945,9 +1028,8 @@ void memory_schedule(const EngineOptions & bundle, const std::string & cache_dir
     uint64_t base = 0;
     const bool base_ok = qm::phys_footprint(base);
     std::thread sampler([&] {
-        std::pair<qm::mem_phase, qm::mem_phase> now{qm::mem_phase::ggml, qm::mem_phase::ggml};
-        for (int tick = 0; !stop.load(); ++tick) {
-            if (tick % 5 == 0) now = phases(watched.load());
+        while (!stop.load()) {
+            const auto now = phases(watched.load());
             uint64_t footprint = 0;
             if (qm::phys_footprint(footprint)) {
                 samples.push_back({footprint, now.first, now.second});
@@ -1148,6 +1230,31 @@ int generated_fixture(const std::string & bundle, const std::string & cache_dir,
         // tolerance, far below what one Core ML frame changes.
         require(first.pcm.size() == reference.pcm.size() && max_error(first.pcm, reference.pcm) < 1e-4,
                 "a pending call matches Core ML off");
+        {
+            // The sidecars are still being generated. Waiter A blocks; cancel()
+            // must end it even though waiter B starts right after the cancel
+            // (a single shared flag that B cleared on entry would leave A
+            // waiting). B keeps waiting until the sidecars are ready.
+            std::atomic<int> a_result{-1};
+            std::thread a([&] { a_result.store(engine.coreml_wait(-1) ? 1 : 0); });
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            require(a_result.load() == -1 && !engine.coreml_wait(0),
+                    "the sidecars are still pending when waiter A blocks: " + engine.coreml_status());
+            engine.cancel();
+            std::atomic<int> b_result{-1};
+            std::thread b([&] { b_result.store(engine.coreml_wait(-1) ? 1 : 0); });
+            const auto cancelled_at = std::chrono::steady_clock::now();
+            while (a_result.load() == -1 && std::chrono::steady_clock::now() - cancelled_at < std::chrono::seconds(2))
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            const bool pending_after_cancel = !engine.coreml_wait(0);
+            a.join();
+            b.join();
+            std::printf("[wait] waiter A after cancel: %d (still pending: %d); waiter B: %d\n", a_result.load(),
+                        int(pending_after_cancel), b_result.load());
+            require(a_result.load() == 0 && pending_after_cancel,
+                    "cancel() ends a blocking wait even when another wait starts after it");
+            require(b_result.load() == 1, "a wait started after the cancel waits for readiness");
+        }
         require(engine.coreml_wait(-1), "the first call's request makes both sidecars ready: " + engine.coreml_status());
         const Json ready = status_of(engine);
         require(stage_status(ready, "step").at("route") == "generated" &&
@@ -1179,12 +1286,39 @@ int generated_fixture(const std::string & bundle, const std::string & cache_dir,
     std::vector<float> streamed;
     engine.synthesize_stream(text, [&](const float * pcm, size_t n, int) { streamed.insert(streamed.end(), pcm, pcm + n); return true; });
     require(max_error(streamed, batch.pcm) < 1e-4, "stream and batch differ on the generated sidecars");
+    {
+        const Json construction = Json::parse(engine.coreml_construction());
+        require(construction.at("success") == true && construction.at("nothing_to_prepare") == false &&
+                    construction.at("slots").size() == 2,
+                "wait construct: the construction group succeeded with both sidecars: " + construction.dump());
+        // prewarm none: an empty construction group (which succeeds), nothing
+        // ready; a later prewarm request prepares both and reports them.
+        EngineOptions later = opts;
+        later.coreml.prewarm = CoremlOptions::Prewarm::none;
+        Engine idle_engine(later);
+        const Json empty = Json::parse(idle_engine.coreml_construction());
+        require(empty.at("success") == true && empty.at("nothing_to_prepare") == true && !idle_engine.coreml_wait(0),
+                "prewarm none: an empty construction group, nothing ready: " + empty.dump());
+        const Json group = Json::parse(idle_engine.coreml_prewarm(CoremlOptions::Prewarm::all, true));
+        std::printf("[prewarm] after construction: %s\n", group.dump().substr(0, 200).c_str());
+        require(group.at("group") == "prewarm" && group.at("success") == true && group.at("slots").size() == 2 &&
+                    idle_engine.flow_lm_on_coreml() && idle_engine.mimi_on_coreml(),
+                "coreml_prewarm(all, wait) after construction makes both sidecars ready: " + group.dump());
+        // Core ML off: both groups are empty and succeed.
+        const Json off_construction = Json::parse(ggml.coreml_construction());
+        const Json off_prewarm = Json::parse(ggml.coreml_prewarm(CoremlOptions::Prewarm::all, true));
+        require(off_construction.at("nothing_to_prepare") == true && off_construction.at("success") == true &&
+                    off_prewarm.at("nothing_to_prepare") == true && off_prewarm.at("success") == true &&
+                    off_prewarm.at("skipped_route_none").size() == 2,
+                "use = off: empty groups that succeed, both stages listed as route none: " + off_prewarm.dump());
+    }
 
     // Parity of the generated artifacts against ggml (the prebuilt sidecars'
     // gates, on the generated bundles).
     check_stage_parity(plain, step_path);
     check_decoder_parity(plain, decoder_path);
     source_changed_gate(plain);
+    capacity_gate(plain);
 
     // Fit is the same with a populated cache.
     const auto fit_after = tts_cpp::pocket::fit_params(fit);
@@ -1355,6 +1489,112 @@ int fit_budgets(const fs::path & bundle, const std::string & cli) {
     return 0;
 }
 
+#ifndef _WIN32
+// Runs `cmd` through the shell; its exit code, or -1.
+int run_command(const std::string & cmd) {
+    const int status = std::system(cmd.c_str());
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+std::string file_text(const fs::path & p) {
+    std::ifstream f(p, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+}
+#endif
+
+// pocket-cli's paths, on Core ML off (POCKET_COREML_DISABLE, so only ggml
+// runs): --coreml-status-json is refused before synthesis when it names the
+// output, a model input or (through a symlink) an existing output, and after
+// synthesis when only the filesystem equates it with the output (a
+// case-insensitive volume), the audio then kept. The cache directory: the
+// explicit option, else QVAC_COREML_CACHE_DIR, else Application Support under
+// HOME.
+int cli_paths(const fs::path & bundle, const std::string & cli) {
+#ifdef _WIN32
+    (void) bundle;
+    (void) cli;
+    std::puts("SKIP: POSIX shell needed");
+    return SKIP;
+#else
+    const fs::path dir = fs::temp_directory_path() / ("pocket-cli-paths-" + test_process_tag());
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir / "bundle");
+    for (const char * f : {"flow-lm.gguf", "mimi.gguf", "frontend.json"})
+        fs::create_symlink(fs::absolute(bundle / f), dir / "bundle" / f);
+    fs::copy_file(bundle / "voice.gguf", dir / "bundle" / "voice.gguf");
+    const std::string voice_before = file_text(dir / "bundle" / "voice.gguf");
+    // `env_set`: extra NAME=VALUE assignments (QVAC_COREML_CACHE_DIR is
+    // unset first, so only an assignment here sets it).
+    auto command = [&](const std::string & env_set) {
+        return "env -u QVAC_COREML_CACHE_DIR " + env_set + " POCKET_COREML_DISABLE=1 HOME='" +
+               (dir / "home").string() + "' '" + cli + "' --model-dir '" + (dir / "bundle").string() +
+               "' --text 'Hi.'";
+    };
+    const std::string base = command("");
+    const fs::path out = dir / "out.wav", log = dir / "log.txt";
+    auto run = [&](const std::string & extra) {
+        const int code = run_command(base + " " + extra + " > '" + log.string() + "' 2>&1");
+        return std::make_pair(code, file_text(log));
+    };
+    // The same path as the output: refused before synthesis, nothing written.
+    auto r = run("--output '" + out.string() + "' --coreml-status-json '" + out.string() + "'");
+    require(r.first == 1 && r.second.find("same file as --output") != std::string::npos && !fs::exists(out),
+            "status = output is refused before synthesis: " + r.second);
+    // A model input: refused, the input untouched.
+    r = run("--output '" + out.string() + "' --coreml-status-json '" + (dir / "bundle" / "voice.gguf").string() + "'");
+    require(r.first == 1 && r.second.find("same file as --voice") != std::string::npos &&
+                file_text(dir / "bundle" / "voice.gguf") == voice_before,
+            "status = a model input is refused: " + r.second);
+    // Through a symlink to an existing output: refused, the output untouched.
+    std::ofstream(out, std::ios::binary) << "keep";
+    fs::create_symlink(out, dir / "status-link.json");
+    r = run("--output '" + out.string() + "' --coreml-status-json '" + (dir / "status-link.json").string() + "'");
+    require(r.first == 1 && r.second.find("same file as --output") != std::string::npos && file_text(out) == "keep",
+            "status through a symlink to the output is refused: " + r.second);
+    fs::remove(out);
+    // Another spelling of the same file on a case-insensitive volume: caught
+    // once the WAV exists; the audio is kept and the run fails.
+    std::ofstream(dir / "case-probe", std::ios::binary) << "x";
+    if (fs::exists(dir / "CASE-PROBE")) {
+        r = run("--output '" + out.string() + "' --coreml-status-json '" + (dir / "OUT.WAV").string() + "'");
+        require(r.first == 1 && r.second.find("same file as --output") != std::string::npos &&
+                    file_text(out).compare(0, 4, "RIFF") == 0,
+                "status in another case of the output is refused after synthesis, the WAV kept: " + r.second);
+        std::puts("[cli] case-insensitive alias: refused, audio kept");
+    } else {
+        std::puts("[cli] case-sensitive volume: no case alias to check");
+    }
+#ifdef TTS_CPP_USE_COREML
+    // The cache directory each way.
+    const fs::path status = dir / "status.json";
+    auto cache_dir = [&](const std::string & env, const std::string & extra) {
+        const int code = run_command(command(env) + " " + extra + " --output '" + out.string() +
+                                     "' --coreml-status-json '" + status.string() + "' > '" + log.string() + "' 2>&1");
+        require(code == 0, "pocket-cli run: " + file_text(log));
+        return nlohmann::json::parse(file_text(status)).at("cache_dir").get<std::string>();
+    };
+    const std::string flag = (dir / "flag-cache").string(), shared = (dir / "shared-cache").string();
+    const std::string by_flag = cache_dir("QVAC_COREML_CACHE_DIR='" + shared + "'", "--coreml-cache-dir '" + flag + "'");
+    const std::string by_env = cache_dir("QVAC_COREML_CACHE_DIR='" + shared + "'", "");
+    const std::string by_default = cache_dir("", "");
+    std::printf("[cli] cache dir: flag %s; env %s; default %s\n", by_flag.c_str(), by_env.c_str(), by_default.c_str());
+    require(by_flag == flag && by_env == shared &&
+                by_default == (dir / "home" / "Library" / "Application Support" / "qvac-speech" / "coreml").string(),
+            "pocket-cli cache dir: the option, then QVAC_COREML_CACHE_DIR, then Application Support");
+#endif
+    // The library's default stays "no cache".
+    EngineOptions plain = bundle_options(bundle);
+    env_guard shared_env("QVAC_COREML_CACHE_DIR");
+    unsetenv("QVAC_COREML_CACHE_DIR");
+    require(pd::coreml_plan_route(pd::CoremlStage::step, pd::coreml_engine_options(plain)).route != "generate",
+            "the library does not generate without a cache directory");
+    fs::remove_all(dir, ec);
+    std::puts("test-pocket-coreml --cli-paths: ok");
+    return 0;
+#endif
+}
+
 int engine_fixture() {
 #ifndef TTS_CPP_USE_COREML
     std::puts("SKIP: built without Core ML (TTS_CPP_COREML=OFF)");
@@ -1383,6 +1623,8 @@ int main(int argc, char ** argv) {
     try {
         if (argc > 1 && std::string(argv[1]) == "--shape-fixture") return shape_fixture();
         if (argc > 1 && std::string(argv[1]) == "--engine-fixture") return engine_fixture();
+        if (argc > 4 && std::string(argv[1]) == "--cli-paths" && std::string(argv[3]) == "--cli")
+            return cli_paths(argv[2], argv[4]);
         if (argc > 2 && std::string(argv[1]) == "--fit-budgets")
             return fit_budgets(argv[2], argc > 4 && std::string(argv[3]) == "--cli" ? argv[4] : "");
         if (argc > 1 && std::string(argv[1]) == "--generated") {

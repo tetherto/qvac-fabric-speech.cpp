@@ -419,6 +419,8 @@ namespace {
 constexpr const char * ENGINE_NAME = "pocket";
 constexpr const char * ENV_PREFIX = "POCKET";
 constexpr const char * STEP_TEMPLATE_ID = "pocket-step-c1024";
+// The positions the generated step's state holds (the template's capacity).
+constexpr int STEP_TEMPLATE_CONTEXT = 1024;
 constexpr const char * DECODER_TEMPLATE_ID = "pocket-mimi";
 constexpr const char * STEP_STAGE = "step";
 constexpr const char * DECODER_STAGE = "mimi";
@@ -885,13 +887,17 @@ std::unique_ptr<CoremlStages> CoremlStages::create(const CoremlEngineOptions & o
     make_stage_slot(p->decoder, CoremlStage::decoder, opts, p->manager, std::move(decoder_geometry));
 
     std::vector<pcm::GroupRequest> requests;
+    std::vector<pcm::SlotStatus> skipped;
     bool waited = false;
     for (stage_slot * s : {&p->step, &p->decoder}) {
-        if (!s->slot) continue;
+        if (!s->slot) {
+            skipped.push_back(s->none_status);
+            continue;
+        }
         if (s->plan.resolved.prewarm != pcm::Prewarm::none) requests.push_back({s->slot, pcm::Priority::minimal});
         waited = waited || s->plan.resolved.wait == pcm::Wait::construct;
     }
-    p->construction = p->manager->issue_group(pcm::GroupKind::construction, requests, waited);
+    p->construction = p->manager->issue_group(pcm::GroupKind::construction, requests, waited, skipped);
     std::unique_ptr<CoremlStages> out(new CoremlStages(std::move(p)));
     if (waited && !requests.empty()) {
         const pcm::PrewarmResult result = out->p_->construction->wait();
@@ -946,6 +952,9 @@ bool CoremlStages::decoder_strict() const { return p_->decoder.plan.resolved.str
 const CoremlRoute & CoremlStages::step_route() const { return p_->step.plan.route; }
 const CoremlRoute & CoremlStages::decoder_route() const { return p_->decoder.plan.route; }
 bool CoremlStages::step_ready() const { return p_->step.slot && p_->step.slot->state() == pcm::SlotState::ready; }
+int CoremlStages::step_capacity() const {
+    return p_->step.slot && p_->step.plan.plan.route == pcm::Route::generate ? STEP_TEMPLATE_CONTEXT : 0;
+}
 bool CoremlStages::decoder_ready() const {
     return p_->decoder.slot && p_->decoder.slot->state() == pcm::SlotState::ready;
 }
@@ -984,7 +993,7 @@ std::string CoremlStages::status_json() const {
     return pcm::to_json(st);
 }
 
-bool CoremlStages::wait(int64_t timeout_ms, const std::atomic<bool> * cancel) const {
+bool CoremlStages::wait(int64_t timeout_ms, const std::atomic<uint64_t> * cancels, uint64_t since) const {
     const auto start = pcm::Clock::now();
     bool any = false;
     for (const stage_slot * s : {&p_->step, &p_->decoder}) any = any || s->slot != nullptr;
@@ -1003,10 +1012,27 @@ bool CoremlStages::wait(int64_t timeout_ms, const std::atomic<bool> * cancel) co
             all_ready = false;
         }
         if (all_ready) return true;
-        if (cancel && cancel->load()) return false;
+        if (cancels && cancels->load() != since) return false;
         if (timeout_ms >= 0 && pcm::Clock::now() - start >= std::chrono::milliseconds(timeout_ms)) return false;
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
+}
+
+std::string CoremlStages::construction_json() const { return pcm::to_json(p_->construction->result()); }
+
+std::string CoremlStages::prewarm(CoremlOptions::Prewarm scope, bool wait, const std::atomic<uint64_t> * cancels,
+                                  uint64_t since) {
+    std::vector<pcm::GroupRequest> requests;
+    std::vector<pcm::SlotStatus> skipped;
+    for (stage_slot * s : {&p_->step, &p_->decoder}) {
+        if (!s->slot) skipped.push_back(s->none_status);
+        else if (scope != CoremlOptions::Prewarm::none) requests.push_back({s->slot, pcm::Priority::minimal});
+    }
+    const std::shared_ptr<pcm::Group> group =
+        p_->manager->issue_group(pcm::GroupKind::prewarm, requests, wait, std::move(skipped));
+    while (wait && !group->finished() && !(cancels && cancels->load() != since))
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    return pcm::to_json(group->result());
 }
 
 #else  // !TTS_CPP_USE_COREML
@@ -1043,10 +1069,20 @@ bool CoremlStages::decoder_strict() const { return false; }
 const CoremlRoute & CoremlStages::step_route() const { static const CoremlRoute r; return r; }
 const CoremlRoute & CoremlStages::decoder_route() const { static const CoremlRoute r; return r; }
 bool CoremlStages::step_ready() const { return false; }
+int CoremlStages::step_capacity() const { return 0; }
 bool CoremlStages::decoder_ready() const { return false; }
 std::string CoremlStages::status_json() const { return "{}"; }
-bool CoremlStages::wait(int64_t, const std::atomic<bool> *) const { return false; }
+bool CoremlStages::wait(int64_t, const std::atomic<uint64_t> *, uint64_t) const { return false; }
+std::string CoremlStages::construction_json() const { return coreml_empty_group_json("construction"); }
+std::string CoremlStages::prewarm(CoremlOptions::Prewarm, bool, const std::atomic<uint64_t> *, uint64_t) {
+    return coreml_empty_group_json("prewarm");
+}
 
 #endif
+
+std::string coreml_empty_group_json(const char * group) {
+    return std::string("{\"group\":\"") + group +
+           "\",\"nothing_to_prepare\":true,\"skipped_route_none\":[],\"slots\":[],\"success\":true}";
+}
 
 } // namespace tts_cpp::pocket::detail

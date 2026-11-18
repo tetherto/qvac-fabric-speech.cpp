@@ -298,6 +298,10 @@ struct CoremlDecoderUse {
     std::function<void(const std::string &)> retire;
 };
 
+// The result of an empty request group (nothing to prepare, which succeeds)
+// as JSON: an Engine without Core ML stages, or a build without Core ML.
+std::string coreml_empty_group_json(const char * group);
+
 // Both stages of one Engine on the shared Core ML runtime.
 class CoremlStages {
 public:
@@ -322,14 +326,28 @@ public:
     const CoremlRoute & decoder_route() const;
     // Whether the stage's sidecar is loaded and not retired.
     bool step_ready() const;
+    // The positions the step's state holds when known before it loads (a
+    // generated step: its template's capacity); 0 when unknown (a prebuilt
+    // step, whose context is read when it loads) or without a step slot.
+    int step_capacity() const;
     bool decoder_ready() const;
     // Status JSON (schema 1: engine, cache_dir, generation, stages).
     std::string status_json() const;
     // Blocks until both requested stages are ready or terminal, `timeout_ms`
-    // passes (< 0: no limit) or `cancel` is set. True when every stage with a
-    // route is ready. Returns false at once while a stage is idle (nothing
-    // requested it yet) or deferred(memory).
-    bool wait(int64_t timeout_ms, const std::atomic<bool> * cancel) const;
+    // passes (< 0: no limit) or `cancels` moves past `since` (a cancel made
+    // after the wait started). True when every stage with a route is ready.
+    // Returns false at once while a stage is idle (nothing requested it yet)
+    // or deferred(memory).
+    bool wait(int64_t timeout_ms, const std::atomic<uint64_t> * cancels = nullptr, uint64_t since = 0) const;
+    // The construction group's result as JSON (group, success,
+    // nothing_to_prepare, slots with their final state, and the stages whose
+    // route is none in skipped_route_none).
+    std::string construction_json() const;
+    // Requests another group (scope none: an empty one; any other scope: both
+    // sidecars, Pocket's minimal set) and, with `wait`, blocks until it
+    // finished or `cancels` moves past `since`. Returns its result as JSON.
+    std::string prewarm(CoremlOptions::Prewarm scope, bool wait, const std::atomic<uint64_t> * cancels = nullptr,
+                        uint64_t since = 0);
 
     struct impl;
 private:

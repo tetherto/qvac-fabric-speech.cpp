@@ -133,6 +133,19 @@ public:
     // for memory (deferred). coreml_wait(0) only polls; a blocking wait never
     // clears a cancel() meant for a synthesis on another thread.
     bool coreml_wait(int64_t timeout_ms = -1) const;
+    // The construction group's result as JSON: "group", "success" (every
+    // requested sidecar reached ready), "nothing_to_prepare" (the group was
+    // empty: prewarm none, Core ML off or unavailable, which succeeds),
+    // "slots" (each requested stage's final state and error) and
+    // "skipped_route_none" (the stages with no Core ML route). With
+    // coreml.wait = construct the constructor returned once it finished.
+    std::string coreml_construction() const;
+    // Requests another group: scope none requests nothing, any other scope
+    // both sidecars (Pocket's minimal set). With `wait` it blocks until every
+    // requested sidecar is ready or terminal, or cancel() is called. Returns
+    // the group's result as JSON (as coreml_construction()); an Engine
+    // without Core ML stages returns an empty group that succeeded.
+    std::string coreml_prewarm(CoremlOptions::Prewarm scope, bool wait);
     const char * device_name() const noexcept;
     std::string model_source_sha256() const;
 private:

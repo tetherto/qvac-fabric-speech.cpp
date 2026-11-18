@@ -76,9 +76,10 @@ struct Engine::Impl {
     std::atomic<bool> pending{false};  // a chunk ran on ggml because a sidecar was not ready
     std::atomic<bool> operating{false};
     std::atomic<bool> cancelled{false};
-    // Set by cancel() together with `cancelled`; a blocking coreml_wait()
-    // clears and watches only this one.
-    std::atomic<bool> wait_cancelled{false};
+    // Counts cancel() calls. A blocking coreml_wait() ends when it moves past
+    // the value the wait started with: nothing clears it, so one wait never
+    // swallows a cancel meant for another, or for a synthesis.
+    std::atomic<uint64_t> wait_cancels{0};
     std::condition_variable changed;
 
     explicit Impl(const EngineOptions & o) : opts(o) {
@@ -211,7 +212,12 @@ struct Engine::Impl {
         lm->prefill(lm->text_embeddings(chunk.tokens));
         int position = lm->position();
         detail::CoremlStepUse use;
-        if (coreml) use = coreml->acquire_step(chunk.budget.max_frames(), &cancelled);
+        // A chunk longer than the step's known capacity runs on ggml whatever
+        // the step's readiness: it does not request the step, and does not
+        // count as pending.
+        const int capacity = coreml ? coreml->step_capacity() : 0;
+        if (coreml && (capacity == 0 || position + chunk.budget.max_frames() <= capacity))
+            use = coreml->acquire_step(chunk.budget.max_frames(), &cancelled);
         if (use.pending) pending.store(true);
         bool on_coreml = use.step && position+chunk.budget.max_frames() <= use.step->context();
         if (on_coreml) {
@@ -390,14 +396,23 @@ std::string Engine::coreml_status() const { return impl_->coreml ? impl_->coreml
 bool Engine::coreml_wait(int64_t timeout_ms) const {
     if (!impl_->coreml) return false;
     // A readiness poll has nothing to cancel and touches no flag.
-    if (timeout_ms == 0) return impl_->coreml->wait(0, nullptr);
-    impl_->wait_cancelled.store(false);
-    return impl_->coreml->wait(timeout_ms, &impl_->wait_cancelled);
+    if (timeout_ms == 0) return impl_->coreml->wait(0);
+    // A blocking wait ends early on any cancel() made after it started; it
+    // clears nothing, so concurrent waits and a synthesis on another thread
+    // each keep the cancels meant for them.
+    return impl_->coreml->wait(timeout_ms, &impl_->wait_cancels, impl_->wait_cancels.load());
+}
+std::string Engine::coreml_construction() const {
+    return impl_->coreml ? impl_->coreml->construction_json() : detail::coreml_empty_group_json("construction");
+}
+std::string Engine::coreml_prewarm(CoremlOptions::Prewarm scope, bool wait) {
+    if (!impl_->coreml) return detail::coreml_empty_group_json("prewarm");
+    return impl_->coreml->prewarm(scope, wait, &impl_->wait_cancels, impl_->wait_cancels.load());
 }
 const char * Engine::device_name() const noexcept { return impl_->device_name.c_str(); }
 std::string Engine::model_source_sha256() const { return impl_->lm->source_hash(); }
 void Engine::cancel() noexcept {
-    impl_->cancelled.store(true); impl_->wait_cancelled.store(true); impl_->changed.notify_all();
+    impl_->cancelled.store(true); impl_->wait_cancels.fetch_add(1); impl_->changed.notify_all();
 }
 SynthesisResult Engine::synthesize_stream(const std::string & text, const AudioCallback & callback) { return impl_->generate(text, callback); }
 SynthesisResult Engine::synthesize(const std::string & text) {
