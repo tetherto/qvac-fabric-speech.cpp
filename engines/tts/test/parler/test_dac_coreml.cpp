@@ -74,6 +74,10 @@
 #include "tts-cpp/parler/engine.h"
 #include "tts-cpp/parler/fit.h"
 #include "parler/internal.h"
+#ifdef TTS_CPP_USE_COREML
+#include "parler/dac_source.h"
+#endif
+#include "gguf.h"
 #include "coreml_sidecar_path.h"
 #include "memory_probe.h"
 #include "npy.h"
@@ -90,7 +94,10 @@
 #include <thread>
 
 #if defined(__APPLE__)
+#include <fcntl.h>
 #include <sys/clonefile.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <sys/sysctl.h>
 #endif
 #include <memory>
@@ -1683,6 +1690,93 @@ void fallback_gates(const std::string & gguf) {
 
 } // namespace
 
+#if defined(__APPLE__)
+// The GGUF at a path is swapped while parler_load_gguf runs: B replaces A
+// once the metadata is parsed, and A is back before the load ends (A/B/A).
+// The load reads through one descriptor, so it must hold A's weights, and
+// its recorded identity must be A's.
+struct swap_paths {
+    std::filesystem::path path, held, other;
+};
+swap_paths g_swap;
+
+void swap_during_load(const char * stage) {
+    std::error_code ec;
+    if (std::string(stage) == "metadata") {
+        std::filesystem::rename(g_swap.path, g_swap.held, ec);
+        if (!ec) std::filesystem::rename(g_swap.other, g_swap.path, ec);
+    } else if (std::string(stage) == "weights") {
+        std::filesystem::rename(g_swap.path, g_swap.other, ec);
+        if (!ec) std::filesystem::rename(g_swap.held, g_swap.path, ec);
+    }
+    if (ec) fprintf(stderr, "  swap at %s: %s\n", stage, ec.message().c_str());
+}
+
+// The file offset of `tensor`'s data in the GGUF at `path`, or -1.
+int64_t gguf_tensor_offset(const std::string & path, const char * tensor) {
+    gguf_init_params gp = {/*.no_alloc=*/true, /*.ctx=*/nullptr};
+    gguf_context * g = gguf_init_from_file(path.c_str(), gp);
+    if (!g) return -1;
+    const int64_t i = gguf_find_tensor(g, tensor);
+    const int64_t off = i < 0 ? -1 : (int64_t) (gguf_get_data_offset(g) + gguf_get_tensor_offset(g, i));
+    gguf_free(g);
+    return off;
+}
+
+void descriptor_load_gate(const std::string & gguf) {
+    fprintf(stderr, "GGUF swapped during the load (A/B/A)\n");
+    namespace fs = std::filesystem;
+    const char * TENSOR = "dac.dec.conv_out.bias";
+    const fs::path dir = fs::temp_directory_path() /
+                         ("parler-aba-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    g_swap = {dir / "model.gguf", dir / "held.gguf", dir / "other.gguf"};
+    const std::string src = fs::absolute(gguf).string();
+    const int64_t off = gguf_tensor_offset(src, TENSOR);
+    float bias_a = 0;
+    bool ready = off >= 0 && ::clonefile(src.c_str(), g_swap.path.c_str(), 0) == 0 &&
+                 ::clonefile(src.c_str(), g_swap.other.c_str(), 0) == 0;
+    if (ready) {
+        const int fa = ::open(g_swap.path.c_str(), O_RDONLY);
+        const int fb = ::open(g_swap.other.c_str(), O_RDWR);
+        const float bias_b_value = 0.25f;
+        ready = fa >= 0 && fb >= 0 && ::pread(fa, &bias_a, 4, off) == 4 && bias_a != bias_b_value &&
+                ::pwrite(fb, &bias_b_value, 4, off) == 4;
+        if (fa >= 0) ::close(fa);
+        if (fb >= 0) ::close(fb);
+    }
+    check(ready, "two GGUFs differing only in conv_out's bias");
+    if (!ready) {
+        fs::remove_all(dir, ec);
+        return;
+    }
+    struct stat sa {};
+    ::stat(g_swap.path.c_str(), &sa);
+    parler_model m;
+    std::string err;
+    parler_gguf_load_hook = &swap_during_load;
+    const bool loaded = parler_load_gguf(g_swap.path.string(), m, 0, &err);
+    parler_gguf_load_hook = nullptr;
+    struct stat now {};
+    const bool a_back = ::stat(g_swap.path.c_str(), &now) == 0 && now.st_ino == sa.st_ino &&
+                        fs::exists(g_swap.other) && !fs::exists(g_swap.held);
+    float got = NAN;
+    if (loaded && m.dac_conv_out_b) ggml_backend_tensor_get(m.dac_conv_out_b, &got, 0, sizeof(float));
+    check(loaded && a_back && got == bias_a,
+          "the load reads A's weights although B held the path in between (conv_out bias " + std::to_string(got) +
+              ", A's " + std::to_string(bias_a) + (a_back ? "" : "; the swap did not restore A") + ")" +
+              (loaded ? "" : ": " + err));
+#ifdef TTS_CPP_USE_COREML
+    const bool identity = m.dac_source && m.dac_source->ok && m.dac_source->stat.ino == (uint64_t) sa.st_ino &&
+                          !m.dac_source->stat.changed;
+    check(identity, "the recorded identity is the file the load read (A's inode)");
+#endif
+    parler_free_model(m);
+    fs::remove_all(dir, ec);
+}
+#endif
+
 int main(int argc, char ** argv) {
     std::string gguf, fallback, ref_dir, cache_dir, memory_dir;
     double min_snr = 45.0;
@@ -1725,6 +1819,9 @@ int main(int argc, char ** argv) {
     model_free_gates();
     fake_sidecar_gates(model);
     pending_seam_gates(model);
+#if defined(__APPLE__)
+    if (memory_dir.empty()) descriptor_load_gate(gguf);
+#endif
 #ifdef TTS_CPP_USE_COREML
     idle_slot_gates(model, gguf);
     if (!memory_dir.empty()) memory_schedule(model, gguf, memory_dir);
