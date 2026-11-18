@@ -3574,6 +3574,7 @@ CoremlCallStats model_coreml_call_stats(ParakeetCtcModel & m) {
         out.coreml_passes = stats.coreml;
         out.pending_passes = stats.not_ready;
         out.label = stats.label;
+        out.capacity = stats.capacity;
     }
 #else
     (void) m;

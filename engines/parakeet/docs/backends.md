@@ -897,10 +897,16 @@ the reports against the templates: the peak increment against what fit
 charges; each prepare, load, resident step and the compiler's growth, times
 1.25 and rounded up to 1 MiB, against the template's constant (the rule the
 constants were set by, so a constant that lost its margin fails); and the
-steady growth against the three capacities' resident parts. A run fails when a
-capacity shows no generate, compile or load phase, a phase has no footprint
-sample, a load has no `ANECompilerService` sample, or the tool reports sampler
-errors (a footprint or `ps` read that failed). The Core ML lane of `parakeet-ci.yml` runs the generated schedule and
+steady growth against the three capacities' resident parts. The compiler's
+growth is held to the reserve over the whole run and per load (from the
+service's size when that load started). A run fails when a capacity shows no
+generate, compile or load phase, a compile has no generate before it, a phase
+has no footprint sample, a load has no `ANECompilerService` sample, the tool
+reports sampler errors (a footprint or `ps` read that failed), a capacity does
+not end the run ready or serves no Core ML pass after every capacity is ready
+(counted by the capacity that served it), or the compiler grew less than
+64 MiB (a warm run). The tool itself exits 1 when a capacity never became
+ready or served too few passes. The Core ML lane of `parakeet-ci.yml` runs the generated schedule and
 the check on its macOS runner. Increments are over a ggml-only run of the same
 passes on the same host:
 

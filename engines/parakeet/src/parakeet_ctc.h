@@ -763,6 +763,7 @@ struct CoremlCallStats {
     int coreml_passes = 0;
     int pending_passes = 0;
     std::string label;
+    int capacity = 0;  // the diarizer capacity (frames) that served the last Core ML pass
 };
 CoremlCallStats model_coreml_call_stats(ParakeetCtcModel & m);
 #ifdef PARAKEET_USE_COREML
