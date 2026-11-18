@@ -66,13 +66,28 @@ bool is_contiguous(MLMultiArray * array, int64_t columns) {
     return strides.count == 1 || strides[strides.count - kTrailingDims].longLongValue == columns;
 }
 
+// A framework failure while binding (an array or provider Core ML could not
+// allocate), as opposed to a schema the wrapper cannot bind. Set on the
+// loading thread; read once the bind returns.
+thread_local parakeet_coreml_load_error t_bind_failure{};
+thread_local bool t_bind_failed = false;
+
+void record_bind_failure(NSError * error) {
+    t_bind_failed = true;
+    parakeet_coreml_record_load_error(error, &t_bind_failure);
+}
+
 MLMultiArray * float_array(MLMultiArrayConstraint * constraint) {
     if (constraint == nil || constraint.dataType != MLMultiArrayDataTypeFloat32) return nil;
     NSError * error = nil;
     MLMultiArray * array = [[MLMultiArray alloc] initWithShape:constraint.shape
                                                       dataType:MLMultiArrayDataTypeFloat32
                                                          error:&error];
-    return error == nil ? array : nil;
+    if (array == nil || error != nil) {
+        record_bind_failure(error);
+        return nil;
+    }
+    return array;
 }
 
 bool bind_array(MLMultiArrayConstraint * constraint, NSString * name, Binding & binding,
@@ -220,7 +235,10 @@ bool bind_model(parakeet_coreml_diarizer * ctx, MLModel * model) {
     NSError * error = nil;
     MLDictionaryFeatureProvider * provider =
         [[MLDictionaryFeatureProvider alloc] initWithDictionary:features error:&error];
-    if (provider == nil || error != nil) return false;
+    if (provider == nil || error != nil) {
+        record_bind_failure(error);
+        return false;
+    }
     MLPredictionOptions * options = [[MLPredictionOptions alloc] init];
     options.outputBackings = backings;
     ctx->provider = CFBridgingRetain(provider);
@@ -295,10 +313,13 @@ struct parakeet_coreml_diarizer * parakeet_coreml_diarizer_init_with_units_error
         auto * ctx = new parakeet_coreml_diarizer();
         ctx->model = CFBridgingRetain(model);
         ctx->label = label;
+        t_bind_failed = false;
         if (!bind_model(ctx, model)) {
             parakeet_coreml_diarizer_free(ctx);
-            if (error != nullptr) {
-                error->incompatible = 1;
+            if (error != nullptr && t_bind_failed) {
+                *error = t_bind_failure;  // Core ML could not allocate: keep its error
+            } else if (error != nullptr) {
+                error->incompatible = 1;  // a schema the wrapper cannot bind
                 std::snprintf(error->message, sizeof(error->message), "%s",
                               "unexpected diarizer inputs or outputs");
             }
