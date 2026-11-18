@@ -466,8 +466,8 @@ void self_test() {
     const CoremlFitVerdict over = acestep_decide_coreml_fit(checks(500, 1000), checks(1100, 1000), true, std::nullopt);
     check(!over.fits && !over.coreml_fits && over.ggml_only_fits && !over.degraded,
           "generated, over the free memory, no budget: does not fit (no memory-degrade without a budget)");
-    const CoremlFitVerdict near = acestep_decide_coreml_fit(checks(500, 1000), checks(900, 1000), true, 700);
-    check(near.degraded && near.fits && near.ggml_only_fits && !near.coreml_fits,
+    const CoremlFitVerdict near_budget = acestep_decide_coreml_fit(checks(500, 1000), checks(900, 1000), true, 700);
+    check(near_budget.degraded && near_budget.fits && near_budget.ggml_only_fits && !near_budget.coreml_fits,
           "near the budget (ggml 500 fits 700, ggml + Core ML 900 does not): memory-degrade, the ggml verdict");
     const CoremlFitVerdict room = acestep_decide_coreml_fit(checks(500, 1000), checks(900, 1000), true, 950);
     check(!room.degraded && room.fits, "a budget with room: Core ML kept");
@@ -1439,18 +1439,18 @@ void case_degrade(const std::string & models, const std::string & root) {
     check(with.coreml.route == "generate" && without.coreml.route == "none" && need_with > need_without,
           "the Core ML-inclusive projection charges more (" + with.coreml.route + ")");
     const uint64_t delta = need_with - need_without;
-    FitOptions near = f;
-    near.coreml.memory_budget_bytes = (int64_t) (need_without + f.margin_bytes + delta / 2);
+    FitOptions near_budget = f;
+    near_budget.coreml.memory_budget_bytes = (int64_t) (need_without + f.margin_bytes + delta / 2);
     FitOptions roomy = f;
     roomy.coreml.memory_budget_bytes = (int64_t) (need_with + f.margin_bytes + delta);
-    const FitResult degraded = fit_params(near);
+    const FitResult degraded = fit_params(near_budget);
     const FitResult kept = fit_params(roomy);
     check(degraded.coreml.disabled_reason == "memory" && degraded.fits && kept.coreml.disabled_reason.empty() &&
               kept.fits,
           "fit: '" + degraded.coreml.disabled_reason + "' near the budget, '" + kept.coreml.disabled_reason +
               "' with room");
     EngineOptions o = engine_options(models, cache);
-    o.coreml.memory_budget_bytes = near.coreml.memory_budget_bytes;
+    o.coreml.memory_budget_bytes = near_budget.coreml.memory_budget_bytes;
     std::unique_ptr<Engine> low = Engine::create(o);
     const std::string st = low->coreml_status();
     check(state_of(st) == "disabled", "Engine near the budget: decoder " + state_of(st) + " (" + head(st, 200) + ")");
