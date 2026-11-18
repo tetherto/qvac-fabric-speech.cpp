@@ -1208,16 +1208,26 @@ static void apply_cli_coreml_defaults(tts_cpp::CoremlOptions & coreml) {
 }
 
 // Writes the Core ML sidecar status (--coreml-status-json) on every exit
-// path once the slots exist.
+// path once the slots exist. Never over the audio: argument validation
+// refuses a path that names --out, and a spelling only the filesystem
+// equates (a case-insensitive volume, a symlink) is caught here, once the WAV
+// exists.
 struct coreml_status_on_exit {
     std::shared_ptr<tts_cpp::chatterbox::detail::s3gen_sidecars> sidecars;
     std::string path;
+    std::string out_wav;
     ~coreml_status_on_exit() {
         if (path.empty()) return;
         const std::string json = sidecars ? sidecars->status_json()
                                           : tts_cpp::chatterbox::detail::coreml_status_without_sidecars();
         if (path == "-") {
             std::printf("%s\n", json.c_str());
+            return;
+        }
+        std::error_code ec;
+        if (!out_wav.empty() && out_wav != "-" && std::filesystem::equivalent(path, out_wav, ec)) {
+            fprintf(stderr, "error: --coreml-status-json '%s' is the --out file; not writing the status over it\n",
+                    path.c_str());
             return;
         }
         if (FILE * fp = std::fopen(path.c_str(), "wb")) {
@@ -1293,7 +1303,7 @@ int tts_cpp_cli_main(int argc, char ** argv) {
             coreml_sidecars = tts_cpp::chatterbox::detail::s3gen_sidecars::get(params.s3gen_gguf, params.coreml);
             if (coreml_sidecars) coreml_sidecars->start_construction();
         }
-        const coreml_status_on_exit coreml_status_guard{coreml_sidecars, params.coreml_status_json};
+        const coreml_status_on_exit coreml_status_guard{coreml_sidecars, params.coreml_status_json, params.out_wav};
 
         // Early preflight: if the user supplied --reference-audio, make sure
         // it's long enough for real voice cloning.  Bail out now with a clear
@@ -2313,8 +2323,8 @@ int tts_cpp_cli_main(int argc, char ** argv) {
                                                     false, true));
                 }
             }
+            coreml_call.sidecars = coreml_sidecars;  // armed first: predict() may throw
             coreml_sidecars->predict(calls);
-            coreml_call.sidecars = coreml_sidecars;
         }
 
         // ----------- T3 autoregressive decode (per segment) ------------

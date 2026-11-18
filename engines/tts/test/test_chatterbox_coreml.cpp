@@ -221,6 +221,26 @@ void check_cli_arguments() {
                 same_text.find("--coreml-status-json and --out name the same file") != std::string::npos &&
                 !fs::exists(wav),
             "tts-cli rejects a status JSON path that names its WAV output");
+    // A spelling only the filesystem equates (case, on a case-insensitive
+    // volume) of a WAV that already exists: refused, the WAV untouched. (The
+    // engine fixture covers the WAV a run writes after validation.)
+    const fs::path upper = dir.path / "Result.wav", lower = dir.path / "result.wav";
+    { std::ofstream(upper, std::ios::binary) << "RIFF-audio"; }
+    std::error_code ec;
+    if (fs::equivalent(upper, lower, ec)) {
+        const std::string cased = "'" + std::string(cli) + "' --model none.gguf --s3gen-gguf none.gguf --text hello " +
+                                  "--out '" + upper.string() + "' --coreml-status-json '" + lower.string() + "' > '" +
+                                  out.string() + "' 2> '" + log.string() + "'";
+        (void) std::system(cased.c_str());
+        std::ifstream cased_err(log), audio(upper, std::ios::binary);
+        const std::string cased_text((std::istreambuf_iterator<char>(cased_err)), std::istreambuf_iterator<char>());
+        const std::string audio_text((std::istreambuf_iterator<char>(audio)), std::istreambuf_iterator<char>());
+        require(audio_text == "RIFF-audio" && (cased_text.find("name the same file") != std::string::npos ||
+                                                cased_text.find("is the --out file") != std::string::npos),
+                "tts-cli never writes the status over a case-differing spelling of its WAV");
+    } else {
+        std::puts("[cli arguments] case-sensitive volume: the case-differing check does not apply");
+    }
 #endif
 }
 
@@ -1378,6 +1398,29 @@ tts_cpp::FitResult fit_check(const std::string & t3, const std::string & s3gen, 
     return enabled;
 }
 
+// The status path differs from --out only in case (a case-insensitive volume)
+// and neither exists when the arguments are checked: the run writes the WAV,
+// and the exit writer must not replace it with the status JSON.
+void cli_status_case_check(const std::string & t3, const std::string & s3gen, const std::string & cli,
+                           const fs::path & root) {
+    const fs::path upper = root / "Cased.wav", lower = root / "cased.wav";
+    { std::ofstream(root / "probe-A") << "x"; }
+    std::error_code ec;
+    const bool insensitive = fs::exists(root / "probe-a", ec);
+    fs::remove(root / "probe-A", ec);
+    if (!insensitive) {
+        std::puts("[cli status case] case-sensitive volume: does not apply");
+        return;
+    }
+    const fs::path log = root / "cli-status-case.log";
+    const int rc = run_cli(cli, t3, s3gen, upper, log, "--coreml-use off --coreml-status-json '" + lower.string() + "'");
+    const std::string wav = read_file(upper), err = read_file(log);
+    std::printf("[cli status case] exit %d, %s starts with %s\n", rc, upper.filename().c_str(),
+                wav.substr(0, 4).c_str());
+    require(rc == 0 && wav.rfind("RIFF", 0) == 0 && err.find("is the --out file") != std::string::npos,
+            "tts-cli never writes the status JSON over its WAV under a case-differing spelling");
+}
+
 // tts-cli's sentence loop with a CFM prediction failure on an overlapped
 // sentence: the call hands the sentence back instead of starting ggml while
 // T3 of the next sentence may hold the GPU; the CLI lets that T3 finish, then
@@ -1473,6 +1516,8 @@ void cli_in_process_check(const std::string & t3, const std::string & s3gen, con
     CoremlOptions cli_options;
     cli_options.cache_dir = cache;
     auto shared = cb::s3gen_sidecars::get(s3gen, cli_options);
+    // The CLI's own set (a fresh one would have nothing requested yet).
+    require(shared && shared->state(cb::s3gen_stage::hift, 0) != "idle", "the shared set is the one tts-cli used");
     std::printf("[cli in-process] shared set %s, predictions %s after tts-cli returned\n",
                 shared ? "found" : "missing", shared && shared->predicting() ? "still marked" : "cleared");
     require(shared && !shared->predicting(), "tts-cli clears its predictions when it returns");
@@ -1674,6 +1719,7 @@ int engine_fixture(bool slow_load) {
     disabled_engine_check(t3, s3gen);
     cli_in_process_check(t3, s3gen, root.path);
     if (slow_load) cli_replay_check(t3, s3gen, cli_env, root.path);
+    if (slow_load) cli_status_case_check(t3, s3gen, cli_env, root.path);
 
     // Overlapped synthesis equals the segments synthesized one call at a time
     // (one segment never overlaps) and crossfaded in order, sample for sample:
