@@ -915,6 +915,28 @@ class PowerRunnerTest(unittest.TestCase):
         self.assertIn("AC power: True.", doc)
         self.assertIn("Not measured yet.", blt.render(blt.summarize([])).split("<!-- /report:power -->")[0])
 
+    def test_header_summarises_the_starting_power_of_every_appended_run(self):
+        # Two runs appended to one results.jsonl: the header must not present
+        # the latest run's start as the start of every row in the tables.
+        row = {"kind": "ttr_cached", "variant": "turbo", "config": "c", "set": "w3", "run": 0, "rep": 0,
+               "time_to_ready_ms": 1.0, "all_ready": True, "power_changed": False, "power_uncertain": False}
+
+        def header(*starts):
+            recs = []
+            for p in starts:
+                recs += [{"kind": "env", "ac_power": p["source"] == "ac", "power": p}, dict(row, power=p)]
+            return blt.render(blt.summarize(recs)).split("<!-- report:power -->")[0]
+
+        self.assertIn("power at the start: AC.", header(AC))
+        self.assertIn("power at the start of each of the 2 runs: AC.", header(AC, AC))
+        mixed = header(AC, BATTERY)
+        self.assertIn("power at the start of the 2 runs: AC (1), battery (1); the latest started on battery.", mixed)
+        self.assertNotIn("power at the start: battery", mixed)
+        # A run recorded before the power was read per row keeps its AC flag.
+        self.assertIn("power at the start of the 2 runs: AC (1), not AC (1)",
+                      blt.render(blt.summarize([{"kind": "env", "ac_power": True, "power": AC},
+                                                {"kind": "env", "ac_power": False}])))
+
 
 class NativeTest(unittest.TestCase):
     """Builds and runs test_bench_ttr.cpp: the driver's time-to-ready bookkeeping."""

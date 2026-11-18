@@ -1058,7 +1058,7 @@ def summarize(recs: list) -> dict:
     by = {}
     for r in recs:
         by.setdefault(r["kind"], []).append(r)
-    s: dict = {"env": (by.get("env") or [{}])[-1]}
+    s: dict = {"env": (by.get("env") or [{}])[-1], "runs": by.get("env", [])}
 
     # Results appended by several runs into one --out: one row per artifact.
     s["sizes"] = list({(r["variant"], r["set"], r["stage"]): r for r in by.get("sizes", [])}.values())
@@ -1155,6 +1155,24 @@ def summarize(recs: list) -> dict:
     return s
 
 
+def start_power(runs: list) -> str:
+    """The header's power words: the starting power of every run whose rows
+    the report holds (one env row per run appended to results.jsonl)."""
+    if len(runs) == 1 and not runs[0].get("power"):
+        return f"AC power: {runs[0].get('ac_power')}"  # recorded before the power was read per row
+    labels = [power_label(e["power"]) if e.get("power") else
+              {True: "AC", False: "not AC"}.get(e.get("ac_power"), "not recorded") for e in runs]
+    if len(runs) == 1:
+        return f"power at the start: {labels[0]}"
+    counts: dict = {}
+    for x in labels:
+        counts[x] = counts.get(x, 0) + 1
+    if len(counts) == 1:
+        return f"power at the start of each of the {len(runs)} runs: {labels[0]}"
+    return (f"power at the start of the {len(runs)} runs: " + ", ".join(f"{k} ({n})" for k, n in counts.items())
+            + f"; the latest started on {labels[-1]}")
+
+
 def render(s: dict) -> str:
     env = s["env"]
     L = []
@@ -1176,8 +1194,7 @@ def render(s: dict) -> str:
       "(Metal cost model, warm-load hints, width set, weight-sharing accounting); the last section says where each one goes.")
     w("")
     if env:
-        power = (f"power at the start: {power_label(env['power'])}" if env.get("power")
-                 else f"AC power: {env.get('ac_power')}")
+        power = start_power(s.get("runs") or [env])
         w(f"- Host: {env.get('chip', '—')}, {(env.get('memsize') or 0) / 2**30:.0f} GB, macOS "
           f"{env.get('os_version', '—')} ({env.get('os_build', '—')}), {power}.")
         w(f"- Commit `{(env.get('git') or '—')[:12]}`, manifest sha256 `{(env.get('manifest_sha256') or '—')[:16]}…`, "
