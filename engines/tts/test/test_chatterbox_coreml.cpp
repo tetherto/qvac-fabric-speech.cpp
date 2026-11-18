@@ -44,6 +44,7 @@
 #include "tts-cpp/chatterbox/engine.h"
 #include "tts-cpp/chatterbox/fit.h"
 #include "tts-cpp/chatterbox/s3gen_pipeline.h"
+#include "tts-cpp/tts-cpp.h"
 
 #include <algorithm>
 #include <atomic>
@@ -1421,6 +1422,26 @@ void two_engines_check(const std::string & t3, const std::string & s3gen) {
     hooks.tracing = false;
 }
 
+// tts-cli run in-process (embedded) ends its call: the widths it predicted on
+// the shared set are no longer protected once it returns, so a later direct
+// S3Gen call in the process is not cap-blocked by them.
+void cli_in_process_check(const std::string & t3, const std::string & s3gen, const fs::path & root) {
+    const std::string cache = (root / "cli-in-process-cache").string(), wav = (root / "cli-in-process.wav").string();
+    std::vector<std::string> args = {"tts-cli", "--model", t3, "--s3gen-gguf", s3gen, "--text", OVERLAP_TEXT,
+                                     "--out", wav, "--seed", "42", "--n-gpu-layers", "99", "--max-sentence-chars",
+                                     std::to_string(OVERLAP_SENTENCE_CHARS), "--coreml-cache-dir", cache};
+    std::vector<char *> argv;
+    for (auto & a : args) argv.push_back(a.data());
+    argv.push_back(nullptr);
+    require(tts_cpp_cli_main((int) args.size(), argv.data()) == 0, "tts-cli in-process");
+    CoremlOptions cli_options;
+    cli_options.cache_dir = cache;
+    auto shared = cb::s3gen_sidecars::get(s3gen, cli_options);
+    std::printf("[cli in-process] shared set %s, predictions %s after tts-cli returned\n",
+                shared ? "found" : "missing", shared && shared->predicting() ? "still marked" : "cleared");
+    require(shared && !shared->predicting(), "tts-cli clears its predictions when it returns");
+}
+
 // An Engine constructed while CHATTERBOX_COREML_DISABLE is set stays on ggml
 // for its whole life, even once the variable is cleared: its calls carry the
 // Engine's own (empty) plan and never acquire Core ML models through the
@@ -1615,6 +1636,7 @@ int engine_fixture(bool slow_load) {
     if (slow_load) slow_load_checks(t3, s3gen, cli_env, root.path);
     two_engines_check(t3, s3gen);
     disabled_engine_check(t3, s3gen);
+    cli_in_process_check(t3, s3gen, root.path);
     if (slow_load) cli_replay_check(t3, s3gen, cli_env, root.path);
 
     // Overlapped synthesis equals the segments synthesized one call at a time

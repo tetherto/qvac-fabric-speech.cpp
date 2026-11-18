@@ -776,6 +776,7 @@ struct s3gen_sidecars::impl {
     stage_slots stages[S3GEN_STAGES];
     mutable std::mutex mu;  // construction
     std::shared_ptr<pcm::Group> construction;
+    std::atomic<bool> predicting{false};
 
     std::vector<std::shared_ptr<pcm::Slot>> all_slots() const {
         std::vector<std::shared_ptr<pcm::Slot>> out;
@@ -1013,6 +1014,7 @@ void s3gen_sidecars::predict(const std::vector<s3gen_call_shape> & calls) {
     // keeps the predicted widths from the resident cap's evictions.
     const bool speculative = p_->resolved.prewarm == pcm::Prewarm::predicted || p_->resolved.prewarm == pcm::Prewarm::all;
     // HiFT first (every call uses it), then the widths in call order.
+    p_->predicting = true;
     for (s3gen_stage s : {s3gen_stage::hift, s3gen_stage::encoder, s3gen_stage::cfm}) {
         if (p_->stages[(int) s].pool) p_->stages[(int) s].pool->set_predicted(predicted[(int) s]);
         if (!speculative) continue;
@@ -1024,7 +1026,10 @@ void s3gen_sidecars::end_call() {
     for (const auto & st : p_->stages) {
         if (st.pool) st.pool->clear_predicted();
     }
+    p_->predicting = false;
 }
+
+bool s3gen_sidecars::predicting() const { return p_->predicting.load(); }
 
 std::shared_ptr<S3genCoremlPlan> s3gen_sidecars::acquire(const s3gen_call_shape & shape,
                                                          std::chrono::steady_clock::time_point deadline,
@@ -1170,6 +1175,7 @@ void s3gen_sidecars::start_construction(const std::atomic<bool> *) {}
 std::string s3gen_sidecars::construction_json() const { return "{}"; }
 void s3gen_sidecars::predict(const std::vector<s3gen_call_shape> &) {}
 void s3gen_sidecars::end_call() {}
+bool s3gen_sidecars::predicting() const { return false; }
 std::shared_ptr<S3genCoremlPlan> s3gen_sidecars::acquire(const s3gen_call_shape &,
                                                          std::chrono::steady_clock::time_point,
                                                          const std::atomic<bool> *) {

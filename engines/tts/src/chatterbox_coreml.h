@@ -232,6 +232,8 @@ public:
     void predict(const std::vector<s3gen_call_shape> & calls);
     // The call ended: nothing is predicted any more.
     void end_call();
+    // A call's predictions are marked (between predict() and end_call()).
+    bool predicting() const;
 
     // Acquires the models one call of `shape` runs on (see
     // s3gen_acquire_coreml_plan).

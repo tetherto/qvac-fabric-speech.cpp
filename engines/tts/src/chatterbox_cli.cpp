@@ -2267,6 +2267,14 @@ int tts_cpp_cli_main(int argc, char ** argv) {
                     seg_text_tokens.size(), params.max_sentence_chars);
         }
 
+        // The predictions below hold for this invocation only: they are
+        // cleared on every exit path, so a later call in the same process
+        // (tts-cli embedded, or a direct S3Gen call) never finds this text's
+        // widths protected from the resident cap.
+        struct coreml_call_guard {
+            std::shared_ptr<tts_cpp::chatterbox::detail::s3gen_sidecars> sidecars;
+            ~coreml_call_guard() { if (sidecars) sidecars->end_call(); }
+        } coreml_call;
         if (coreml_sidecars && !text_segments.empty()) {
             // The S3Gen calls each sentence is expected to make (one, or its
             // streamed chunk windows), from the text length: their widths
@@ -2290,6 +2298,7 @@ int tts_cpp_cli_main(int argc, char ** argv) {
                 }
             }
             coreml_sidecars->predict(calls);
+            coreml_call.sidecars = coreml_sidecars;
         }
 
         // ----------- T3 autoregressive decode (per segment) ------------
