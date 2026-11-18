@@ -124,7 +124,9 @@ struct PrepareResult {
 
 using PrepareFn = PrepareResult (*)(const PrepareRequest & req, PrepareContext & ctx);
 
-// One loaded MLModel instance (per (artifact, function, units) when shareable).
+// One loaded MLModel instance (per (artifact, function, units, geometry) when
+// shareable; a prediction failure retires every instance of the (artifact,
+// function, units), whatever its geometry).
 class SharedModel {
 public:
     SharedModel(const SharedModel &) = delete;

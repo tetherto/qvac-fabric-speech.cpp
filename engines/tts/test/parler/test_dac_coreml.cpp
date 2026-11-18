@@ -389,9 +389,10 @@ void parity_floor_gates() {
 //               footprint just before the load began, against
 //               load_peak_bytes for the resolved compute units;
 //   steady      ready, Core ML decodes running: the peak over the footprint
-//               just before the load began, against the resident charge
-//               (weights, 2 x I/O, workspace_bytes and the host quantizer
-//               copy). Generation memory the allocator still holds when the
+//               just before the load began, against the template's resident
+//               part (weights, 2 x I/O, workspace_bytes; the host quantizer
+//               copy predates the load, so that footprint holds it already,
+//               see charges_of). Generation memory the allocator still holds when the
 //               load begins is the prepare transient's, which the envelope
 //               charges next to the resident; the whole run checks the sum;
 //   whole run   the peak over the baseline, against the envelope fit charges;
@@ -1833,9 +1834,11 @@ struct swap_paths {
     std::filesystem::path path, held, other;
 };
 swap_paths g_swap;
+int g_swap_stages = 0;  // stages the hook ran at (both must, or nothing was swapped)
 
 void swap_during_load(const char * stage) {
     std::error_code ec;
+    ++g_swap_stages;
     if (std::string(stage) == "metadata") {
         std::filesystem::rename(g_swap.path, g_swap.held, ec);
         if (!ec) std::filesystem::rename(g_swap.other, g_swap.path, ec);
@@ -1887,26 +1890,39 @@ void descriptor_load_gate(const std::string & gguf) {
     }
     struct stat sa {};
     ::stat(g_swap.path.c_str(), &sa);
-    parler_model m;
-    std::string err;
-    parler_gguf_load_hook = &swap_during_load;
-    const bool loaded = parler_load_gguf(g_swap.path.string(), m, 0, &err);
-    parler_gguf_load_hook = nullptr;
-    struct stat now {};
-    const bool a_back = ::stat(g_swap.path.c_str(), &now) == 0 && now.st_ino == sa.st_ino &&
-                        fs::exists(g_swap.other) && !fs::exists(g_swap.held);
-    float got = NAN;
-    if (loaded && m.dac_conv_out_b) ggml_backend_tensor_get(m.dac_conv_out_b, &got, 0, sizeof(float));
-    check(loaded && a_back && got == bias_a,
-          "the load reads A's weights although B held the path in between (conv_out bias " + std::to_string(got) +
-              ", A's " + std::to_string(bias_a) + (a_back ? "" : "; the swap did not restore A") + ")" +
-              (loaded ? "" : ": " + err));
+    // On the CPU every weight is mapped; with the GPU every weight is
+    // streamed into a device buffer. Both readers must use the descriptor.
+    for (const int ngl : {0, 99}) {
+        const std::string path_kind = ngl == 0 ? "CPU, mapped weights" : "GPU, streamed weights";
+        parler_model m;
+        std::string err;
+        g_swap_stages = 0;
+        parler_gguf_load_hook = &swap_during_load;
+        const bool loaded = parler_load_gguf(g_swap.path.string(), m, ngl, &err);
+        parler_gguf_load_hook = nullptr;
+        const std::string backend = loaded && m.backend ? ggml_backend_name(m.backend) : "";
+        if (ngl > 0 && loaded && backend.rfind("CPU", 0) == 0) {
+            fprintf(stderr, "  %s: not run (backend %s)\n", path_kind.c_str(), backend.c_str());
+            parler_free_model(m);
+            continue;
+        }
+        struct stat now {};
+        const bool a_back = ::stat(g_swap.path.c_str(), &now) == 0 && now.st_ino == sa.st_ino &&
+                            fs::exists(g_swap.other) && !fs::exists(g_swap.held);
+        float got = NAN;
+        if (loaded && m.dac_conv_out_b) ggml_backend_tensor_get(m.dac_conv_out_b, &got, 0, sizeof(float));
+        check(loaded && g_swap_stages == 2 && a_back && got == bias_a,
+              path_kind + " (" + backend + "): the load reads A's weights although B held the path in between "
+              "(conv_out bias " + std::to_string(got) + ", A's " + std::to_string(bias_a) + "; hook stages " +
+                  std::to_string(g_swap_stages) + " of 2" + (a_back ? "" : "; the swap did not restore A") + ")" +
+                  (loaded ? "" : ": " + err));
 #ifdef TTS_CPP_USE_COREML
-    const bool identity = m.dac_source && m.dac_source->ok && m.dac_source->stat.ino == (uint64_t) sa.st_ino &&
-                          !m.dac_source->stat.changed;
-    check(identity, "the recorded identity is the file the load read (A's inode)");
+        const bool identity = m.dac_source && m.dac_source->ok && m.dac_source->stat.ino == (uint64_t) sa.st_ino &&
+                              !m.dac_source->stat.changed;
+        check(identity, path_kind + ": the recorded identity is the file the load read (A's inode)");
 #endif
-    parler_free_model(m);
+        parler_free_model(m);
+    }
     fs::remove_all(dir, ec);
 }
 #endif
