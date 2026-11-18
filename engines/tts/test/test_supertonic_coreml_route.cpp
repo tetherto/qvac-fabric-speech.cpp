@@ -12,6 +12,7 @@
 // string keeps a generated sidecar off unless use = require; an adjacent
 // prebuilt sidecar wins unless the GGUF's weights are below its floor; no
 // cache directory, generate = never and use = off give no route; the
+// synthesis CLI's macOS cache default makes a bare GGUF plan generation; the
 // template's memory charges are pinned. The route (and, with --fit,
 // supertonic::fit_params' Core ML part) must then be the same on an empty
 // cache, after a generation, and with non-stale and stale warm hints at the
@@ -20,6 +21,7 @@
 // fit charges its envelope. --fit needs a whole Supertonic GGUF. With --cache-dir DIR (a cache a real run populated)
 // DIR is compared as it is, then a copy of it gets the hint cases.
 
+#include "supertonic_cli_coreml.h"
 #include "supertonic_coreml_path.h"
 #include "supertonic_vocoder_coreml.h"
 #include "tts-cpp/supertonic/fit.h"
@@ -240,6 +242,46 @@ void route_gates(const std::string & gguf, const std::string & want, const fs::p
     fs::remove_all(dir, ec);
 }
 
+// The synthesis CLI's cache default with an isolated home and no adjacent
+// sidecar: on macOS a bare GGUF gets Application Support's cache directory and
+// plans the generated route (where the build can generate) instead of
+// unsupported(no_cache_dir); an explicit directory and QVAC_COREML_CACHE_DIR
+// win; elsewhere nothing is defaulted.
+void cli_cache_default_gates(const std::string & gguf, const fs::path & scratch) {
+    std::fprintf(stderr, "CLI cache default (%s)\n", gguf.c_str());
+    const fs::path home = scratch / "home";
+    fs::create_directories(home);
+    const std::string expected = home.string() + CLI_COREML_CACHE_SUBDIR;
+    tts_cpp::CoremlOptions o;
+    apply_cli_coreml_cache_default(o, nullptr, home.c_str(), cli_on_macos());
+    if (cli_on_macos()) {
+        check(o.cache_dir && *o.cache_dir == expected, "macOS: Application Support default " + o.cache_dir.value_or("(unset)"));
+    } else {
+        check(!o.cache_dir, "not macOS: no CLI default");
+    }
+    const supertonic_vocoder_route r = supertonic_vocoder_plan_route(gguf, o, "Apple M2");
+    if (generation_expected()) {
+        check(r.route == "generate", "a bare GGUF with the CLI default generates: " + describe(r));
+    } else if (cli_on_macos()) {
+        const auto [state, reason] = no_generation_state();
+        check(r.route == "none" && r.state == state && r.reason == reason,
+              "a bare GGUF with the CLI default, no generation in this build: " + describe(r));
+    }
+    tts_cpp::CoremlOptions flag;
+    flag.cache_dir = (scratch / "explicit").string();
+    apply_cli_coreml_cache_default(flag, "/env/dir", home.c_str(), true);
+    check(flag.cache_dir && *flag.cache_dir == (scratch / "explicit").string(), "an explicit directory wins");
+    tts_cpp::CoremlOptions env;
+    apply_cli_coreml_cache_default(env, "/env/dir", home.c_str(), true);
+    check(!env.cache_dir, "QVAC_COREML_CACHE_DIR is left to the library");
+    tts_cpp::CoremlOptions other;
+    apply_cli_coreml_cache_default(other, nullptr, home.c_str(), false);
+    apply_cli_coreml_cache_default(other, nullptr, "", true);
+    check(!other.cache_dir, "no default off macOS or without a home");
+    std::error_code ec;
+    fs::remove_all(home, ec);
+}
+
 // Route and fit before a generation, after it, and with warm hints. On a
 // device class the template prefers ggml on (this host's brand), the
 // comparisons run with use = require, so they hold the generated route and
@@ -358,6 +400,7 @@ int main(int argc, char ** argv) {
                 continue;
             }
             route_gates(gguf, tmpl, scratch);
+            cli_cache_default_gates(gguf, scratch);
             stability_gates(gguf, scratch, fit, given_cache);
         }
         std::error_code ec;

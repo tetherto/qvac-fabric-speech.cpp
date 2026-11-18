@@ -314,6 +314,12 @@ two.
   GGUF replaced at the path since the load (an atomic rename, a re-pointed
   symlink) fails generation with `source_changed`, and the vocoder stays on
   ggml.
+- **CLI.** `supertonic-cli` takes `--coreml-cache-dir DIR`; without it, and
+  with `QVAC_COREML_CACHE_DIR` unset, it uses
+  `~/Library/Application Support/qvac-speech/coreml` on macOS, so a bare GGUF
+  a template matches generates its sidecar with no flag (not under
+  `Library/Caches`, whose purge would mean a new path and a cold compile).
+  Library users set `coreml.cache_dir` themselves.
 - **Device class.** Generation is skipped (`unsupported(device)` in the
   status) on Max and Ultra parts (`prefer_ggml_on` in the templates;
   `machdep.cpu.brand_string`), where the GPU runs the ggml vocoder faster than
