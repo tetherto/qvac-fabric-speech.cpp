@@ -13,6 +13,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <chrono>
 #include <mutex>
 #include <stdexcept>
 
@@ -219,9 +220,27 @@ std::vector<float> Vae::decode(const std::vector<float> & latent, int T_latent,
             }
         }
     }
+    // A whole decode on ggml trains the Core ML deadline's cost per frame,
+    // timed without the caller's progress callbacks.
+    using steady = std::chrono::steady_clock;
+    steady::duration in_callbacks{};
+    ProgressCb timed_progress;
+    if (on_progress) {
+        timed_progress = [&on_progress, &in_callbacks](int done, int total) {
+            const steady::time_point t = steady::now();
+            const bool go_on = on_progress(done, total);
+            in_callbacks += steady::now() - t;
+            return go_on;
+        };
+    }
     std::vector<float> pcm;
-    const int T_audio = vae_model_decode(impl_->model, latent.data(), T_latent, pcm, on_progress);
+    const steady::time_point t0 = steady::now();
+    const int T_audio = vae_model_decode(impl_->model, latent.data(), T_latent, pcm, timed_progress);
     if (T_audio < 0) return finish({});
+    if (impl_->coreml) {
+        impl_->coreml->record_ggml_decode(
+            T_latent, std::chrono::duration_cast<std::chrono::milliseconds>(steady::now() - t0 - in_callbacks).count());
+    }
     return finish(std::move(pcm));
 }
 

@@ -16,6 +16,14 @@
 // generation and no warm hints), the template's compute units (all), strict
 // waits unbounded, no memory budget (and no memory-degrade decision).
 //
+// The sidecar always loads in the background, a prebuilt one included. With
+// wait none a decode waits for it only on a warm hint, and only while the
+// wait fits this host's ggml decode time of the latent; hints need a cache
+// directory. So with the defaults and low-memory mode (the Engine's default),
+// a prebuilt sidecar without a cache directory is reloaded at every decode
+// and released at the stage boundary before it is used: set cache_dir (the
+// second generation then decodes on Core ML), or wait = call.
+//
 // Builds without AUDIOGEN_COREML accept these options; an explicit invalid
 // compute_units still throws there, and everything else is ignored.
 

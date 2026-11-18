@@ -9,7 +9,7 @@
 // the background; without one, and with a cache directory, the sidecar is
 // generated from the GGUF's own decoder tensors (template acestep-vae-t64) on
 // macOS 15 or later. Each decode acquires the slot once, with a deadline equal
-// to the estimated ggml decode time of its latent, and runs entirely on what it
+// to the ggml decode time of its latent on this host, and runs entirely on what it
 // acquired: Core ML windows, or the ggml decode when nothing was ready.
 //
 // Low-memory mode (the default) evicts the slot at every VAE stage boundary
@@ -36,13 +36,21 @@ constexpr int          VAE_COREML_TEMPLATE_WINDOW = 64;
 constexpr const char * VAE_GGML_BACKEND        = "ggml";
 constexpr const char * VAE_MIXED_BACKEND       = "mixed";
 
-// The ggml decode time the bounded wait for a warm load must not exceed: a
-// low estimate of the GPU decode (about 6 ms per latent frame on an M2 with
-// Metal, about 3 ms on an M5), so a decode never waits longer for Core ML than
-// the ggml decode it replaces would take.
-constexpr double  VAE_GGML_DECODE_MS_PER_FRAME = 3.0;
+// The bounded wait for a warm load follows the rule every engine uses: a
+// decode waits for Core ML only while the wait fits the time the decode would
+// take on ggml. That time is this host's own: once a stage has decoded a
+// latent of at least one window on ggml, its deadline uses the fastest cost
+// per latent frame it measured. Before that, it uses this low estimate of the
+// GPU decode (ggml with Metal measures 27.6 ms per latent frame on an M2,
+// 20.6-21.0 s for 750 frames, and 7.9-8.3 ms on an M4 Max), so a decode never
+// waits longer for Core ML than the ggml decode it replaces would take.
+constexpr double  VAE_GGML_DECODE_MS_PER_FRAME = 7.0;
 constexpr int64_t VAE_GGML_DECODE_MS_FLOOR     = 100;
-int64_t vae_ggml_decode_estimate_ms(int T_latent);
+int64_t vae_ggml_decode_estimate_ms(int T_latent, double ms_per_frame = VAE_GGML_DECODE_MS_PER_FRAME);
+
+// Tests: the ggml cost per latent frame every stage's deadline uses instead of
+// its measurement or the estimate above (<= 0: none, the default).
+void vae_coreml_set_ggml_ms_per_frame_override(double ms_per_frame);
 
 // Label merge across the decodes of one call: equal labels stay, anything else
 // is "mixed" (an empty accumulator takes the next label).
@@ -146,11 +154,19 @@ public:
     vae_coreml_stage & operator=(const vae_coreml_stage &) = delete;
 
     // Once per decode of `T_latent` frames: requests the decoder and acquires
-    // it with a deadline of vae_ggml_decode_estimate_ms(T_latent). A set
+    // it with a deadline of the ggml decode time of `T_latent` frames
+    // (ggml_ms_per_frame()). A set
     // cancel flag returns `cancelled`. Throws std::runtime_error when use =
     // require and the sidecar cannot serve the decode (failed, retired, timed
     // out, deferred for memory, evicted or shut down while waiting).
     vae_coreml_call acquire(int T_latent);
+    // A decode of `T_latent` frames that ran entirely on ggml in `ms`: one of
+    // at least the decoder's window trains the stage's cost per frame.
+    void record_ggml_decode(int T_latent, int64_t ms);
+    // The ggml cost per latent frame the deadline uses: the test override,
+    // else the fastest one measured, else VAE_GGML_DECODE_MS_PER_FRAME.
+    double ggml_ms_per_frame() const;
+
     // Releases the loaded decoder and cancels unstarted jobs; a started load
     // runs on, writes its hint and never repopulates the slot.
     void evict();

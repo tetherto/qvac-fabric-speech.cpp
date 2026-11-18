@@ -302,9 +302,23 @@ Either way the sidecar loads in the background and nothing waits for it:
   Core ML windows, or the ggml decode when the decoder is not ready yet
   (`GenerateResult::coreml_pending`). It waits for a load only when this host
   loaded the sidecar quickly before (a warm hint under the cache directory)
-  and the load would finish before the ggml decode would (about 3 ms per latent
-  frame). A latent shorter than the generated decoder's 64-frame window
-  never requests it and is not pending (strict fails it).
+  and the hinted load (1.5 x its recorded warm time, plus any hinted loads
+  queued ahead) would finish before the ggml decode would. The ggml decode
+  time is this host's own: once the engine has decoded a latent of at least
+  64 frames on ggml it uses the fastest cost per latent frame it measured
+  (ggml with Metal takes about 27.6 ms per frame on an M2 and 8 ms on an
+  M4 Max); before that, a low estimate of 7 ms per frame. A clip whose ggml
+  decode is shorter than that budget does not wait and decodes on ggml (in
+  low-memory mode, every time). A latent shorter than the generated
+  decoder's 64-frame window never requests it and is not pending (strict
+  fails it).
+- A wait that runs out while the decoder's own load is still running past
+  1.5 x its warm time marks the warm hint stale for 24 hours, and a stale
+  hint is never waited on. In low-memory mode, where every decode reloads
+  the decoder, that would keep a whole day of generations on ggml. So the
+  next load that is as fast as the recorded warm load (it runs in the
+  background during the next generation's ggml decode) ends the cooldown:
+  one slow reload costs one generation.
   `GenerateResult::vae_backend` reports `ggml`, `coreml-all`,
   `coreml-ane`, `coreml-gpu`, `coreml-cpu` or `mixed` (an edit plan whose
   decodes ran on different backends).
@@ -315,11 +329,29 @@ Either way the sidecar loads in the background and nothing waits for it:
   generation decodes on ggml while the sidecar is generated and compiled for
   the Neural Engine (tens of seconds, once per host and cache path); a load
   still running when the first generation releases the decoder finishes in the
-  background, records its warm hint and releases its model. A cancelled call
-  (a progress callback returning `false`, or `Engine::cancel()`) ends its VAE
-  phase the same way, and a cancel that arrives while a decode waits for the
-  decoder returns without starting a ggml decode. A repaint that re-decodes
-  and re-encodes its source releases the decoder before the encode.
+  background, records its warm hint and releases its model. Core ML therefore
+  starts with the second generation of the first process on a host, and with
+  the first generation of every later process that uses the same cache
+  directory (that decode waits for the warm reload). With
+  `ACESTEP_KEEP_STAGES` the decoder stays loaded, and every decode after its
+  load has finished runs on Core ML. A cancelled call (a progress callback
+  returning `false`, or `Engine::cancel()`) ends its VAE phase the same way,
+  and a cancel that arrives while a decode waits for the decoder returns
+  without starting a ggml decode. A repaint that re-decodes and re-encodes
+  its source releases the decoder before the encode.
+- **A prebuilt sidecar needs a cache directory (or `coreml.wait = call`) in
+  low-memory mode.** Before the shared runtime, a prebuilt sidecar loaded
+  synchronously in `Vae::load`, so every decode used it. It now loads in the
+  background like the generated one, and only a warm hint lets a decode wait
+  for its reload; hints live under the cache directory (keyed by the
+  sidecar's real path), so without one nothing ever waits. With the default
+  `coreml.wait = none`, low-memory mode and no cache directory, each decode
+  starts the reload, runs on ggml, and releases the loaded decoder at the
+  stage boundary: such an engine may never decode on Core ML. Set
+  `coreml.cache_dir` (or `QVAC_COREML_CACHE_DIR`; `music-cli` has a default)
+  so the second generation waits for the warm reload, or `coreml.wait = call`
+  to block every decode until the sidecar is loaded (the previous behaviour),
+  or keep the stages loaded (`ACESTEP_KEEP_STAGES`).
 - `coreml.prewarm = all` with `coreml.wait = construct` is install-time
   preparation: `create()` generates, loads and warms the decoder, then (in
   low-memory mode) releases it again. Without `coreml.wait = construct` the
@@ -337,7 +369,10 @@ Either way the sidecar loads in the background and nothing waits for it:
   mode it is released again and the group still reports success), any other
   scope is an empty group. With `wait` it returns the group's result JSON
   once the group has finished (`cancel()` interrupts it); without, the
-  snapshot at once.
+  snapshot at once. A `cancel()` that interrupts only a `coreml_wait()` or a
+  waited `coreml_prewarm()` is consumed by it, so the next `generate()` runs;
+  with nothing in flight, `cancel()` cancels the next `generate()` or
+  `understand()`.
 - `coreml.memory_budget_bytes` with `coreml.memory_degrade`: pass the budget
   the memory-fit preflight was assessed against and its decision
   (`FitResult::coreml.disabled_reason == "memory"`), and `create()` runs the

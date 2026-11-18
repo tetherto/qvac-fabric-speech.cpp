@@ -31,9 +31,17 @@
 
 namespace tts_cpp::acestep::detail {
 
-int64_t vae_ggml_decode_estimate_ms(int T_latent) {
-    const double ms = VAE_GGML_DECODE_MS_PER_FRAME * (double) std::max(T_latent, 0);
+int64_t vae_ggml_decode_estimate_ms(int T_latent, double ms_per_frame) {
+    const double ms = ms_per_frame * (double) std::max(T_latent, 0);
     return std::max<int64_t>(VAE_GGML_DECODE_MS_FLOOR, (int64_t) ms);
+}
+
+namespace {
+std::atomic<double> g_ggml_ms_per_frame_override{0.0};
+}  // namespace
+
+void vae_coreml_set_ggml_ms_per_frame_override(double ms_per_frame) {
+    g_ggml_ms_per_frame_override.store(ms_per_frame);
 }
 
 std::string vae_merge_backend(const std::string & acc, const std::string & next) {
@@ -267,6 +275,8 @@ struct vae_coreml_stage::impl {
     rt::SlotStatus none_status;
     std::shared_ptr<rt::Group> construction;
     const std::atomic<bool> * cancel = nullptr;
+    // The fastest ggml decode cost per latent frame measured (0: none yet).
+    std::atomic<double> ggml_ms_per_frame{0.0};
     // Decode demand: bumped by every acquire() under demand_mu, so the
     // release of an un-waited group's load never evicts a decoder a decode
     // has asked for since the group was issued.
@@ -476,7 +486,8 @@ vae_coreml_call vae_coreml_stage::acquire(int T_latent) {
         std::lock_guard<std::mutex> lk(p_->demand_mu);
         ++p_->demand;
     }
-    const auto deadline = rt::Clock::now() + std::chrono::milliseconds(vae_ggml_decode_estimate_ms(T_latent));
+    const auto deadline =
+        rt::Clock::now() + std::chrono::milliseconds(vae_ggml_decode_estimate_ms(T_latent, ggml_ms_per_frame()));
     rt::Acquired got;
     try {
         got = p_->slot->acquire(rt::Demand::now, deadline, p_->cancel);
@@ -589,6 +600,7 @@ bool vae_coreml_stage::wait(int64_t timeout_ms, const std::atomic<bool> * cancel
 struct vae_coreml_stage::impl {
     vae_coreml_route route;
     std::string cache_dir;
+    std::atomic<double> ggml_ms_per_frame{0.0};
 };
 
 namespace {
@@ -668,5 +680,20 @@ void vae_coreml_stage::release_unless_demanded(uint64_t) {}
 bool vae_coreml_stage::wait(int64_t, const std::atomic<bool> *) const { return false; }
 
 #endif
+
+void vae_coreml_stage::record_ggml_decode(int T_latent, int64_t ms) {
+    if (T_latent < VAE_COREML_TEMPLATE_WINDOW || ms <= 0) return;
+    const double per_frame = (double) ms / (double) T_latent;
+    double seen = p_->ggml_ms_per_frame.load();
+    while ((seen <= 0.0 || per_frame < seen) && !p_->ggml_ms_per_frame.compare_exchange_weak(seen, per_frame)) {
+    }
+}
+
+double vae_coreml_stage::ggml_ms_per_frame() const {
+    const double forced = g_ggml_ms_per_frame_override.load();
+    if (forced > 0.0) return forced;
+    const double measured = p_->ggml_ms_per_frame.load();
+    return measured > 0.0 ? measured : VAE_GGML_DECODE_MS_PER_FRAME;
+}
 
 }  // namespace tts_cpp::acestep::detail
