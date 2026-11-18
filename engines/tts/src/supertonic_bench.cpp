@@ -88,6 +88,12 @@ void usage(const char * argv0) {
         "          [--coreml-require] [--coreml-prewarm none|minimal|predicted|all]\n"
         "                            (any of these also selects the shared runtime;\n"
         "                            --json-out then carries coreml_status)\n"
+        "          [--coreml-ignore-prebuilt]  (development: plan as if no prebuilt sidecar\n"
+        "                            were next to the GGUF, so the generated route is\n"
+        "                            measured beside the exporter's sidecar)\n"
+        "          [--coreml-expect-route prebuilt|generate|generated|cached|none]\n"
+        "                            (fail, exit 1, unless the vocoder stage planned and\n"
+        "                            ran that route; generate = generated or cached)\n"
         "          [--wav-out FILE] [--json-out FILE]\n",
         argv0);
 }
@@ -164,6 +170,23 @@ void write_json_stage(std::ofstream & os, const Stage & s, bool comma) {
        << "}" << (comma ? "," : "") << "\n";
 }
 
+// The vocoder stage's route in a Core ML status JSON ("prebuilt",
+// "generated", "cached", "none"; "" when absent).
+std::string status_stage_route(const std::string & status) {
+    const std::string key = "\"route\":\"";
+    const size_t at = status.find(key);
+    if (at == std::string::npos) return {};
+    const size_t end = status.find('"', at + key.size());
+    return end == std::string::npos ? std::string() : status.substr(at + key.size(), end - at - key.size());
+}
+
+// Whether `observed` (a status route) is the route an arm asked for:
+// "generate" accepts a fresh generation and an adopted cached artifact.
+bool route_matches(const std::string & expected, const std::string & observed) {
+    if (expected == "generate") return observed == "generated" || observed == "cached";
+    return observed == expected;
+}
+
 } // namespace
 
 int main(int argc, char ** argv) {
@@ -175,6 +198,8 @@ int main(int argc, char ** argv) {
     std::string json_out, wav_out;
     tts_cpp::CoremlOptions coreml;
     bool coreml_runtime = false;
+    bool coreml_ignore_prebuilt = false;
+    std::string coreml_expect_route;
     int steps = 5;
     float speed = 1.05f;
     int seed = 42;
@@ -305,6 +330,17 @@ int main(int argc, char ** argv) {
         else if (a == "--coreml-cache-dir") { coreml.cache_dir = next("--coreml-cache-dir"); coreml_runtime = true; }
         else if (a == "--coreml-units") { coreml.compute_units = next("--coreml-units"); coreml_runtime = true; }
         else if (a == "--coreml-require") { coreml.use = tts_cpp::CoremlOptions::Use::require; coreml_runtime = true; }
+        else if (a == "--coreml-ignore-prebuilt") { coreml_ignore_prebuilt = true; coreml_runtime = true; }
+        else if (a == "--coreml-expect-route") {
+            coreml_expect_route = next("--coreml-expect-route");
+            if (coreml_expect_route != "prebuilt" && coreml_expect_route != "generate" &&
+                coreml_expect_route != "generated" && coreml_expect_route != "cached" &&
+                coreml_expect_route != "none") {
+                fprintf(stderr, "--coreml-expect-route: prebuilt, generate, generated, cached or none\n");
+                return 2;
+            }
+            coreml_runtime = true;
+        }
         else if (a == "--coreml-wait") {
             const std::string w = next("--coreml-wait");
             if (w == "none") coreml.wait = tts_cpp::CoremlOptions::Wait::none;
@@ -356,13 +392,29 @@ int main(int argc, char ** argv) {
     std::shared_ptr<supertonic_vocoder_coreml> vocoder_stage;
     if (coreml_runtime) {
         try {
-            vocoder_stage = supertonic_vocoder_coreml::create(model, model_path, coreml);
+            vocoder_stage = supertonic_vocoder_coreml::create(model, model_path, coreml, /*memory_degrade=*/false,
+                                                              /*cpu_brand=*/{}, coreml_ignore_prebuilt);
         } catch (const std::exception & e) {
             fprintf(stderr, "Core ML vocoder: %s\n", e.what());
             free_supertonic_model(model);
             return 1;
         }
         if (!vocoder_stage) fprintf(stderr, "Core ML vocoder: this build has no Core ML runtime\n");
+        // The route this arm asked for, as planned (the timed runs below
+        // check it again on the stage's status).
+        if (!coreml_expect_route.empty()) {
+            const std::string planned = vocoder_stage ? vocoder_stage->route().route : std::string("none");
+            const bool ok = coreml_expect_route == "generated" || coreml_expect_route == "cached"
+                                ? planned == "generate"
+                                : planned == coreml_expect_route;
+            if (!ok) {
+                fprintf(stderr, "Core ML vocoder: planned route '%s' (%s), expected '%s'\n", planned.c_str(),
+                        vocoder_stage ? vocoder_stage->status_json().c_str() : "no stage",
+                        coreml_expect_route.c_str());
+                free_supertonic_model(model);
+                return 1;
+            }
+        }
     }
     const double construct_ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - construct_t0).count();
@@ -853,6 +905,17 @@ int main(int argc, char ** argv) {
         write_json_stage(os, st_tot, false);
         os << "  }\n";
         os << "}\n";
+    }
+
+    // The route the timed runs ran on, as the stage reports it.
+    if (!coreml_expect_route.empty()) {
+        const std::string observed = vocoder_stage ? status_stage_route(vocoder_stage->status_json()) : "none";
+        if (!route_matches(coreml_expect_route, observed)) {
+            fprintf(stderr, "Core ML vocoder: the runs ran on route '%s', expected '%s'\n", observed.c_str(),
+                    coreml_expect_route.c_str());
+            free_supertonic_model(model);
+            return 1;
+        }
     }
 
     free_supertonic_model(model);

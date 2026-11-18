@@ -136,10 +136,14 @@ struct supertonic_vocoder_route {
 // this machine's (tests pass a fake one). `prebuilt_below_floor`: the GGUF's
 // vocoder weights are stored below the prebuilt sidecar's 8-bit floor, so an
 // adjacent prebuilt does not count (supertonic_first_low_bit_vocoder_weight on
-// a loaded model). Throws std::invalid_argument for invalid explicit options.
+// a loaded model). `ignore_prebuilt`: a development override (the benchmark's
+// --coreml-ignore-prebuilt) that plans as if no prebuilt sidecar were next to
+// the GGUF, so generation can be measured beside the exporter's sidecar.
+// Throws std::invalid_argument for invalid explicit options.
 supertonic_vocoder_route supertonic_vocoder_plan_route(const std::string & gguf_path, const CoremlOptions & options,
                                                        const std::string & cpu_brand = {},
-                                                       bool prebuilt_below_floor = false);
+                                                       bool prebuilt_below_floor = false,
+                                                       bool ignore_prebuilt = false);
 // Whether a loaded (or metadata-only loaded) model's vocoder weights are
 // stored below the prebuilt sidecar's floor, unless
 // SUPERTONIC_COREML_ALLOW_LOW_BIT lifts it.
@@ -163,11 +167,12 @@ public:
     // in builds without TTS_CPP_COREML. Throws std::invalid_argument for
     // invalid options and std::runtime_error when use = require cannot be
     // met.
-    // `cpu_brand` as in supertonic_vocoder_plan_route.
+    // `cpu_brand` and `ignore_prebuilt` as in supertonic_vocoder_plan_route.
     static std::shared_ptr<supertonic_vocoder_coreml> create(supertonic_model & model, const std::string & gguf_path,
                                                              const CoremlOptions & options,
                                                              bool memory_degrade = false,
-                                                             const std::string & cpu_brand = {});
+                                                             const std::string & cpu_brand = {},
+                                                             bool ignore_prebuilt = false);
     ~supertonic_vocoder_coreml() override;
 
     supertonic_vocoder_call acquire(int latent_len, const std::atomic<bool> * cancel) override;

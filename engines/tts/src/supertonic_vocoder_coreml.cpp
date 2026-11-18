@@ -250,7 +250,7 @@ struct planned {
 // `prebuilt_below_floor`: the GGUF's vocoder weights are stored below the
 // prebuilt sidecar's weight floor, so an adjacent prebuilt does not count.
 planned plan_route(const std::string & gguf_path, const pcm::Resolved & r, bool prebuilt_below_floor,
-                   const std::string & cpu_brand) {
+                   const std::string & cpu_brand, bool ignore_prebuilt) {
     planned out;
     out.route.strict = r.strict();
     out.prebuilt_path = coreml_vocoder_sidecar_path(gguf_path);
@@ -258,7 +258,8 @@ planned plan_route(const std::string & gguf_path, const pcm::Resolved & r, bool 
     pcm::PlanInput in;
     in.coreml_built = true;
     in.generation_built = pcm::generation::built();
-    in.prebuilt_present = ::tts_cpp::detail::coreml_sidecar_exists(out.prebuilt_path) && !prebuilt_below_floor;
+    in.prebuilt_present =
+        !ignore_prebuilt && ::tts_cpp::detail::coreml_sidecar_exists(out.prebuilt_path) && !prebuilt_below_floor;
     if (in.generation_built && !in.prebuilt_present && r.enabled()) {
         std::vector<pcm::generation::Candidate> cands = pcm::generation::probe(
             {SUPERTONIC_VOCODER_TEMPLATE_W64, SUPERTONIC_VOCODER_TEMPLATE_PW2D_W64}, gguf_path, r);
@@ -332,10 +333,11 @@ struct supertonic_vocoder_coreml::impl {
 };
 
 supertonic_vocoder_route supertonic_vocoder_plan_route(const std::string & gguf_path, const CoremlOptions & options,
-                                                       const std::string & cpu_brand, bool prebuilt_below_floor) {
+                                                       const std::string & cpu_brand, bool prebuilt_below_floor,
+                                                       bool ignore_prebuilt) {
     validate_options(options);
     const pcm::Resolved r = pcm::resolve_coreml(to_runtime_options(options), ENV_PREFIX);
-    return plan_route(gguf_path, r, prebuilt_below_floor, cpu_brand).route;
+    return plan_route(gguf_path, r, prebuilt_below_floor, cpu_brand, ignore_prebuilt).route;
 }
 
 struct supertonic_vocoder_source {
@@ -353,7 +355,8 @@ std::shared_ptr<supertonic_vocoder_coreml> supertonic_vocoder_coreml::create(sup
                                                                              const std::string & gguf_path,
                                                                              const CoremlOptions & options,
                                                                              bool memory_degrade,
-                                                                             const std::string & cpu_brand) {
+                                                                             const std::string & cpu_brand,
+                                                                             bool ignore_prebuilt) {
     validate_options(options);
     auto p = std::make_unique<impl>();
     p->resolved = pcm::resolve_coreml(to_runtime_options(options), ENV_PREFIX);
@@ -363,7 +366,8 @@ std::shared_ptr<supertonic_vocoder_coreml> supertonic_vocoder_coreml::create(sup
         p->resolved.disabled_reason = "memory";
     }
     p->manager = pcm::Manager::instance();
-    p->plan = plan_route(gguf_path, p->resolved, supertonic_vocoder_prebuilt_below_floor(model), cpu_brand);
+    p->plan = plan_route(gguf_path, p->resolved, supertonic_vocoder_prebuilt_below_floor(model), cpu_brand,
+                         ignore_prebuilt);
     const supertonic_hparams & hp = model.hparams;
     const int context = supertonic_coreml_vocoder_context_frames(model);
 
@@ -543,7 +547,7 @@ struct supertonic_vocoder_coreml::impl {
 };
 
 supertonic_vocoder_route supertonic_vocoder_plan_route(const std::string &, const CoremlOptions & options,
-                                                       const std::string &, bool) {
+                                                       const std::string &, bool, bool) {
     validate_options(options);
     supertonic_vocoder_route r;
     r.state = "unsupported";
@@ -553,7 +557,7 @@ supertonic_vocoder_route supertonic_vocoder_plan_route(const std::string &, cons
 
 std::shared_ptr<supertonic_vocoder_coreml> supertonic_vocoder_coreml::create(supertonic_model &, const std::string &,
                                                                              const CoremlOptions & options, bool,
-                                                                             const std::string &) {
+                                                                             const std::string &, bool) {
     validate_options(options);
     return nullptr;
 }

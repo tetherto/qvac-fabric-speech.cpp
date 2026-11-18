@@ -319,7 +319,12 @@ two.
   `~/Library/Application Support/qvac-speech/coreml` on macOS, so a bare GGUF
   a template matches generates its sidecar with no flag (not under
   `Library/Caches`, whose purge would mean a new path and a cold compile).
-  Library users set `coreml.cache_dir` themselves.
+  Library users set `coreml.cache_dir` themselves. `supertonic-bench` runs
+  the vocoder on the shared runtime with any `--coreml-*` flag;
+  `--coreml-ignore-prebuilt` (development) plans as if no prebuilt sidecar
+  were next to the GGUF, so a generated sidecar can be measured beside the
+  exporter's, and `--coreml-expect-route prebuilt|generate|...` fails the run
+  (exit 1) unless the stage planned and ran that route.
 - **Device class.** Generation is skipped (`unsupported(device)` in the
   status) on Max and Ultra parts (`prefer_ggml_on` in the templates;
   `machdep.cpu.brand_string`), where the GPU runs the ggml vocoder faster than

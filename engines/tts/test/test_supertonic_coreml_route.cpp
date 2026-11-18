@@ -239,6 +239,12 @@ void route_gates(const std::string & gguf, const std::string & want, const fs::p
           "an adjacent prebuilt wins, on an Ultra too");
     check(supertonic_vocoder_plan_route(linked.string(), at(cache), "Apple M2", true).route == "generate",
           "a prebuilt below its weight floor does not count: generate");
+    // The benchmark's development override plans generation beside the
+    // exporter's sidecar, on every device class it would generate on.
+    check(supertonic_vocoder_plan_route(linked.string(), at(cache), "Apple M2", false, true).route == "generate",
+          "ignore_prebuilt: generate beside an adjacent prebuilt");
+    check(supertonic_vocoder_plan_route(linked.string(), at(cache), "Apple M2").route == "prebuilt",
+          "without ignore_prebuilt the adjacent prebuilt wins");
     fs::remove_all(dir, ec);
 }
 
