@@ -119,6 +119,7 @@ PrepareResult prepare(const PrepareRequest & req, PrepareContext & ctx);
 // LookupFn of route `generate` (SlotSpec::lookup_fn): the complete artifact
 // the cache's memo maps this source (same file identity, template and
 // options) to. Reads only the cache: no digest, no generation, no lock kept.
+// A source marked `changed` always misses (prepare refuses it).
 bool lookup(const PrepareRequest & req, PrepareResult & out);
 
 // For LoadFns. A generated artifact (LoadRequest::tmpl set) loads under the

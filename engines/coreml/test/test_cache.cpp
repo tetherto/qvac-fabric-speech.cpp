@@ -314,6 +314,14 @@ void case_generation_lookup() {
     CHECK(r.cache_hit && r.artifact_key == key32 && r.artifact_path == model_path);
     CHECK(g_file_raw_reads == reads);  // no hashing
     CHECK(g_compiles == 1);
+    // The same identity marked changed (the engine could not confirm it loaded
+    // this file): a miss, as prepare refuses it.
+    {
+        PrepareRequest marked = req;
+        marked.source.changed = true;
+        PrepareResult miss;
+        CHECK(!generation::lookup(marked, miss) && miss.artifact_path.empty());
+    }
     // The artifact lost a file of its inventory: a miss (the preparation
     // regenerates it).
     {

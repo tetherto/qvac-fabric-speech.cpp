@@ -348,6 +348,9 @@ PrepareResult prepare(const PrepareRequest & req, PrepareContext & ctx) {
 
 bool lookup(const PrepareRequest & req, PrepareResult & out) {
     if (req.tmpl == nullptr || req.cache_dir.empty() || req.source.path.empty()) return false;
+    // A source marked changed is not certainly the file the engine loaded:
+    // prepare refuses it, and so does the lookup.
+    if (req.source.changed) return false;
     const auto * t = static_cast<const recipe::Template *>(req.tmpl);
     SourceStat now;
     if (!stat_path(req.source.path, now) || !same_identity(now, req.source)) return false;
