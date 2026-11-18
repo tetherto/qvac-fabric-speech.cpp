@@ -922,6 +922,53 @@ class PowerRunnerTest(unittest.TestCase):
             self.run_ttr([BATTERY])
         self.assertIn("need AC power (pmset reports battery)", str(cm.exception))
 
+    def run_cmd(self, readings, ready=lambda call: True):
+        """`run ttr` through cmd_run on the fixture: (exit code or exception, stderr)."""
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        fx = RunnerFixture(Path(d.name))
+        fx.power, fx.ready = readings, ready
+        args = argparse.Namespace(**vars(fx.args), measurements=["ttr"], dry_run=False)
+        m = copy.deepcopy(MANIFEST)
+        m["measurements"]["ttr"] = TtrRunnerTest.CFG
+        runner = fx.runner()
+        real_run = subprocess.run
+
+        def run(cmd, *a, **k):  # no sysctl or fresh-host.sh clean-up in a hermetic test
+            if cmd[0] in ("sysctl", "bash"):
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            return real_run(cmd, *a, **k)
+
+        err = io.StringIO()
+        with fx.patched(), contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()), \
+                mock.patch.object(blt, "validate", lambda *a, **k: []), \
+                mock.patch.object(blt, "Runner", lambda a, mm: runner), \
+                mock.patch.object(blt.subprocess, "run", run):
+            try:
+                out = blt.cmd_run(args, m)
+            except RuntimeError as e:
+                out = e
+        return out, err.getvalue()
+
+    def test_cmd_run_prints_the_power_warning_at_the_end(self):
+        rc, err = self.run_cmd([AC, AC, BATTERY, AC])
+        self.assertEqual(rc, 0)
+        last = err.rstrip("\n").splitlines()[-1]
+        self.assertIn("changed during the run (started on AC); 2 rows are flagged power_changed", last)
+        rc, err = self.run_cmd([AC])
+        self.assertEqual(rc, 0)
+        self.assertNotIn("warning", err)
+
+    def test_cmd_run_prints_the_power_warning_when_a_measurement_fails(self):
+        def ready(call):  # the second time-to-ready run fails
+            if call["identity"] == "qvac-bench-00000001":
+                raise RuntimeError("driver failed")
+            return True
+
+        out, err = self.run_cmd([AC, BATTERY], ready)
+        self.assertIsInstance(out, RuntimeError)
+        self.assertIn("rows are flagged power_changed", err.rstrip("\n").splitlines()[-1])
+
     def test_report_on_rows_without_a_power_reading(self):
         recs = [{"kind": "env", "ac_power": True},
                 {"kind": "load_cold", "variant": "turbo", "set": "w7", "stage": "cfm", "function": "frames_512",
