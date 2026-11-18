@@ -161,10 +161,10 @@ struct Engine::Impl {
     supertonic_model model;
     std::shared_ptr<supertonic_vocoder_coreml> vocoder_coreml;  // the vocoder on the shared Core ML runtime
     std::atomic<bool> cancel_flag{false};
-    // Set by Engine::cancel() together with cancel_flag; a blocking
-    // coreml_wait() clears and watches only this one, so a wait on another
-    // thread never clears a cancel meant for a synthesis.
-    std::atomic<bool> wait_cancel_requested{false};
+    // Counts Engine::cancel() calls. A blocking coreml_wait() ends when it
+    // moves past the count read when that wait started, so a wait never
+    // swallows a cancel meant for another wait, or for a synthesis.
+    std::atomic<uint64_t> wait_cancels{0};
     // round 7 — voice ttl/dp host cache. Populated
     // lazily on first `synthesize()` call per voice; subsequent
     // calls hit the cache and skip the GPU→host download (2 sync
@@ -883,7 +883,7 @@ SynthesisResult Engine::synthesize(const std::string & text,
 
 void Engine::cancel() {
     pimpl_->cancel_flag.store(true, std::memory_order_release);
-    pimpl_->wait_cancel_requested.store(true, std::memory_order_release);
+    pimpl_->wait_cancels.fetch_add(1);
 }
 
 // follow-up — explicit first-synth pre-warm.
@@ -942,10 +942,10 @@ bool Engine::coreml_wait(int64_t timeout_ms) const {
     if (!pimpl_ || !pimpl_->vocoder_coreml) return false;
     // A readiness poll has nothing to cancel and touches no flag.
     if (timeout_ms == 0) return pimpl_->vocoder_coreml->wait(0);
-    // A blocking wait starts with its own flag clear and ends early on
-    // Engine::cancel(); it leaves the synthesis's flag alone.
-    pimpl_->wait_cancel_requested.store(false, std::memory_order_release);
-    return pimpl_->vocoder_coreml->wait(timeout_ms, &pimpl_->wait_cancel_requested);
+    // A blocking wait ends early on any Engine::cancel() made after it
+    // started; waits on other threads and a synthesis each keep the cancels
+    // meant for them.
+    return pimpl_->vocoder_coreml->wait(timeout_ms, &pimpl_->wait_cancels, pimpl_->wait_cancels.load());
 }
 
 // Convenience one-shot wrapper.  Pays the full GGUF load + free per

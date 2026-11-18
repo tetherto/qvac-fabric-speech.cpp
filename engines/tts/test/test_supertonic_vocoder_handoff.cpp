@@ -2,7 +2,9 @@
 // ggml graph (supertonic_vocoder_forward_ggml), with test doubles and no model
 // weights: a ready sidecar serves the call, a pending one leaves it to ggml, a
 // failed prediction retires the sidecar and fails under the strict policy, a
-// throwing acquisition fails the call, a cancelled wait cancels it, and the
+// throwing acquisition fails the call, a cancelled wait cancels it, a
+// blocking readiness wait ends on a cancel made after it started (a later
+// wait cannot take that cancel back), and the
 // strict policy is taken once, from the stage, never from the environment
 // (SUPERTONIC_COREML_STRICT is read only for a sidecar attached at load, and
 // only by Core ML builds).
@@ -19,10 +21,13 @@
 #include "ggml.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
+#include <functional>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace tts_cpp::supertonic::detail;
@@ -286,6 +291,73 @@ void stage_route_gates() {
     }
 }
 
+// Blocking Core ML waits and cancel(), as Engine::coreml_wait uses them:
+// each waiter reads the cancel count when it starts. Waiter A is asleep
+// between two polls while cancel() runs and waiter B starts; A must still end
+// on that cancel (a wait that starts later cannot take it back), and B, which
+// started after it, waits for its own timeout.
+void wait_cancel_gates() {
+    std::fprintf(stderr, "blocking waits and cancel()\n");
+    using clock = std::chrono::steady_clock;
+    std::atomic<uint64_t> cancels{0};
+    std::atomic<int> a_polls{0};
+    std::atomic<bool> b_started{false};
+    bool a_ready = true, b_ready = true;
+    double a_ms = 0.0, b_ms = 0.0;
+    auto ms_since = [](clock::time_point t0) {
+        return std::chrono::duration<double, std::milli>(clock::now() - t0).count();
+    };
+    std::thread a([&] {
+        const auto t0 = clock::now();
+        const uint64_t since = cancels.load();
+        a_ready = supertonic_wait_until_ready(
+            [&] {
+                if (a_polls.fetch_add(1) == 1) {
+                    while (!b_started.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                // Ready after 3 s: reached only if the cancel was lost.
+                return ms_since(t0) > 3000.0 ? 1 : 0;
+            },
+            -1, &cancels, since);
+        a_ms = ms_since(t0);
+    });
+    while (a_polls.load() < 2) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    cancels.fetch_add(1);  // Engine::cancel()
+    std::thread b([&] {
+        const auto t0 = clock::now();
+        const uint64_t since = cancels.load();
+        b_started.store(true);
+        b_ready = supertonic_wait_until_ready([] { return 0; }, 100, &cancels, since);
+        b_ms = ms_since(t0);
+    });
+    a.join();
+    b.join();
+    check(!a_ready && a_ms < 1000.0,
+          "a wait asleep across cancel() and a later wait's start ends on that cancel (" + std::to_string(a_ms) +
+              " ms)");
+    check(!b_ready && b_ms >= 100.0,
+          "a wait started after cancel() waits for its own timeout (" + std::to_string(b_ms) + " ms)");
+
+    // A cancel after both waits started ends both.
+    std::atomic<int> started{0};
+    bool r1 = true, r2 = true;
+    auto waiter = [&](bool & r) {
+        const uint64_t since = cancels.load();
+        started.fetch_add(1);
+        r = supertonic_wait_until_ready([] { return 0; }, 3000, &cancels, since);
+    };
+    const auto t0 = clock::now();
+    std::thread w1(waiter, std::ref(r1)), w2(waiter, std::ref(r2));
+    while (started.load() < 2) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    cancels.fetch_add(1);
+    w1.join();
+    w2.join();
+    check(!r1 && !r2 && ms_since(t0) < 1000.0, "one cancel() ends every wait that started before it");
+    check(supertonic_wait_until_ready([] { return 1; }, 0, &cancels, cancels.load()) &&
+              !supertonic_wait_until_ready([] { return -1; }, -1, &cancels, cancels.load()),
+          "ready returns true, a slot nothing will move returns false at once");
+}
+
 }  // namespace
 
 int main() {
@@ -296,6 +368,7 @@ int main() {
     fake_stage_gates();
     strict_environment_gates();
     stage_route_gates();
+    wait_cancel_gates();
     std::fprintf(stderr, g_failures ? "FAILED (%d)\n" : "OK\n", g_failures);
     return g_failures ? 1 : 0;
 }

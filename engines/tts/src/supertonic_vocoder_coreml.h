@@ -179,10 +179,11 @@ public:
     // The status JSON (schema 1: engine, cache_dir, generation, stages).
     std::string status_json() const;
     // Blocks until the vocoder sidecar is ready or terminal, `timeout_ms`
-    // passes (< 0: no limit) or `cancel` (optional) is set. True when it is
-    // ready. Returns false at once while nothing has requested the sidecar
-    // (prewarm none before the first call) or it waits for memory.
-    bool wait(int64_t timeout_ms, const std::atomic<bool> * cancel = nullptr) const;
+    // passes (< 0: no limit) or `cancels` (optional) moves past `since` (see
+    // supertonic_wait_until_ready). True when it is ready. Returns false at
+    // once while nothing has requested the sidecar (prewarm none before the
+    // first call) or it waits for memory.
+    bool wait(int64_t timeout_ms, const std::atomic<uint64_t> * cancels = nullptr, uint64_t since = 0) const;
 
     struct impl;
 
@@ -190,6 +191,15 @@ private:
     explicit supertonic_vocoder_coreml(std::unique_ptr<impl> p);
     std::unique_ptr<impl> p_;
 };
+
+// The polling loop of a blocking Core ML wait: calls `poll` every 20 ms (1:
+// ready, returns true; -1: will not become ready without a new request,
+// returns false; 0: keep waiting) until `timeout_ms` passes (< 0: no limit)
+// or `cancels` (optional, a cancel counter) differs from `since`, the count
+// the waiter read when it started. A cancel made after a wait began ends it,
+// and a wait that starts later cannot take that cancel back from it.
+bool supertonic_wait_until_ready(const std::function<int()> & poll, int64_t timeout_ms,
+                                 const std::atomic<uint64_t> * cancels, uint64_t since);
 
 // Label merge across the calls of one synthesis: equal labels stay, anything
 // else is "mixed" (an empty accumulator takes the next label).

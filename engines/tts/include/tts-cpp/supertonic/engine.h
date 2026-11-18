@@ -537,11 +537,12 @@ public:
     // artifact key, timings and error); "{}" in builds without TTS_CPP_COREML.
     std::string coreml_status() const;
     // Waits until the vocoder sidecar is ready or has failed, or `timeout_ms`
-    // passes (< 0: no limit), or cancel() is called from another thread.
-    // True when it is ready. Returns false at once while nothing has
-    // requested the sidecar (prewarm none before the first synthesis) or it
-    // waits for memory (deferred). coreml_wait(0) only polls; a wait never
-    // clears a cancel() meant for a synthesis on another thread.
+    // passes (< 0: no limit), or cancel() is called from another thread
+    // after the wait started. True when it is ready. Returns false at once
+    // while nothing has requested the sidecar (prewarm none before the first
+    // synthesis) or it waits for memory
+    // (deferred). coreml_wait(0) only polls; a wait never takes back a
+    // cancel() meant for another wait or for a synthesis.
     bool coreml_wait(int64_t timeout_ms = -1) const;
 
 private:

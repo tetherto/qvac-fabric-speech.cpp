@@ -8,6 +8,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <thread>
 #include <cstdlib>
 #include <stdexcept>
 
@@ -489,21 +491,21 @@ std::string supertonic_vocoder_coreml::status_json() const {
     return pcm::to_json(st);
 }
 
-bool supertonic_vocoder_coreml::wait(int64_t timeout_ms, const std::atomic<bool> * cancel) const {
+bool supertonic_vocoder_coreml::wait(int64_t timeout_ms, const std::atomic<uint64_t> * cancels, uint64_t since) const {
     if (!p_->slot) return false;
-    const auto start = pcm::Clock::now();
-    for (;;) {
-        const pcm::SlotState st = p_->slot->state();
-        if (st == pcm::SlotState::ready) return true;
-        // Terminal, or nothing will move it without a request: idle (prewarm
-        // none before the first call, or evicted) and deferred(memory).
-        if (pcm::is_terminal(st) || st == pcm::SlotState::idle || st == pcm::SlotState::deferred_memory) {
-            return false;
-        }
-        if (cancel && cancel->load()) return false;
-        if (timeout_ms >= 0 && pcm::Clock::now() - start >= std::chrono::milliseconds(timeout_ms)) return false;
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    }
+    return supertonic_wait_until_ready(
+        [this] {
+            const pcm::SlotState st = p_->slot->state();
+            if (st == pcm::SlotState::ready) return 1;
+            // Terminal, or nothing will move it without a request: idle
+            // (prewarm none before the first call, or evicted) and
+            // deferred(memory).
+            if (pcm::is_terminal(st) || st == pcm::SlotState::idle || st == pcm::SlotState::deferred_memory) {
+                return -1;
+            }
+            return 0;
+        },
+        timeout_ms, cancels, since);
 }
 
 #else  // !TTS_CPP_USE_COREML
@@ -537,9 +539,23 @@ bool supertonic_vocoder_coreml::strict() const { return false; }
 const supertonic_vocoder_route & supertonic_vocoder_coreml::route() const { return p_->route; }
 std::string supertonic_vocoder_coreml::state() const { return {}; }
 std::string supertonic_vocoder_coreml::status_json() const { return "{}"; }
-bool supertonic_vocoder_coreml::wait(int64_t, const std::atomic<bool> *) const { return false; }
+bool supertonic_vocoder_coreml::wait(int64_t, const std::atomic<uint64_t> *, uint64_t) const { return false; }
 
 #endif
+
+bool supertonic_wait_until_ready(const std::function<int()> & poll, int64_t timeout_ms,
+                                 const std::atomic<uint64_t> * cancels, uint64_t since) {
+    const auto start = std::chrono::steady_clock::now();
+    for (;;) {
+        const int r = poll();
+        if (r != 0) return r > 0;
+        if (cancels && cancels->load() != since) return false;
+        if (timeout_ms >= 0 && std::chrono::steady_clock::now() - start >= std::chrono::milliseconds(timeout_ms)) {
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+}
 
 }  // namespace detail
 }  // namespace supertonic
