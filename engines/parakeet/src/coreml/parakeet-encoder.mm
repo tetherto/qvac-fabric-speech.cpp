@@ -315,30 +315,12 @@ bool copy_channel_first_output(MLMultiArray * arr, float * dst, int64_t n_rows, 
     return true;
 }
 
-// The compiled bundle's metadata.json lists the model's inputs by name, so the
-// export kind is known before the (expensive) model load has to pick its
-// compute units. A bundle without readable metadata is treated as single-input.
-bool mlmodelc_declares_ane_inputs(NSString * path) {
-    NSString * metadata = [path stringByAppendingPathComponent:@"metadata.json"];
-    NSString * text = [NSString stringWithContentsOfFile:metadata
-                                                encoding:NSUTF8StringEncoding
-                                                   error:nil];
-    if (text == nil) return false;
-    NSString * pad_mask = [NSString stringWithFormat:@"\"%@\"", kAnePadMaskInput];
-    NSString * key_bias = [NSString stringWithFormat:@"\"%@\"", kAneKeyBiasInput];
-    return [text containsString:pad_mask] && [text containsString:key_bias];
-}
-
-// What metadata.json shows about the export without loading it: 1 the
-// fixed-window Neural Engine export, 0 conclusively another export (a parsed
-// input schema that names its inputs, without both Neural Engine inputs), -1
-// unknown (no metadata, or metadata that cannot be read, parsed or that lists
-// no input names). Only the model's own description is authoritative for -1.
-int mlmodelc_export_kind(NSString * path) {
-    if (mlmodelc_declares_ane_inputs(path)) return 1;
+// The input names metadata.json declares, decoded from its input schema, or
+// nil when the schema is missing, unreadable or incomplete.
+NSArray<NSString *> * mlmodelc_input_names(NSString * path) {
     NSString * metadata = [path stringByAppendingPathComponent:@"metadata.json"];
     NSData * data = [NSData dataWithContentsOfFile:metadata];
-    if (data == nil) return -1;
+    if (data == nil) return nil;
     id root = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
     NSDictionary * description = nil;
     if ([root isKindOfClass:[NSArray class]] && [(NSArray *) root count] > 0 &&
@@ -348,15 +330,31 @@ int mlmodelc_export_kind(NSString * path) {
         description = root;
     }
     id schema = description[@"inputSchema"];
-    if (![schema isKindOfClass:[NSArray class]] || [(NSArray *) schema count] == 0) return -1;
+    if (![schema isKindOfClass:[NSArray class]] || [(NSArray *) schema count] == 0) return nil;
+    NSMutableArray<NSString *> * names = [NSMutableArray array];
     for (id input in (NSArray *) schema) {
-        if (![input isKindOfClass:[NSDictionary class]] ||
-            ![((NSDictionary *) input)[@"name"] isKindOfClass:[NSString class]]) {
-            return -1;
-        }
+        id name = [input isKindOfClass:[NSDictionary class]] ? ((NSDictionary *) input)[@"name"] : nil;
+        if (![name isKindOfClass:[NSString class]]) return nil;
+        [names addObject:name];
     }
-    return 0;
+    return names;
 }
+
+// What metadata.json shows about the export without loading it, from the
+// decoded input names: 1 the fixed-window Neural Engine export (it declares
+// both Neural Engine inputs), 0 conclusively another export, -1 unknown (no
+// metadata, or a schema that cannot be read or lists no complete names).
+// Only the model's own description is authoritative for -1.
+int mlmodelc_export_kind(NSString * path) {
+    NSArray<NSString *> * names = mlmodelc_input_names(path);
+    if (names == nil) return -1;
+    return [names containsObject:kAnePadMaskInput] && [names containsObject:kAneKeyBiasInput] ? 1 : 0;
+}
+
+// The export kind is known before the (expensive) model load has to pick
+// its compute units; unknown metadata is treated as single-input.
+bool mlmodelc_declares_ane_inputs(NSString * path) { return mlmodelc_export_kind(path) == 1; }
+
 
 }  // namespace
 

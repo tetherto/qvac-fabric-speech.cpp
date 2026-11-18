@@ -332,6 +332,21 @@ void check_stub_tdt_skips_throwaway_load() {
 
     // Metadata that does not show the export (unparsable, or no input names)
     // is inconclusive: only the model's own description can rule ownership
+    // The Neural Engine inputs named with JSON escapes: the decoded names are
+    // what counts, so the loader still loads the bundle to read its seams.
+    write_text(bundle / "metadata.json",
+               R"([{"inputSchema":[{"name":"mel"},{"name":"pad\u005fmask"},{"name":"key\u005fbias"}]}])");
+    expect(load_logged(gguf.string(), log) == kGgufLoadNoEncoderWeights &&
+               log.find(kFailedLoad) != std::string::npos &&
+               log.find("no validated seam policy") == std::string::npos,
+           "Neural Engine inputs in escaped metadata: the loader still loads the sidecar");
+    // One Neural Engine name alone does not make the export.
+    write_text(bundle / "metadata.json",
+               R"([{"inputSchema":[{"name":"mel"},{"name":"pad_mask"}],"shortDescription":"key_bias"}])");
+    expect(load_logged(gguf.string(), log) == kGgufLoadNoEncoderWeights &&
+               log.find("no validated seam policy") != std::string::npos,
+           "a schema with only one Neural Engine input is another export: the load is skipped");
+
     // out, so the bundle is loaded, as with no metadata.
     for (const char * inconclusive : {"not json", "{}", R"([{"inputSchema":[]}])",
                                       R"([{"shortDescription":"encoder"}])"}) {
