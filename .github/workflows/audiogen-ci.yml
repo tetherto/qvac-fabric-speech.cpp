@@ -363,8 +363,12 @@ jobs:
       # cache runs on Core ML; cancelled decodes (pending, ready, waiting,
       # strict) leave the slot idle and start no ggml decode; a warm repaint
       # releases the decoder before its encode; {prewarm all} with and without
-      # wait construct succeeds with no decoder retained; an eviction cancels
-      # an unstarted job; memory-degrade follows the caller's decision. Fit (route and whole projection) is
+      # wait construct succeeds with no decoder retained, and an engine
+      # destroyed while that release is held returns at once;
+      # Engine::coreml_prewarm on an idle engine succeeds and releases the
+      # decoder; an eviction cancels an unstarted job; a latent shorter than
+      # the decoder's window decodes on ggml, not pending, on a ready slot;
+      # memory-degrade follows the caller's decision. Fit (route and whole projection) is
       # the same on an empty cache, on one holding a simulated generation in
       # the runtime's layout with a non-stale and then a stale hint, and on the
       # cache the three generations really populated (its compiled artifact
@@ -393,8 +397,10 @@ jobs:
       # re-signed copy of the test and an empty cache, so every Neural Engine
       # load is cold. Each run prints its per-phase table and a one-line JSON
       # report and fails when a phase exceeds the constant that charges it
-      # (a late run's samples after the eviction are held, over the warmed
-      # ggml-only baseline, to the transient charge). ANECompilerService is
+      # (a late run's load, warm-up and post-eviction samples are held, over
+      # the warmed ggml-only baseline, to the transient charge; a failed
+      # footprint or compiler query, no compiler reading during the load or
+      # a failed ggml decode fails the run). ANECompilerService is
       # held by its absolute size while loading, which includes what other
       # jobs on this runner's Mac compiled: the reserve is set from that
       # absolute size, since growth over a service that already holds memory

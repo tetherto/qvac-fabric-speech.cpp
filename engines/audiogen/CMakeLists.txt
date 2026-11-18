@@ -435,6 +435,11 @@ if (AUDIOGEN_BUILD_TESTS)
                  COMMAND test-acestep-vae-coreml --vae "${_acestep_vae_twin}" --source-swap "${_acestep_vae_twin_b}")
         set_tests_properties(test-acestep-vae-source-swap PROPERTIES LABELS "unit"
                              FIXTURES_REQUIRED "acestep-vae-twin;acestep-vae-twin-b")
+        # A latent shorter than the decoder's window: ggml, not pending, the
+        # decoder never requested (strict: fails).
+        add_test(NAME test-acestep-vae-short-latent
+                 COMMAND test-acestep-vae-coreml --vae "${_acestep_vae_twin}" --short-latent)
+        set_tests_properties(test-acestep-vae-short-latent PROPERTIES LABELS "unit" FIXTURES_REQUIRED acestep-vae-twin)
     endif()
 
     # Core ML VAE decode benchmark (ggml GPU vs sidecar, markdown to stdout).

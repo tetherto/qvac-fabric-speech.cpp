@@ -18,15 +18,16 @@
 //       [--duration S] [--require-coreml]
 //       Device cases (AUDIOGEN_COREML, macOS 15), each on a fresh cache under
 //       --cache-root (LIST: encode,lowmem,cached,cancel,repaint,prewarm,
-//       prewarm-async,evict,degrade; default all):
+//       prewarm-async,prewarm-call,evict,short,degrade; default all):
 //       encode   an encoding (ensure_vae(true)) starts no decoder job;
 //       lowmem   three generate() calls in low-memory mode: the first decodes
 //                on ggml while the cold load completes after its eviction (no
 //                repopulation, hint written), the second and third reload warm
 //                within their deadlines and decode on Core ML;
-//       cached   (after lowmem) a second process on the primed cache: its
-//                first decode, with the default wait settings, adopts the
-//                cached artifact and decodes on Core ML;
+//       cached   a second process on the primed cache (the lowmem case's, or
+//                one primed by install-time preparation when lowmem is not
+//                selected): its first decode, with the default wait
+//                settings, adopts the cached artifact and decodes on Core ML;
 //       cancel   cancelled VAE phases (ggml decode with the decoder pending,
 //                Core ML decode, an acquisition waiting for the loading
 //                decoder, also strict) end at the stage boundary with the slot
@@ -36,21 +37,35 @@
 //       prewarm  {prewarm all, wait construct} succeeds with no decoder
 //                retained, and the next generate() decodes on Core ML;
 //       prewarm-async  {prewarm all, wait none} succeeds in the background
-//                and the decoder is released without any generate();
+//                and the decoder is released without any generate(); an
+//                Engine destroyed while that release is held returns at once
+//                and the release completes after it;
+//       prewarm-call  Engine::coreml_prewarm on an idle Engine: scope all
+//                succeeds and releases the decoder (waited and not), scope
+//                none is an empty group;
 //       evict    an eviction while a job is unstarted cancels it;
+//       short    a 32-frame latent on a ready slot decodes on ggml, not
+//                pending, without acquiring the decoder (strict: fails);
 //       degrade  memory-degrade near the budget, in fit and in the Engine.
 //   test-acestep-vae-coreml --vae GGUF_A --source-swap GGUF_B
 //       The VAE GGUF replaced in place after the decoder's slot was made: a
 //       ggml VAE loaded from the other file decodes on ggml without
 //       requesting the decoder (strict: fails); one loaded after the original
 //       file is renamed back serves it again. Needs no device.
+//   test-acestep-vae-coreml --vae GGUF --short-latent
+//       A 32-frame latent (shorter than the decoder's window) on a cold slot
+//       decodes on ggml, not pending, without requesting the decoder
+//       (strict: fails). Needs no device.
 //   test-acestep-vae-coreml --vae GGUF --memory-schedule DIR [--late]
 //       The overlapped memory schedule: ggml decodes run on this thread while
 //       the decoder is generated, compiled, loaded and warmed into DIR; each
-//       phase is held to the template constant that charges it. --late evicts
-//       the decoder while it loads (the late-completion schedule) and holds
-//       every sample after the eviction, over the warmed ggml-only baseline,
-//       to the transient charge fit applies outside the VAE decode phase.
+//       phase is held to the template constant that charges it. --late
+//       holds the load after its warm-up, evicts the decoder, then lets the
+//       load publish (the late-completion schedule); every load, warm-up and
+//       post-eviction sample over the warmed ggml-only baseline is held to
+//       the transient charge fit applies outside the VAE decode phase. A
+//       failed footprint or compiler query, no compiler reading during the
+//       load, or a ggml decode without the whole PCM fails the run.
 //
 // Without --require-coreml a route other than `generate` skips the device
 // cases (exit 77); with it, that fails. --host-route (fit-stable) expects the
@@ -66,6 +81,7 @@
 #include "vae_access.h"
 #include "vae_coreml.h"
 #include "vae_coreml_path.h"
+#include "vae_gguf.h"
 #include "memory_probe.h"
 
 #ifdef AUDIOGEN_USE_COREML
@@ -74,6 +90,9 @@
 #include "qvac_coreml/manager.h"
 #endif
 
+#include "ggml.h"
+#include "gguf.h"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -81,6 +100,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -242,12 +262,144 @@ struct completion_barrier {
     }
 };
 
+// Holds the release of an un-waited group's decoder (vae_coreml_set_release_hook)
+// until the test releases it, and records that it ran.
+struct release_barrier {
+    std::mutex mu;
+    std::condition_variable cv;
+    bool entered = false, released = false, exited = false;
+
+    static release_barrier & get() {
+        static release_barrier b;
+        return b;
+    }
+    static void hold() {
+        release_barrier & b = get();
+        std::unique_lock<std::mutex> lk(b.mu);
+        b.entered = true;
+        b.cv.notify_all();
+        b.cv.wait(lk, [&] { return b.released; });
+        b.exited = true;
+        b.cv.notify_all();
+    }
+    static void arm() {
+        release_barrier & b = get();
+        {
+            std::lock_guard<std::mutex> lk(b.mu);
+            b.entered = b.released = b.exited = false;
+        }
+        detail::vae_coreml_set_release_hook(&release_barrier::hold);
+    }
+    static bool wait_entered(std::chrono::seconds timeout) {
+        release_barrier & b = get();
+        std::unique_lock<std::mutex> lk(b.mu);
+        return b.cv.wait_for(lk, timeout, [&] { return b.entered; });
+    }
+    static bool is_exited() {
+        release_barrier & b = get();
+        std::lock_guard<std::mutex> lk(b.mu);
+        return b.exited;
+    }
+    static bool wait_exited(std::chrono::seconds timeout) {
+        release_barrier & b = get();
+        std::unique_lock<std::mutex> lk(b.mu);
+        return b.cv.wait_for(lk, timeout, [&] { return b.exited; });
+    }
+    static void release() {
+        detail::vae_coreml_set_release_hook(nullptr);
+        release_barrier & b = get();
+        std::lock_guard<std::mutex> lk(b.mu);
+        b.released = true;
+        b.cv.notify_all();
+    }
+};
+
 // ---- model-free checks -------------------------------------------------------
 
 float eligible_duration(int64_t warm_load_ms, float at_least);
 
+// The ggml VAE reads its weights as BF16 while the Core ML decoder's recipe
+// converts by the GGUF type, so a VAE file with a tensor of any other type is
+// refused at load: otherwise a decode before the decoder is ready (ggml) and
+// one after (Core ML) would run different weights.
+void bf16_only_self_test() {
+    for (const ggml_type type : {GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_Q8_0, GGML_TYPE_BF16}) {
+        const fs::path path = fs::temp_directory_path() / ("acestep-vae-type-" + std::to_string((int) type) + ".gguf");
+        ggml_init_params ip{16 * 1024 * 1024, nullptr, /*no_alloc=*/false};
+        ggml_context * ctx = ggml_init(ip);
+        gguf_context * g = gguf_init_empty();
+        ggml_tensor * bias = ggml_new_tensor_1d(ctx, type, 2048);
+        ggml_set_name(bias, "decoder.conv1.bias");
+        std::memset(bias->data, 0, ggml_nbytes(bias));
+        ggml_tensor * g_w = ggml_new_tensor_3d(ctx, GGML_TYPE_BF16, 1, 1, 2048);
+        ggml_set_name(g_w, "decoder.conv1.weight_g");
+        std::memset(g_w->data, 0, ggml_nbytes(g_w));
+        gguf_add_tensor(g, g_w);
+        gguf_add_tensor(g, bias);
+        const bool written = gguf_write_to_file(g, path.string().c_str(), /*only_meta=*/false);
+        gguf_free(g);
+        ggml_free(ctx);
+        check(written, std::string("write a VAE GGUF with a ") + ggml_type_name(type) + " bias");
+        if (type == GGML_TYPE_BF16) {
+            // Not loaded: the file holds two tensors of the decoder, so only
+            // the type check is asked here.
+            VaeGGUF vg;
+            const bool opened = vae_gguf_open(vg, path.string());
+            check(opened && vae_gguf_type_refusal(vg, path.string()).empty(), "an all-BF16 file passes the type check");
+            vae_gguf_close(vg);
+        } else {
+            std::string err;
+            VaeOptions vo;
+            vo.backend = "cpu";
+            try {
+                Vae::load(path.string(), vo);
+            } catch (const std::exception & e) {
+                err = e.what();
+            }
+            const std::string want = std::string("decoder.conv1.bias is ") + ggml_type_name(type) +
+                                     "; the VAE loader reads BF16 weights only";
+            check(contains(err, want), std::string("a ") + ggml_type_name(type) + " tensor refuses the load: " + err);
+        }
+        std::error_code ec;
+        fs::remove(path, ec);
+    }
+}
+
+// With no usable route, install-time preparation still observes a normal
+// result: an empty, successful construction group with nothing to prepare and
+// the decoder under skipped_route_none. Without the runtime (Core ML off) the
+// route is unsupported(build); with it, use = off gives disabled. No file is
+// read either way.
+void route_none_group_self_test() {
+    CoremlOptions o;
+    o.prewarm = CoremlOptions::Prewarm::all;
+    o.wait = CoremlOptions::Wait::construct;
+#ifdef AUDIOGEN_USE_COREML
+    o.use = CoremlOptions::Use::off;
+    const std::string want_state = "disabled";
+#else
+    const std::string want_state = "unsupported(build)";
+#endif
+    std::shared_ptr<detail::vae_coreml_stage> stage =
+        detail::vae_coreml_stage::create("/nonexistent/vae-BF16.gguf", o, false, true);
+    const std::string group = stage ? stage->construction_json() : std::string("(no stage)");
+    const std::string st = stage ? stage->status_json() : std::string("(no stage)");
+    std::fprintf(stderr, "  route none: %s\n  status: %s\n", head(group, 300).c_str(), head(st, 300).c_str());
+    check(stage && !stage->active() && contains(group, "\"success\":true") &&
+              contains(group, "\"nothing_to_prepare\":true") && contains(group, "\"skipped_route_none\":[{") &&
+              contains(group, "\"stage\":\"vae\"") && state_of(group) == want_state,
+          "route none: an empty successful construction group with the decoder's status (" + want_state + ")");
+    check(state_of(st) == want_state && contains(st, "\"engine\":\"acestep\""),
+          "route none: the status reports the decoder " + want_state);
+    const std::string again = stage ? stage->prewarm(CoremlOptions::Prewarm::all, true, true) : std::string();
+    check(contains(again, "\"group\":\"prewarm\"") && contains(again, "\"success\":true") &&
+              contains(again, "\"nothing_to_prepare\":true") && state_of(again) == want_state,
+          "route none: a prewarm group is empty and successful too (" + head(again, 120) + ")");
+}
+
 void self_test() {
     std::fprintf(stderr, "self-test\n");
+    route_none_group_self_test();
     using detail::vae_ggml_decode_estimate_ms;
     check(vae_ggml_decode_estimate_ms(0) == detail::VAE_GGML_DECODE_MS_FLOOR &&
               vae_ggml_decode_estimate_ms(-5) == detail::VAE_GGML_DECODE_MS_FLOOR &&
@@ -659,6 +811,55 @@ void source_swap(const std::string & vae_a, const std::string & vae_b, const std
     fs::remove_all(dir, ec);
 }
 
+// A latent shorter than the decoder's 64-frame window decodes on ggml and is
+// not pending: on a cold (idle) slot without requesting the decoder, and, with
+// `ready`, on a slot whose decoder is loaded (a device run); strict fails it.
+void short_latent(const std::string & vae, const std::string & root, bool ready) {
+    std::fprintf(stderr, "short latent: 32 frames on a %s slot\n", ready ? "ready" : "cold");
+    const fs::path cache = fresh_dir(root, "short-latent");
+    VaeOptions vo;
+    vo.n_gpu_layers = ready ? 99 : 0;
+    const int T = 32;
+    const std::vector<float> latent = make_latent(T, 0x51u);
+    for (const bool strict : {false, true}) {
+        CoremlOptions o;
+        o.cache_dir = cache.string();
+        if (strict) o.use = CoremlOptions::Use::require;
+        if (ready) {
+            o.prewarm = CoremlOptions::Prewarm::all;
+            o.wait = CoremlOptions::Wait::construct;
+        }
+        std::shared_ptr<detail::vae_coreml_stage> stage;
+        try {
+            stage = detail::vae_coreml_stage::create(vae, o, false, /*release_after_construction=*/false);
+        } catch (const std::exception & e) {
+            std::fprintf(stderr, "  stage: %s\n", e.what());
+        }
+        if (!stage || stage->route().route != "generate") {
+            std::fprintf(stderr, "  route %s: case skipped\n", stage ? stage->route().route.c_str() : "none");
+            break;
+        }
+        const std::string mode = strict ? "strict: " : "";
+        const std::string before = state_of(stage->status_json());
+        check(before == (ready ? "ready" : "idle"), mode + "the slot is " + (ready ? "ready" : "idle") + " (" + before + ")");
+        auto v = detail::VaeAccess::load(vae, vo, stage);
+        const std::vector<float> pcm = v->decode(latent, T);
+        const std::string after = state_of(stage->status_json());
+        std::fprintf(stderr, "  %s%zu samples, backend %s, pending %d, slot %s\n", mode.c_str(), pcm.size(),
+                     v->last_decode_backend().c_str(), (int) v->last_decode_coreml_pending(), after.c_str());
+        if (strict) {
+            check(pcm.empty(), "strict: a latent shorter than the window fails");
+        } else {
+            check(pcm.size() == (size_t) T * 1920 * 2 && v->last_decode_backend() == "ggml",
+                  "a latent shorter than the window decodes on ggml");
+        }
+        check(!v->last_decode_coreml_pending(), mode + "and is not pending");
+        check(after == before, mode + "without requesting the decoder (slot " + after + ")");
+    }
+    std::error_code ec;
+    fs::remove_all(cache, ec);
+}
+
 // The same comparison on a cache a real run populated (a compiled artifact and
 // the hint its load wrote) against a fresh empty directory: the cache as it
 // is, then with its hints stale.
@@ -827,6 +1028,25 @@ std::string case_lowmem(const std::string & models, const std::string & root, fl
         check(state_of(st) == "idle", "gen " + std::to_string(g) + ": evicted again (" + state_of(st) + ")");
     }
     return cache;
+}
+
+// A cache primed for the cases that need one when the lowmem case did not run:
+// install-time preparation ({prewarm all, wait construct}) leaves the
+// generated artifact and its warm hint. "" (and a failed check) when it did
+// not succeed.
+std::string prime_cache(const std::string & models, const std::string & root) {
+    std::fprintf(stderr, "priming a cache (the lowmem case did not run)\n");
+    const std::string cache = fresh_dir(root, "primed");
+    EngineOptions o = engine_options(models, cache);
+    o.coreml.prewarm = CoremlOptions::Prewarm::all;
+    o.coreml.wait = CoremlOptions::Wait::construct;
+    std::unique_ptr<Engine> engine = Engine::create(o);
+    const std::string group = engine->coreml_construction();
+    const std::string st = engine->coreml_status();
+    const bool ok = contains(group, "\"success\":true") && contains(group, "\"nothing_to_prepare\":false") &&
+                    has_hint(st);
+    check(ok, "the cache is primed (artifact and warm hint): " + head(group, 200));
+    return ok ? cache : std::string();
 }
 
 // A fresh process on a cache another process primed (the lowmem case left a
@@ -1093,6 +1313,69 @@ void case_prewarm_async(const std::string & models, const std::string & root) {
     std::fprintf(stderr, "  group: %s\n  status: %s\n", head(group, 300).c_str(), head(last, 300).c_str());
     check(finished && contains(group, "\"nothing_to_prepare\":false"), "the asynchronous construction group succeeds");
     check(idle, "the decoder is released after the group finished, without generate() (" + state_of(last) + ")");
+    engine.reset();
+
+    // The owner disappears while its release is held: the release of an
+    // un-waited group runs off the Engine's threads and holds the stage only
+    // while it runs, so destroying the Engine returns at once and the
+    // release completes on its own afterwards.
+    std::fprintf(stderr, "prewarm-async: the Engine destroyed while its release is held\n");
+    release_barrier::arm();
+    engine = Engine::create(o);  // the cache is primed: a warm load
+    const bool entered = release_barrier::wait_entered(std::chrono::seconds(120));
+    check(entered, "the release of the finished group started");
+    std::atomic<bool> destroyed{false};
+    const auto t_destroy = Clock::now();
+    std::thread destroyer([&] {
+        engine.reset();
+        destroyed.store(true);
+    });
+    while (!destroyed.load() && Clock::now() - t_destroy < std::chrono::seconds(10)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    const double destroy_ms = std::chrono::duration<double, std::milli>(Clock::now() - t_destroy).count();
+    const bool returned_while_held = destroyed.load() && !release_barrier::is_exited();
+    release_barrier::release();
+    destroyer.join();
+    const bool exited = release_barrier::wait_exited(std::chrono::seconds(10));
+    std::fprintf(stderr, "  destroyed in %.1f ms while the release was held: %d; the release finished after: %d\n",
+                 destroy_ms, (int) returned_while_held, (int) exited);
+    check(entered && returned_while_held && destroy_ms < 2000.0,
+          "destroying the Engine never waits for its release (returned while it was held)");
+    check(exited, "the held release completed after its owner was destroyed");
+}
+
+// Engine::coreml_prewarm on an existing, idle low-memory Engine: scope all
+// prepares, loads and warms the decoder and reports success; the decoder is
+// released again (hint kept). Scope none is an empty group. Without wait the
+// decoder is released in the background once the group finished.
+void case_prewarm_call(const std::string & models, const std::string & root) {
+    std::fprintf(stderr, "prewarm-call: Engine::coreml_prewarm on an idle Engine\n");
+    const std::string cache = fresh_dir(root, "prewarm-call");
+    std::unique_ptr<Engine> engine = Engine::create(engine_options(models, cache));
+    const std::string before = engine->coreml_status();
+    check(state_of(before) == "idle" && !has_hint(before), "the default Engine requested nothing (" +
+                                                               state_of(before) + ")");
+    const std::string all = engine->coreml_prewarm(CoremlOptions::Prewarm::all, true);
+    const std::string after = engine->coreml_status();
+    std::fprintf(stderr, "  all: %s\n  status: %s\n", head(all, 300).c_str(), head(after, 300).c_str());
+    check(contains(all, "\"group\":\"prewarm\"") && contains(all, "\"success\":true") &&
+              contains(all, "\"nothing_to_prepare\":false"),
+          "scope all succeeds with the decoder in the group");
+    check(state_of(after) == "idle" && has_hint(after) && !engine->coreml_wait(0),
+          "the decoder is released after the waited group (" + state_of(after) + "), hint written");
+    const std::string none = engine->coreml_prewarm(CoremlOptions::Prewarm::none, true);
+    std::fprintf(stderr, "  none: %s\n", head(none, 300).c_str());
+    check(contains(none, "\"success\":true") && contains(none, "\"slots\":[]"), "scope none is an empty group");
+    const std::string snapshot = engine->coreml_prewarm(CoremlOptions::Prewarm::all, false);
+    std::string last;
+    const bool released = poll_until([&] { return engine->coreml_status(); },
+                                     [](const std::string & st) { return state_of(st) == "idle"; },
+                                     std::chrono::seconds(60), &last);
+    std::fprintf(stderr, "  all without wait: %s\n  status: %s\n", head(snapshot, 200).c_str(),
+                 head(last, 200).c_str());
+    check(contains(snapshot, "\"group\":\"prewarm\"") && released,
+          "scope all without wait: the decoder is released once the group finished");
 }
 
 // An eviction while a job is unstarted cancels it: two stages on two caches;
@@ -1264,10 +1547,48 @@ struct mem_sample {
 // so it holds everything this process kept above what the ggml work needs
 // outside the VAE decode phase, preparation leftovers included, which is what
 // fit's transient charge covers there.
+// load_over_base is every load and warm-up sample over the baseline: in the
+// late schedule the load runs outside the VAE decode phase, so each of them is
+// held to the transient charge too (late_window).
 struct mem_breakdown {
-    uint64_t prepare = 0, load_warm = 0, steady = 0, late = 0, total = 0;
-    bool prepared = false, loaded = false, ready = false, late_seen = false;
+    uint64_t prepare = 0, load_warm = 0, load_over_base = 0, steady = 0, late = 0, total = 0;
+    bool prepared = false, compiled = false, loaded = false, ready = false, late_seen = false;
 };
+
+// What the late schedule holds to the transient charge: every sample of the
+// load, its warm-up and the tail after the eviction, over the baseline.
+uint64_t late_window(const mem_breakdown & b) { return std::max(b.load_over_base, b.late); }
+
+bool loading_phase(mem_phase p) { return p == mem_phase::load || p == mem_phase::warm || p == mem_phase::late; }
+
+// The label of an ANECompilerService query bracketed by two reads of the
+// phase: loading when both are, not loading when neither is, and none (the
+// sample is dropped) when the query crossed the load's start or end.
+std::optional<bool> ane_query_loading(mem_phase before, mem_phase after) {
+    if (loading_phase(before) != loading_phase(after)) return std::nullopt;
+    return loading_phase(before);
+}
+
+// What the probes failed to measure: the baseline, footprint samples or (on
+// the Neural Engine) the compiler service while loading. A run with any of
+// them fails instead of reading the missing values as 0.
+std::vector<std::string> schedule_probe_failures(bool base_ok, size_t footprint_failures, bool ane_units,
+                                                 const qvac_coreml_memory::AneGrowth & ane) {
+    std::vector<std::string> out;
+    if (!base_ok) out.push_back("no footprint baseline (the probe failed)");
+    if (footprint_failures > 0) out.push_back(std::to_string(footprint_failures) + " footprint probe(s) failed");
+    if (ane_units && !qvac_coreml_memory::ane_compiler_measured(ane)) {
+        out.push_back("no successful ANECompilerService query while loading or warming");
+    } else if (ane_units && ane.failed_samples > 0) {
+        out.push_back(std::to_string(ane.failed_samples) + " ANECompilerService query(ies) failed");
+    }
+    return out;
+}
+
+// Whether one ggml decode of the schedule did its work: the whole PCM, on ggml.
+bool ggml_decode_ok(const std::vector<float> & pcm, int T, const std::string & backend) {
+    return pcm.size() == (size_t) T * 1920 * 2 && backend == "ggml";
+}
 
 mem_breakdown mem_breakdown_of(const std::vector<mem_sample> & samples, uint64_t base) {
     const auto group = [](mem_phase p) {
@@ -1285,8 +1606,16 @@ mem_breakdown mem_breakdown_of(const std::vector<mem_sample> & samples, uint64_t
         if (group(s.phase) != group(last)) group_start = prev;
         if (group(s.phase) == 2 && !load_start) load_start = group_start;
         switch (group(s.phase)) {
-            case 1: b.prepared = true; b.prepare = std::max(b.prepare, over(s.footprint, group_start)); break;
-            case 2: b.loaded = true; b.load_warm = std::max(b.load_warm, over(s.footprint, group_start)); break;
+            case 1:
+                b.prepared = true;
+                b.compiled = b.compiled || s.phase == mem_phase::compile;
+                b.prepare = std::max(b.prepare, over(s.footprint, group_start));
+                break;
+            case 2:
+                b.loaded = true;
+                b.load_warm = std::max(b.load_warm, over(s.footprint, group_start));
+                b.load_over_base = std::max(b.load_over_base, over(s.footprint, base));
+                break;
             case 3: b.late_seen = true; b.late = std::max(b.late, over(s.footprint, base)); break;
             default: break;
         }
@@ -1313,10 +1642,46 @@ void breakdown_self_test() {
         {1280, mem_phase::late},    {1240, mem_phase::late},     {1210, mem_phase::ggml},
     };
     const mem_breakdown b = mem_breakdown_of(samples, base);
-    check(b.prepared && b.loaded && b.late_seen && b.prepare == 200 && b.load_warm == 50 && b.late == 280 &&
-              b.total == 280,
+    check(b.prepared && b.compiled && b.loaded && b.late_seen && b.prepare == 200 && b.load_warm == 50 &&
+              b.late == 280 && b.total == 280,
           "memory breakdown: the late tail is every post-eviction sample over the ggml-only baseline (" +
               std::to_string(b.late) + ")");
+    // A load peak that is gone before the completion hook: preparation keeps
+    // 240 above the baseline, the load peaks 1500 above it, the tail after the
+    // eviction is 240 again. The late window is 1500, not the tail's 240.
+    const std::vector<mem_sample> peak = {
+        {1000, mem_phase::ggml}, {1300, mem_phase::generate}, {1240, mem_phase::compile},
+        {1240, mem_phase::ggml}, {2500, mem_phase::load},     {1300, mem_phase::warm},
+        {1240, mem_phase::late}, {1240, mem_phase::late},
+    };
+    const mem_breakdown p = mem_breakdown_of(peak, base);
+    check(p.late == 240 && p.load_over_base == 1500 && late_window(p) == 1500,
+          "memory breakdown: the late window holds the load's own samples over the baseline (" +
+              std::to_string(late_window(p)) + ")");
+    // Measurements that failed are not readings.
+    qvac_coreml_memory::AneGrowth measured;
+    measured.loading_samples = 3;
+    check(schedule_probe_failures(true, 0, true, measured).empty() &&
+              schedule_probe_failures(true, 0, false, qvac_coreml_memory::AneGrowth{}).empty(),
+          "memory schedule: complete measurements pass");
+    qvac_coreml_memory::AneGrowth failed_query = measured;
+    failed_query.failed_samples = 1;
+    check(schedule_probe_failures(false, 0, false, measured).size() == 1 &&
+              schedule_probe_failures(true, 2, false, measured).size() == 1 &&
+              schedule_probe_failures(true, 0, true, qvac_coreml_memory::AneGrowth{}).size() == 1 &&
+              schedule_probe_failures(true, 0, true, failed_query).size() == 1,
+          "memory schedule: a failed baseline, failed footprint samples, no compiler reading during the load or a "
+          "failed compiler query each fail the run");
+    check(ane_query_loading(mem_phase::load, mem_phase::warm) == std::optional<bool>(true) &&
+              ane_query_loading(mem_phase::compile, mem_phase::ggml) == std::optional<bool>(false) &&
+              !ane_query_loading(mem_phase::compile, mem_phase::load).has_value() &&
+              !ane_query_loading(mem_phase::warm, mem_phase::ready).has_value(),
+          "memory schedule: a compiler query that crossed the load's start or end has no label");
+    const int T = 64;
+    const std::vector<float> full((size_t) T * 1920 * 2, 0.0f);
+    check(ggml_decode_ok(full, T, "ggml") && !ggml_decode_ok({}, T, "ggml") && !ggml_decode_ok(full, T, "coreml-all") &&
+              !ggml_decode_ok(std::vector<float>(full.size() - 2), T, "ggml"),
+          "memory schedule: a ggml call counts only with the full PCM on ggml");
 }
 
 void memory_schedule(const std::string & vae, const std::string & cache, bool late, bool require) {
@@ -1337,31 +1702,61 @@ void memory_schedule(const std::string & vae, const std::string & cache, bool la
     std::unique_ptr<Vae> ggml_vae = Vae::load(vae, vo);
     const int T = 250;  // 10 s of audio: four Core ML windows
     const std::vector<float> latent = make_latent(T, 0x2468ace1u);
-    for (int i = 0; i < 2; ++i) ggml_vae->decode(latent, T);  // warm the ggml arena
-    const uint64_t base = qvac_coreml_memory::phys_footprint();
+    // One ggml decode: true when it produced the whole PCM on ggml. A failed
+    // one fails the run instead of counting.
+    bool bad_ggml = false;
+    const auto ggml_decode = [&]() {
+        const std::vector<float> pcm = ggml_vae->decode(latent, T);
+        if (ggml_decode_ok(pcm, T, ggml_vae->last_decode_backend())) return true;
+        if (!bad_ggml) {
+            check(false, "every ggml decode of the schedule returns the whole PCM on ggml (" +
+                             std::to_string(pcm.size()) + " samples on " + ggml_vae->last_decode_backend() + ")");
+        }
+        bad_ggml = true;
+        return false;
+    };
+    for (int i = 0; i < 2; ++i) {  // warm the ggml arena
+        if (!ggml_decode()) return;
+    }
+    uint64_t base = 0;
+    const bool base_ok = qvac_coreml_memory::phys_footprint(base);
 
     std::atomic<bool> stop{false};
     std::atomic<int> phase{(int) mem_phase::ggml};
     std::atomic<bool> in_late{false};
     std::shared_ptr<detail::vae_coreml_stage> stage = detail::vae_coreml_stage::create(vae, opts, false, true);
+    const auto slot_phase = [&] {
+        return in_late.load() ? mem_phase::late : mem_phase_of(state_of(stage->status_json()));
+    };
     std::vector<qvac_coreml_memory::AneSample> ane_samples;
     std::vector<mem_sample> samples;
     samples.reserve(1 << 17);
+    size_t footprint_failures = 0, ane_crossing = 0;
     std::thread sampler([&] {
         for (int tick = 0; !stop.load(); ++tick) {
-            if (tick % 5 == 0) {
-                const mem_phase p = in_late.load() ? mem_phase::late : mem_phase_of(state_of(stage->status_json()));
-                phase.store((int) p);
+            if (tick % 5 == 0) phase.store((int) slot_phase());
+            uint64_t fp = 0;
+            if (qvac_coreml_memory::phys_footprint(fp)) {
+                samples.push_back({fp, (mem_phase) phase.load()});
+            } else {
+                ++footprint_failures;
             }
-            samples.push_back({qvac_coreml_memory::phys_footprint(), (mem_phase) phase.load()});
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
     });
+    // Each compiler query is bracketed by its own reads of the phase; one that
+    // crossed the load's start or end is dropped (counted).
     std::thread ane_sampler([&] {
         while (!stop.load()) {
-            const uint64_t a = qvac_coreml_memory::ane_compiler_rss();
-            const auto p = (mem_phase) phase.load();
-            ane_samples.push_back({a, p == mem_phase::load || p == mem_phase::warm || p == mem_phase::late});
+            const mem_phase before = slot_phase();
+            uint64_t a = 0;
+            const bool ok = qvac_coreml_memory::ane_compiler_rss(a);
+            const std::optional<bool> loading = ane_query_loading(before, slot_phase());
+            if (loading) {
+                ane_samples.push_back({a, *loading, ok});
+            } else {
+                ++ane_crossing;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
     });
@@ -1375,15 +1770,14 @@ void memory_schedule(const std::string & vae, const std::string & cache, bool la
             // After the eviction: ggml keeps working until the late load
             // wrote its hint, then two more seconds for the release. The slot
             // must stay idle throughout.
-            ggml_vae->decode(latent, T);
+            if (!ggml_decode()) break;
             ++ggml_calls;
             const std::string st = stage->status_json();
             if (state_of(st) != "idle") repopulated = true;
             if (!hint_seen && has_hint(st)) {
                 hint_seen = true;
                 const auto t_hint = Clock::now();
-                while (Clock::now() - t_hint < std::chrono::seconds(2)) {
-                    ggml_vae->decode(latent, T);
+                while (Clock::now() - t_hint < std::chrono::seconds(2) && ggml_decode()) {
                     ++ggml_calls;
                     if (state_of(stage->status_json()) != "idle") repopulated = true;
                 }
@@ -1405,7 +1799,7 @@ void memory_schedule(const std::string & vae, const std::string & cache, bool la
             continue;
         }
         if (!call.decoder) {
-            ggml_vae->decode(latent, T);
+            if (!ggml_decode()) break;
             ++ggml_calls;
             continue;
         }
@@ -1436,24 +1830,30 @@ void memory_schedule(const std::string & vae, const std::string & cache, bool la
     for (const auto & a : ane_samples) ane_peak = std::max(ane_peak, a.rss);
     std::fprintf(stderr,
                  "  memory (MiB; base %.1f): prepare %.1f (charged %.1f), load+warm %.1f (charged %.1f), steady %.1f "
-                 "(resident charged %.1f), late tail over the baseline %.1f (transient charged %.1f), whole run %.1f (envelope %.1f); "
+                 "(resident charged %.1f), late window over the baseline %.1f (transient charged %.1f), whole run %.1f (envelope %.1f); "
                  "ANECompilerService growth %.1f from %.1f (%s), peak %.1f, reserve %.1f\n",
                  mib(base), mib(b.prepare), mib(route.prepare_peak_bytes), mib(b.load_warm), mib(route.load_peak_bytes),
-                 mib(b.steady), mib(route.resident_bytes), mib(b.late), mib(route.transient_bytes), mib(b.total),
+                 mib(b.steady), mib(route.resident_bytes), mib(late ? late_window(b) : b.late), mib(route.transient_bytes), mib(b.total),
                  mib(route.envelope_bytes), mib(ane.growth), mib(ane.before), baseline, mib(ane_peak),
                  mib(route.ane_compile_reserve_bytes));
     std::fprintf(stderr,
                  "  memory report: {\"chip\":\"%s\",\"units\":\"%s\",\"schedule\":\"%s\",\"base\":%llu,\"prepare\":%llu,"
                  "\"load_warm\":%llu,\"steady\":%llu,\"late\":%llu,\"total\":%llu,\"ane_compiler_before_load\":%llu,"
                  "\"ane_compiler_growth\":%llu,\"ane_compiler_load_peak\":%llu,\"ane_compiler_peak\":%llu,"
-                 "\"ane_compiler_baseline\":\"%s\",\"ggml_calls\":%d,\"coreml_calls\":%d,\"seconds\":%.1f}\n",
+                 "\"ane_compiler_baseline\":\"%s\",\"ane_loading_samples\":%zu,\"ane_crossing\":%zu,"
+                 "\"ggml_calls\":%d,\"coreml_calls\":%d,\"seconds\":%.1f}\n",
                  host_chip().c_str(), route.compute_units.c_str(), late ? "late" : "early", (unsigned long long) base,
                  (unsigned long long) b.prepare, (unsigned long long) b.load_warm, (unsigned long long) b.steady,
                  (unsigned long long) b.late, (unsigned long long) b.total, (unsigned long long) ane.before,
                  (unsigned long long) ane.growth, (unsigned long long) ane.peak, (unsigned long long) ane_peak, baseline,
-                 ggml_calls, coreml_calls, secs);
+                 ane.loading_samples, ane_crossing, ggml_calls, coreml_calls, secs);
 
-    check(b.prepared && b.loaded, "the schedule sampled the preparation and the load");
+    const bool ane_units = route.compute_units == "all" || route.compute_units == "cpu_and_ane";
+    for (const std::string & f : schedule_probe_failures(base_ok, footprint_failures, ane_units, ane)) {
+        check(false, "memory schedule measured: " + f);
+    }
+    check(!bad_ggml, "every ggml decode of the schedule succeeded on ggml");
+    check(b.compiled && b.loaded, "the schedule sampled the compile and the load");
     check(b.prepare <= route.prepare_peak_bytes, "prepare within its charge");
     check(b.load_warm <= route.load_peak_bytes, "load and warm-up within the load charge");
     check(b.total <= route.envelope_bytes, "whole run within the envelope");
@@ -1467,8 +1867,13 @@ void memory_schedule(const std::string & vae, const std::string & cache, bool la
     }
     if (late) {
         check(evicted && hint_seen && b.late_seen, "late completion: evicted while loading, the load wrote its hint");
-        check(b.late <= route.transient_bytes, "late tail over the warmed ggml-only baseline within the transient "
-                                               "charge (what fit charges outside the VAE decode phase)");
+        // The load ran outside the VAE decode phase from the eviction on, but
+        // it was held only after its warm-up: so each load and warm-up sample
+        // is held to the transient charge over the baseline as well as the
+        // tail after the eviction.
+        check(late_window(b) <= route.transient_bytes,
+              "load, warm-up and late tail over the warmed ggml-only baseline within the transient charge (what "
+              "fit charges outside the VAE decode phase): " + std::to_string(mib(late_window(b))) + " MiB");
         check(coreml_calls == 0 && !repopulated && state_of(stage->status_json()) == "idle",
               "late completion: the load completed after the eviction and never repopulated the slot");
     } else {
@@ -1482,8 +1887,8 @@ void memory_schedule(const std::string & vae, const std::string & cache, bool la
 }  // namespace
 
 int main(int argc, char ** argv) {
-    bool self = false, fit = false, require = false, late = false, host_route = false;
-    std::string models, vae, vae_b, cache_root, memory_dir, first_decode, cases = "encode,lowmem,cached,cancel,repaint,prewarm,prewarm-async,evict,degrade";
+    bool self = false, fit = false, require = false, late = false, host_route = false, short_cold = false;
+    std::string models, vae, vae_b, cache_root, memory_dir, first_decode, cases = "encode,lowmem,cached,cancel,repaint,prewarm,prewarm-async,prewarm-call,evict,short,degrade";
     float duration = 20.0f;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -1499,6 +1904,7 @@ int main(int argc, char ** argv) {
         else if (a == "--models") models = next();
         else if (a == "--vae") vae = next();
         else if (a == "--source-swap") vae_b = next();
+        else if (a == "--short-latent") short_cold = true;
         else if (a == "--cache-root") cache_root = next();
         else if (a == "--cases") cases = next();
         else if (a == "--duration") duration = std::stof(next());
@@ -1510,9 +1916,24 @@ int main(int argc, char ** argv) {
         }
     }
     if (vae.empty() && !models.empty()) vae = models + "/vae-BF16.gguf";
+    {
+        // An unknown case name would select nothing and pass without a check.
+        const std::string known = "encode,lowmem,cached,cancel,repaint,prewarm,prewarm-async,prewarm-call,evict,short,degrade";
+        size_t at = 0;
+        while (at <= cases.size()) {
+            const size_t end = std::min(cases.find(',', at), cases.size());
+            const std::string name = cases.substr(at, end - at);
+            if (!has_case(known, name)) {
+                std::fprintf(stderr, "unknown case '%s' (known: %s)\n", name.c_str(), known.c_str());
+                return 2;
+            }
+            at = end + 1;
+        }
+    }
 
     if (self) {
         self_test();
+        bf16_only_self_test();
         breakdown_self_test();
     }
     if (fit) {
@@ -1530,6 +1951,13 @@ int main(int argc, char ** argv) {
             return 2;
         }
         source_swap(vae, vae_b, cache_root.empty() ? fs::temp_directory_path().string() : cache_root);
+    }
+    if (short_cold) {
+        if (vae.empty()) {
+            std::fprintf(stderr, "--short-latent needs --vae\n");
+            return 2;
+        }
+        short_latent(vae, cache_root.empty() ? fs::temp_directory_path().string() : cache_root, false);
     }
 #ifdef AUDIOGEN_USE_COREML
     if (!first_decode.empty()) {
@@ -1553,15 +1981,29 @@ int main(int argc, char ** argv) {
             if (has_case(cases, "encode")) case_encode(models, cache_root);
             std::string lowmem_cache;
             if (has_case(cases, "lowmem")) lowmem_cache = case_lowmem(models, cache_root, duration);
-            if (has_case(cases, "cached") && !lowmem_cache.empty()) case_cached(argv[0], models, lowmem_cache, duration);
-            if (has_case(cases, "cancel")) case_cancel(models, cache_root, lowmem_cache, duration);
+            // The cases that need a primed cache prime one themselves when the
+            // lowmem case did not run; they never pass without assertions.
+            std::string primed = lowmem_cache;
+            if (primed.empty() && (has_case(cases, "cached") || has_case(cases, "cancel") || has_case(cases, "repaint"))) {
+                primed = prime_cache(models, cache_root);
+            }
+            if (has_case(cases, "cached")) {
+                if (primed.empty()) check(false, "the cached case needs a primed cache");
+                else case_cached(argv[0], models, primed, duration);
+            }
+            if (has_case(cases, "cancel")) {
+                if (primed.empty()) check(false, "the cancel case needs a primed cache");
+                else case_cancel(models, cache_root, primed, duration);
+            }
             if (has_case(cases, "repaint")) {
-                if (lowmem_cache.empty()) check(false, "the repaint case needs the lowmem case's primed cache");
-                else case_repaint(models, lowmem_cache);
+                if (primed.empty()) check(false, "the repaint case needs a primed cache");
+                else case_repaint(models, primed);
             }
             if (has_case(cases, "prewarm")) case_prewarm(models, cache_root, duration);
             if (has_case(cases, "prewarm-async")) case_prewarm_async(models, cache_root);
+            if (has_case(cases, "prewarm-call")) case_prewarm_call(models, cache_root);
             if (has_case(cases, "evict")) case_evict(vae, cache_root);
+            if (has_case(cases, "short")) short_latent(vae, cache_root, true);
             if (has_case(cases, "degrade")) case_degrade(models, cache_root);
             // The cache the low-memory generations left (a compiled artifact
             // and the hint its load wrote) against an empty one.
