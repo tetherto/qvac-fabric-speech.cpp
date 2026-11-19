@@ -817,10 +817,18 @@ if (PARAKEET_BUILD_TESTS)
         ARGS     "${_qvp_tdt_f16_gguf}" "${_qvp_jfk_wav}"
         REQUIRES "${_qvp_tdt_f16_gguf}" "${_qvp_jfk_wav}")
 
-    add_executable(test-tdt-padding test/test_tdt_padding.cpp)
-    target_link_libraries(test-tdt-padding PRIVATE qvac-parakeet)
-    target_include_directories(test-tdt-padding PRIVATE src)
-    parakeet_apply_ccache(test-tdt-padding)
+    add_executable(test-tdt-padding
+        test/test_tdt_padding.cpp
+        src/parakeet_ctc.cpp
+        src/parakeet_log.cpp
+        src/mel_preprocess.cpp
+        src/sentencepiece_bpe.cpp)
+    target_link_libraries(test-tdt-padding PRIVATE ggml parakeet-backend-defs)
+    target_include_directories(test-tdt-padding PRIVATE src include ggml/include)
+    if (PARAKEET_F16_ACTIVATIONS)
+        target_compile_definitions(test-tdt-padding PRIVATE PARAKEET_F16_ACTIVATIONS=1)
+    endif()
+    parakeet_apply_backend_defs(test-tdt-padding)
     parakeet_register_test(test-tdt-padding
         LABEL    "fixture"
         ARGS     "${_qvp_tdt_q8_gguf}"
