@@ -2120,7 +2120,7 @@ if (PARAKEET_BUILD_TESTS)
         endif()
         add_test(NAME test-sortformer-diarizer-coreml-source
             COMMAND test-nemotron-diarization-coreml-source "${PARAKEET_TEST_SORTFORMER_GENERATED_GGUF}"
-                    "${CMAKE_CURRENT_BINARY_DIR}/coreml-source-swap-sortformer")
+                    "${CMAKE_CURRENT_BINARY_DIR}/coreml-source-swap-sortformer" sortformer-diar-f410)
         set_tests_properties(test-sortformer-diarizer-coreml-source PROPERTIES
             LABELS "fixture;coreml;coreml-generated" TIMEOUT 1800)
     endif()
