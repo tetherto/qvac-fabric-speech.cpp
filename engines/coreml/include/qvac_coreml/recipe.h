@@ -251,12 +251,14 @@ struct PatchOut {
 };
 
 // Evaluates every patch line in spec offset order, with the errors of evaluate().
+// `stats` gets the patch expressions' interpreter peak.
 Error evaluate_patches(const Recipe & r, TensorSource & src, const std::function<Error(const PatchOut &)> & sink,
-                       const ReadObserver & observer = nullptr);
+                       const ReadObserver & observer = nullptr, EvalStats * stats = nullptr);
 
 // The spec with every patch applied (`spec` is the template's model.mlmodel).
+// `stats` gets the pass's peak: the spec copy plus the patch expressions'.
 Error patched_spec(const Recipe & r, TensorSource & src, const uint8_t * spec, size_t spec_size,
-                   std::vector<uint8_t> & out, const ReadObserver & observer = nullptr);
+                   std::vector<uint8_t> & out, const ReadObserver & observer = nullptr, EvalStats * stats = nullptr);
 
 // ---- Number formats and tolerance ---------------------------------------------
 

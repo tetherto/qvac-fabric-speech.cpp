@@ -8,6 +8,10 @@
 #include "digest.h"
 #include "failed.h"
 #include "hints.h"
+#if defined(QVAC_COREML_HAVE_GGML)
+#include "generation_internal.h"
+#include "qvac_coreml/generation.h"
+#endif
 
 #include "qvac_coreml/generation.h"
 #include "qvac_coreml/manager.h"
@@ -257,6 +261,38 @@ void case_generate_and_artifact_json() {
     CHECK(cache::write_package(*env.tpl, ms, env.td / "pkg.mlpackage").ok());
     CHECK(read_bytes(env.td / "pkg.mlpackage/Data/com.apple.CoreML/weights/weight.bin") == wb);
     CHECK(read_bytes(env.td / "pkg.mlpackage/Manifest.json") == read_bytes(env.td / "tpl/Manifest.json"));
+}
+
+// The generation peak covers the spec patch pass too: a patch expression
+// whose interpreter peak exceeds every blob expression's sets it.
+void case_patch_pass_peak() {
+    TempDir td;
+    TemplateSpec spec = cache_spec();
+    spec.decls = "source \"w\" f32 [4,8]\nsource \"b\" f32 [8]\nsource \"big\" f32 [4096]\n"
+                 "meta \"general.architecture\" str\n";
+    spec.items.push_back(patch_(16, "fp16", 4096, "f16(mul(t(\"big\"), 2))"));
+    spec.spec_bytes = std::string(16 + 4096 * 2 + 16, '\x01');
+    std::string sentinel;
+    for (int i = 0; i < 4096 * 2; ++i) sentinel += "01";
+    spec.extra["patches"] = json::array({{{"spec_offset", 16}, {"len", 4096 * 2}, {"sentinel_hex", sentinel}}});
+    auto tpl = make_template(td / "tpl", spec);
+    std::vector<TT> ts = tensors(1.0f);
+    ts.push_back(TT{"big", T_F32, {4096}, std::vector<float>(4096, 0.25f)});
+    MemSource ms(ts, kMeta);
+    recipe::EvalStats blobs, patches;
+    CHECK(recipe::evaluate(tpl->recipe(), ms, [](const recipe::BlobOut &) { return Error{}; }, &blobs).ok());
+    std::vector<uint8_t> patched;
+    const recipe::TemplateFile * f = tpl->file("model.mlmodel");
+    CHECK(recipe::patched_spec(tpl->recipe(), ms, f->data, f->size, patched, nullptr, &patches).ok());
+    // t("big") and its product are live together, plus the spec copy.
+    CHECK(patches.peak_bytes >= 2 * 4096 * 4 + f->size);
+    CHECK(patches.peak_bytes > blobs.peak_bytes);
+    recipe::EvalStats st;
+    CHECK(cache::write_package(*tpl, ms, td / "pkg.mlpackage", &st).ok());
+    CHECK_MSG(st.peak_bytes == patches.peak_bytes,
+              std::to_string(st.peak_bytes) + " vs patch pass " + std::to_string(patches.peak_bytes));
+    CHECK(read_bytes(td / "pkg.mlpackage/Data/com.apple.CoreML/model.mlmodel") ==
+          std::string(patched.begin(), patched.end()));
 }
 
 void case_memo_hot_path() {
@@ -1756,6 +1792,305 @@ void case_scheduler_hint_pruned() {
     CHECK(!fs::exists(hint_path));
 }
 
+#if defined(QVAC_COREML_HAVE_GGML)
+// ---- the generation glue through the scheduler ---------------------------------------------
+
+std::function<void()> g_before_glue_load;
+
+PrepareResult glue_prepare(const PrepareRequest &, PrepareContext & ctx) {
+    PrepareOutcome o = cache::prepare(g_sched_inputs, &ctx);
+    return generation::internal::result_of(o);
+}
+
+// Loads like an engine's LoadFn: under the lease the glue's begin_load takes.
+LoadResult glue_load(const LoadRequest & req) {
+    if (g_before_glue_load) g_before_glue_load();
+    LoadResult r;
+    if (!generation::begin_load(req, r)) return r;
+    r.model = std::make_shared<int>(1);
+    generation::end_load(req, r);
+    return r;
+}
+
+// The engine rejects the first `g_glue_rejects` loads: the framework refused
+// the model (LoadResult::rejected), with an error of class
+// `g_glue_reject_class` (a framework error is transient for the engine).
+std::atomic<int> g_glue_rejects{0};
+std::atomic<int> g_glue_loads{0};
+ErrorClass g_glue_reject_class = ErrorClass::transient;
+
+LoadResult glue_load_rejecting(const LoadRequest & req) {
+    LoadResult r;
+    if (!generation::begin_load(req, r)) return r;
+    if (g_glue_loads++ < g_glue_rejects) {
+        r.error = Error{g_glue_reject_class, "com.apple.CoreML", 0, "the engine rejected the model"};
+        r.rejected = true;
+    } else {
+        r.model = std::make_shared<int>(1);
+    }
+    generation::end_load(req, r);
+    return r;
+}
+
+std::shared_ptr<Slot> glue_slot(const std::shared_ptr<Manager> & mgr, const Env & env, const std::string & a,
+                                LoadFn load = glue_load) {
+    SlotSpec gen;
+    gen.engine = "toy";
+    gen.stage = "dac";
+    gen.units = ComputeUnits::cpu_only;
+    gen.route = Route::generate;
+    gen.tmpl = env.tpl.get();
+    gen.prepare.key = "toy-dac:" + a;
+    gen.prepare.template_id = "toy-dac";
+    gen.prepare_fn = glue_prepare;
+    gen.load_fn = load;
+    SlotPolicy pol;
+    pol.cache_dir = env.cache;
+    return mgr->make_slot(gen, pol);
+}
+
+std::shared_ptr<Manager> glue_manager() {
+    Config cfg;
+    cfg.backoff_initial = 20ms;
+    cfg.backoff_max = 100ms;
+    cfg.pin_image = false;
+    cfg.available_memory = [] { return uint64_t{1} << 40; };
+    return Manager::create(cfg);
+}
+
+// A prune between the artifact's publication and its load (the preparation
+// released its lease) deletes it; the load reports it gone and the slot goes
+// back to preparation, which regenerates it, instead of failing.
+void case_generated_artifact_pruned_before_load() {
+    Env env;
+    const std::string a = env.source("a.gguf");
+    g_sched_inputs = env.inputs(a);
+    int pruned = 0;
+    g_before_glue_load = [&] {
+        if (pruned++ == 0) {
+            CHECK(cache::prune(env.cache, cache::PrunePolicy::all(), env.catalog()).deleted_artifacts.size() == 1);
+        }
+    };
+    {
+        auto mgr = glue_manager();
+        auto s = glue_slot(mgr, env, a);
+        s->request(Priority::now);
+        CHECK_MSG(wait_state(s, SlotState::ready), s->status().error);
+        CHECK(g_compiles == 2);  // generated, pruned, generated again
+        CHECK(env.artifacts() == 1 && env.memos() == 1);
+    }
+    g_before_glue_load = nullptr;
+
+    // An artifact that went incomplete is likewise prepared again.
+    const std::string b = env.source("b.gguf", 2.0f);
+    PrepareOutcome o = env.prepare(b);
+    CHECK(ready(o));
+    o.lease.release();
+    LoadRequest req;
+    req.tmpl = env.tpl.get();
+    req.artifact_path = o.model_path;
+    fs::remove_all(o.model_path);
+    LoadResult r;
+    CHECK(!generation::begin_load(req, r));
+    CHECK(r.artifact_gone && r.lease_fd < 0 && !r.error.ok());
+}
+
+// One load of `req` through the glue that the framework refuses with
+// (cls, domain, code): what a LoadFn does with a rejected generated artifact.
+LoadResult reject_once(const LoadRequest & req, ErrorClass cls, const std::string & domain, int64_t code) {
+    LoadResult r;
+    if (!generation::begin_load(req, r)) return r;
+    r.error = Error{cls, domain, code, "the framework refused the model"};
+    r.rejected = true;
+    generation::end_load(req, r);
+    return r;
+}
+
+// A cached artifact the framework refuses (it passed the inventory check) is
+// quarantined under EX and regenerated at the same key, once; the error class
+// the engine reported stays on the slot. The (function, units) load record
+// counts the failures: the same error in another process promotes it, and
+// begin_load then refuses to load. A resource error never quarantines and
+// never promotes.
+void case_generated_rejected_hit_quarantined() {
+    Env env;
+    const std::string a = env.source("a.gguf");
+    g_sched_inputs = env.inputs(a);
+    { CHECK(ready(env.prepare(a))); }  // a cache hit for the slot below
+    CHECK(g_compiles == 1);
+    const cache::Layout l = env.layout();
+    {
+        // A framework rejection classed transient (as the engine reports it).
+        g_glue_rejects = 1;
+        g_glue_loads = 0;
+        auto mgr = glue_manager();
+        auto s = glue_slot(mgr, env, a, &glue_load_rejecting);
+        s->request(Priority::now);
+        CHECK_MSG(wait_state(s, SlotState::ready), s->status().error);
+        CHECK(g_compiles == 2 && g_glue_loads == 2);
+        CHECK(count_files(l.quarantine) == 1);  // the rejected copy, for prune
+        CHECK(env.artifacts() == 1 && s->status().route == StatusRoute::generated);
+    }
+    std::string key;
+    {
+        g_glue_rejects = 100;
+        g_glue_loads = 0;
+        auto mgr = glue_manager();
+        auto s = glue_slot(mgr, env, a, &glue_load_rejecting);
+        s->request(Priority::now);
+        CHECK(wait_state(s, SlotState::failed));
+        CHECK(g_glue_loads == 2 && g_compiles == 3);  // one regeneration, then failed
+        const SlotStatus st = s->status();
+        CHECK(st.error == "the engine rejected the model" && st.error_class == ErrorClass::transient);
+    }
+    g_glue_rejects = 0;
+    // The load record: two failures in this process, still transient.
+    PrepareOutcome o = env.prepare(a);
+    CHECK(ready(o));
+    o.lease.release();
+    key = o.key32;
+    LoadRequest req;
+    req.tmpl = env.tpl.get();
+    req.artifact_path = o.model_path;
+    req.units = ComputeUnits::cpu_and_ane;  // the slots above loaded with cpu_only
+    CHECK(failed::read(failed::record_path(l.failed, key, req.function, "cpu_only")));
+    const std::string rec_path = failed::record_path(l.failed, key, req.function, to_string(req.units));
+    CHECK(!failed::read(rec_path));  // another (function, units) than the slots above
+    reject_once(req, ErrorClass::transient, "com.apple.CoreML", 0);
+    auto rec = failed::read(rec_path);
+    CHECK(rec && rec->cls == ErrorClass::transient && rec->attempts == 1);
+    // The same rejection in another process promotes the record.
+    { CHECK(ready(env.prepare(a))); }
+    pid_t kid = spawn([&] {
+        reject_once(req, ErrorClass::transient, "com.apple.CoreML", 0);
+        return 0;
+    });
+    CHECK(reap(kid) == 0);
+    rec = failed::read(rec_path);
+    CHECK(rec && rec->cls == ErrorClass::deterministic && rec->attempts == 2);
+    // Then nothing loads it: begin_load refuses with the record's class.
+    { CHECK(ready(env.prepare(a))); }
+    LoadResult blocked;
+    CHECK(!generation::begin_load(req, blocked) && blocked.error.cls == ErrorClass::deterministic &&
+          blocked.lease_fd < 0 && !blocked.artifact_gone);
+    // A resource error, in two processes: never quarantined, never promoted.
+    const size_t quarantined = count_files(l.quarantine);
+    req.units = ComputeUnits::cpu_and_gpu;
+    const std::string res_path = failed::record_path(l.failed, key, req.function, to_string(req.units));
+    LoadResult first = reject_once(req, ErrorClass::transient, "NSPOSIXErrorDomain", ENOMEM);
+    kid = spawn([&] {
+        reject_once(req, ErrorClass::transient, "NSPOSIXErrorDomain", ENOMEM);
+        return 0;
+    });
+    CHECK(reap(kid) == 0);
+    rec = failed::read(res_path);
+    CHECK(!first.artifact_gone && count_files(l.quarantine) == quarantined && env.artifacts() == 1);
+    CHECK(rec && rec->cls == ErrorClass::transient && rec->attempts == 2);
+}
+
+// Quarantine under contention. While another holder keeps a shared lease the
+// quarantine of a rejected artifact cannot run: the load is requeued, not
+// failed, and once the lease is gone the next rejection quarantines it. If
+// another process repaired the entry after this load released its lease, the
+// repair (a new publication) is not quarantined: the load is requeued and
+// loads it.
+std::function<void(LoadResult &, int)> g_contention;  // runs inside the load, after begin_load
+std::atomic<int> g_contention_rejects{0};
+
+LoadResult glue_load_contention(const LoadRequest & req) {
+    LoadResult r;
+    if (!generation::begin_load(req, r)) return r;
+    const int n = ++g_glue_loads;
+    if (g_contention) g_contention(r, n);
+    if (n <= g_contention_rejects) {
+        r.error = Error{ErrorClass::transient, "com.apple.CoreML", 0, "the engine rejected the model"};
+        r.rejected = true;
+    } else {
+        r.model = std::make_shared<int>(1);
+    }
+    generation::end_load(req, r);
+    return r;
+}
+
+void case_generated_rejected_quarantine_contention() {
+    {
+        Env env;
+        const std::string a = env.source("a.gguf");
+        g_sched_inputs = env.inputs(a);
+        PrepareOutcome o = env.prepare(a);
+        CHECK(ready(o));
+        const std::string key = o.key32;
+        o.lease.release();
+        const cache::Layout l = env.layout();
+        cache::KeyLock other;  // another holder's lease
+        Error le;
+        CHECK(cache::KeyLock::take(l, key, cache::KeyLock::Mode::shared, other, &le) == cache::KeyLock::Result::ok);
+        g_glue_loads = 0;
+        g_contention_rejects = 2;
+        g_contention = [&](LoadResult &, int n) {
+            if (n == 2) other.release();  // the other holder is done before the second load's end
+        };
+        auto mgr = glue_manager();
+        auto s = glue_slot(mgr, env, a, &glue_load_contention);
+        s->request(Priority::now);
+        CHECK_MSG(wait_state(s, SlotState::ready), s->status().error);
+        CHECK(g_glue_loads == 3);                // busy -> requeued, rejected -> quarantined, regenerated -> loaded
+        CHECK(count_files(l.quarantine) == 1 && g_compiles == 2);
+        g_contention = nullptr;
+    }
+    {
+        Env env;
+        const std::string a = env.source("a.gguf");
+        g_sched_inputs = env.inputs(a);
+        PrepareOutcome o = env.prepare(a);
+        CHECK(ready(o));
+        const std::string key = o.key32;
+        const std::string tid = env.tpl->id();
+        o.lease.release();
+        const cache::Layout l = env.layout();
+        g_glue_loads = 0;
+        g_contention_rejects = 1;
+        g_contention = [&](LoadResult & r, int n) {
+            if (n != 1) return;
+            // This load is done with its lease; another process repairs the
+            // entry before this one takes the exclusive lock.
+            ::close(r.lease_fd);
+            r.lease_fd = -1;
+            CHECK(cache::quarantine(l, tid, key, nullptr) == cache::KeyLock::Result::ok);
+            CHECK(ready(env.prepare(a)));
+        };
+        auto mgr = glue_manager();
+        auto s = glue_slot(mgr, env, a, &glue_load_contention);
+        s->request(Priority::now);
+        CHECK_MSG(wait_state(s, SlotState::ready), s->status().error);
+        CHECK(g_glue_loads == 2);                                // requeued, then loads the repair
+        CHECK(count_files(l.quarantine) == 1 && g_compiles == 2);  // the repair is not quarantined
+        g_contention = nullptr;
+    }
+}
+
+// An unsupported cache volume: the slot is unsupported(cache_fs), not failed.
+void case_generated_unsupported_cache_fs() {
+    Env env;
+    const std::string a = env.source("a.gguf");
+    g_sched_inputs = env.inputs(a);
+    g_sched_inputs.fs_probe = [](const std::string &, cache::FsFacts & f) {
+        f.local = false;
+        f.fstype = "nfs";
+        f.free_bytes = 1ull << 40;
+        return true;
+    };
+    auto mgr = glue_manager();
+    auto s = glue_slot(mgr, env, a);
+    s->request(Priority::now);
+    CHECK(wait_state(s, SlotState::unsupported));
+    const SlotStatus st = s->status();
+    CHECK(st.reason == "cache_fs" && st.error_class == ErrorClass::none);
+    CHECK(state_label(st.state, st.reason) == "unsupported(cache_fs)");
+    CHECK(g_compiles == 0);
+}
+#endif
+
 }  // namespace
 
 int main(int argc, char ** argv) {
@@ -1764,6 +2099,7 @@ int main(int argc, char ** argv) {
                      {
                          {"golden-keys", case_golden_keys},
                          {"generate-and-artifact-json", case_generate_and_artifact_json},
+                         {"patch-pass-peak", case_patch_pass_peak},
                          {"memo-hot-path", case_memo_hot_path},
                          {"publish-race", case_publish_race},
                          {"recheck-under-lock", case_recheck_under_lock},
@@ -1800,6 +2136,12 @@ int main(int argc, char ** argv) {
                          {"preflight", case_preflight},
                          {"would-block-requeue", case_would_block_requeue},
                          {"scheduler-hint-pruned", case_scheduler_hint_pruned},
+#if defined(QVAC_COREML_HAVE_GGML)
+                         {"generated-artifact-pruned-before-load", case_generated_artifact_pruned_before_load},
+                         {"generated-unsupported-cache-fs", case_generated_unsupported_cache_fs},
+                         {"generated-rejected-hit-quarantined", case_generated_rejected_hit_quarantined},
+                         {"generated-rejected-quarantine-contention", case_generated_rejected_quarantine_contention},
+#endif
                      },
                      "test-coreml-cache");
 }
