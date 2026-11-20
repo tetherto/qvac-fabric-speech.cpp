@@ -19,9 +19,13 @@
 #include "parakeet/engine.h"
 #include "parakeet/fit.h"
 
+#include "nlohmann/json.hpp"
+
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <system_error>
 
@@ -68,6 +72,40 @@ void print(const char * what, const parakeet::FitResult & r) {
     std::printf("%s: ggml %llu, coreml %llu (fits %d, validated %d), free %llu\n", what,
                 (unsigned long long) r.ggml_required_bytes, (unsigned long long) r.coreml.bytes, r.coreml.fits,
                 r.coreml.validated, (unsigned long long) r.device_free_bytes);
+}
+
+// One template's charge, from its template.json as the runtime computes it
+// for cpu_and_ane: resident = runtime_weight_bytes + 2 x I/O + state +
+// workspace; transient = max(generation_peak_bytes + 8 MiB +
+// compile_peak_bytes, load_peak_bytes.cpu_and_ane); and its margin.
+struct TemplateCharge {
+    uint64_t resident = 0;
+    uint64_t transient = 0;
+    double margin = 0;
+};
+
+TemplateCharge template_charge(const char * id) {
+    std::ifstream in(std::string(PARAKEET_TEST_TEMPLATE_DIR) + "/" + id + "/template.json");
+    const nlohmann::json j = nlohmann::json::parse(in);
+    const nlohmann::json & m = j.at("memory");
+    uint64_t io = 0;
+    for (const auto & fn : j.at("functions")) {
+        for (const char * side : {"inputs", "outputs"}) {
+            for (const auto & x : fn.at(side)) {
+                uint64_t n = x.value("dtype", std::string("fp32")) == "fp16" ? 2 : 4;
+                for (const auto & d : x.at("shape")) n *= d.get<uint64_t>();
+                io += n;
+            }
+        }
+    }
+    TemplateCharge c;
+    c.resident = m.at("runtime_weight_bytes").get<uint64_t>() + 2 * io + j.value("state_bytes", uint64_t{0}) +
+                 m.value("workspace_bytes", uint64_t{0});
+    const uint64_t prepare = j.at("generation_peak_bytes").get<uint64_t>() + 8ull * 1024 * 1024 +
+                             m.at("compile_peak_bytes").get<uint64_t>();
+    c.transient = std::max(prepare, m.at("load_peak_bytes").at("cpu_and_ane").get<uint64_t>());
+    c.margin = m.at("margin").get<double>();
+    return c;
 }
 
 // The Engine's Core ML status, and its construction group in `construction`.
@@ -117,6 +155,30 @@ int main(int argc, char ** argv) {
     print("5 s workload", brief);
     check(brief.coreml.bytes > 0 && brief.coreml.bytes < all.coreml.bytes,
           "a 5 s workload charges fewer capacities");
+    // prewarm = all loads every capacity whatever the workload: a 5 s
+    // projection charges as much as the default one, more than without it.
+    const parakeet::FitResult all_brief = project(gguf, every, 5.0f);
+    print("prewarm all, 5 s", all_brief);
+    check(all_brief.coreml.bytes == all.coreml.bytes && all_brief.coreml.bytes > brief.coreml.bytes,
+          "prewarm all: a 5 s workload is charged every capacity");
+
+    // The exact charge, recomputed from the three templates' memory sections:
+    // every capacity = the residents + one (the largest) transient; the 5 s
+    // workload = capacity 358 alone. The constants carry the 1.25 already,
+    // so the templates' envelope margin must be 1.0.
+    const TemplateCharge t358 = template_charge("nemotron-diar-f358");
+    const TemplateCharge t745 = template_charge("nemotron-diar-f745");
+    const TemplateCharge t1125 = template_charge("nemotron-diar-f1125");
+    check(t358.margin == 1.0 && t745.margin == 1.0 && t1125.margin == 1.0,
+          "the templates' memory.margin is 1.0 (the constants carry the 1.25)");
+    const uint64_t every_bytes = t358.resident + t745.resident + t1125.resident +
+                                 std::max({t358.transient, t745.transient, t1125.transient});
+    const uint64_t one_bytes = t358.resident + t358.transient;
+    std::printf("from template.json: every capacity %llu, capacity 358 %llu\n", (unsigned long long) every_bytes,
+                (unsigned long long) one_bytes);
+    check(all.coreml.bytes == every_bytes && before.coreml.bytes == every_bytes,
+          "prewarm all and the default workload charge exactly the three templates' residents + one transient");
+    check(brief.coreml.bytes == one_bytes, "the 5 s workload charges exactly capacity 358's resident + transient");
 
     // Generate every capacity (wait for construction, prewarm all).
     parakeet::CoremlOptions generate = coreml_options(cache);

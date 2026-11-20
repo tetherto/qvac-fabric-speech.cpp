@@ -1971,7 +1971,11 @@ if (PARAKEET_BUILD_TESTS)
         # not validated for report every capacity unsupported. Never skips.
         add_executable(test-fit-coreml-generated-diarizers test/test_fit_coreml_generated_diarizers.cpp)
         target_link_libraries(test-fit-coreml-generated-diarizers PRIVATE qvac-parakeet)
-        target_include_directories(test-fit-coreml-generated-diarizers PRIVATE include)
+        target_include_directories(test-fit-coreml-generated-diarizers PRIVATE include
+            ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/third_party)
+        # The expected charge is recomputed from the embedded templates' memory sections.
+        target_compile_definitions(test-fit-coreml-generated-diarizers PRIVATE
+            PARAKEET_TEST_TEMPLATE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates")
         parakeet_apply_ccache(test-fit-coreml-generated-diarizers)
         add_test(NAME test-fit-coreml-generated-diarizers
             COMMAND test-fit-coreml-generated-diarizers "${PARAKEET_TEST_NEMOTRON_GENERATED_GGUF}"
