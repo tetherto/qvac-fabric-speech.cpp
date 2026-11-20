@@ -136,6 +136,11 @@ EU, default to 30-second chunks and reject smaller explicit chunks to prevent
 phrase loss. PCM writes can still be arbitrarily small; `finalize()` processes
 the remaining audio. See the [streaming contract](docs/api.md).
 
+For standard offline TDT models, the ggml encoder masks right-padding in
+attention and zeros padded activations before depthwise convolution. Valid
+encoder frames therefore do not depend on the padded tail. Push streaming
+still re-encodes windows, so the model's accuracy can vary with window context.
+
 Fixed TDT exports now accept `mel` plus `mel_valid_mask` and require this updated
 runtime. Legacy single-input sidecars remain loadable but need re-exporting to
 isolate padding; updating runtime code alone does not fix those old artifacts.
