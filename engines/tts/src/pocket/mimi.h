@@ -9,7 +9,10 @@ struct ggml_backend_device;
 namespace tts_cpp::pocket::detail {
 class Mimi {
 public:
-    explicit Mimi(const std::string & path, int threads = 2, ggml_backend_device * device = nullptr);
+    // `on_open` (optional) receives the descriptor the load reads the GGUF
+    // through, before the first read (see pocket/gguf_file.h).
+    explicit Mimi(const std::string & path, int threads = 2, ggml_backend_device * device = nullptr,
+                  const LoadedFileRecorder & on_open = {});
     ~Mimi();
     Mimi(const Mimi &) = delete;
     Mimi & operator=(const Mimi &) = delete;

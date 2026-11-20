@@ -1,5 +1,6 @@
 #define TTS_CPP_BUILD
 #include "tts-cpp/pocket/engine.h"
+#include "tts-cpp/pocket/fit.h"
 #include "pocket/flow_lm.h"
 #include "pocket/mimi.h"
 #include "pocket/frontend.h"
@@ -52,6 +53,7 @@ public:
         return values;
     }
 };
+
 }
 
 struct Engine::Impl {
@@ -61,26 +63,46 @@ struct Engine::Impl {
     std::unique_ptr<detail::Frontend> frontend;
     detail::VoiceState voice;
     std::string device_name;
-    detail::CoremlPolicy coreml_policy;
-    // Used by the constructor and then only by one producer thread at a time.
-    std::unique_ptr<detail::CoremlStep> step;
-    std::atomic<bool> coreml_active{false};
-    std::string coreml_label;
+    // Both stages on the shared Core ML runtime; null without TTS_CPP_COREML.
+    std::unique_ptr<detail::CoremlStages> coreml;
     std::vector<float> bos;
-    // Used by the constructor and then only by the synthesizing thread.
+    // Used by the synthesizing thread: this chunk's Mimi decoder stream.
+    detail::CoremlDecoderUse decoder_use;
     std::unique_ptr<detail::CoremlDecoder> decoder;
-    std::atomic<bool> decoder_active{false};
-    std::string decoder_label;
     std::vector<float> chunk_latents;  // decoded on Core ML this chunk, for a ggml replay
     // Where this call's stages ran.
     bool flow_coreml = false, flow_ggml = false, mimi_coreml = false, mimi_ggml = false;
+    std::string flow_label, mimi_label;
+    std::atomic<bool> pending{false};  // a chunk ran on ggml because a sidecar was not ready
     std::atomic<bool> operating{false};
     std::atomic<bool> cancelled{false};
+    // Counts cancel() calls. A blocking coreml_wait() ends when it moves past
+    // the value the wait started with: nothing clears it, so one wait never
+    // swallows a cancel meant for another, or for a synthesis.
+    std::atomic<uint64_t> wait_cancels{0};
     std::condition_variable changed;
 
     explicit Impl(const EngineOptions & o) : opts(o) {
         detail::backend_request(o.backend);
-        coreml_policy = detail::resolve_coreml_policy(o.coreml_compute_units, o.coreml_strict);
+        detail::CoremlEngineOptions coreml_options = detail::coreml_engine_options(o);
+        // Validates the Core ML options in every build (an explicit invalid
+        // value throws even without Core ML).
+        detail::coreml_plan_route(detail::CoremlStage::step, coreml_options);
+        detail::coreml_plan_route(detail::CoremlStage::decoder, coreml_options);
+#ifdef TTS_CPP_USE_COREML
+        // Fit's memory-degrade: with a budget, Core ML is dropped when only the
+        // ggml projection fits. Decided before the weights load, so it reads
+        // the same free memory fit_params reports, for the workload and
+        // headroom the caller's fit assessed.
+        bool degrade = false;
+        if (o.coreml.memory_budget_bytes) {
+            FitOptions fit;
+            fit.engine = o;
+            fit.text = o.fit_text;
+            fit.margin_bytes = o.fit_margin_bytes;
+            degrade = fit_params(fit).coreml.disabled_reason == "memory";
+        }
+#endif
         if (o.output_sample_rate < 8000 || o.output_sample_rate > 192000) fail("output sample rate must be 8000..192000 Hz");
         if (o.steps < 1 || o.steps > 64 || !std::isfinite(o.temperature) || o.temperature < 0 || o.temperature > 10 ||
             !std::isfinite(o.noise_clamp) || o.noise_clamp < 0 || !std::isfinite(o.eos_threshold) ||
@@ -94,8 +116,13 @@ struct Engine::Impl {
         const auto device = ggml_backend_get_device(backend.get());
         device_name = ggml_backend_dev_description(device);
         frontend.reset(new detail::Frontend(o.frontend_path));
-        lm.reset(new detail::FlowLM(o.flow_lm_path, o.context, o.n_threads, device));
-        mimi.reset(new detail::Mimi(o.mimi_path, o.n_threads, device));
+        // Each load records the file it read (Core ML generation asks for it).
+        lm.reset(new detail::FlowLM(o.flow_lm_path, o.context, o.n_threads, device, [&](int fd, const std::string & p) {
+            coreml_options.step_source = detail::coreml_loaded_source(fd, p);
+        }));
+        mimi.reset(new detail::Mimi(o.mimi_path, o.n_threads, device, [&](int fd, const std::string & p) {
+            coreml_options.decoder_source = detail::coreml_loaded_source(fd, p);
+        }));
         if (frontend->source_hash() != lm->source_hash() || mimi->source_hash() != lm->source_hash() ||
             frontend->vocab_size() != lm->config().vocab_size || lm->config().latent_dim != mimi->latent_dim()) fail("model artifacts do not belong to the same checkpoint");
         if (!o.voice_path.empty()) voice = lm->read_voice(o.voice_path);
@@ -105,66 +132,32 @@ struct Engine::Impl {
             if (rate != mimi->sample_rate()) pcm = ::resample_sinc(pcm, rate, mimi->sample_rate());
             lm->prefill(lm->voice_embeddings(mimi->encode(pcm))); voice = lm->capture_voice();
         }
-        load_coreml_step();
-        load_coreml_decoder();
+#ifdef TTS_CPP_USE_COREML
+        // A chunk needs the voice plus at least one token and one frame.
+        coreml = detail::CoremlStages::create(coreml_options, lm->config(), lm->source_hash(), voice.frames + 2, degrade);
+        if (coreml && coreml->step_route().route != "none") bos = lm->bos_latent();
+#endif
     }
 
     [[noreturn]] void fail_strict(const std::string & reason) const {
         fail(reason + " (Core ML strict policy: coreml_strict / " + detail::COREML_STRICT_ENV + ")");
     }
-    // The voice prefix never changes and no frame writes below it, so its
-    // rows go into the sidecar's state once (again after a strict failure).
-    void load_coreml_step() {
-        if (!detail::coreml_step_enabled(opts.flow_lm_path, coreml_policy)) return;
-        try {
-            auto loaded = std::make_unique<detail::CoremlStep>(detail::coreml_step_path(opts.flow_lm_path),
-                detail::coreml_units(coreml_policy, detail::COREML_STEP_DEFAULT_UNITS), lm->config(), lm->source_hash());
-            // A chunk needs the voice plus at least one token and one frame.
-            if (voice.frames+2 > loaded->context())
-                throw std::runtime_error("the " + std::to_string(voice.frames) + "-frame voice fills the Core ML step "
-                    "sidecar's " + std::to_string(loaded->context()) + " positions; export a longer --context");
-            loaded->reset(voice_rows());
-            bos = lm->bos_latent();
-            coreml_label = loaded->label();
-            step = std::move(loaded);
-            coreml_active.store(true);
-        } catch (const std::exception & e) {
-            if (coreml_policy.strict) fail_strict(e.what());
-            std::fprintf(stderr, "Pocket TTS: %s; FlowLM stays on ggml\n", e.what());
-        }
-    }
-    void load_coreml_decoder() {
-        if (!detail::coreml_decoder_enabled(opts.mimi_path, coreml_policy)) return;
-        try {
-            decoder = std::make_unique<detail::CoremlDecoder>(detail::coreml_decoder_path(opts.mimi_path),
-                detail::coreml_units(coreml_policy, detail::COREML_DECODER_DEFAULT_UNITS), mimi->source_hash());
-            decoder_label = decoder->label();
-            decoder_active.store(true);
-        } catch (const std::exception & e) {
-            if (coreml_policy.strict) fail_strict(e.what());
-            std::fprintf(stderr, "Pocket TTS: %s; Mimi stays on ggml\n", e.what());
-        }
-    }
+    // A failed prediction retires the sidecar for every Engine on it; strict
+    // mode then fails the call instead of falling back.
     void retire_decoder(const std::exception & e) {
-        // Strict mode keeps the decoder; the next chunk resets its stream.
-        if (coreml_policy.strict) fail_strict(e.what());
-        std::fprintf(stderr, "Pocket TTS: %s; retiring the Core ML Mimi decoder, Mimi continues on ggml\n", e.what());
-        decoder_active.store(false);
+        if (decoder_use.retire) decoder_use.retire(e.what());
+        const bool strict = coreml && coreml->decoder_strict();
         decoder.reset();
+        decoder_use = {};
+        if (strict) fail_strict(e.what());
+        std::fprintf(stderr, "Pocket TTS: %s; retiring the Core ML Mimi decoder, Mimi continues on ggml\n", e.what());
     }
     detail::CacheRows voice_rows() const { return {0, voice.frames, voice.keys, voice.values}; }
-    // Strict mode keeps the sidecar for later calls: the failed frame's
-    // blended write may have left non-finite values in any row, so the state
-    // is replaced by one holding only the voice rows.
-    void retire_step(const std::exception & e) {
-        if (coreml_policy.strict) {
-            try { step->reset(voice_rows()); }
-            catch (const std::exception &) { coreml_active.store(false); step.reset(); }
-            fail_strict(e.what());
-        }
+    void retire_step(detail::CoremlStepUse & use, const std::exception & e) {
+        if (use.retire) use.retire(e.what());
+        use = {};
+        if (coreml && coreml->step_strict()) fail_strict(e.what());
         std::fprintf(stderr, "Pocket TTS: %s; retiring the Core ML step sidecar, FlowLM continues on ggml\n", e.what());
-        coreml_active.store(false);
-        step.reset();
     }
 
     struct Chunk {
@@ -177,8 +170,9 @@ struct Engine::Impl {
         bool done = false, stop = false;
         std::exception_ptr error;
     };
-    std::vector<Chunk> prepare_chunks(const std::string & text) const {
+    std::vector<Chunk> prepare_chunks(const std::string & text) {
         std::vector<Chunk> prepared;
+        size_t longest = 0;
         for (const auto & chunk : frontend->split(text, opts.max_tokens)) {
             auto tokens = frontend->encode(chunk.text);
             const int tail = opts.frames_after_eos >= 0 ? opts.frames_after_eos : chunk.tail_frames;
@@ -186,10 +180,16 @@ struct Engine::Impl {
             const size_t positions = voice.frames+tokens.size()+budget.max_frames();
             if (positions > size_t(opts.context))
                 fail("text chunk exceeds the context; add sentence punctuation or increase context");
-            if (step && coreml_policy.strict && positions > size_t(step->context()))
-                fail_strict("text chunk needs " + std::to_string(positions) + " positions; the Core ML step sidecar holds " +
-                            std::to_string(step->context()) + " (lower max_tokens or export a longer --context)");
             prepared.push_back({std::move(tokens), budget});
+            longest = std::max(longest, positions);
+        }
+        // Strict mode refuses a chunk past the step's context before any PCM
+        // (the acquisition waits for the step).
+        if (coreml && coreml->step_strict()) {
+            auto use = coreml->acquire_step(0, &cancelled);
+            if (use.step && longest > size_t(use.step->context()))
+                fail_strict("text chunk needs " + std::to_string(longest) + " positions; the Core ML step sidecar holds " +
+                            std::to_string(use.step->context()) + " (lower max_tokens or export a longer --context)");
         }
         if (prepared.empty()) fail("no text chunks");
         return prepared;
@@ -202,17 +202,32 @@ struct Engine::Impl {
         changed.notify_all();
         return true;
     }
-    // The Core ML sidecar serves a chunk whose every position fits its state.
-    // A failing prediction retires it; the frames it generated are prefilled
-    // into the ggml cache and the chunk continues on ggml.
+    // The Core ML step serves a chunk whose every position fits its state. It
+    // is acquired once, here on the producer thread; a model this Engine has
+    // not used yet gets the voice rows first. A failing prediction retires it;
+    // the frames it generated are prefilled into the ggml cache and the chunk
+    // continues on ggml.
     void generate_frames(const Chunk & chunk, Noise & noise, Queue & queue) {
         const int start = lm->position();
         lm->prefill(lm->text_embeddings(chunk.tokens));
         int position = lm->position();
-        bool coreml = step && position+chunk.budget.max_frames() <= step->context();
-        if (coreml) {
-            try { step->write_rows(lm->cache_rows(start, position-start)); }
-            catch (const std::exception & e) { retire_step(e); coreml = false; }
+        detail::CoremlStepUse use;
+        // A chunk longer than the step's known capacity runs on ggml whatever
+        // the step's readiness: it does not request the step, and does not
+        // count as pending.
+        const int capacity = coreml ? coreml->step_capacity() : 0;
+        if (coreml && (capacity == 0 || position + chunk.budget.max_frames() <= capacity))
+            use = coreml->acquire_step(chunk.budget.max_frames(), &cancelled);
+        if (use.pending) pending.store(true);
+        bool on_coreml = use.step && position+chunk.budget.max_frames() <= use.step->context();
+        if (on_coreml) {
+            try {
+                auto lock = use.lock();
+                // The voice prefix never changes and no frame writes below it.
+                if (!use.step->primed()) use.step->prime(voice_rows());
+                use.step->write_rows(lm->cache_rows(start, position-start));
+            }
+            catch (const std::exception & e) { retire_step(use, e); on_coreml = false; }
         }
         std::vector<float> previous, fed, hidden, next;
         detail::FrameProgress progress(chunk.budget);
@@ -221,20 +236,22 @@ struct Engine::Impl {
             { std::lock_guard<std::mutex> lock(queue.mutex); if (queue.stop) return; }
             const auto frame_noise = noise.sample(lm->config().latent_dim, opts.temperature, opts.noise_clamp);
             float eos = 0;
-            if (coreml) {
+            if (on_coreml) {
                 const auto & input = previous.empty() ? bos : previous;
-                try { step->step(position, input, frame_noise, hidden, next); }
+                try { auto lock = use.lock(); use.step->step(position, input, frame_noise, hidden, next); }
                 catch (const std::exception & e) {
-                    retire_step(e); coreml = false;
+                    on_coreml = false;
+                    retire_step(use, e);
                     if (!fed.empty()) lm->prefill(lm->audio_embeddings(fed));
                 }
-                if (coreml) {
+                if (on_coreml) {
                     fed.insert(fed.end(), input.begin(), input.end()); ++position; flow_coreml = true;
+                    flow_label = use.label;
                     eos = lm->eos_logit(hidden);
                     if (opts.steps > 1) { next = lm->sample(hidden, frame_noise, opts.steps); flow_ggml = true; }
                 }
             }
-            if (!coreml) {
+            if (!on_coreml) {
                 const auto condition = lm->advance(previous);
                 eos = condition.eos_logit; flow_ggml = true;
                 next = lm->sample(condition.hidden, frame_noise, opts.steps);
@@ -274,9 +291,11 @@ struct Engine::Impl {
     std::vector<float> decode(const std::vector<float> & latents) {
         if (decoder) {
             try {
-                auto pcm = decoder->decode(latents);
+                std::vector<float> pcm;
+                { auto lock = decoder_use.lock(); pcm = decoder->decode(latents); }
                 chunk_latents.insert(chunk_latents.end(), latents.begin(), latents.end());
                 mimi_coreml = true;
+                mimi_label = decoder_use.label;
                 return pcm;
             } catch (const std::exception & e) {
                 retire_decoder(e);
@@ -309,7 +328,12 @@ struct Engine::Impl {
     void generate_chunk(const Chunk & chunk, Noise & noise, OutputResampler & resampler,
                         SynthesisResult & result, const Emit & emit) {
         lm->restore_voice(voice); mimi->reset_decoder();
-        if (decoder) decoder->reset();
+        // The Mimi decoder is acquired once per chunk, on this (the calling) thread.
+        decoder.reset();
+        decoder_use = {};
+        if (coreml) decoder_use = coreml->acquire_decoder(chunk.budget.max_frames(), &cancelled);
+        if (decoder_use.pending) pending.store(true);
+        if (decoder_use.model) decoder = std::make_unique<detail::CoremlDecoder>(decoder_use.model, decoder_use.label);
         chunk_latents.clear();
         Queue queue;
         std::thread producer([&] { produce(chunk, noise, queue); });
@@ -337,6 +361,7 @@ struct Engine::Impl {
         SynthesisResult result; result.sample_rate = opts.output_sample_rate;
         Noise noise(opts.seed); OutputResampler resampler(mimi->sample_rate(), opts.output_sample_rate);
         flow_coreml = flow_ggml = mimi_coreml = mimi_ggml = false;
+        flow_label.clear(); mimi_label.clear(); pending.store(false);
         bool delivered = false;
         const auto emit = [&](const std::vector<float> & pcm) {
             if (pcm.empty() || cancelled.load()) return;
@@ -350,8 +375,12 @@ struct Engine::Impl {
         const auto placement = [](bool coreml, bool ggml, const std::string & label) {
             return !coreml ? detail::GGML_STAGE_BACKEND : ggml ? detail::MIXED_STAGE_BACKEND : label;
         };
-        result.flow_lm_backend = placement(flow_coreml, flow_ggml, coreml_label);
-        result.mimi_backend = placement(mimi_coreml, mimi_ggml, decoder_label);
+        result.flow_lm_backend = placement(flow_coreml, flow_ggml, flow_label);
+        result.mimi_backend = placement(mimi_coreml, mimi_ggml, mimi_label);
+        result.coreml_pending = pending.load();
+        // The chunk's handles are released with the call.
+        decoder.reset();
+        decoder_use = {};
         result.cancelled = cancelled.load(); result.generation_ms = milliseconds(begin); return result;
     }
 };
@@ -361,11 +390,34 @@ int Engine::sample_rate() const noexcept { return impl_->opts.output_sample_rate
 const char * Engine::backend_name() const noexcept { return flow_lm_backend_name(); }
 const char * Engine::flow_lm_backend_name() const noexcept { return impl_->lm->backend_name(); }
 const char * Engine::mimi_backend_name() const noexcept { return impl_->mimi->backend_name(); }
-bool Engine::flow_lm_on_coreml() const noexcept { return impl_->coreml_active.load(); }
-bool Engine::mimi_on_coreml() const noexcept { return impl_->decoder_active.load(); }
+bool Engine::flow_lm_on_coreml() const noexcept { return impl_->coreml && impl_->coreml->step_ready(); }
+bool Engine::mimi_on_coreml() const noexcept { return impl_->coreml && impl_->coreml->decoder_ready(); }
+std::string Engine::coreml_status() const {
+    return impl_->coreml ? impl_->coreml->status_json()
+                         : detail::coreml_unbuilt_status_json(detail::coreml_engine_options(impl_->opts));
+}
+bool Engine::coreml_wait(int64_t timeout_ms) const {
+    if (!impl_->coreml) return false;
+    // A readiness poll has nothing to cancel and touches no flag.
+    if (timeout_ms == 0) return impl_->coreml->wait(0);
+    // A blocking wait ends early on any cancel() made after it started; it
+    // clears nothing, so concurrent waits and a synthesis on another thread
+    // each keep the cancels meant for them.
+    return impl_->coreml->wait(timeout_ms, &impl_->wait_cancels, impl_->wait_cancels.load());
+}
+std::string Engine::coreml_construction() const {
+    return impl_->coreml ? impl_->coreml->construction_json()
+                         : detail::coreml_unbuilt_group_json("construction", detail::coreml_engine_options(impl_->opts));
+}
+std::string Engine::coreml_prewarm(CoremlOptions::Prewarm scope, bool wait) {
+    if (!impl_->coreml) return detail::coreml_unbuilt_group_json("prewarm", detail::coreml_engine_options(impl_->opts));
+    return impl_->coreml->prewarm(scope, wait, &impl_->wait_cancels, impl_->wait_cancels.load());
+}
 const char * Engine::device_name() const noexcept { return impl_->device_name.c_str(); }
 std::string Engine::model_source_sha256() const { return impl_->lm->source_hash(); }
-void Engine::cancel() noexcept { impl_->cancelled.store(true); impl_->changed.notify_all(); }
+void Engine::cancel() noexcept {
+    impl_->cancelled.store(true); impl_->wait_cancels.fetch_add(1); impl_->changed.notify_all();
+}
 SynthesisResult Engine::synthesize_stream(const std::string & text, const AudioCallback & callback) { return impl_->generate(text, callback); }
 SynthesisResult Engine::synthesize(const std::string & text) {
     std::vector<float> pcm;

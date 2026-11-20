@@ -1,0 +1,320 @@
+{
+  "schema": 1,
+  "id": "pocket-mimi",
+  "family": "pocket",
+  "stage": "mimi",
+  "export_kind": "pocket-mimi-decoder-v1",
+  "exporter": {
+    "path": "engines/tts/scripts/export-pocket-coreml.py",
+    "sha256": "12ecd776b9cdad9bec7242554727542e2a812d49ad285cb076827b116722a067",
+    "args": [
+      "--gguf",
+      "{gguf}",
+      "--output",
+      "{out}"
+    ],
+    "gguf_name": "mimi.gguf"
+  },
+  "min_os": {
+    "macos": "15.0"
+  },
+  "multifunction_ane": false,
+  "default_compute_units": "cpu_and_ane",
+  "shareable": true,
+  "pad_safe": false,
+  "match": {
+    "architecture": "pocket-tts-mimi",
+    "metadata": {}
+  },
+  "toolchain": {
+    "coremltools": "9.0",
+    "torch": "2.7.0",
+    "numpy": "1.26.4"
+  },
+  "functions": [
+    {
+      "name": "main",
+      "inputs": [
+        {
+          "name": "latents",
+          "dtype": "fp32",
+          "shape": [
+            1,
+            32
+          ]
+        },
+        {
+          "name": "cos",
+          "dtype": "fp32",
+          "shape": [
+            16,
+            32
+          ]
+        },
+        {
+          "name": "sin",
+          "dtype": "fp32",
+          "shape": [
+            16,
+            32
+          ]
+        },
+        {
+          "name": "mask",
+          "dtype": "fp32",
+          "shape": [
+            16,
+            265
+          ]
+        },
+        {
+          "name": "keys",
+          "dtype": "fp32",
+          "shape": [
+            2,
+            8,
+            249,
+            64
+          ]
+        },
+        {
+          "name": "values",
+          "dtype": "fp32",
+          "shape": [
+            2,
+            8,
+            249,
+            64
+          ]
+        },
+        {
+          "name": "h_upsample",
+          "dtype": "fp32",
+          "shape": [
+            512,
+            1
+          ]
+        },
+        {
+          "name": "h_conv0",
+          "dtype": "fp32",
+          "shape": [
+            512,
+            6
+          ]
+        },
+        {
+          "name": "h_convtr0",
+          "dtype": "fp32",
+          "shape": [
+            512,
+            1
+          ]
+        },
+        {
+          "name": "h_residual0",
+          "dtype": "fp32",
+          "shape": [
+            256,
+            2
+          ]
+        },
+        {
+          "name": "h_convtr1",
+          "dtype": "fp32",
+          "shape": [
+            256,
+            1
+          ]
+        },
+        {
+          "name": "h_residual1",
+          "dtype": "fp32",
+          "shape": [
+            128,
+            2
+          ]
+        },
+        {
+          "name": "h_convtr2",
+          "dtype": "fp32",
+          "shape": [
+            128,
+            1
+          ]
+        },
+        {
+          "name": "h_residual2",
+          "dtype": "fp32",
+          "shape": [
+            64,
+            2
+          ]
+        },
+        {
+          "name": "h_final",
+          "dtype": "fp32",
+          "shape": [
+            64,
+            2
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "pcm",
+          "dtype": "fp32",
+          "shape": [
+            1920
+          ]
+        },
+        {
+          "name": "new_keys",
+          "dtype": "fp32",
+          "shape": [
+            2,
+            8,
+            249,
+            64
+          ]
+        },
+        {
+          "name": "new_values",
+          "dtype": "fp32",
+          "shape": [
+            2,
+            8,
+            249,
+            64
+          ]
+        },
+        {
+          "name": "new_h_upsample",
+          "dtype": "fp32",
+          "shape": [
+            512,
+            1
+          ]
+        },
+        {
+          "name": "new_h_conv0",
+          "dtype": "fp32",
+          "shape": [
+            512,
+            6
+          ]
+        },
+        {
+          "name": "new_h_convtr0",
+          "dtype": "fp32",
+          "shape": [
+            512,
+            1
+          ]
+        },
+        {
+          "name": "new_h_residual0",
+          "dtype": "fp32",
+          "shape": [
+            256,
+            2
+          ]
+        },
+        {
+          "name": "new_h_convtr1",
+          "dtype": "fp32",
+          "shape": [
+            256,
+            1
+          ]
+        },
+        {
+          "name": "new_h_residual1",
+          "dtype": "fp32",
+          "shape": [
+            128,
+            2
+          ]
+        },
+        {
+          "name": "new_h_convtr2",
+          "dtype": "fp32",
+          "shape": [
+            128,
+            1
+          ]
+        },
+        {
+          "name": "new_h_residual2",
+          "dtype": "fp32",
+          "shape": [
+            64,
+            2
+          ]
+        },
+        {
+          "name": "new_h_final",
+          "dtype": "fp32",
+          "shape": [
+            64,
+            2
+          ]
+        }
+      ]
+    }
+  ],
+  "stateful": false,
+  "weight_bin_size": 20621824,
+  "patches": [
+    {
+      "spec_offset": 1061,
+      "len": 64,
+      "sentinel_hex": "61653164613135386336353864656530343564383836663964393935396236636333653062363462626236386436346161653862643734373866366265393938"
+    },
+    {
+      "spec_offset": 88155,
+      "len": 2,
+      "sentinel_hex": "1804"
+    }
+  ],
+  "state_bytes": 0,
+  "expected_warm_load_ms": {
+    "main": 0
+  },
+  "memory": {
+    "runtime_weight_bytes": 20621824,
+    "workspace_bytes": 0,
+    "compile_peak_bytes": 59768832,
+    "ane_compile_reserve_bytes": 923795456,
+    "load_peak_bytes": {
+      "cpu_and_ane": 67108864,
+      "all": null,
+      "cpu_and_gpu": null,
+      "cpu_only": null
+    },
+    "margin": 1.0,
+    "coreml_bound": "measured",
+    "validated_for": [
+      {
+        "units": "cpu_and_ane",
+        "os": "27.2.1",
+        "chip": "M2"
+      },
+      {
+        "units": "cpu_and_ane",
+        "os": "26.7.2",
+        "chip": "M4 Max"
+      }
+    ],
+    "measured": {
+      "margin": 1.25,
+      "runs": 57,
+      "resident_bytes": 28926848,
+      "basis": "Each constant is 1.25 x the largest value measured over every overlapped generated-schedule run on the validated_for hosts (57 run reports: 27 on an Apple M2, macOS 27.2.1; 30 on the CI runners' Apple M4 Max, macOS 26.7.2), rounded up to 1 MiB, so the envelope's own margin is 1.0. The schedule (test-pocket-coreml --generated BUNDLE --memory-schedule DIR) generates, compiles, loads and warms both Pocket sidecars in the background (one Core ML job at a time) while ggml FlowLM and Mimi keep working: the prepare charge (generation_peak_bytes + 8 MiB + compile_peak_bytes) covers this stage's prepare over the footprint just before it began, and load_peak_bytes its load and warm-up over the footprint just before the load. The two templates' resident parts (weights, 2 x I/O, the step's KV state and the step's workspace_bytes) together cover 1.25 x the largest steady state with both sidecars running, over the footprint just before the first load (458.5 MiB, M4 Max): on the M4 Max the step on cpu_and_gpu holds GPU working memory the M2 does not (steady up to 4.4 x the M2's largest, 103.3 MiB), which the step's workspace_bytes carries; Mimi's workspace is 0. ane_compile_reserve_bytes is 1.25 x ANECompilerService's largest absolute size while the decoder loaded on any host: no run could start the service clean (it runs as root under aned and does not exit when idle), so its growth over a service that already held memory (at most 41.6 MiB on the M2 and 232.3 MiB on the M4 Max) understates a cold compile; the absolute size, which includes other processes' compiles on the same Mac (on the CI runners it ranged from 312.0 to 704.4 MiB with the same job), is the conservative basis."
+    }
+  },
+  "prefer_ggml_on": [],
+  "literals": [],
+  "provided": [],
+  "generation_peak_bytes": 14680064
+}

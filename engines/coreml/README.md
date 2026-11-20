@@ -414,7 +414,16 @@ script).
    ```
 
    `extract` runs the exporter on twins A and B (seeds 1 and 2) and compares
-   the two specs field by field. An inline fp16 or fp32 constant whose value
+   the two specs field by field. For every `meta "<key>" str` line already
+   in `recipe.txt`, twins A and B carry different strings of that key (of its
+   reference length), so a spec metadata string the exporter copies from it
+   becomes a `str` patch site with a drafted `meta_s` line. A one-value tensor
+   has no spread in its reference statistics, so twins A and B would agree on
+   it; widen its range in `reference-gguf.json` when the spec inlines it (the
+   Pocket Mimi template does this for its final convolution bias).
+   `template.json` `exporter.gguf_name` (or `--exporter-gguf-name`) makes the
+   exporter see every input GGUF under that file name, for exporters that
+   record it in the spec. An inline fp16 or fp32 constant whose value
    differs between A and B (a weight the compiler folded into the program,
    such as a bias it negated) becomes a patch site: `model.mlmodel` holds a
    deterministic sentinel there, `template.json` `patches` records
@@ -517,13 +526,30 @@ permute take concat`, `let` bindings, and:
 | `lit("id")` | a `template.json` `literals` entry `{id, dtype, shape, offset}`: bytes of `literals.bin` (fp16 or fp32, numpy order), as f32 |
 | `sub(x, y)` | IEEE subtraction in the promoted dtype, numpy broadcasting (like `add`); `sub(x, x)` is `+0` |
 | `sqrt(x)` | IEEE square root, correctly rounded in the operand's dtype (so still `exact`); a negative input gives NaN, which the output cast rejects |
+| `meta_f("key")` | a numeric GGUF metadata value (`meta "key" u32\|i32\|f32\|f64\|bool`) as a weak scalar, like a numeric literal |
+| `meta_s("key")` | a GGUF metadata string (`meta "key" str`); only the value of a `patch ... str` line or a `provided()` dependency |
+| `provided("key", [deps...])` | an f32 array of the shape `template.json` `provided` declares for `key` (`{"key", "shape"}`), computed by the C++ function the engine registered under `key` (`recipe::register_provided`). `deps` lists what it reads, each `t("name")`, `meta_f("key")` or `meta_s("key")` of a declared `source` or `meta` line, so the source digest covers it; the function sees only those. A blob that uses it is `ulp` |
 
 `patch <spec_offset> fp16|fp32 <count> <expr>` lines write `count` values
 into `model.mlmodel` at `spec_offset`, replacing the sentinel that
-`template.json` `patches` records there. Patch lines come in spec offset
-order and must not overlap; each lies on a declared patch site of exactly its
-length, and every site has a line. `patch ... str`, `provided()`, `meta_f`
-and `meta_s` belong to a later generator version.
+`template.json` `patches` records there. `patch <spec_offset> str <len>
+meta_s("key")` writes a GGUF metadata string of exactly `len` bytes there (a
+checkpoint hash the spec's metadata records); a value of another length is a
+deterministic failure, and that GGUF stays on ggml. Patch lines come in spec
+offset order and must not overlap; each lies on a declared patch site of
+exactly its length, and every site has a line.
+
+**provided() implementations.** An engine keeps them in
+`engines/<engine>/coreml-provided/*.cpp`, written against `TensorSource`
+under `QVAC_COREML_NS` (no ggml): `qvac_coreml_add_to(... PROVIDED <files>)`
+compiles them into the engine's generator, and `qvac-coreml-tool` compiles
+every engine's, so `generate`, `report`, `real` and the golden check cover
+every template. Each file registers its keys when linked (the tool) and
+exposes a registration function the engine calls before it probes a template
+(a static library may drop an unreferenced object). A template whose recipe
+uses a key with no registered implementation does not match (`no_template`).
+An implementation is part of the generator: a change that alters its output
+must bump `GENERATOR_VERSION`.
 
 ### Gates in CI
 

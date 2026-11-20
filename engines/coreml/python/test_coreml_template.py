@@ -313,6 +313,114 @@ class PatchSiteTest(unittest.TestCase):
             ctpl.find_sites(b"zz.zz", [("p", b"zz")])
 
 
+class StringPatchSiteTest(unittest.TestCase):
+    @needs(HAVE_CT, "coremltools")
+    def test_metadata_string_sites(self):
+        fixed = ("eps", ctpl.MIL_TYPE_FP16, "bytes", [1e-5])
+        a, b = mil_spec([fixed]), mil_spec([fixed])
+        for spec, sha in ((a, "a" * 64), (b, "b" * 64)):
+            spec.description.metadata.userDefined["toy.source_sha256"] = sha
+            spec.description.metadata.userDefined["toy.schema"] = "1"
+            spec.description.metadata.userDefined["com.github.apple.coremltools.conversion_date"] = sha[:3]
+        path = "description.metadata.userDefined['toy.source_sha256']"
+        strings = [("toy.sha", "a" * 64, "b" * 64)]
+        self.assertEqual(ctpl.differing_strings(a, b, strings), [(path, "toy.source_sha256", "toy.sha")])
+        # A string the twins do not vary is not a site (spec_diff then fails the extraction).
+        self.assertEqual(ctpl.differing_strings(a, b), [])
+        spec, out = ctpl.patch_spec(a, b, strings)
+        self.assertEqual([(p, d) for p, _, d, _ in out], [(path, "str:toy.sha")])
+        self.assertEqual(out[0][3], b"a" * 64)  # A's value, for the draft
+        data = spec.SerializeToString(deterministic=True)
+        self.assertEqual(len(data), len(a.SerializeToString(deterministic=True)))
+        found = ctpl.find_sites(data, [(p, sent) for p, sent, _, _ in out])
+        self.assertEqual(found[0]["len"], 64)
+        sent = bytes.fromhex(found[0]["sentinel_hex"])
+        self.assertEqual(sent, ctpl.str_sentinel(path, 64))
+        self.assertTrue(sent.isascii() and sent != b"a" * 64)
+        drafts = ctpl.patch_drafts(out, found, {})
+        self.assertEqual(drafts[0][1], f'patch {found[0]["spec_offset"]} str 64 meta_s("toy.sha")')
+        with self.assertRaisesRegex(ctpl.TemplateError, "spec differs between twin A and twin B"):
+            ctpl.patch_spec(a, b)
+
+    def test_twin_strings(self):
+        text = 'mlrecipe 1\nsource "w" f32 [2]\nmeta "toy.sha" str\nmeta "toy.n" u32\nmeta  "toy.other"  str\nend\n'
+        self.assertEqual(ctpl.recipe_str_metas(text), ["toy.sha", "toy.other"])
+        # Every spelling the recipe grammar accepts: indented, tabs, a
+        # trailing comment, CRLF, a `#` inside the key; never a commented-out
+        # line or another type.
+        text = ('mlrecipe 1\r\n  meta "a.sha" str   # the checkpoint\r\n\tmeta\t"b#c"\tstr\n'
+                '# meta "commented" str\nmeta "d" str_x\nmeta "e" u32 # str\nblob 64 fp16 1 f16(add(\n'
+                't("w"), 1.0))  # meta "f" str\nend\n')
+        self.assertEqual(ctpl.recipe_str_metas(text), ["a.sha", "b#c"])
+        manifest = {"metadata": [{"key": "toy.sha", "value": "x" * 64}, {"key": "toy.other", "value": "abc"}]}
+        sa = ctpl.twin_sets(manifest, ["toy.sha", "toy.other"], "a")
+        sb = ctpl.twin_sets(manifest, ["toy.sha", "toy.other"], "b")
+        self.assertEqual([s.split("=", 1)[0] for s in sa], ["toy.sha", "toy.other"])
+        self.assertEqual([len(s.split("=", 1)[1]) for s in sa], [64, 3])
+        self.assertNotEqual(sa, sb)
+        self.assertEqual(sa, ctpl.twin_sets(manifest, ["toy.sha", "toy.other"], "a"))
+        with self.assertRaisesRegex(ctpl.TemplateError, "lacks"):
+            ctpl.twin_sets(manifest, ["toy.nope"], "a")
+        # A patch str site's length is in bytes: a non-ASCII reference value
+        # gets a twin value of its UTF-8 byte length.
+        wide = {"metadata": [{"key": "toy.name", "value": "caf\u00e9\u00e9"}]}
+        value = ctpl.twin_sets(wide, ["toy.name"], "a")[0].split("=", 1)[1]
+        self.assertEqual(len(value.encode("utf-8")), len("caf\u00e9\u00e9".encode("utf-8")))
+        self.assertTrue(value.isascii())
+
+    def test_twin_strings_never_coincide(self):
+        # A one-byte value once gave every twin the same character (A, B and
+        # Q of this key all held "7"), so neither extraction nor report saw
+        # it vary. Each key's values now differ between labels and from the
+        # reference, and no two keys share a value within a label.
+        t = ctpl.twin_string_table({"pocket.variant145": "x"})
+        vals = [t[l]["pocket.variant145"] for l in ctpl.TWIN_LABELS]
+        self.assertEqual(len(set(vals)), len(vals), vals)
+        self.assertTrue(all(len(v) == 1 and v != "x" and v.isascii() for v in vals), vals)
+        manifest = {"metadata": [{"key": "pocket.variant145", "value": "x"}]}
+        self.assertEqual(ctpl.twin_sets(manifest, ["pocket.variant145"], "a"),
+                         [f"pocket.variant145={t['a']['pocket.variant145']}"])
+        refs = {f"k{i}": "z" for i in range(20)}
+        refs.update({"long": "y" * 64})
+        t = ctpl.twin_string_table(refs)
+        self.assertEqual(t, ctpl.twin_string_table(dict(reversed(list(refs.items())))))  # order-independent
+        for label in ctpl.TWIN_LABELS:
+            self.assertEqual(len(set(t[label].values())), len(refs), label)
+        for k in refs:
+            vs = [t[l][k] for l in ctpl.TWIN_LABELS]
+            self.assertEqual(len(set(vs)), len(vs), k)
+            self.assertNotIn(refs[k], vs)
+        # More one-byte strings than one-byte values: refused, not ambiguous.
+        with self.assertRaisesRegex(ctpl.TemplateError, "no distinct 1-byte value"):
+            ctpl.twin_string_table({f"k{i}": "z" for i in range(40)})
+
+    @needs(HAVE_CT, "coremltools")
+    def test_ambiguous_string_mapping_is_refused(self):
+        fixed = ("eps", ctpl.MIL_TYPE_FP16, "bytes", [1e-5])
+        a, b = mil_spec([fixed]), mil_spec([fixed])
+        a.description.metadata.userDefined["toy.id"] = "p"
+        b.description.metadata.userDefined["toy.id"] = "q"
+        with self.assertRaisesRegex(ctpl.TemplateError, "ambiguous"):
+            ctpl.differing_strings(a, b, [("toy.one", "p", "q"), ("toy.two", "p", "q")])
+
+    def test_exporter_gguf_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            script = tmp / "exporter.py"
+            script.write_text("import sys, pathlib\n"
+                              "out = pathlib.Path(sys.argv[2]) / (pathlib.Path(sys.argv[1]).name + '.mlpackage')\n"
+                              "out.mkdir(parents=True)\n")
+            gguf = tmp / "twin-a.gguf"
+            gguf.write_bytes(b"GGUF")
+            exp = {"path": str(script), "args": ["{gguf}", "{out}"], "gguf_name": "flow-lm.gguf"}
+            pkg = ctpl.run_exporter(exp, gguf, tmp / "export-a")
+            self.assertEqual(pkg.name, "flow-lm.gguf.mlpackage")
+            pkg = ctpl.run_exporter({"path": str(script), "args": ["{gguf}", "{out}"]}, gguf, tmp / "export-b")
+            self.assertEqual(pkg.name, "twin-a.gguf.mlpackage")
+            with self.assertRaisesRegex(ctpl.TemplateError, "plain"):
+                ctpl.run_exporter(dict(exp, gguf_name="../x.gguf"), gguf, tmp / "export-c")
+
+
 class PatchDraftTest(unittest.TestCase):
     def test_add_patch_drafts(self):
         text = 'mlrecipe 1\nblob 64 fp16 2 f16(t("a"))\npatch 10 fp16 1 f16(t("b"))\nend\n'
@@ -424,6 +532,70 @@ class TwinTest(unittest.TestCase):
             self.assertEqual(ctpl.coinciding_tensors(a, b), ["same"])
             with self.assertRaisesRegex(ctpl.TemplateError, r"same values for 1 tensor\(s\).*: same"):
                 ctpl.check_twins_differ(a, b, "extract")
+
+
+class QTwinTypesTest(unittest.TestCase):
+    """Twin Q holds the lower precisions each recipe source accepts, even for
+    tensors the reference holds in f32, and the twin really holds them."""
+
+    RECIPE = ('mlrecipe 1\nsource "a" f32,f16 [4,32]\nsource "b" f32 [32]\n'
+              'source "c" f32,q8_0,f16 [4,32]\nsource "d" f32,q8_0,f16 [4,8]\nend\n')
+
+    def manifest(self):
+        return {"tensors": [{"name": "a", "type": "f32", "ne": [32, 4, 1, 1]},
+                            {"name": "b", "type": "f32", "ne": [32, 1, 1, 1]},
+                            {"name": "c", "type": "f32", "ne": [32, 4, 1, 1]},
+                            {"name": "d", "type": "f32", "ne": [8, 4, 1, 1]},
+                            {"name": "unread", "type": "f32", "ne": [32, 1, 1, 1]}]}
+
+    @needs(HAVE_GGUF, "gguf")
+    def test_plan(self):
+        src = ctpl.recipe_source_types(self.RECIPE)
+        self.assertEqual(src["c"], ["f32", "q8_0", "f16"])
+        plan = ctpl.q_twin_tensor_types(self.manifest(), src, "q8_0")
+        # a: only f16 below f32; b: f32-only; c: the requested q8_0; d: a row
+        # of 8 is not a q8_0 block, so f16; unread: no source, stays f32.
+        self.assertEqual(plan, {"a": "f16", "c": "q8_0", "d": "f16"})
+        self.assertEqual(ctpl.type_summary({"x": "f16", "y": "f32", "z": "f16"}), "f16 x2, f32 x1")
+
+    @needs(HAVE_GGUF, "gguf")
+    def test_repo_pocket_templates_exercise_f16(self):
+        # The Pocket templates' references are all f32; their recipes accept
+        # f16, so twin Q must convert every source tensor (the step's F16
+        # matrix tier included). Parler's recipe is f32-only: nothing lower.
+        root = HERE.parents[2] / "engines" / "tts" / "coreml-templates"
+        for tid, n in (("pocket-step-c1024", 119), ("pocket-mimi", 44), ("parler-dac-w128", 0)):
+            tdir = root / tid
+            plan = ctpl.q_twin_tensor_types(ctpl.load_manifest(tdir / "reference-gguf.json"),
+                                            ctpl.recipe_source_types((tdir / "recipe.txt").read_text()), "q8_0")
+            self.assertEqual(len(plan), n, tid)
+            self.assertTrue(all(t == "f16" for t in plan.values()), (tid, plan))
+        step = ctpl.q_twin_tensor_types(
+            ctpl.load_manifest(root / "pocket-step-c1024" / "reference-gguf.json"),
+            ctpl.recipe_source_types((root / "pocket-step-c1024" / "recipe.txt").read_text()), "q8_0")
+        self.assertEqual(step.get("transformer.layers.0.self_attn.in_proj.weight"), "f16")
+
+    @NEEDS_TOOL
+    def test_twin_holds_the_forced_types(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            out = tmp / "twin-q.gguf"
+            subprocess.run([TOOL, "twin", "--manifest", TOY_STATELESS / "reference-gguf.json", "--seed", "3",
+                            "--types", "q8_0", "--tensor-type", "toy.w1=f16", "--tensor-type", "toy.b1=q8_0",
+                            "-o", out], check=True, capture_output=True)
+            held = ctpl.verified_types(out)
+            self.assertEqual(held, {"toy.w1": "f16", "toy.b1": "q8_0", "toy.w2": "f32", "toy.b2": "f32"})
+            # Without --tensor-type an f32 reference stays f32 (the gap the
+            # forced types close).
+            subprocess.run([TOOL, "twin", "--manifest", TOY_STATELESS / "reference-gguf.json", "--seed", "3",
+                            "--types", "q8_0", "-o", out], check=True, capture_output=True)
+            self.assertEqual(set(ctpl.verified_types(out).values()), {"f32"})
+            for bad, msg in (("nope=f16", "no tensor nope"), ("toy.w1=q4_k", "row of 8"),
+                             ("toy.w1=f64", "cannot write")):
+                p = subprocess.run([TOOL, "twin", "--manifest", TOY_STATELESS / "reference-gguf.json", "--seed", "3",
+                                    "--types", "f32", "--tensor-type", bad, "-o", out], capture_output=True, text=True)
+                self.assertNotEqual(p.returncode, 0, bad)
+                self.assertIn(msg, p.stderr, bad)
 
 
 def stored_tensor_name(template, gguf_path, name):
@@ -595,6 +767,17 @@ if mode == "spec":
     spec.ParseFromString((data / "model.mlmodel").read_bytes())
     w1 = export_toy.read_weights(gguf, "stateless")["toy.w1"]
     spec.description.metadata.userDefined["qvac.toy.w1_sum"] = repr(float(w1.sum()))
+    (data / "model.mlmodel").write_bytes(spec.SerializeToString(deterministic=True))
+elif mode.startswith("hash"):
+    # A spec string copied from a GGUF string (qvac_toy.source, or the key
+    # after "hash:"), as an exporter records a checkpoint hash.
+    import gguf as gguf_py
+    from coremltools.proto import Model_pb2
+
+    field = gguf_py.GGUFReader(gguf).fields[mode.split(":", 1)[1] if ":" in mode else "qvac_toy.source"]
+    spec = Model_pb2.Model()
+    spec.ParseFromString((data / "model.mlmodel").read_bytes())
+    spec.description.metadata.userDefined["qvac.toy.source"] = bytes(field.parts[field.data[0]]).decode()
     (data / "model.mlmodel").write_bytes(spec.SerializeToString(deterministic=True))
 elif mode == "patch":
     # An inline fp16 constant that depends on the weights (minus toy.b1): a
@@ -777,6 +960,88 @@ class ToyExtractTest(unittest.TestCase):
         patch_lines = [l for l in (self.tdir / "recipe.txt").read_text().splitlines() if l.startswith("patch ")]
         self.assertEqual(len(patch_lines), 1)
         self.assertIn('t("toy.b1")', patch_lines[0])
+
+    SOURCE = "0123456789abcdef"  # the reference checkpoint's identity string
+
+    def add_source_string(self, key="qvac_toy.source", value=None):
+        """Gives the toy's reference GGUF a string (qvac_toy.source) the template does not match on."""
+        path = self.tdir / "reference-gguf.json"
+        man = json.loads(path.read_text())
+        man["metadata"].append({"gguf_type": 8, "key": key, "value": self.SOURCE if value is None else value})
+        path.write_text(json.dumps(man, indent=1) + "\n")
+
+    def declare_source(self, comment, key="qvac_toy.source"):
+        """Declares GGUF string `key` in the toy's recipe, after its sources."""
+        lines = (self.tdir / "recipe.txt").read_text().splitlines()
+        at = max(i for i, l in enumerate(lines) if l.startswith("source ")) + 1
+        lines.insert(at, f'  meta  "{key}"\tstr' + ("   # the checkpoint's identity" if comment else ""))
+        (self.tdir / "recipe.txt").write_text("\n".join(lines) + "\n")
+
+    def report(self):
+        p = run_ctpl("report", "--template-dir", self.tdir)
+        return p, {l.split()[2] + l.split()[3]: l.split()[0] for l in p.stdout.splitlines()
+                   if l.startswith(("PASS ", "FAIL ")) and " twin " in l}
+
+    @NEEDS_TOY
+    def test_declared_string_becomes_a_patch_site_and_report_varies_it(self):
+        # Declared indented, with tabs and a trailing comment: the twins still
+        # vary it, so the exporter's copy becomes a str patch site, and the
+        # report's three twins (each with its own value) all pass.
+        self.add_source_string()
+        self.declare_source(comment=True)
+        p = self.extract_variant("hash")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        patches = json.loads((self.tdir / "template.json").read_text())["patches"]
+        self.assertEqual([x["len"] for x in patches], [len(self.SOURCE)])
+        self.assertIn(f'str {len(self.SOURCE)} meta_s("qvac_toy.source")', (self.tdir / "recipe.txt").read_text())
+        p, twins = self.report()
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(twins, {"twinA": "PASS", "twinB": "PASS", "twinQ": "PASS"}, p.stdout)
+
+    @NEEDS_TOY
+    def test_one_byte_string_is_never_baked(self):
+        # The counterexample: a legal one-byte string whose twin values once
+        # all came out "7", so extraction found no site, the report passed
+        # and the template wrote "7" for the real "x". The twins now vary it,
+        # so extraction sees the exporter copy it. A one-byte site has no
+        # sentinel unique in the spec, so extraction refuses and writes
+        # nothing; it never bakes a value.
+        key = "pocket.variant145"
+        self.add_source_string(key, "x")
+        self.declare_source(comment=False, key=key)
+        before = snapshot(self.tdir)
+        p = self.extract_variant("hash:" + key)
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertIn("qvac.toy.source", p.stderr)
+        self.assertEqual(snapshot(self.tdir), before)
+        # A template extracted before the string was declared bakes "x";
+        # once declared, the report gives every twin its own one-byte value
+        # and fails B and Q.
+        lines = [l for l in (self.tdir / "recipe.txt").read_text().splitlines() if key not in l]
+        (self.tdir / "recipe.txt").write_text("\n".join(lines) + "\n")
+        p = self.extract_variant("hash:" + key)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.declare_source(comment=False, key=key)
+        p, twins = self.report()
+        self.assertNotEqual(p.returncode, 0, p.stdout)
+        self.assertEqual((twins.get("twinB"), twins.get("twinQ")), ("FAIL", "FAIL"), p.stdout)
+
+    @NEEDS_TOY
+    def test_report_rejects_a_baked_string(self):
+        # Extracted without the declaration, the template bakes the reference
+        # string into its spec. Once the recipe declares the string, the
+        # report gives every twin another value (another source hash), and
+        # the baked spec no longer equals the exporter's.
+        self.add_source_string()
+        p = self.extract_variant("hash")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(json.loads((self.tdir / "template.json").read_text()).get("patches", []), [])
+        self.declare_source(comment=False)
+        p, twins = self.report()
+        self.assertNotEqual(p.returncode, 0, p.stdout)
+        self.assertEqual(twins.get("twinB"), "FAIL", p.stdout)
+        self.assertEqual(twins.get("twinQ"), "FAIL", p.stdout)
+        self.assertIn("qvac.toy.source", p.stdout)
 
     @NEEDS_TOY
     def test_unchanged_reextraction_keeps_template_bytes(self):

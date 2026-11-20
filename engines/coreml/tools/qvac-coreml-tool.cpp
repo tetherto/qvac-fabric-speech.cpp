@@ -6,11 +6,14 @@
 //            Shape manifest: every metadata key/value and every tensor's name,
 //            type and ne, plus per-tensor value statistics (min, max, mean, std).
 //   twin     --manifest <reference-gguf.json> --seed <S> --types <t[,t...]> -o <out.gguf>
-//            [--set key=value ...]
+//            [--set key=value ...] [--tensor-type name=type ...]
 //            A production-geometry random GGUF: values per tensor inside the
 //            recorded range (around the recorded value when the range is a
 //            single value, so every tensor differs between seeds); tensors that are quantised (or f16/bf16) in the
 //            reference take the listed types in turn, the rest stay f32.
+//            --tensor-type writes the named tensor in that type whatever the
+//            reference type (a twin with the lower precisions a recipe
+//            accepts for tensors the reference holds in f32).
 //            Quantised with ggml's own quantizers; --types takes only types
 //            ggml can both write and read back (twin_writes()). --set
 //            overrides a string metadata value (extraction sentinels).
@@ -525,6 +528,20 @@ int cmd_twin(const Args & a) {
             sets[kv.substr(0, eq)] = kv.substr(eq + 1);
         }
     }
+    std::map<std::string, ggml_type> tensor_types;
+    if (auto it = a.opt.find("--tensor-type"); it != a.opt.end()) {
+        for (const std::string & kv : it->second) {
+            const size_t eq = kv.rfind('=');
+            if (eq == std::string::npos || eq == 0) die("--tensor-type name=type");
+            const auto ty = recipe::ggml_type_from_name(kv.substr(eq + 1));
+            if (!ty || !twin_writes(static_cast<ggml_type>(*ty))) {
+                die("--tensor-type: cannot write " + kv.substr(eq + 1) + " (supported: " + twin_type_names() + ")");
+            }
+            if (!tensor_types.emplace(kv.substr(0, eq), static_cast<ggml_type>(*ty)).second) {
+                die("--tensor-type: " + kv.substr(0, eq) + " given twice");
+            }
+        }
+    }
     gguf_context * g = gguf_init_empty();
     for (const json & e : m.at("metadata")) {
         const std::string k = e.at("key");
@@ -573,7 +590,14 @@ int cmd_twin(const Args & a) {
         }
         p.type = GGML_TYPE_F32;
         const bool low_precision = ref && *ref != GGML_TYPE_F32;
-        if (low_precision) {
+        if (auto forced = tensor_types.find(p.name); forced != tensor_types.end()) {
+            if (p.ne[0] % ggml_blck_size(forced->second) != 0) {
+                die("--tensor-type: " + p.name + " row of " + std::to_string(p.ne[0]) + " is not a multiple of " +
+                    ggml_type_name(forced->second) + "'s block");
+            }
+            p.type = forced->second;
+            tensor_types.erase(forced);
+        } else if (low_precision) {
             const ggml_type want = types[rr % types.size()];
             if (want == GGML_TYPE_F32 || p.ne[0] % ggml_blck_size(want) == 0) {
                 p.type = want;
@@ -582,6 +606,7 @@ int cmd_twin(const Args & a) {
         }
         plan.push_back(p);
     }
+    if (!tensor_types.empty()) die("--tensor-type: no tensor " + tensor_types.begin()->first + " in the manifest");
     const std::string out = a.need("-o");
     StreamWriter w(g, out);
     for (const Plan & p : plan) w.add(p.name, p.type, p.n_dims, p.ne);

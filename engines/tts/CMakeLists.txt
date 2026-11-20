@@ -514,7 +514,10 @@ if (TTS_CPP_BUILD_LIBRARY)
     qvac_coreml_add_to(tts-cpp NAMESPACE tts_cpp_coreml PREFIX TTS_CPP ENABLE ${TTS_CPP_COREML}
         TEMPLATES "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/parler-dac-w128"
                   "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/supertonic-vocoder-w64"
-                  "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/supertonic-vocoder-pw2d-w64")
+                  "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/supertonic-vocoder-pw2d-w64"
+                  "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/pocket-step-c1024"
+                  "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/pocket-mimi"
+        PROVIDED "${CMAKE_CURRENT_SOURCE_DIR}/coreml-provided/pocket.cpp")
     target_link_libraries(tts-cpp PUBLIC ggml)
     find_package(Threads REQUIRED)
     target_link_libraries(tts-cpp PRIVATE Threads::Threads)
@@ -2059,7 +2062,7 @@ if (TTS_CPP_BUILD_TESTS)
         # parity against ggml and Engine routing on a real bundle with
         # POCKET_COREML_TEST_BUNDLE (both sidecars exported next to their GGUFs).
         add_executable(test-pocket-coreml test/pocket/test_coreml.cpp src/pocket/frontend.cpp)
-        target_include_directories(test-pocket-coreml PRIVATE src include)
+        target_include_directories(test-pocket-coreml PRIVATE src include ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/test)
         target_link_libraries(test-pocket-coreml PRIVATE tts-cpp ggml)
         if (TTS_CPP_COREML)
             target_compile_definitions(test-pocket-coreml PRIVATE TTS_CPP_USE_COREML)
@@ -2071,6 +2074,41 @@ if (TTS_CPP_BUILD_TESTS)
         tts_cpp_register_test(test-pocket-coreml-engine
             EXE test-pocket-coreml LABEL "fixture" ARGS "--engine-fixture")
         set_tests_properties(test-pocket-coreml-shapes test-pocket-coreml-engine PROPERTIES SKIP_RETURN_CODE 77)
+        # Pocket's Core ML routes never read the cache, so fit is the same
+        # before and after a generation, with and without warm hints. Checked
+        # on twins of the pocket-step-c1024 and pocket-mimi templates'
+        # reference manifests, written by qvac-coreml-tool; --bundle DIR also
+        # compares the whole fit result on a complete bundle.
+        add_executable(test-pocket-fit-stable test/pocket/test_fit_stable.cpp)
+        target_include_directories(test-pocket-fit-stable PRIVATE src)
+        target_link_libraries(test-pocket-fit-stable PRIVATE tts-cpp ggml)
+        if (TTS_CPP_COREML)
+            # The hint cases write records where the runtime looks for them,
+            # so the test uses the runtime's hint-path helper (same namespace).
+            get_target_property(_tcb_coreml_ns tts-cpp QVAC_COREML_NS)
+            target_compile_definitions(test-pocket-fit-stable PRIVATE TTS_CPP_USE_COREML
+                                       QVAC_COREML_NS=${_tcb_coreml_ns})
+            target_include_directories(test-pocket-fit-stable PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/include ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/src)
+        endif()
+        tts_cpp_apply_ccache(test-pocket-fit-stable)
+        if (TARGET qvac-coreml-tool)
+            set(_pocket_step_twin "${CMAKE_CURRENT_BINARY_DIR}/pocket-step-c1024-twin.gguf")
+            set(_pocket_mimi_twin "${CMAKE_CURRENT_BINARY_DIR}/pocket-mimi-twin.gguf")
+            add_test(NAME test-pocket-fit-stable-twin-step
+                     COMMAND qvac-coreml-tool twin
+                             --manifest "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/pocket-step-c1024/reference-gguf.json"
+                             --seed 1 --types f16 -o "${_pocket_step_twin}")
+            add_test(NAME test-pocket-fit-stable-twin-mimi
+                     COMMAND qvac-coreml-tool twin
+                             --manifest "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/pocket-mimi/reference-gguf.json"
+                             --seed 1 --types f16 -o "${_pocket_mimi_twin}")
+            set_tests_properties(test-pocket-fit-stable-twin-step test-pocket-fit-stable-twin-mimi
+                                 PROPERTIES LABELS "unit" FIXTURES_SETUP pocket-twins)
+            add_test(NAME test-pocket-fit-stable COMMAND test-pocket-fit-stable
+                     --step-gguf "${_pocket_step_twin}" --mimi-gguf "${_pocket_mimi_twin}")
+            set_tests_properties(test-pocket-fit-stable PROPERTIES LABELS "unit" FIXTURES_REQUIRED pocket-twins)
+        endif()
         foreach(_pocket_backend opencl hexagon)
             string(TOUPPER "${_pocket_backend}" _pocket_backend_uc)
             if (TTS_CPP_POCKET_${_pocket_backend_uc}_TESTS)
