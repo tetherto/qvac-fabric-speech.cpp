@@ -1,0 +1,422 @@
+mlrecipe 1
+template acestep-vae-t64
+spec_sha256 2f46467a752ecfd13da33305b96305ff7ed6816ea2161d444ed04332c6830fba
+weight_bin_size 170113920
+blobs 145
+
+# ACE-Step 1.5 Oobleck VAE decoder, 64-frame window (scripts/export-vae-coreml.py, default
+# --t-latent 64, fp16). ACE-Step ships every vae tensor in BF16; f32, f16 and q8_0 are accepted
+# too and read through ggml's dequantisation, as the exporter reads the GGUF.
+# Every convolution weight is the exporter's weight-norm fuse, v * (g / (||v|| + 1e-12)), with the
+# norm over each output row ([OC, IC, K] for a convolution, [IC, OC, K] for a transposed one: the
+# exporter flattens v by its first dimension), summed in f64 here and pairwise in f32 there, so those
+# blobs are ulp-class. Each Snake stores exp(alpha) and 1 / exp(beta) (ulp-class: libm vs NumPy exp).
+# The two stride-4 upsamplers (blocks 2 and 3) are written in the exporter's phase form: the
+# [IC, OC, 8] transposed kernel becomes a three-tap [4 * OC, IC, 3] convolution with
+# out[r * OC + o, i, k] = w[i, o, tap(r, k)], tap = [[6, 2, -], [7, 3, -], [-, 4, 0], [-, 5, 1]]
+# (- is a zero tap, take index -1), and its bias is torch's 1-D bias.repeat(4): tile, in phase-major
+# row order r * OC + o. Blocks 0, 1 and 4 keep the native transposed convolution and the fused
+# [IC, OC, K] kernel.
+source "decoder.conv1.weight_v" f32,f16,bf16,q8_0 [2048,64,7]
+source "decoder.conv1.weight_g" f32,f16,bf16,q8_0 [2048,1,1]
+source "decoder.conv1.bias" f32,f16,bf16,q8_0 [2048]
+source "decoder.block.0.snake1.alpha" f32,f16,bf16,q8_0 [1,2048,1]
+source "decoder.block.0.snake1.beta" f32,f16,bf16,q8_0 [1,2048,1]
+source "decoder.block.0.conv_t1.weight_v" f32,f16,bf16,q8_0 [2048,1024,20]
+source "decoder.block.0.conv_t1.weight_g" f32,f16,bf16,q8_0 [2048,1,1]
+source "decoder.block.0.conv_t1.bias" f32,f16,bf16,q8_0 [1024]
+source "decoder.block.0.res_unit1.snake1.alpha" f32,f16,bf16,q8_0 [1,1024,1]
+source "decoder.block.0.res_unit1.snake1.beta" f32,f16,bf16,q8_0 [1,1024,1]
+source "decoder.block.0.res_unit1.conv1.weight_v" f32,f16,bf16,q8_0 [1024,1024,7]
+source "decoder.block.0.res_unit1.conv1.weight_g" f32,f16,bf16,q8_0 [1024,1,1]
+source "decoder.block.0.res_unit1.conv1.bias" f32,f16,bf16,q8_0 [1024]
+source "decoder.block.0.res_unit1.snake2.alpha" f32,f16,bf16,q8_0 [1,1024,1]
+source "decoder.block.0.res_unit1.snake2.beta" f32,f16,bf16,q8_0 [1,1024,1]
+source "decoder.block.0.res_unit1.conv2.weight_v" f32,f16,bf16,q8_0 [1024,1024,1]
+source "decoder.block.0.res_unit1.conv2.weight_g" f32,f16,bf16,q8_0 [1024,1,1]
+source "decoder.block.0.res_unit1.conv2.bias" f32,f16,bf16,q8_0 [1024]
+source "decoder.block.0.res_unit2.snake1.alpha" f32,f16,bf16,q8_0 [1,1024,1]
+source "decoder.block.0.res_unit2.snake1.beta" f32,f16,bf16,q8_0 [1,1024,1]
+source "decoder.block.0.res_unit2.conv1.weight_v" f32,f16,bf16,q8_0 [1024,1024,7]
+source "decoder.block.0.res_unit2.conv1.weight_g" f32,f16,bf16,q8_0 [1024,1,1]
+source "decoder.block.0.res_unit2.conv1.bias" f32,f16,bf16,q8_0 [1024]
+source "decoder.block.0.res_unit2.snake2.alpha" f32,f16,bf16,q8_0 [1,1024,1]
+source "decoder.block.0.res_unit2.snake2.beta" f32,f16,bf16,q8_0 [1,1024,1]
+source "decoder.block.0.res_unit2.conv2.weight_v" f32,f16,bf16,q8_0 [1024,1024,1]
+source "decoder.block.0.res_unit2.conv2.weight_g" f32,f16,bf16,q8_0 [1024,1,1]
+source "decoder.block.0.res_unit2.conv2.bias" f32,f16,bf16,q8_0 [1024]
+source "decoder.block.0.res_unit3.snake1.alpha" f32,f16,bf16,q8_0 [1,1024,1]
+source "decoder.block.0.res_unit3.snake1.beta" f32,f16,bf16,q8_0 [1,1024,1]
+source "decoder.block.0.res_unit3.conv1.weight_v" f32,f16,bf16,q8_0 [1024,1024,7]
+source "decoder.block.0.res_unit3.conv1.weight_g" f32,f16,bf16,q8_0 [1024,1,1]
+source "decoder.block.0.res_unit3.conv1.bias" f32,f16,bf16,q8_0 [1024]
+source "decoder.block.0.res_unit3.snake2.alpha" f32,f16,bf16,q8_0 [1,1024,1]
+source "decoder.block.0.res_unit3.snake2.beta" f32,f16,bf16,q8_0 [1,1024,1]
+source "decoder.block.0.res_unit3.conv2.weight_v" f32,f16,bf16,q8_0 [1024,1024,1]
+source "decoder.block.0.res_unit3.conv2.weight_g" f32,f16,bf16,q8_0 [1024,1,1]
+source "decoder.block.0.res_unit3.conv2.bias" f32,f16,bf16,q8_0 [1024]
+source "decoder.block.1.snake1.alpha" f32,f16,bf16,q8_0 [1,1024,1]
+source "decoder.block.1.snake1.beta" f32,f16,bf16,q8_0 [1,1024,1]
+source "decoder.block.1.conv_t1.weight_v" f32,f16,bf16,q8_0 [1024,512,12]
+source "decoder.block.1.conv_t1.weight_g" f32,f16,bf16,q8_0 [1024,1,1]
+source "decoder.block.1.conv_t1.bias" f32,f16,bf16,q8_0 [512]
+source "decoder.block.1.res_unit1.snake1.alpha" f32,f16,bf16,q8_0 [1,512,1]
+source "decoder.block.1.res_unit1.snake1.beta" f32,f16,bf16,q8_0 [1,512,1]
+source "decoder.block.1.res_unit1.conv1.weight_v" f32,f16,bf16,q8_0 [512,512,7]
+source "decoder.block.1.res_unit1.conv1.weight_g" f32,f16,bf16,q8_0 [512,1,1]
+source "decoder.block.1.res_unit1.conv1.bias" f32,f16,bf16,q8_0 [512]
+source "decoder.block.1.res_unit1.snake2.alpha" f32,f16,bf16,q8_0 [1,512,1]
+source "decoder.block.1.res_unit1.snake2.beta" f32,f16,bf16,q8_0 [1,512,1]
+source "decoder.block.1.res_unit1.conv2.weight_v" f32,f16,bf16,q8_0 [512,512,1]
+source "decoder.block.1.res_unit1.conv2.weight_g" f32,f16,bf16,q8_0 [512,1,1]
+source "decoder.block.1.res_unit1.conv2.bias" f32,f16,bf16,q8_0 [512]
+source "decoder.block.1.res_unit2.snake1.alpha" f32,f16,bf16,q8_0 [1,512,1]
+source "decoder.block.1.res_unit2.snake1.beta" f32,f16,bf16,q8_0 [1,512,1]
+source "decoder.block.1.res_unit2.conv1.weight_v" f32,f16,bf16,q8_0 [512,512,7]
+source "decoder.block.1.res_unit2.conv1.weight_g" f32,f16,bf16,q8_0 [512,1,1]
+source "decoder.block.1.res_unit2.conv1.bias" f32,f16,bf16,q8_0 [512]
+source "decoder.block.1.res_unit2.snake2.alpha" f32,f16,bf16,q8_0 [1,512,1]
+source "decoder.block.1.res_unit2.snake2.beta" f32,f16,bf16,q8_0 [1,512,1]
+source "decoder.block.1.res_unit2.conv2.weight_v" f32,f16,bf16,q8_0 [512,512,1]
+source "decoder.block.1.res_unit2.conv2.weight_g" f32,f16,bf16,q8_0 [512,1,1]
+source "decoder.block.1.res_unit2.conv2.bias" f32,f16,bf16,q8_0 [512]
+source "decoder.block.1.res_unit3.snake1.alpha" f32,f16,bf16,q8_0 [1,512,1]
+source "decoder.block.1.res_unit3.snake1.beta" f32,f16,bf16,q8_0 [1,512,1]
+source "decoder.block.1.res_unit3.conv1.weight_v" f32,f16,bf16,q8_0 [512,512,7]
+source "decoder.block.1.res_unit3.conv1.weight_g" f32,f16,bf16,q8_0 [512,1,1]
+source "decoder.block.1.res_unit3.conv1.bias" f32,f16,bf16,q8_0 [512]
+source "decoder.block.1.res_unit3.snake2.alpha" f32,f16,bf16,q8_0 [1,512,1]
+source "decoder.block.1.res_unit3.snake2.beta" f32,f16,bf16,q8_0 [1,512,1]
+source "decoder.block.1.res_unit3.conv2.weight_v" f32,f16,bf16,q8_0 [512,512,1]
+source "decoder.block.1.res_unit3.conv2.weight_g" f32,f16,bf16,q8_0 [512,1,1]
+source "decoder.block.1.res_unit3.conv2.bias" f32,f16,bf16,q8_0 [512]
+source "decoder.block.2.snake1.alpha" f32,f16,bf16,q8_0 [1,512,1]
+source "decoder.block.2.snake1.beta" f32,f16,bf16,q8_0 [1,512,1]
+source "decoder.block.2.conv_t1.weight_v" f32,f16,bf16,q8_0 [512,256,8]
+source "decoder.block.2.conv_t1.weight_g" f32,f16,bf16,q8_0 [512,1,1]
+source "decoder.block.2.conv_t1.bias" f32,f16,bf16,q8_0 [256]
+source "decoder.block.2.res_unit1.snake1.alpha" f32,f16,bf16,q8_0 [1,256,1]
+source "decoder.block.2.res_unit1.snake1.beta" f32,f16,bf16,q8_0 [1,256,1]
+source "decoder.block.2.res_unit1.conv1.weight_v" f32,f16,bf16,q8_0 [256,256,7]
+source "decoder.block.2.res_unit1.conv1.weight_g" f32,f16,bf16,q8_0 [256,1,1]
+source "decoder.block.2.res_unit1.conv1.bias" f32,f16,bf16,q8_0 [256]
+source "decoder.block.2.res_unit1.snake2.alpha" f32,f16,bf16,q8_0 [1,256,1]
+source "decoder.block.2.res_unit1.snake2.beta" f32,f16,bf16,q8_0 [1,256,1]
+source "decoder.block.2.res_unit1.conv2.weight_v" f32,f16,bf16,q8_0 [256,256,1]
+source "decoder.block.2.res_unit1.conv2.weight_g" f32,f16,bf16,q8_0 [256,1,1]
+source "decoder.block.2.res_unit1.conv2.bias" f32,f16,bf16,q8_0 [256]
+source "decoder.block.2.res_unit2.snake1.alpha" f32,f16,bf16,q8_0 [1,256,1]
+source "decoder.block.2.res_unit2.snake1.beta" f32,f16,bf16,q8_0 [1,256,1]
+source "decoder.block.2.res_unit2.conv1.weight_v" f32,f16,bf16,q8_0 [256,256,7]
+source "decoder.block.2.res_unit2.conv1.weight_g" f32,f16,bf16,q8_0 [256,1,1]
+source "decoder.block.2.res_unit2.conv1.bias" f32,f16,bf16,q8_0 [256]
+source "decoder.block.2.res_unit2.snake2.alpha" f32,f16,bf16,q8_0 [1,256,1]
+source "decoder.block.2.res_unit2.snake2.beta" f32,f16,bf16,q8_0 [1,256,1]
+source "decoder.block.2.res_unit2.conv2.weight_v" f32,f16,bf16,q8_0 [256,256,1]
+source "decoder.block.2.res_unit2.conv2.weight_g" f32,f16,bf16,q8_0 [256,1,1]
+source "decoder.block.2.res_unit2.conv2.bias" f32,f16,bf16,q8_0 [256]
+source "decoder.block.2.res_unit3.snake1.alpha" f32,f16,bf16,q8_0 [1,256,1]
+source "decoder.block.2.res_unit3.snake1.beta" f32,f16,bf16,q8_0 [1,256,1]
+source "decoder.block.2.res_unit3.conv1.weight_v" f32,f16,bf16,q8_0 [256,256,7]
+source "decoder.block.2.res_unit3.conv1.weight_g" f32,f16,bf16,q8_0 [256,1,1]
+source "decoder.block.2.res_unit3.conv1.bias" f32,f16,bf16,q8_0 [256]
+source "decoder.block.2.res_unit3.snake2.alpha" f32,f16,bf16,q8_0 [1,256,1]
+source "decoder.block.2.res_unit3.snake2.beta" f32,f16,bf16,q8_0 [1,256,1]
+source "decoder.block.2.res_unit3.conv2.weight_v" f32,f16,bf16,q8_0 [256,256,1]
+source "decoder.block.2.res_unit3.conv2.weight_g" f32,f16,bf16,q8_0 [256,1,1]
+source "decoder.block.2.res_unit3.conv2.bias" f32,f16,bf16,q8_0 [256]
+source "decoder.block.3.snake1.alpha" f32,f16,bf16,q8_0 [1,256,1]
+source "decoder.block.3.snake1.beta" f32,f16,bf16,q8_0 [1,256,1]
+source "decoder.block.3.conv_t1.weight_v" f32,f16,bf16,q8_0 [256,128,8]
+source "decoder.block.3.conv_t1.weight_g" f32,f16,bf16,q8_0 [256,1,1]
+source "decoder.block.3.conv_t1.bias" f32,f16,bf16,q8_0 [128]
+source "decoder.block.3.res_unit1.snake1.alpha" f32,f16,bf16,q8_0 [1,128,1]
+source "decoder.block.3.res_unit1.snake1.beta" f32,f16,bf16,q8_0 [1,128,1]
+source "decoder.block.3.res_unit1.conv1.weight_v" f32,f16,bf16,q8_0 [128,128,7]
+source "decoder.block.3.res_unit1.conv1.weight_g" f32,f16,bf16,q8_0 [128,1,1]
+source "decoder.block.3.res_unit1.conv1.bias" f32,f16,bf16,q8_0 [128]
+source "decoder.block.3.res_unit1.snake2.alpha" f32,f16,bf16,q8_0 [1,128,1]
+source "decoder.block.3.res_unit1.snake2.beta" f32,f16,bf16,q8_0 [1,128,1]
+source "decoder.block.3.res_unit1.conv2.weight_v" f32,f16,bf16,q8_0 [128,128,1]
+source "decoder.block.3.res_unit1.conv2.weight_g" f32,f16,bf16,q8_0 [128,1,1]
+source "decoder.block.3.res_unit1.conv2.bias" f32,f16,bf16,q8_0 [128]
+source "decoder.block.3.res_unit2.snake1.alpha" f32,f16,bf16,q8_0 [1,128,1]
+source "decoder.block.3.res_unit2.snake1.beta" f32,f16,bf16,q8_0 [1,128,1]
+source "decoder.block.3.res_unit2.conv1.weight_v" f32,f16,bf16,q8_0 [128,128,7]
+source "decoder.block.3.res_unit2.conv1.weight_g" f32,f16,bf16,q8_0 [128,1,1]
+source "decoder.block.3.res_unit2.conv1.bias" f32,f16,bf16,q8_0 [128]
+source "decoder.block.3.res_unit2.snake2.alpha" f32,f16,bf16,q8_0 [1,128,1]
+source "decoder.block.3.res_unit2.snake2.beta" f32,f16,bf16,q8_0 [1,128,1]
+source "decoder.block.3.res_unit2.conv2.weight_v" f32,f16,bf16,q8_0 [128,128,1]
+source "decoder.block.3.res_unit2.conv2.weight_g" f32,f16,bf16,q8_0 [128,1,1]
+source "decoder.block.3.res_unit2.conv2.bias" f32,f16,bf16,q8_0 [128]
+source "decoder.block.3.res_unit3.snake1.alpha" f32,f16,bf16,q8_0 [1,128,1]
+source "decoder.block.3.res_unit3.snake1.beta" f32,f16,bf16,q8_0 [1,128,1]
+source "decoder.block.3.res_unit3.conv1.weight_v" f32,f16,bf16,q8_0 [128,128,7]
+source "decoder.block.3.res_unit3.conv1.weight_g" f32,f16,bf16,q8_0 [128,1,1]
+source "decoder.block.3.res_unit3.conv1.bias" f32,f16,bf16,q8_0 [128]
+source "decoder.block.3.res_unit3.snake2.alpha" f32,f16,bf16,q8_0 [1,128,1]
+source "decoder.block.3.res_unit3.snake2.beta" f32,f16,bf16,q8_0 [1,128,1]
+source "decoder.block.3.res_unit3.conv2.weight_v" f32,f16,bf16,q8_0 [128,128,1]
+source "decoder.block.3.res_unit3.conv2.weight_g" f32,f16,bf16,q8_0 [128,1,1]
+source "decoder.block.3.res_unit3.conv2.bias" f32,f16,bf16,q8_0 [128]
+source "decoder.block.4.snake1.alpha" f32,f16,bf16,q8_0 [1,128,1]
+source "decoder.block.4.snake1.beta" f32,f16,bf16,q8_0 [1,128,1]
+source "decoder.block.4.conv_t1.weight_v" f32,f16,bf16,q8_0 [128,128,4]
+source "decoder.block.4.conv_t1.weight_g" f32,f16,bf16,q8_0 [128,1,1]
+source "decoder.block.4.conv_t1.bias" f32,f16,bf16,q8_0 [128]
+source "decoder.block.4.res_unit1.snake1.alpha" f32,f16,bf16,q8_0 [1,128,1]
+source "decoder.block.4.res_unit1.snake1.beta" f32,f16,bf16,q8_0 [1,128,1]
+source "decoder.block.4.res_unit1.conv1.weight_v" f32,f16,bf16,q8_0 [128,128,7]
+source "decoder.block.4.res_unit1.conv1.weight_g" f32,f16,bf16,q8_0 [128,1,1]
+source "decoder.block.4.res_unit1.conv1.bias" f32,f16,bf16,q8_0 [128]
+source "decoder.block.4.res_unit1.snake2.alpha" f32,f16,bf16,q8_0 [1,128,1]
+source "decoder.block.4.res_unit1.snake2.beta" f32,f16,bf16,q8_0 [1,128,1]
+source "decoder.block.4.res_unit1.conv2.weight_v" f32,f16,bf16,q8_0 [128,128,1]
+source "decoder.block.4.res_unit1.conv2.weight_g" f32,f16,bf16,q8_0 [128,1,1]
+source "decoder.block.4.res_unit1.conv2.bias" f32,f16,bf16,q8_0 [128]
+source "decoder.block.4.res_unit2.snake1.alpha" f32,f16,bf16,q8_0 [1,128,1]
+source "decoder.block.4.res_unit2.snake1.beta" f32,f16,bf16,q8_0 [1,128,1]
+source "decoder.block.4.res_unit2.conv1.weight_v" f32,f16,bf16,q8_0 [128,128,7]
+source "decoder.block.4.res_unit2.conv1.weight_g" f32,f16,bf16,q8_0 [128,1,1]
+source "decoder.block.4.res_unit2.conv1.bias" f32,f16,bf16,q8_0 [128]
+source "decoder.block.4.res_unit2.snake2.alpha" f32,f16,bf16,q8_0 [1,128,1]
+source "decoder.block.4.res_unit2.snake2.beta" f32,f16,bf16,q8_0 [1,128,1]
+source "decoder.block.4.res_unit2.conv2.weight_v" f32,f16,bf16,q8_0 [128,128,1]
+source "decoder.block.4.res_unit2.conv2.weight_g" f32,f16,bf16,q8_0 [128,1,1]
+source "decoder.block.4.res_unit2.conv2.bias" f32,f16,bf16,q8_0 [128]
+source "decoder.block.4.res_unit3.snake1.alpha" f32,f16,bf16,q8_0 [1,128,1]
+source "decoder.block.4.res_unit3.snake1.beta" f32,f16,bf16,q8_0 [1,128,1]
+source "decoder.block.4.res_unit3.conv1.weight_v" f32,f16,bf16,q8_0 [128,128,7]
+source "decoder.block.4.res_unit3.conv1.weight_g" f32,f16,bf16,q8_0 [128,1,1]
+source "decoder.block.4.res_unit3.conv1.bias" f32,f16,bf16,q8_0 [128]
+source "decoder.block.4.res_unit3.snake2.alpha" f32,f16,bf16,q8_0 [1,128,1]
+source "decoder.block.4.res_unit3.snake2.beta" f32,f16,bf16,q8_0 [1,128,1]
+source "decoder.block.4.res_unit3.conv2.weight_v" f32,f16,bf16,q8_0 [128,128,1]
+source "decoder.block.4.res_unit3.conv2.weight_g" f32,f16,bf16,q8_0 [128,1,1]
+source "decoder.block.4.res_unit3.conv2.bias" f32,f16,bf16,q8_0 [128]
+source "decoder.snake1.alpha" f32,f16,bf16,q8_0 [1,128,1]
+source "decoder.snake1.beta" f32,f16,bf16,q8_0 [1,128,1]
+source "decoder.conv2.weight_v" f32,f16,bf16,q8_0 [2,128,7]
+source "decoder.conv2.weight_g" f32,f16,bf16,q8_0 [2,1,1]
+
+let v_conv1 = t("decoder.conv1.weight_v")
+let w_conv1 = mul(v_conv1, div(t("decoder.conv1.weight_g"), add(l2norm(v_conv1, [1, 2]), 1e-12)))
+blob 64 fp16 917504 f16(w_conv1)
+blob 1835136 fp16 2048 f16(t("decoder.conv1.bias"))
+blob 1839296 fp16 2048 f16(exp(t("decoder.block.0.snake1.alpha")))
+blob 1843456 fp16 2048 f16(recip(exp(t("decoder.block.0.snake1.beta"))))
+let v_block_0_conv_t1 = t("decoder.block.0.conv_t1.weight_v")
+let w_block_0_conv_t1 = mul(v_block_0_conv_t1, div(t("decoder.block.0.conv_t1.weight_g"), add(l2norm(v_block_0_conv_t1, [1, 2]), 1e-12)))
+blob 1847616 fp16 41943040 f16(w_block_0_conv_t1)
+blob 85733760 fp16 1024 f16(t("decoder.block.0.conv_t1.bias"))
+blob 85735872 fp16 1024 f16(exp(t("decoder.block.0.res_unit1.snake1.alpha")))
+blob 85737984 fp16 1024 f16(recip(exp(t("decoder.block.0.res_unit1.snake1.beta"))))
+let v_block_0_res_unit1_conv1 = t("decoder.block.0.res_unit1.conv1.weight_v")
+let w_block_0_res_unit1_conv1 = mul(v_block_0_res_unit1_conv1, div(t("decoder.block.0.res_unit1.conv1.weight_g"), add(l2norm(v_block_0_res_unit1_conv1, [1, 2]), 1e-12)))
+blob 85740096 fp16 7340032 f16(w_block_0_res_unit1_conv1)
+blob 100420224 fp16 1024 f16(t("decoder.block.0.res_unit1.conv1.bias"))
+blob 100422336 fp16 1024 f16(exp(t("decoder.block.0.res_unit1.snake2.alpha")))
+blob 100424448 fp16 1024 f16(recip(exp(t("decoder.block.0.res_unit1.snake2.beta"))))
+let v_block_0_res_unit1_conv2 = t("decoder.block.0.res_unit1.conv2.weight_v")
+let w_block_0_res_unit1_conv2 = mul(v_block_0_res_unit1_conv2, div(t("decoder.block.0.res_unit1.conv2.weight_g"), add(l2norm(v_block_0_res_unit1_conv2, [1, 2]), 1e-12)))
+blob 100426560 fp16 1048576 f16(w_block_0_res_unit1_conv2)
+blob 102523776 fp16 1024 f16(t("decoder.block.0.res_unit1.conv2.bias"))
+blob 102525888 fp16 1024 f16(exp(t("decoder.block.0.res_unit2.snake1.alpha")))
+blob 102528000 fp16 1024 f16(recip(exp(t("decoder.block.0.res_unit2.snake1.beta"))))
+let v_block_0_res_unit2_conv1 = t("decoder.block.0.res_unit2.conv1.weight_v")
+let w_block_0_res_unit2_conv1 = mul(v_block_0_res_unit2_conv1, div(t("decoder.block.0.res_unit2.conv1.weight_g"), add(l2norm(v_block_0_res_unit2_conv1, [1, 2]), 1e-12)))
+blob 102530112 fp16 7340032 f16(w_block_0_res_unit2_conv1)
+blob 117210240 fp16 1024 f16(t("decoder.block.0.res_unit2.conv1.bias"))
+blob 117212352 fp16 1024 f16(exp(t("decoder.block.0.res_unit2.snake2.alpha")))
+blob 117214464 fp16 1024 f16(recip(exp(t("decoder.block.0.res_unit2.snake2.beta"))))
+let v_block_0_res_unit2_conv2 = t("decoder.block.0.res_unit2.conv2.weight_v")
+let w_block_0_res_unit2_conv2 = mul(v_block_0_res_unit2_conv2, div(t("decoder.block.0.res_unit2.conv2.weight_g"), add(l2norm(v_block_0_res_unit2_conv2, [1, 2]), 1e-12)))
+blob 117216576 fp16 1048576 f16(w_block_0_res_unit2_conv2)
+blob 119313792 fp16 1024 f16(t("decoder.block.0.res_unit2.conv2.bias"))
+blob 119315904 fp16 1024 f16(exp(t("decoder.block.0.res_unit3.snake1.alpha")))
+blob 119318016 fp16 1024 f16(recip(exp(t("decoder.block.0.res_unit3.snake1.beta"))))
+let v_block_0_res_unit3_conv1 = t("decoder.block.0.res_unit3.conv1.weight_v")
+let w_block_0_res_unit3_conv1 = mul(v_block_0_res_unit3_conv1, div(t("decoder.block.0.res_unit3.conv1.weight_g"), add(l2norm(v_block_0_res_unit3_conv1, [1, 2]), 1e-12)))
+blob 119320128 fp16 7340032 f16(w_block_0_res_unit3_conv1)
+blob 134000256 fp16 1024 f16(t("decoder.block.0.res_unit3.conv1.bias"))
+blob 134002368 fp16 1024 f16(exp(t("decoder.block.0.res_unit3.snake2.alpha")))
+blob 134004480 fp16 1024 f16(recip(exp(t("decoder.block.0.res_unit3.snake2.beta"))))
+let v_block_0_res_unit3_conv2 = t("decoder.block.0.res_unit3.conv2.weight_v")
+let w_block_0_res_unit3_conv2 = mul(v_block_0_res_unit3_conv2, div(t("decoder.block.0.res_unit3.conv2.weight_g"), add(l2norm(v_block_0_res_unit3_conv2, [1, 2]), 1e-12)))
+blob 134006592 fp16 1048576 f16(w_block_0_res_unit3_conv2)
+blob 136103808 fp16 1024 f16(t("decoder.block.0.res_unit3.conv2.bias"))
+blob 136105920 fp16 1024 f16(exp(t("decoder.block.1.snake1.alpha")))
+blob 136108032 fp16 1024 f16(recip(exp(t("decoder.block.1.snake1.beta"))))
+let v_block_1_conv_t1 = t("decoder.block.1.conv_t1.weight_v")
+let w_block_1_conv_t1 = mul(v_block_1_conv_t1, div(t("decoder.block.1.conv_t1.weight_g"), add(l2norm(v_block_1_conv_t1, [1, 2]), 1e-12)))
+blob 136110144 fp16 6291456 f16(w_block_1_conv_t1)
+blob 148693120 fp16 512 f16(t("decoder.block.1.conv_t1.bias"))
+blob 148694208 fp16 512 f16(exp(t("decoder.block.1.res_unit1.snake1.alpha")))
+blob 148695296 fp16 512 f16(recip(exp(t("decoder.block.1.res_unit1.snake1.beta"))))
+let v_block_1_res_unit1_conv1 = t("decoder.block.1.res_unit1.conv1.weight_v")
+let w_block_1_res_unit1_conv1 = mul(v_block_1_res_unit1_conv1, div(t("decoder.block.1.res_unit1.conv1.weight_g"), add(l2norm(v_block_1_res_unit1_conv1, [1, 2]), 1e-12)))
+blob 148696384 fp16 1835008 f16(w_block_1_res_unit1_conv1)
+blob 152366464 fp16 512 f16(t("decoder.block.1.res_unit1.conv1.bias"))
+blob 152367552 fp16 512 f16(exp(t("decoder.block.1.res_unit1.snake2.alpha")))
+blob 152368640 fp16 512 f16(recip(exp(t("decoder.block.1.res_unit1.snake2.beta"))))
+let v_block_1_res_unit1_conv2 = t("decoder.block.1.res_unit1.conv2.weight_v")
+let w_block_1_res_unit1_conv2 = mul(v_block_1_res_unit1_conv2, div(t("decoder.block.1.res_unit1.conv2.weight_g"), add(l2norm(v_block_1_res_unit1_conv2, [1, 2]), 1e-12)))
+blob 152369728 fp16 262144 f16(w_block_1_res_unit1_conv2)
+blob 152894080 fp16 512 f16(t("decoder.block.1.res_unit1.conv2.bias"))
+blob 152895168 fp16 512 f16(exp(t("decoder.block.1.res_unit2.snake1.alpha")))
+blob 152896256 fp16 512 f16(recip(exp(t("decoder.block.1.res_unit2.snake1.beta"))))
+let v_block_1_res_unit2_conv1 = t("decoder.block.1.res_unit2.conv1.weight_v")
+let w_block_1_res_unit2_conv1 = mul(v_block_1_res_unit2_conv1, div(t("decoder.block.1.res_unit2.conv1.weight_g"), add(l2norm(v_block_1_res_unit2_conv1, [1, 2]), 1e-12)))
+blob 152897344 fp16 1835008 f16(w_block_1_res_unit2_conv1)
+blob 156567424 fp16 512 f16(t("decoder.block.1.res_unit2.conv1.bias"))
+blob 156568512 fp16 512 f16(exp(t("decoder.block.1.res_unit2.snake2.alpha")))
+blob 156569600 fp16 512 f16(recip(exp(t("decoder.block.1.res_unit2.snake2.beta"))))
+let v_block_1_res_unit2_conv2 = t("decoder.block.1.res_unit2.conv2.weight_v")
+let w_block_1_res_unit2_conv2 = mul(v_block_1_res_unit2_conv2, div(t("decoder.block.1.res_unit2.conv2.weight_g"), add(l2norm(v_block_1_res_unit2_conv2, [1, 2]), 1e-12)))
+blob 156570688 fp16 262144 f16(w_block_1_res_unit2_conv2)
+blob 157095040 fp16 512 f16(t("decoder.block.1.res_unit2.conv2.bias"))
+blob 157096128 fp16 512 f16(exp(t("decoder.block.1.res_unit3.snake1.alpha")))
+blob 157097216 fp16 512 f16(recip(exp(t("decoder.block.1.res_unit3.snake1.beta"))))
+let v_block_1_res_unit3_conv1 = t("decoder.block.1.res_unit3.conv1.weight_v")
+let w_block_1_res_unit3_conv1 = mul(v_block_1_res_unit3_conv1, div(t("decoder.block.1.res_unit3.conv1.weight_g"), add(l2norm(v_block_1_res_unit3_conv1, [1, 2]), 1e-12)))
+blob 157098304 fp16 1835008 f16(w_block_1_res_unit3_conv1)
+blob 160768384 fp16 512 f16(t("decoder.block.1.res_unit3.conv1.bias"))
+blob 160769472 fp16 512 f16(exp(t("decoder.block.1.res_unit3.snake2.alpha")))
+blob 160770560 fp16 512 f16(recip(exp(t("decoder.block.1.res_unit3.snake2.beta"))))
+let v_block_1_res_unit3_conv2 = t("decoder.block.1.res_unit3.conv2.weight_v")
+let w_block_1_res_unit3_conv2 = mul(v_block_1_res_unit3_conv2, div(t("decoder.block.1.res_unit3.conv2.weight_g"), add(l2norm(v_block_1_res_unit3_conv2, [1, 2]), 1e-12)))
+blob 160771648 fp16 262144 f16(w_block_1_res_unit3_conv2)
+blob 161296000 fp16 512 f16(t("decoder.block.1.res_unit3.conv2.bias"))
+blob 161297088 fp16 512 f16(exp(t("decoder.block.2.snake1.alpha")))
+blob 161298176 fp16 512 f16(recip(exp(t("decoder.block.2.snake1.beta"))))
+let v_block_2_conv_t1 = t("decoder.block.2.conv_t1.weight_v")
+let w_block_2_conv_t1 = mul(v_block_2_conv_t1, div(t("decoder.block.2.conv_t1.weight_g"), add(l2norm(v_block_2_conv_t1, [1, 2]), 1e-12)))
+blob 161299264 fp16 1572864 f16(reshape(permute(reshape(take(w_block_2_conv_t1, 2, [6, 2, -1, 7, 3, -1, -1, 4, 0, -1, 5, 1]), [512, 256, 4, 3]), [2, 1, 0, 3]), [1024, 512, 3]))
+blob 164445056 fp16 1024 f16(tile(t("decoder.block.2.conv_t1.bias"), 0, 4))
+blob 164447168 fp16 256 f16(exp(t("decoder.block.2.res_unit1.snake1.alpha")))
+blob 164447744 fp16 256 f16(recip(exp(t("decoder.block.2.res_unit1.snake1.beta"))))
+let v_block_2_res_unit1_conv1 = t("decoder.block.2.res_unit1.conv1.weight_v")
+let w_block_2_res_unit1_conv1 = mul(v_block_2_res_unit1_conv1, div(t("decoder.block.2.res_unit1.conv1.weight_g"), add(l2norm(v_block_2_res_unit1_conv1, [1, 2]), 1e-12)))
+blob 164448320 fp16 458752 f16(w_block_2_res_unit1_conv1)
+blob 165365888 fp16 256 f16(t("decoder.block.2.res_unit1.conv1.bias"))
+blob 165366464 fp16 256 f16(exp(t("decoder.block.2.res_unit1.snake2.alpha")))
+blob 165367040 fp16 256 f16(recip(exp(t("decoder.block.2.res_unit1.snake2.beta"))))
+let v_block_2_res_unit1_conv2 = t("decoder.block.2.res_unit1.conv2.weight_v")
+let w_block_2_res_unit1_conv2 = mul(v_block_2_res_unit1_conv2, div(t("decoder.block.2.res_unit1.conv2.weight_g"), add(l2norm(v_block_2_res_unit1_conv2, [1, 2]), 1e-12)))
+blob 165367616 fp16 65536 f16(w_block_2_res_unit1_conv2)
+blob 165498752 fp16 256 f16(t("decoder.block.2.res_unit1.conv2.bias"))
+blob 165499328 fp16 256 f16(exp(t("decoder.block.2.res_unit2.snake1.alpha")))
+blob 165499904 fp16 256 f16(recip(exp(t("decoder.block.2.res_unit2.snake1.beta"))))
+let v_block_2_res_unit2_conv1 = t("decoder.block.2.res_unit2.conv1.weight_v")
+let w_block_2_res_unit2_conv1 = mul(v_block_2_res_unit2_conv1, div(t("decoder.block.2.res_unit2.conv1.weight_g"), add(l2norm(v_block_2_res_unit2_conv1, [1, 2]), 1e-12)))
+blob 165500480 fp16 458752 f16(w_block_2_res_unit2_conv1)
+blob 166418048 fp16 256 f16(t("decoder.block.2.res_unit2.conv1.bias"))
+blob 166418624 fp16 256 f16(exp(t("decoder.block.2.res_unit2.snake2.alpha")))
+blob 166419200 fp16 256 f16(recip(exp(t("decoder.block.2.res_unit2.snake2.beta"))))
+let v_block_2_res_unit2_conv2 = t("decoder.block.2.res_unit2.conv2.weight_v")
+let w_block_2_res_unit2_conv2 = mul(v_block_2_res_unit2_conv2, div(t("decoder.block.2.res_unit2.conv2.weight_g"), add(l2norm(v_block_2_res_unit2_conv2, [1, 2]), 1e-12)))
+blob 166419776 fp16 65536 f16(w_block_2_res_unit2_conv2)
+blob 166550912 fp16 256 f16(t("decoder.block.2.res_unit2.conv2.bias"))
+blob 166551488 fp16 256 f16(exp(t("decoder.block.2.res_unit3.snake1.alpha")))
+blob 166552064 fp16 256 f16(recip(exp(t("decoder.block.2.res_unit3.snake1.beta"))))
+let v_block_2_res_unit3_conv1 = t("decoder.block.2.res_unit3.conv1.weight_v")
+let w_block_2_res_unit3_conv1 = mul(v_block_2_res_unit3_conv1, div(t("decoder.block.2.res_unit3.conv1.weight_g"), add(l2norm(v_block_2_res_unit3_conv1, [1, 2]), 1e-12)))
+blob 166552640 fp16 458752 f16(w_block_2_res_unit3_conv1)
+blob 167470208 fp16 256 f16(t("decoder.block.2.res_unit3.conv1.bias"))
+blob 167470784 fp16 256 f16(exp(t("decoder.block.2.res_unit3.snake2.alpha")))
+blob 167471360 fp16 256 f16(recip(exp(t("decoder.block.2.res_unit3.snake2.beta"))))
+let v_block_2_res_unit3_conv2 = t("decoder.block.2.res_unit3.conv2.weight_v")
+let w_block_2_res_unit3_conv2 = mul(v_block_2_res_unit3_conv2, div(t("decoder.block.2.res_unit3.conv2.weight_g"), add(l2norm(v_block_2_res_unit3_conv2, [1, 2]), 1e-12)))
+blob 167471936 fp16 65536 f16(w_block_2_res_unit3_conv2)
+blob 167603072 fp16 256 f16(t("decoder.block.2.res_unit3.conv2.bias"))
+blob 167603648 fp16 256 f16(exp(t("decoder.block.3.snake1.alpha")))
+blob 167604224 fp16 256 f16(recip(exp(t("decoder.block.3.snake1.beta"))))
+let v_block_3_conv_t1 = t("decoder.block.3.conv_t1.weight_v")
+let w_block_3_conv_t1 = mul(v_block_3_conv_t1, div(t("decoder.block.3.conv_t1.weight_g"), add(l2norm(v_block_3_conv_t1, [1, 2]), 1e-12)))
+blob 167604800 fp16 393216 f16(reshape(permute(reshape(take(w_block_3_conv_t1, 2, [6, 2, -1, 7, 3, -1, -1, 4, 0, -1, 5, 1]), [256, 128, 4, 3]), [2, 1, 0, 3]), [512, 256, 3]))
+blob 168391296 fp16 512 f16(tile(t("decoder.block.3.conv_t1.bias"), 0, 4))
+blob 168392384 fp16 128 f16(exp(t("decoder.block.3.res_unit1.snake1.alpha")))
+blob 168392704 fp16 128 f16(recip(exp(t("decoder.block.3.res_unit1.snake1.beta"))))
+let v_block_3_res_unit1_conv1 = t("decoder.block.3.res_unit1.conv1.weight_v")
+let w_block_3_res_unit1_conv1 = mul(v_block_3_res_unit1_conv1, div(t("decoder.block.3.res_unit1.conv1.weight_g"), add(l2norm(v_block_3_res_unit1_conv1, [1, 2]), 1e-12)))
+blob 168393024 fp16 114688 f16(w_block_3_res_unit1_conv1)
+blob 168622464 fp16 128 f16(t("decoder.block.3.res_unit1.conv1.bias"))
+blob 168622784 fp16 128 f16(exp(t("decoder.block.3.res_unit1.snake2.alpha")))
+blob 168623104 fp16 128 f16(recip(exp(t("decoder.block.3.res_unit1.snake2.beta"))))
+let v_block_3_res_unit1_conv2 = t("decoder.block.3.res_unit1.conv2.weight_v")
+let w_block_3_res_unit1_conv2 = mul(v_block_3_res_unit1_conv2, div(t("decoder.block.3.res_unit1.conv2.weight_g"), add(l2norm(v_block_3_res_unit1_conv2, [1, 2]), 1e-12)))
+blob 168623424 fp16 16384 f16(w_block_3_res_unit1_conv2)
+blob 168656256 fp16 128 f16(t("decoder.block.3.res_unit1.conv2.bias"))
+blob 168656576 fp16 128 f16(exp(t("decoder.block.3.res_unit2.snake1.alpha")))
+blob 168656896 fp16 128 f16(recip(exp(t("decoder.block.3.res_unit2.snake1.beta"))))
+let v_block_3_res_unit2_conv1 = t("decoder.block.3.res_unit2.conv1.weight_v")
+let w_block_3_res_unit2_conv1 = mul(v_block_3_res_unit2_conv1, div(t("decoder.block.3.res_unit2.conv1.weight_g"), add(l2norm(v_block_3_res_unit2_conv1, [1, 2]), 1e-12)))
+blob 168657216 fp16 114688 f16(w_block_3_res_unit2_conv1)
+blob 168886656 fp16 128 f16(t("decoder.block.3.res_unit2.conv1.bias"))
+blob 168886976 fp16 128 f16(exp(t("decoder.block.3.res_unit2.snake2.alpha")))
+blob 168887296 fp16 128 f16(recip(exp(t("decoder.block.3.res_unit2.snake2.beta"))))
+let v_block_3_res_unit2_conv2 = t("decoder.block.3.res_unit2.conv2.weight_v")
+let w_block_3_res_unit2_conv2 = mul(v_block_3_res_unit2_conv2, div(t("decoder.block.3.res_unit2.conv2.weight_g"), add(l2norm(v_block_3_res_unit2_conv2, [1, 2]), 1e-12)))
+blob 168887616 fp16 16384 f16(w_block_3_res_unit2_conv2)
+blob 168920448 fp16 128 f16(t("decoder.block.3.res_unit2.conv2.bias"))
+blob 168920768 fp16 128 f16(exp(t("decoder.block.3.res_unit3.snake1.alpha")))
+blob 168921088 fp16 128 f16(recip(exp(t("decoder.block.3.res_unit3.snake1.beta"))))
+let v_block_3_res_unit3_conv1 = t("decoder.block.3.res_unit3.conv1.weight_v")
+let w_block_3_res_unit3_conv1 = mul(v_block_3_res_unit3_conv1, div(t("decoder.block.3.res_unit3.conv1.weight_g"), add(l2norm(v_block_3_res_unit3_conv1, [1, 2]), 1e-12)))
+blob 168921408 fp16 114688 f16(w_block_3_res_unit3_conv1)
+blob 169150848 fp16 128 f16(t("decoder.block.3.res_unit3.conv1.bias"))
+blob 169151168 fp16 128 f16(exp(t("decoder.block.3.res_unit3.snake2.alpha")))
+blob 169151488 fp16 128 f16(recip(exp(t("decoder.block.3.res_unit3.snake2.beta"))))
+let v_block_3_res_unit3_conv2 = t("decoder.block.3.res_unit3.conv2.weight_v")
+let w_block_3_res_unit3_conv2 = mul(v_block_3_res_unit3_conv2, div(t("decoder.block.3.res_unit3.conv2.weight_g"), add(l2norm(v_block_3_res_unit3_conv2, [1, 2]), 1e-12)))
+blob 169151808 fp16 16384 f16(w_block_3_res_unit3_conv2)
+blob 169184640 fp16 128 f16(t("decoder.block.3.res_unit3.conv2.bias"))
+blob 169184960 fp16 128 f16(exp(t("decoder.block.4.snake1.alpha")))
+blob 169185280 fp16 128 f16(recip(exp(t("decoder.block.4.snake1.beta"))))
+let v_block_4_conv_t1 = t("decoder.block.4.conv_t1.weight_v")
+let w_block_4_conv_t1 = mul(v_block_4_conv_t1, div(t("decoder.block.4.conv_t1.weight_g"), add(l2norm(v_block_4_conv_t1, [1, 2]), 1e-12)))
+blob 169185600 fp16 65536 f16(w_block_4_conv_t1)
+blob 169316736 fp16 128 f16(t("decoder.block.4.conv_t1.bias"))
+blob 169317056 fp16 128 f16(exp(t("decoder.block.4.res_unit1.snake1.alpha")))
+blob 169317376 fp16 128 f16(recip(exp(t("decoder.block.4.res_unit1.snake1.beta"))))
+let v_block_4_res_unit1_conv1 = t("decoder.block.4.res_unit1.conv1.weight_v")
+let w_block_4_res_unit1_conv1 = mul(v_block_4_res_unit1_conv1, div(t("decoder.block.4.res_unit1.conv1.weight_g"), add(l2norm(v_block_4_res_unit1_conv1, [1, 2]), 1e-12)))
+blob 169317696 fp16 114688 f16(w_block_4_res_unit1_conv1)
+blob 169547136 fp16 128 f16(t("decoder.block.4.res_unit1.conv1.bias"))
+blob 169547456 fp16 128 f16(exp(t("decoder.block.4.res_unit1.snake2.alpha")))
+blob 169547776 fp16 128 f16(recip(exp(t("decoder.block.4.res_unit1.snake2.beta"))))
+let v_block_4_res_unit1_conv2 = t("decoder.block.4.res_unit1.conv2.weight_v")
+let w_block_4_res_unit1_conv2 = mul(v_block_4_res_unit1_conv2, div(t("decoder.block.4.res_unit1.conv2.weight_g"), add(l2norm(v_block_4_res_unit1_conv2, [1, 2]), 1e-12)))
+blob 169548096 fp16 16384 f16(w_block_4_res_unit1_conv2)
+blob 169580928 fp16 128 f16(t("decoder.block.4.res_unit1.conv2.bias"))
+blob 169581248 fp16 128 f16(exp(t("decoder.block.4.res_unit2.snake1.alpha")))
+blob 169581568 fp16 128 f16(recip(exp(t("decoder.block.4.res_unit2.snake1.beta"))))
+let v_block_4_res_unit2_conv1 = t("decoder.block.4.res_unit2.conv1.weight_v")
+let w_block_4_res_unit2_conv1 = mul(v_block_4_res_unit2_conv1, div(t("decoder.block.4.res_unit2.conv1.weight_g"), add(l2norm(v_block_4_res_unit2_conv1, [1, 2]), 1e-12)))
+blob 169581888 fp16 114688 f16(w_block_4_res_unit2_conv1)
+blob 169811328 fp16 128 f16(t("decoder.block.4.res_unit2.conv1.bias"))
+blob 169811648 fp16 128 f16(exp(t("decoder.block.4.res_unit2.snake2.alpha")))
+blob 169811968 fp16 128 f16(recip(exp(t("decoder.block.4.res_unit2.snake2.beta"))))
+let v_block_4_res_unit2_conv2 = t("decoder.block.4.res_unit2.conv2.weight_v")
+let w_block_4_res_unit2_conv2 = mul(v_block_4_res_unit2_conv2, div(t("decoder.block.4.res_unit2.conv2.weight_g"), add(l2norm(v_block_4_res_unit2_conv2, [1, 2]), 1e-12)))
+blob 169812288 fp16 16384 f16(w_block_4_res_unit2_conv2)
+blob 169845120 fp16 128 f16(t("decoder.block.4.res_unit2.conv2.bias"))
+blob 169845440 fp16 128 f16(exp(t("decoder.block.4.res_unit3.snake1.alpha")))
+blob 169845760 fp16 128 f16(recip(exp(t("decoder.block.4.res_unit3.snake1.beta"))))
+let v_block_4_res_unit3_conv1 = t("decoder.block.4.res_unit3.conv1.weight_v")
+let w_block_4_res_unit3_conv1 = mul(v_block_4_res_unit3_conv1, div(t("decoder.block.4.res_unit3.conv1.weight_g"), add(l2norm(v_block_4_res_unit3_conv1, [1, 2]), 1e-12)))
+blob 169846080 fp16 114688 f16(w_block_4_res_unit3_conv1)
+blob 170075520 fp16 128 f16(t("decoder.block.4.res_unit3.conv1.bias"))
+blob 170075840 fp16 128 f16(exp(t("decoder.block.4.res_unit3.snake2.alpha")))
+blob 170076160 fp16 128 f16(recip(exp(t("decoder.block.4.res_unit3.snake2.beta"))))
+let v_block_4_res_unit3_conv2 = t("decoder.block.4.res_unit3.conv2.weight_v")
+let w_block_4_res_unit3_conv2 = mul(v_block_4_res_unit3_conv2, div(t("decoder.block.4.res_unit3.conv2.weight_g"), add(l2norm(v_block_4_res_unit3_conv2, [1, 2]), 1e-12)))
+blob 170076480 fp16 16384 f16(w_block_4_res_unit3_conv2)
+blob 170109312 fp16 128 f16(t("decoder.block.4.res_unit3.conv2.bias"))
+blob 170109632 fp16 128 f16(exp(t("decoder.snake1.alpha")))
+blob 170109952 fp16 128 f16(recip(exp(t("decoder.snake1.beta"))))
+let v_conv2 = t("decoder.conv2.weight_v")
+let w_conv2 = mul(v_conv2, div(t("decoder.conv2.weight_g"), add(l2norm(v_conv2, [1, 2]), 1e-12)))
+blob 170110272 fp16 1792 f16(w_conv2)
+end

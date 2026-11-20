@@ -145,7 +145,7 @@ void case_grammar_errors() {
     expect_error(hdr(192, 1) + kSrcA + "bogus 1\n" + blob + "end\n", "unknown line");
     // Unknown and not-yet-available ops.
     expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(frob(t(\"a\")))\nend\n", "unknown op frob");
-    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(tile(t(\"a\"), 0, 1))\nend\n", "not in generator version 1 (a later version adds it)");
+    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(sqrt(t(\"a\")))\nend\n", "not in generator version 1 (a later version adds it)");
     expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(provided(\"k\", [t(\"a\")]))\nend\n", "a later version adds it");
     expect_error(hdr(192, 1) + kSrcA + "patch 10 str 4 \"abcd\"\n" + blob + "end\n", "patch str lines are not");
     // Bindings.
@@ -761,6 +761,181 @@ void case_op_slice_neg_consts() {
     for (const recipe::Item & it : r.items) CHECK(!it.ulp);
 }
 
+// ---- tile, exp, l2norm --------------------------------------------------------------------------
+
+void case_op_tile() {
+    // A phase-major upsample bias: torch's 1-D bias.repeat(stride) puts row
+    // r * OC + c at bias[c]. With distinct values, numpy's element-wise
+    // repeat ([b0, b0, ..., b1, b1, ...]) would differ at every phase but the
+    // first, so the test catches either ordering mistake.
+    const std::vector<float> bias = {0.25f, -1.5f, 3.0f};  // OC = 3
+    const std::string kSrcB = "source \"b\" f32 [3]\n";
+    MemSource sb({TT{"b", T_F32, {3}, bias}}, {});
+    auto ob = run(recipe_text("t", zeros64(), kSrcB,
+                              {blob("fp32", 12, "f32(tile(t(\"b\"), 0, 4))"),
+                               blob("fp32", 3, "f32(tile(t(\"b\"), 0, 1))")}),
+                  sb);
+    CHECK(ob.size() == 2);
+    if (ob.size() == 2) {
+        // torch.tensor([0.25, -1.5, 3.0]).repeat(4)
+        const std::vector<float> torch_repeat = {0.25f, -1.5f, 3.0f, 0.25f, -1.5f, 3.0f,
+                                                 0.25f, -1.5f, 3.0f, 0.25f, -1.5f, 3.0f};
+        CHECK(f32s(ob[0]) == torch_repeat);
+        const std::vector<float> numpy_repeat = {0.25f, 0.25f, 0.25f, 0.25f, -1.5f, -1.5f,
+                                                 -1.5f, -1.5f, 3.0f,  3.0f,  3.0f,  3.0f};
+        CHECK(f32s(ob[0]) != numpy_repeat);
+        CHECK(f32s(ob[1]) == bias);
+        for (size_t r = 0; r < 4; ++r) {
+            for (size_t c = 0; c < 3; ++c) CHECK(f32s(ob[0])[r * 3 + c] == bias[c]);
+        }
+    }
+
+    // On a 2-D array: whole-array tiling along the axis (np.tile with reps on
+    // that axis), and it composes with reshape like the recipe's bias line.
+    MemSource s = src_a({1, 2, 3, 4, 5, 6});
+    auto out = run(recipe_text("t", zeros64(), kSrcA,
+                               {blob("fp32", 12, "f32(tile(t(\"a\"), 0, 2))"),
+                                blob("fp32", 12, "f32(tile(t(\"a\"), 1, 2))"),
+                                blob("fp32", 18, "f32(tile(reshape(t(\"a\"), [6]), 0, 3))"),
+                                blob("fp16", 12, "f16(f32(tile(f64(t(\"a\")), 1, 2)))")}),
+                   s);
+    CHECK(out.size() == 4);
+    if (out.size() != 4) return;
+    CHECK(f32s(out[0]) == std::vector<float>({1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 6}));
+    CHECK(f32s(out[1]) == std::vector<float>({1, 2, 3, 1, 2, 3, 4, 5, 6, 4, 5, 6}));
+    std::vector<float> three;
+    for (int k = 0; k < 3; ++k) three.insert(three.end(), {1, 2, 3, 4, 5, 6});
+    CHECK(f32s(out[2]) == three);
+    const auto h = f16s(out[3]);
+    CHECK(h.size() == 12 && h[3] == recipe::f32_to_f16(1.0f) && h[6] == recipe::f32_to_f16(4.0f));
+
+    const std::string b6 = "\nend\n";
+    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(tile(t(\"a\"), 2, 2))" + b6, "tile() axis out of range");
+    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(tile(t(\"a\"), 0, 0))" + b6, "count must be at least 1");
+    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(tile(t(\"a\"), 0))" + b6, "takes 3 argument");
+    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(tile(2, 0, 3))" + b6, "needs an array");
+    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 12 f16(tile(t(\"a\"), 0, 3))" + b6, "expression has 18 [6,3]");
+    // A layout op: exact.
+    const recipe::Recipe r = recipe::parse(recipe_text("t", zeros64(), kSrcA, {blob("fp16", 12, "f16(tile(t(\"a\"), 0, 2))")}));
+    for (const recipe::Item & it : r.items) CHECK(!it.ulp);
+}
+
+void case_op_exp() {
+    const std::vector<float> a = {0.0f, 1.0f, -1.0f, 0.5f, -7.25f, 10.0f};
+    MemSource s = src_a(a);
+    auto out = run(recipe_text("t", zeros64(), kSrcA,
+                               {blob("fp32", 6, "f32(exp(t(\"a\")))"),
+                                blob("fp32", 6, "f32(exp(f64(t(\"a\"))))"),
+                                blob("fp32", 6, "f32(recip(exp(t(\"a\"))))"),
+                                blob("fp32", 6, "f32(mul(t(\"a\"), exp(1)))"),
+                                let_("e = exp(t(\"a\"))"),
+                                blob("fp16", 6, "f16(e)")}),
+                   s);
+    CHECK(out.size() == 5);
+    if (out.size() != 5) return;
+    const auto e32 = f32s(out[0]);
+    for (size_t i = 0; i < a.size(); ++i) {
+        // round_to_dtype(libm exp in f64)
+        CHECK(bits(e32[i]) == bits(static_cast<float>(std::exp(static_cast<double>(a[i])))));
+    }
+    CHECK(e32[0] == 1.0f);
+    CHECK(f32s(out[1]) == e32);  // f64 exp then f32: the same rounding here
+    const auto inv = f32s(out[2]);
+    for (size_t i = 0; i < a.size(); ++i) CHECK(bits(inv[i]) == bits(1.0f / e32[i]));
+    const auto m = f32s(out[3]);
+    const float e1 = static_cast<float>(std::exp(1.0));  // a weak literal takes the array's dtype
+    for (size_t i = 0; i < a.size(); ++i) CHECK(bits(m[i]) == bits(a[i] * e1));
+    const auto h = f16s(out[4]);
+    for (size_t i = 0; i < a.size(); ++i) CHECK(h[i] == recipe::f32_to_f16(e32[i]));
+
+    // Overflow is a non-finite weight: a deterministic failure.
+    MemSource big = src_a({1, 2, 3, 4, 5, 1000});
+    Error err;
+    run(recipe_text("t", zeros64(), kSrcA, {blob("fp32", 6, "f32(exp(t(\"a\")))")}), big, &err);
+    CHECK(err.cls == ErrorClass::deterministic && err.message.find("non-finite") != std::string::npos);
+
+    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(exp(t(\"a\"), 1))\nend\n", "takes 1 argument");
+    // A transcendental is ulp, through a let too.
+    const recipe::Recipe r = recipe::parse(recipe_text(
+        "t", zeros64(), kSrcA,
+        {let_("e = exp(t(\"a\"))"), blob("fp16", 6, "f16(recip(e))"), blob("fp16", 6, "f16(t(\"a\"))")}));
+    std::vector<bool> ulp;
+    for (const recipe::Item & it : r.items) {
+        if (it.kind == recipe::Item::Kind::blob) ulp.push_back(it.ulp);
+    }
+    CHECK(ulp == std::vector<bool>({true, false}));
+}
+
+void case_op_l2norm() {
+    MemSource s = src_a({1, 2, 3, 4, 5, 6});
+    auto out = run(recipe_text("t", zeros64(), kSrcA,
+                               {blob("fp32", 2, "f32(l2norm(t(\"a\"), [1]))"),
+                                blob("fp32", 3, "f32(l2norm(t(\"a\"), [0]))"),
+                                blob("fp32", 1, "f32(l2norm(t(\"a\"), [1, 0]))"),
+                                // keepdims: [2,1] broadcasts against [2,3] row by row
+                                blob("fp32", 6, "f32(div(t(\"a\"), l2norm(t(\"a\"), [1])))"),
+                                blob("fp32", 2, "f32(l2norm(f64(t(\"a\")), [1]))")}),
+                   s);
+    CHECK(out.size() == 5);
+    if (out.size() != 5) return;
+    const float r0 = static_cast<float>(std::sqrt(14.0)), r1 = static_cast<float>(std::sqrt(77.0));
+    CHECK(f32s(out[0]) == std::vector<float>({r0, r1}));
+    CHECK(f32s(out[1]) == std::vector<float>({static_cast<float>(std::sqrt(17.0)), static_cast<float>(std::sqrt(29.0)),
+                                              static_cast<float>(std::sqrt(45.0))}));
+    CHECK(f32s(out[2]) == std::vector<float>({static_cast<float>(std::sqrt(91.0))}));
+    CHECK(f32s(out[3]) == std::vector<float>({1 / r0, 2 / r0, 3 / r0, 4 / r1, 5 / r1, 6 / r1}));
+    CHECK(f32s(out[4]) == f32s(out[0]));
+
+    // The weight-norm fuse of a [OC, IC, K] conv weight, as the ACE-Step VAE
+    // recipe writes it: v * (g / (||v|| over [1,2] + 1e-12)). The reference
+    // sums in f64, in row-major order, then rounds the norm to f32.
+    std::vector<float> v(2 * 3 * 4), g = {0.75f, -2.0f};
+    for (size_t i = 0; i < v.size(); ++i) v[i] = 0.1f * static_cast<float>(i) - 0.9f;
+    MemSource sv({TT{"v", T_F32, {2, 3, 4}, v}, TT{"g", T_F32, {2, 1, 1}, g}}, {});
+    const std::string kSrcV = "source \"v\" f32 [2,3,4]\nsource \"g\" f32 [2,1,1]\n";
+    auto wn = run(recipe_text("t", zeros64(), kSrcV,
+                              {blob("fp32", 24, "f32(mul(t(\"v\"), div(t(\"g\"), add(l2norm(t(\"v\"), [1, 2]), 1e-12))))")}),
+                  sv);
+    CHECK(wn.size() == 1);
+    if (wn.size() == 1) {
+        const auto w = f32s(wn[0]);
+        for (size_t oc = 0; oc < 2; ++oc) {
+            double acc = 0.0;
+            for (size_t j = 0; j < 12; ++j) acc += static_cast<double>(v[oc * 12 + j]) * static_cast<double>(v[oc * 12 + j]);
+            const float norm = static_cast<float>(std::sqrt(acc));
+            const float scale = g[oc] / (norm + 1e-12f);
+            for (size_t j = 0; j < 12; ++j) CHECK(bits(w[oc * 12 + j]) == bits(v[oc * 12 + j] * scale));
+        }
+    }
+
+    // f64 accumulation of an f32 array: 4096 squares of 2^-12 each add 2^-24
+    // to 1, which an f32 running sum rounds away every time (the norm would be
+    // exactly 1); in f64 they add up to 2^-12 and the f32 norm is above 1.
+    std::vector<float> p(4097, std::ldexp(1.0f, -12));
+    p[0] = 1.0f;
+    MemSource sp({TT{"p", T_F32, {4097}, p}}, {});
+    auto pd = run(recipe_text("t", zeros64(), "source \"p\" f32 [4097]\n", {blob("fp32", 1, "f32(l2norm(t(\"p\"), [0]))")}),
+                  sp);
+    CHECK(pd.size() == 1);
+    if (pd.size() == 1) {
+        const float want = static_cast<float>(std::sqrt(1.0 + 4096.0 * std::ldexp(1.0, -24)));
+        CHECK(want > 1.0f);
+        CHECK(bits(f32s(pd[0])[0]) == bits(want));
+    }
+
+    const std::string b6 = "\nend\n";
+    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(l2norm(t(\"a\"), []))" + b6, "at least one axis");
+    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(l2norm(t(\"a\"), [1, 1]))" + b6, "distinct axes");
+    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(l2norm(t(\"a\"), [2]))" + b6, "distinct axes");
+    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(l2norm(t(\"a\"), 1))" + b6, "must be a list");
+    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(l2norm(t(\"a\"), [1]))" + b6, "expression has 2 [2,1]");
+    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(l2norm(3, [0]))" + b6, "needs an array");
+    // A reduction is ulp.
+    const recipe::Recipe r = recipe::parse(recipe_text(
+        "t", zeros64(), kSrcA, {blob("fp16", 6, "f16(div(t(\"a\"), l2norm(t(\"a\"), [1])))")}));
+    for (const recipe::Item & it : r.items) CHECK(it.ulp);
+}
+
 // ---- lit --------------------------------------------------------------------------------------
 
 void case_op_lit() {
@@ -1262,6 +1437,9 @@ int main(int argc, char ** argv) {
                          {"op-layout", case_op_layout},
                          {"op-slice-neg-consts", case_op_slice_neg_consts},
                          {"op-lit", case_op_lit},
+                         {"op-tile", case_op_tile},
+                         {"op-exp", case_op_exp},
+                         {"op-l2norm", case_op_l2norm},
                          {"patches", case_patches},
                          {"template-literals-patches", case_template_literals_patches},
                          {"shape-overflow", case_shape_overflow},

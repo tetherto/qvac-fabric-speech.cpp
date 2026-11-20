@@ -8,7 +8,10 @@
 // "artifact" is the realpath hashed into hint_id; it lets the cache's prune
 // attribute a hint to a cache artifact and its template id.
 // A hint records that this host loaded this artifact before; it is not proof
-// that the ANE plan is still cached.
+// that the ANE plan is still cached. "stale_until" is set for 24 h when a
+// bounded wait expired on a load running past 1.5 x its warm time, and cleared
+// by a later load that started on that stale hint and finished within 1.5 x
+// the warm time.
 
 #include <cstdint>
 #include <optional>

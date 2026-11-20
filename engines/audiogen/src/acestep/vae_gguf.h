@@ -30,6 +30,11 @@ void           vae_gguf_close(VaeGGUF & g);
 const void *   vae_gdata(const VaeGGUF & g, const std::string & name);  // raw mmap ptr, nullptr if absent
 ggml_tensor *  vae_gmeta(const VaeGGUF & g, const std::string & name);  // metadata tensor, nullptr if absent
 bool           vae_gguf_has(const VaeGGUF & g, const std::string & name);
+// The weight readers below take every tensor as BF16 (the converter keeps the
+// VAE BF16). "" when every tensor of `g` is BF16, otherwise why the file is
+// refused: a tensor of another type would be read as wrong values, and the
+// Core ML decoder, which converts by the GGUF type, would disagree with it.
+std::string    vae_gguf_type_refusal(const VaeGGUF & g, const std::string & path);
 
 // weight_norm fusion into a pre-allocated backend tensor (dst must already be
 // backed by a buffer; data is uploaded via ggml_backend_tensor_set).

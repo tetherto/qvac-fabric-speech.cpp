@@ -835,7 +835,11 @@ void Runtime::start_locked(const std::shared_ptr<Job> & j, Clock::time_point now
         reserve_locked(*j, *c, gy);
     }
     if (j->kind == JobKind::load) {
-        j->hinted_at_start = hinted(j->hint_path);
+        const std::optional<HintRecord> h = j->hint_path.empty() ? std::nullopt : read_hint(j->hint_path);
+        const bool stale = h && hint_stale(*h, unix_now_s());
+        j->hinted_at_start = h && !stale;
+        j->stale_until_at_start = stale ? h->stale_until_s : std::nullopt;
+        j->stale_w_ms = !stale ? -1 : h->warm_load_ms ? *h->warm_load_ms : j->expected_warm_ms.value_or(-1);
         ++stats_.loads_started;
         event_locked("start:load:" + j->load.stage + "/" + j->load.function);
     } else {
@@ -968,10 +972,16 @@ void Runtime::requeue(const std::shared_ptr<Job> & j) {
     bump_locked();
 }
 
-std::optional<HintView> Runtime::record_hint(const Job & j, int64_t ms, bool warm) {
+std::optional<HintView> Runtime::record_hint(const Job & j, int64_t ms, bool warm, bool refresh) {
     if (j.hint_path.empty()) return std::nullopt;
     std::lock_guard<std::mutex> hl(hint_mu_);
     HintRecord rec = read_hint(j.hint_path).value_or(HintRecord{});
+    // A refresh lifts only the cooldown the load started under; a stale_until
+    // written meanwhile is preserved, and the load then counts as cold.
+    if (refresh && rec.stale_until_s == j.stale_until_at_start) {
+        rec.stale_until_s.reset();
+        warm = true;
+    }
     if (warm) {
         rec.warm_load_ms = ms;
     } else {
@@ -979,7 +989,6 @@ std::optional<HintView> Runtime::record_hint(const Job & j, int64_t ms, bool war
     }
     rec.last_ok = iso8601_utc(unix_now_s());
     rec.artifact = j.load.artifact_path;  // lets the cache prune attribute the hint
-    // stale_until written meanwhile is preserved (read just above).
     write_hint(j.hint_path, rec);
     {
         std::lock_guard<std::mutex> lk(mu);
@@ -1054,16 +1063,23 @@ void Runtime::run_load(const std::shared_ptr<Job> & j) {
     }
     const Clock::time_point t2 = Clock::now();
     bool expired = false;
+    bool refresh = false;
+    const int64_t ms = ms_between(t0, t2);
     {
         std::lock_guard<std::mutex> lk(mu);
         j->completing = true;
         expired = j->wait_expired.load();
         j->timings.load = ms_between(t0, t1);
         j->timings.warm = j->warm_fn ? ms_between(t1, t2) : 0;
+        // Started on a stale hint and as fast as a warm load the hint would
+        // have waited for: the plan is cached again, so the cooldown ends here
+        // instead of after 24 h (an owner that reloads at every unit, such as
+        // a low-memory mode, would otherwise never wait for a day).
+        refresh = !expired && j->stale_until_at_start && j->stale_w_ms >= 0 && ms <= j->stale_w_ms + j->stale_w_ms / 2;
     }
     // A load counts as warm if a non-stale hint existed when it started; one
     // whose bounded wait expired does not train warm_load_ms.
-    const std::optional<HintView> hint = record_hint(*j, ms_between(t0, t2), j->hinted_at_start.load() && !expired);
+    const std::optional<HintView> hint = record_hint(*j, ms, j->hinted_at_start.load() && !expired, refresh);
     std::shared_ptr<SharedModel> sm(
         new SharedModel(std::move(r.model), j->load, j->model_key, r.lease_fd, weak_from_this()));
     publish(j, sm, true, hint);
@@ -1249,11 +1265,35 @@ Runtime::WaitPlan Runtime::plan_bounded_wait_locked(SlotCore & c, std::optional<
     return WaitPlan{true, w};
 }
 
+void Runtime::adopt_cached(const std::shared_ptr<SlotCore> & c) {
+    if (c->spec.route != Route::generate || c->spec.lookup_fn == nullptr) return;
+    PrepareRequest req;
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        if (stopping_ || exiting() || !c->artifact_path.empty() || c->job || is_terminal(c->state)) return;
+        req = c->spec.prepare;
+    }
+    PrepareResult r;
+    if (!c->spec.lookup_fn(req, r) || !r.error.ok() || r.artifact_path.empty()) return;
+    std::lock_guard<std::mutex> lk(mu);
+    // A preparation queued meanwhile adopts the same artifact itself.
+    if (!c->artifact_path.empty() || c->job || is_terminal(c->state)) return;
+    c->artifact_path = r.artifact_path;
+    c->artifact_key = r.artifact_key;
+    c->status_route = StatusRoute::cached;
+    c->hint_path = hint_path_for(c->policy.cache_dir, host_id, c->artifact_path, c->spec.function,
+                                 to_string(c->spec.units), os_build);
+    event_locked("cached:" + req.key);
+}
+
 Acquired Runtime::acquire(const std::shared_ptr<SlotCore> & c, Demand d, std::optional<Clock::time_point> deadline,
                           const std::atomic<bool> * cancel) {
     Acquired out;
     std::string stale_path, stale_artifact;
-    if (d == Demand::now) pin_for_work();
+    if (d == Demand::now) {
+        pin_for_work();
+        adopt_cached(c);
+    }
     {
         Graveyard gy;
         std::unique_lock<std::mutex> lk(mu);

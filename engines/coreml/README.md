@@ -113,6 +113,17 @@ route `generate`:
    `generation::end_load` after: a generated bundle loads under the shared
    lease of its cache entry, and `used/<key>` is touched after a successful
    load. Both do nothing for a prebuilt bundle.
+5. Each unit acquires its slot once with `Demand::now` and one deadline: the
+   time the unit would take on ggml on this host. With `wait = none` the
+   slot waits only on a non-stale warm hint (`<cache>/qvac-coreml-v1/hints`),
+   and only while 1.5 x the hinted warm load fits before the deadline. A wait
+   that expires while the slot's own load runs past 1.5 x its warm time marks
+   the hint stale for 24 hours; a stale hint is never waited on. The next load
+   that started on the stale hint and finishes within 1.5 x the hinted warm
+   time ends the cooldown and records its time as warm, since the plan is
+   evidently cached again. An engine that reloads at every unit (ACE-Step's
+   low-memory mode) would otherwise not wait for a day. A `stale_until`
+   written while that load ran is kept.
 
 Fit charges a generated stage with `generation::envelope_bytes(memory,
 units)`: resident (runtime weights, twice the function I/O, state,
@@ -331,6 +342,15 @@ permute take concat`, `let` bindings, and:
 | `neg(x)` | IEEE negation (`neg(0)` is `-0`) |
 | `zeros([d...])`, `ones([d...])` | f32 constants |
 | `lit("id")` | a `template.json` `literals` entry `{id, dtype, shape, offset}`: bytes of `literals.bin` (fp16 or fp32, numpy order), as f32 |
+| `tile(x, axis, n)` | `n` copies of `x` one after the other along `axis` (`np.tile` on that axis); on a 1-D array, torch's `x.repeat(n)`: `[a,b,c]` → `[a,b,c,a,b,c]`, not NumPy's element-wise `repeat` |
+| `exp(x)` | `exp` computed in f64 by libm, rounded to `x`'s dtype |
+| `l2norm(x, [axes...])` | `sqrt` of the sum of squares over the distinct `axes`, which are kept with size 1 (so the result broadcasts against `x`); the squares are summed in f64 in row-major order over the reduced elements and the f64 root is rounded to `x`'s dtype |
+
+A blob whose expression contains `exp` or `l2norm` is compared in the `ulp`
+class (at most 1 ulp, or within 2^-10 of the blob's largest magnitude): libm
+and the exporter's own arithmetic (NumPy's `float32` `exp`, a pairwise `f32`
+sum) may round differently in the last place. Every other blob must be
+byte-equal.
 
 `patch <spec_offset> fp16|fp32 <count> <expr>` lines write `count` values
 into `model.mlmodel` at `spec_offset`, replacing the sentinel that

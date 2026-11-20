@@ -258,7 +258,134 @@ The [memory-fit preflight](memory-fit.md#minimax-music3) reports
 the ACE-Step Oobleck VAE decoder — the stage that dominates generation time at
 song lengths on Apple GPUs — running it predominantly on the Neural Engine.
 Every other stage stays on ggml, and the decoder falls back to ggml on any
-sidecar failure. Export it from the VAE GGUF:
+sidecar failure. The sidecar loads through the shared Core ML runtime
+(`engines/coreml`), from one of two places:
+
+- **Prebuilt**, next to the VAE GGUF as `<basename-minus-quant>-decoder.mlmodelc`
+  (`vae-BF16.gguf` resolves to `vae-decoder.mlmodelc`), exported with
+  `scripts/export-vae-coreml.py` (below).
+- **Generated** from the VAE GGUF itself, when no prebuilt sidecar sits next
+  to it and `EngineOptions::coreml.cache_dir` (or `VaeOptions::coreml.cache_dir`,
+  or `QVAC_COREML_CACHE_DIR`) names a cache directory, on macOS 15 or later.
+  The library embeds the weight-free template `acestep-vae-t64`
+  (`coreml-templates/acestep-vae-t64/`, made from the unchanged exporter at
+  its 64-frame window): the first decode writes the fp16 `weight.bin` from the
+  GGUF's decoder tensors, compiles the package on the device and publishes it
+  in the cache (`AUDIOGEN_COREML_GENERATE`, on by default on macOS, compiles
+  the generator in). Later engines, and later processes, find the artifact
+  there: a decode adopts the cached artifact and its warm hint before it
+  decides whether to wait, so a new process's first decode reloads warm and
+  runs on Core ML. `music-cli` defaults the cache directory to
+  `~/Library/Application Support/qvac-speech/coreml` on macOS when neither
+  `--coreml-cache-dir` nor `QVAC_COREML_CACHE_DIR` is given. The generated weights match the exporter's within one fp16 ulp per
+  element (the template's `real` gate on `vae-BF16.gguf`), and
+  `test-vae-coreml-parity --cache-dir` holds the generated decoder to cosine
+  0.999 against the ggml decode (measured 0.99999 on an M2).
+- The generated decoder belongs to the VAE file the engine was created with
+  (its size, modification time, inode and device). Every load of the ggml VAE
+  (low-memory mode reloads it at each VAE phase) reads the metadata and the
+  weights through one descriptor and compares that file with the decoder's:
+  a VAE GGUF replaced in place under a live engine decodes on ggml from then
+  on (`coreml_pending` false; strict fails the decode) instead of running the
+  old decoder next to the new ggml weights.
+- The ggml VAE reads its weights as BF16 (the converter keeps the VAE BF16),
+  so a VAE GGUF with a tensor of any other type is refused at load with the
+  tensor's name and type. The template accepts other source types only for
+  its own generator gates.
+
+Either way the sidecar loads in the background and nothing waits for it:
+
+- `Engine::create` requests nothing. The decoder is requested by the first
+  decode (`Vae::decode`), never by an encoding (source or reference audio,
+  `understand()`), so a generation that never decodes starts no Core ML work.
+- Each decode acquires the decoder once and runs entirely on what it got:
+  Core ML windows, or the ggml decode when the decoder is not ready yet
+  (`GenerateResult::coreml_pending`). It waits for a load only when this host
+  loaded the sidecar quickly before (a warm hint under the cache directory)
+  and the hinted load (1.5 x its recorded warm time, plus any hinted loads
+  queued ahead) would finish before the ggml decode would. The ggml decode
+  time is this host's own: once the engine has decoded a latent of at least
+  64 frames on ggml it uses the fastest cost per latent frame it measured
+  (ggml with Metal takes about 27.6 ms per frame on an M2 and 8 ms on an
+  M4 Max); before that, a low estimate of 7 ms per frame. A clip whose ggml
+  decode is shorter than that budget does not wait and decodes on ggml (in
+  low-memory mode, every time). A latent shorter than the generated
+  decoder's 64-frame window never requests it and is not pending (strict
+  fails it).
+- A wait that runs out while the decoder's own load is still running past
+  1.5 x its warm time marks the warm hint stale for 24 hours, and a stale
+  hint is never waited on. In low-memory mode, where every decode reloads
+  the decoder, that would keep a whole day of generations on ggml. So the
+  next load that is as fast as the recorded warm load (it runs in the
+  background during the next generation's ggml decode) ends the cooldown:
+  one slow reload costs one generation.
+  `GenerateResult::vae_backend` reports `ggml`, `coreml-all`,
+  `coreml-ane`, `coreml-gpu`, `coreml-cpu` or `mixed` (an edit plan whose
+  decodes ran on different backends).
+- **Low-memory mode** (the default; `ACESTEP_KEEP_STAGES` unset) releases the
+  decoder at every VAE stage boundary like the ggml stages. The generated
+  artifact and the warm hint stay, so the next `generate()` reloads the
+  decoder in a fraction of a second and decodes on Core ML. The very first
+  generation decodes on ggml while the sidecar is generated and compiled for
+  the Neural Engine (tens of seconds, once per host and cache path); a load
+  still running when the first generation releases the decoder finishes in the
+  background, records its warm hint and releases its model. Core ML therefore
+  starts with the second generation of the first process on a host, and with
+  the first generation of every later process that uses the same cache
+  directory (that decode waits for the warm reload). With
+  `ACESTEP_KEEP_STAGES` the decoder stays loaded, and every decode after its
+  load has finished runs on Core ML. A cancelled call (a progress callback
+  returning `false`, or `Engine::cancel()`) ends its VAE phase the same way,
+  and a cancel that arrives while a decode waits for the decoder returns
+  without starting a ggml decode. A repaint that re-decodes and re-encodes
+  its source releases the decoder before the encode.
+- **A prebuilt sidecar needs a cache directory (or `coreml.wait = call`) in
+  low-memory mode.** Before the shared runtime, a prebuilt sidecar loaded
+  synchronously in `Vae::load`, so every decode used it. It now loads in the
+  background like the generated one, and only a warm hint lets a decode wait
+  for its reload; hints live under the cache directory (keyed by the
+  sidecar's real path), so without one nothing ever waits. With the default
+  `coreml.wait = none`, low-memory mode and no cache directory, each decode
+  starts the reload, runs on ggml, and releases the loaded decoder at the
+  stage boundary: such an engine may never decode on Core ML. Set
+  `coreml.cache_dir` (or `QVAC_COREML_CACHE_DIR`; `music-cli` has a default)
+  so the second generation waits for the warm reload, or `coreml.wait = call`
+  to block every decode until the sidecar is loaded (the previous behaviour),
+  or keep the stages loaded (`ACESTEP_KEEP_STAGES`).
+- `coreml.prewarm = all` with `coreml.wait = construct` is install-time
+  preparation: `create()` generates, loads and warms the decoder, then (in
+  low-memory mode) releases it again. Without `coreml.wait = construct` the
+  same happens in the background: in low-memory mode the decoder is released
+  as soon as the construction group has finished, unless a decode has asked
+  for it by then. That release runs on one process-wide thread that holds the
+  engine's decoder stage only weakly, so destroying the engine never waits
+  for it. `Engine::coreml_construction()` reports
+  the group's success (with no usable route, including a build without
+  `AUDIOGEN_COREML`, an empty successful group with `nothing_to_prepare` and
+  the decoder under `skipped_route_none`); `Engine::coreml_status()` and
+  `Engine::coreml_wait()` report and wait for the decoder.
+- `Engine::coreml_prewarm(scope, wait)` issues the same kind of group on an
+  existing engine: `all` prepares, loads and warms the decoder (in low-memory
+  mode it is released again and the group still reports success), any other
+  scope is an empty group. With `wait` it returns the group's result JSON
+  once the group has finished (`cancel()` interrupts it); without, the
+  snapshot at once. A `cancel()` that interrupts only a `coreml_wait()` or a
+  waited `coreml_prewarm()` is consumed by it, so the next `generate()` runs;
+  with nothing in flight, `cancel()` cancels the next `generate()` or
+  `understand()`.
+- `coreml.memory_budget_bytes` with `coreml.memory_degrade`: pass the budget
+  the memory-fit preflight was assessed against and its decision
+  (`FitResult::coreml.disabled_reason == "memory"`), and `create()` runs the
+  route fit chose for that workload. With a budget and no decision, `create()`
+  assesses fit itself with the default workload (60 s, no source audio).
+- `coreml.use = require` (or `ACESTEP_COREML_STRICT`) makes a decoder that
+  cannot serve a decode — none available, a failed generation or load, a
+  failed prediction, a latent shorter than one window — fail the decode instead
+  of falling back; `create()` throws when there is no usable route at all.
+
+The memory-fit preflight charges a generated decoder ([memory-fit](memory-fit.md#ace-step)).
+
+Export a prebuilt sidecar from the VAE GGUF:
 
 ```bash
 python3.11 -m venv .venv-coreml
@@ -269,9 +396,7 @@ python engines/audiogen/scripts/export-vae-coreml.py \
   --out models/vae-decoder.mlpackage --compile-dir models
 ```
 
-The compiled sidecar must sit next to the VAE GGUF as
-`<basename-minus-quant>-decoder.mlmodelc` (`vae-BF16.gguf` resolves to
-`vae-decoder.mlmodelc`). The export is fixed-shape; the engine decodes in
+The export is fixed-shape; the engine decodes in
 fixed overlapped windows of exactly the exported latent length (the last
 window end-aligned), keeping the same trimmed-core stitching as the ggml
 chunked decode. A latent shorter than one window falls back to ggml.
@@ -299,17 +424,24 @@ output cosine 0.71 vs CPU at any size), while the phase form matches the CPU
 reference at fp16 rounding error. `test-vae-coreml-parity` gates the sidecar
 against the ggml decode at cosine 0.999 (measured 0.99999).
 
-Set `ACESTEP_COREML_DISABLE=1` to force the ggml decode, including for parity
-or benchmarking. `ACESTEP_COREML_STRICT=1` turns the silent ggml fallback into
-a decode failure, so a test cannot measure ggml and attribute it to Core ML —
-the parity test and benchmark set it for their Core ML legs.
-`ACESTEP_COREML_COMPUTE_UNITS=cpu_only|cpu_and_gpu|cpu_and_ane`
-overrides the default all-units placement for comparisons — on an M5 both
-non-default choices are large regressions (`cpu_and_ane` pushes the
-ANE-declined upsample stages onto the CPU).
+Options are resolved once, at construction: each `CoremlOptions` field
+(`audiogen-cpp/coreml_options.h`), then the environment, then
+`QVAC_COREML_CACHE_DIR` for the cache directory, then the default.
+`ACESTEP_COREML_DISABLE=1` forces the ggml decode and overrides everything,
+including `use = require`; the parity test uses it for its ggml reference.
+`ACESTEP_COREML_STRICT=1` is `use = require`, so a test cannot measure ggml
+and attribute it to Core ML — the parity test and benchmark set it (or
+`use = require`) for their Core ML legs.
+`ACESTEP_COREML_COMPUTE_UNITS=cpu_only|cpu_and_gpu|cpu_and_ane` (or
+`coreml.compute_units`) overrides the default all-units placement for
+comparisons — on an M5 both non-default choices are large regressions
+(`cpu_and_ane` pushes the ANE-declined upsample stages onto the CPU). A
+generated decoder is offered only for compute units its memory envelope was
+validated for (`all`); other units leave the decoder on ggml.
 
-`bench-vae-coreml` times the ggml GPU decode against the sidecar on the same
-deterministic 30 s and 60 s latents (median of 3 after a warm-up that absorbs
+`bench-vae-coreml` (`--cache-dir DIR` for the generated sidecar) times the
+ggml GPU decode against the sidecar on the same deterministic 30 s and 60 s
+latents (median of 3 after a warm-up that absorbs
 the one-time ANE compile) and prints a markdown table; it fails below the
 0.999 parity gate, so its numbers are correctness-checked. The audiogen CI
 macOS lane runs it for the float16 and the 8-bit palettized sidecar and

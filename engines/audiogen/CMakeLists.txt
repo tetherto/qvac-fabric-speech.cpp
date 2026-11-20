@@ -109,6 +109,7 @@ set(AUDIOGEN_LIB_SOURCES
     src/acestep/vae_ggml.cpp
     src/acestep/vae_encode_windows.cpp
     src/acestep/vae_coreml_path.cpp
+    src/acestep/vae_coreml.cpp
     src/acestep/vae_api.cpp
     src/acestep/wav_reader.cpp
     src/acestep/dit_gguf.cpp
@@ -214,10 +215,21 @@ if (AUDIOGEN_BUILD_LIBRARY)
         )
     endif()
     # Shared Core ML runtime (engines/coreml): compiled into libaudiogen-cpp
-    # under its own namespace when AUDIOGEN_COREML is on. No engine source uses
-    # it yet.
+    # under its own namespace when AUDIOGEN_COREML is on. The ACE-Step VAE
+    # decoder loads through its slots and, with AUDIOGEN_COREML_GENERATE (macOS
+    # default), is generated from the VAE GGUF with the embedded template below.
     include(${CMAKE_CURRENT_SOURCE_DIR}/../coreml/qvac_coreml.cmake)
-    qvac_coreml_add_to(audiogen-cpp NAMESPACE audiogen_coreml PREFIX AUDIOGEN ENABLE ${AUDIOGEN_COREML})
+    qvac_coreml_add_to(audiogen-cpp NAMESPACE audiogen_coreml PREFIX AUDIOGEN ENABLE ${AUDIOGEN_COREML}
+        TEMPLATES "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/acestep-vae-t64")
+    if (AUDIOGEN_COREML)
+        # The engine sources compile in audiogen-cpp-objects, so the adoption
+        # (src/acestep/vae_coreml.cpp) needs the runtime's namespace and headers
+        # there; in-tree binaries that link the objects link the runtime's
+        # objects too (audiogen_link_in_tree_binary).
+        get_target_property(_ag_coreml_ns audiogen-cpp QVAC_COREML_NS)
+        target_compile_definitions(audiogen-cpp-objects PRIVATE QVAC_COREML_NS=${_ag_coreml_ns})
+        target_include_directories(audiogen-cpp-objects PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/include)
+    endif()
 
     set_target_properties(audiogen-cpp PROPERTIES
         POSITION_INDEPENDENT_CODE ON
@@ -248,6 +260,14 @@ endif()
 
 function(audiogen_link_in_tree_binary target)
     target_link_libraries(${target} PRIVATE audiogen-cpp-objects)
+    if (TARGET audiogen-cpp.qvac-coreml)
+        # The shared Core ML runtime's objects (folded into libaudiogen-cpp by
+        # qvac_coreml_add_to) and the frameworks it needs.
+        _qvac_coreml_apple_frameworks(_ag_coreml_fws ON)
+        find_package(Threads REQUIRED)
+        target_sources(${target} PRIVATE $<TARGET_OBJECTS:audiogen-cpp.qvac-coreml>)
+        target_link_libraries(${target} PRIVATE ${_ag_coreml_fws} Threads::Threads)
+    endif()
     target_include_directories(${target} PRIVATE
         include
         src
@@ -360,6 +380,67 @@ if (AUDIOGEN_BUILD_TESTS)
     endif()
     audiogen_register_test(test-vae-coreml-parity LABEL "integration")
     set_property(TEST test-vae-coreml-parity PROPERTY SKIP_RETURN_CODE 77)
+
+    # The VAE decoder on the shared Core ML runtime. --self-test (every build):
+    # the decode deadline, labels, options, the per-phase Core ML charge and
+    # the fit verdict with memory-degrade. --fit-stable on a twin of the
+    # template's reference manifest: the route and envelope never read the
+    # cache. The device cases and the memory schedule run from CI
+    # (audiogen-ci.yml) on the staged models.
+    add_executable(test-acestep-vae-coreml test/test_acestep_vae_coreml.cpp)
+    audiogen_link_in_tree_binary(test-acestep-vae-coreml)
+    # memory_probe.h: the shared probes of the Core ML memory schedules.
+    target_include_directories(test-acestep-vae-coreml PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/test)
+    if (AUDIOGEN_COREML)
+        # The fit-stable hint cases write records where the runtime reads
+        # them, so the test uses the runtime's hint-path helper (same
+        # namespace as the runtime objects it links).
+        get_target_property(_ag_test_coreml_ns audiogen-cpp QVAC_COREML_NS)
+        target_compile_definitions(test-acestep-vae-coreml PRIVATE AUDIOGEN_USE_COREML
+                                   QVAC_COREML_NS=${_ag_test_coreml_ns})
+        target_include_directories(test-acestep-vae-coreml PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/include ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/src)
+    endif()
+    add_test(NAME test-acestep-vae-coreml-self-test COMMAND test-acestep-vae-coreml --self-test)
+    set_property(TEST test-acestep-vae-coreml-self-test PROPERTY LABELS "unit")
+    if (TARGET qvac-coreml-tool)
+        set(_acestep_vae_twin "${CMAKE_CURRENT_BINARY_DIR}/acestep-vae-t64-twin.gguf")
+        add_test(NAME test-acestep-vae-fit-stable-twin
+                 COMMAND qvac-coreml-tool twin
+                         --manifest "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/acestep-vae-t64/reference-gguf.json"
+                         --seed 1 --types bf16 -o "${_acestep_vae_twin}")
+        set_tests_properties(test-acestep-vae-fit-stable-twin PROPERTIES LABELS "unit" FIXTURES_SETUP acestep-vae-twin)
+        # A macOS Core ML build expects the route its build options and the
+        # host's macOS support: generate (and the template charges it pins)
+        # with the generator built in on macOS 15 or later, none on a
+        # prebuilt-only build or an older macOS. On the CI runner, which has
+        # both, the generated route is therefore mandatory.
+        set(_acestep_vae_require "")
+        if (AUDIOGEN_COREML AND CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+            set(_acestep_vae_require --host-route)
+        endif()
+        add_test(NAME test-acestep-vae-fit-stable
+                 COMMAND test-acestep-vae-coreml --fit-stable --vae "${_acestep_vae_twin}" ${_acestep_vae_require})
+        set_tests_properties(test-acestep-vae-fit-stable PROPERTIES LABELS "unit" FIXTURES_REQUIRED acestep-vae-twin)
+        # A second twin (other weights, same shapes) replaces the first under
+        # a live decoder slot: the reloaded ggml VAE must not decode on the
+        # decoder generated from the first.
+        set(_acestep_vae_twin_b "${CMAKE_CURRENT_BINARY_DIR}/acestep-vae-t64-twin-b.gguf")
+        add_test(NAME test-acestep-vae-twin-b
+                 COMMAND qvac-coreml-tool twin
+                         --manifest "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/acestep-vae-t64/reference-gguf.json"
+                         --seed 2 --types bf16 -o "${_acestep_vae_twin_b}")
+        set_tests_properties(test-acestep-vae-twin-b PROPERTIES LABELS "unit" FIXTURES_SETUP acestep-vae-twin-b)
+        add_test(NAME test-acestep-vae-source-swap
+                 COMMAND test-acestep-vae-coreml --vae "${_acestep_vae_twin}" --source-swap "${_acestep_vae_twin_b}")
+        set_tests_properties(test-acestep-vae-source-swap PROPERTIES LABELS "unit"
+                             FIXTURES_REQUIRED "acestep-vae-twin;acestep-vae-twin-b")
+        # A latent shorter than the decoder's window: ggml, not pending, the
+        # decoder never requested (strict: fails).
+        add_test(NAME test-acestep-vae-short-latent
+                 COMMAND test-acestep-vae-coreml --vae "${_acestep_vae_twin}" --short-latent)
+        set_tests_properties(test-acestep-vae-short-latent PROPERTIES LABELS "unit" FIXTURES_REQUIRED acestep-vae-twin)
+    endif()
 
     # Core ML VAE decode benchmark (ggml GPU vs sidecar, markdown to stdout).
     # Not a ctest: CI runs it directly and appends its table to the job

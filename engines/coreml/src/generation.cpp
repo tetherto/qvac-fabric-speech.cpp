@@ -153,6 +153,19 @@ TemplateMemory memory_of(const recipe::Template & t) {
     return m;
 }
 
+std::map<std::string, int64_t> expected_warm_of(const recipe::Template & t) {
+    std::map<std::string, int64_t> out;
+    const recipe::TemplateFile * f = t.file("template.json");
+    const json j = json::parse(std::string(reinterpret_cast<const char *>(f->data), f->size), nullptr, false);
+    if (!j.is_object()) return out;
+    auto w = j.find("expected_warm_load_ms");
+    if (w == j.end() || !w->is_object()) return out;
+    for (auto it = w->begin(); it != w->end(); ++it) {
+        if (it->is_number_integer() && it->get<int64_t>() > 0) out[it.key()] = it->get<int64_t>();
+    }
+    return out;
+}
+
 // Templates found through the development override are parsed per directory
 // and kept for the process, so PrepareRequest::tmpl stays valid like an
 // embedded template's.
@@ -244,6 +257,7 @@ std::vector<Candidate> probe(const std::vector<std::string> & template_ids, cons
         c.sha256_hex = t->sha256_hex();
         c.default_units = parse_compute_units(t->info().default_compute_units);
         c.memory = memory_of(*t);
+        c.expected_warm_load_ms = expected_warm_of(*t);
         if (!opened) {
             src = GgufSource::open(gguf_path, open_error);
             opened = true;
@@ -332,6 +346,28 @@ PrepareResult prepare(const PrepareRequest & req, PrepareContext & ctx) {
     return r;
 }
 
+bool lookup(const PrepareRequest & req, PrepareResult & out) {
+    if (req.tmpl == nullptr || req.cache_dir.empty() || req.source.path.empty()) return false;
+    // A source marked changed is not certainly the file the engine loaded:
+    // prepare refuses it, and so does the lookup.
+    if (req.source.changed) return false;
+    const auto * t = static_cast<const recipe::Template *>(req.tmpl);
+    SourceStat now;
+    if (!stat_path(req.source.path, now) || !same_identity(now, req.source)) return false;
+    const std::string options = req.options.empty() ? std::string(digest::DEFAULT_OPTIONS) : req.options;
+    const std::string memo_id = digest::memo_id(req.source.path, now.size, now.mtime_ns, now.ino, now.dev,
+                                                t->sha256(), GENERATOR_VERSION, options);
+    const cache::Layout l(req.cache_dir);
+    const std::optional<cache::MemoFile> mf = cache::find_memo(l, memo_id);
+    if (!mf || !mf->memo || mf->memo->template_id != t->id() || mf->memo->artifact_key != mf->key32) return false;
+    const std::string dir = l.artifact_dir(t->id(), mf->key32);
+    if (cache::validate(dir) != cache::Validity::ok) return false;
+    out.artifact_path = dir + "/model.mlmodelc";
+    out.artifact_key = mf->key32;
+    out.cache_hit = true;
+    return true;
+}
+
 bool begin_load(const LoadRequest & req, LoadResult & out) {
     if (req.tmpl == nullptr) return true;  // prebuilt
     std::string cache_dir, template_id, key32;
@@ -402,6 +438,8 @@ PrepareResult prepare(const PrepareRequest &, PrepareContext &) {
     r.error = Error::deterministic("this build has no Core ML generator");
     return r;
 }
+
+bool lookup(const PrepareRequest &, PrepareResult &) { return false; }
 
 bool begin_load(const LoadRequest &, LoadResult &) { return true; }
 void end_load(const LoadRequest &, LoadResult &) {}
