@@ -1017,10 +1017,10 @@ Fit charges the capacity 137 + 121 = 258 MiB, against a largest measured
 peak increment of 108.9 MiB. As with Nemotron, the M2 sometimes keeps most of
 a load resident: in 3 of 22 runs the load grew the footprint by 83-90 MiB and
 the step to the settled footprint was 104-109 MiB; the M4 Max never did. The
-20 runs from the current tool (16 on the M2, 4 on the M4 Max) report no
-sampler errors, a compile segment, and an `ANECompilerService` sample during
-the load; the 10 earlier runs predate those fields and count only towards the
-maxima.
+schedule checker accepts only runs from the current tool, which report no
+sampler errors, a compile segment, an `ANECompilerService` sample during the
+load and the passes that overlapped the background work. Runs recorded before
+those fields existed count only towards the maxima.
 `diarizer-coreml-memory` labels the compiler's size before the load as a
 clean (at most 32 MiB), dirty or unknown baseline, because a service that
 already holds memory grows less than a clean one would. Every run here
