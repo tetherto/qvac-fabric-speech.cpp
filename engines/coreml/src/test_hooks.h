@@ -6,6 +6,7 @@
 // at a point no public API can reach. Null when unset.
 
 #include <atomic>
+#include <cstdint>
 
 namespace QVAC_COREML_NS {
 namespace detail {
@@ -23,6 +24,8 @@ struct TestHooks {
     // ~PendingRelease: after the pool's reference is released, before the
     // pool is told (Runtime::on_pool_released).
     std::atomic<void (*)()> pending_released{nullptr};
+    // The bound on the exit wait in milliseconds; negative: the default.
+    std::atomic<int64_t> exit_wait_ms{-1};
 };
 
 TestHooks & test_hooks();

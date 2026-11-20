@@ -2690,56 +2690,135 @@ void case_dlclose() {
     }
 }
 
-int child_exit_during_load(const std::string & dir) {
-    // The per-image manager, a load in flight that never returns and a second
-    // job queued behind it; then the process exits.
-    struct Never {
-        static LoadResult load(const LoadRequest &) {
-            for (;;) std::this_thread::sleep_for(1h);
-        }
-    };
+// Exit while a job runs. The jobs stand for Core ML calls, which cannot be
+// cancelled and crash if the frameworks' static state is destroyed under
+// them. Child modes:
+//   waits:        a 400 ms load is in flight when main returns. The load
+//                 creates a function-local static (as the frameworks create
+//                 theirs lazily, during the first compile), and the main
+//                 thread registers an atexit handler after the load started;
+//                 both mark the process torn down. The load must return before
+//                 either runs: exit waits first, ahead of every destructor and
+//                 handler registered later. A second job queued behind it must
+//                 never start.
+//   bounded:      the load in flight never returns; with the bound set to
+//                 300 ms, exit waits that long, then completes with status 0.
+//   other-thread: exit() is called from a thread other than main while a
+//                 400 ms load runs: the atexit handler waits for it.
+// Each child records what happened in files under its directory.
+std::string g_exit_dir;
+std::atomic<bool> g_torn_down{false};
+
+void exit_mark(const std::string & name, const std::string & text = "") {
+    if (FILE * f = std::fopen((g_exit_dir + "/" + name).c_str(), "w")) {
+        std::fputs(text.c_str(), f);
+        std::fclose(f);
+    }
+}
+
+struct TearDownMarker {
+    ~TearDownMarker() { g_torn_down = true; }
+};
+
+LoadResult exit_slow_load(const LoadRequest & r) {
+    static TearDownMarker lazy;  // registered for destruction during the load
+    (void) lazy;
+    exit_mark("load-started");
+    std::this_thread::sleep_for(400ms);
+    exit_mark("load-returned", g_torn_down ? "torn-down" : "intact");
+    LoadResult out;
+    out.model = std::make_shared<FakeModel>(r.function);
+    return out;
+}
+
+LoadResult exit_never_load(const LoadRequest & r) {
+    exit_mark("started-" + r.function);
+    for (;;) std::this_thread::sleep_for(1h);
+}
+
+int child_exit(const std::string & mode, const std::string & dir) {
+    g_exit_dir = dir;
+    if (mode == "bounded") detail::test_hooks().exit_wait_ms = 300;
     SlotSpec s;
     s.engine = "child";
     s.stage = "child";
     s.units = ComputeUnits::cpu_only;
     s.route = Route::prebuilt;
     s.artifact_path = dir + "/child.mlmodelc";
-    s.load_fn = &fake_load;
-    set_beh("in-flight", {true});
     s.function = "in-flight";
+    s.load_fn = mode == "bounded" ? &exit_never_load : &exit_slow_load;
     auto a = Manager::instance()->make_slot(s, SlotPolicy{});
     s.function = "queued";
-    s.load_fn = &Never::load;
+    s.load_fn = &exit_never_load;
     auto b = Manager::instance()->make_slot(s, SlotPolicy{});
     a->request(Priority::minimal);
     b->request(Priority::minimal);
-    if (!wait_for([] { return in_progress("in-flight"); })) return 3;
-    std::exit(0);
+    const std::string started = mode == "bounded" ? "started-in-flight" : "load-started";
+    if (!wait_for([&] { return fs::exists(dir + "/" + started); })) return 3;
+    if (mode == "waits") {
+        std::atexit([] { g_torn_down = true; });
+        return 0;  // main returns: exit()
+    }
+    if (mode == "other-thread") {
+        std::thread([] { std::exit(0); }).detach();
+        for (;;) std::this_thread::sleep_for(1h);
+    }
+    return 0;
+}
+
+// Runs a child mode; returns its exit status (128 + signal, -2 if it hung)
+// and how long it ran.
+int run_exit_child(const std::string & mode, const std::string & dir, int64_t & ms) {
+    const auto t0 = Clock::now();
+    const int rc = run_child({"--child", "exit", mode, dir});
+    ms = ms_since(t0);
+    return rc;
+}
+
+std::string read_file(const std::string & path) {
+    std::string out;
+    if (FILE * f = std::fopen(path.c_str(), "r")) {
+        char buf[256];
+        size_t n = 0;
+        while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) out.append(buf, n);
+        std::fclose(f);
+    }
+    return out;
 }
 
 void case_exit_during_load() {
-    const std::string dir = make_temp_dir();
-    const char * argv[] = {g_self.c_str(), "--child", "exit-during-load", dir.c_str(), nullptr};
-    pid_t pid = 0;
-    CHECK(posix_spawn(&pid, g_self.c_str(), nullptr, nullptr, const_cast<char * const *>(argv), environ) == 0);
-    int status = 0;
-    bool exited = false;
-    const auto t0 = Clock::now();
-    while (ms_since(t0) < 10000) {
-        if (waitpid(pid, &status, WNOHANG) == pid) {
-            exited = true;
-            break;
-        }
-        std::this_thread::sleep_for(5ms);
+    {
+        const std::string dir = make_temp_dir();
+        int64_t ms = 0;
+        const int rc = run_exit_child("waits", dir, ms);
+        CHECK(rc == 0);
+        // Absent: the process ended without waiting for the load. "torn-down":
+        // the wait ran after destructors registered during the load.
+        CHECK(read_file(dir + "/load-returned") == "intact");
+        CHECK(!fs::exists(dir + "/started-queued"));
+        std::error_code ec;
+        fs::remove_all(dir, ec);
     }
-    if (!exited) {
-        kill(pid, SIGKILL);
-        waitpid(pid, &status, 0);
+    {
+        const std::string dir = make_temp_dir();
+        int64_t ms = 0;
+        const int rc = run_exit_child("bounded", dir, ms);
+        CHECK(rc == 0);
+        CHECK(ms >= 300);   // waited for the job...
+        CHECK(ms < 5000);   // ...up to the bound only
+        CHECK(!fs::exists(dir + "/started-queued"));
+        std::error_code ec;
+        fs::remove_all(dir, ec);
     }
-    CHECK(exited);
-    CHECK(exited && WIFEXITED(status) && WEXITSTATUS(status) == 0);
-    std::error_code ec;
-    fs::remove_all(dir, ec);
+    {
+        const std::string dir = make_temp_dir();
+        int64_t ms = 0;
+        const int rc = run_exit_child("other-thread", dir, ms);
+        CHECK(rc == 0);
+        CHECK(fs::exists(dir + "/load-returned"));
+        std::error_code ec;
+        fs::remove_all(dir, ec);
+    }
 }
 
 // ---- options, plan, fit, status -------------------------
@@ -3064,8 +3143,8 @@ int main(int argc, char ** argv) {
             g_plugin = argv[++i];
         } else if (a == "--only" && i + 1 < argc) {
             only = argv[++i];
-        } else if (a == "--child" && i + 2 < argc && std::string(argv[i + 1]) == "exit-during-load") {
-            return child_exit_during_load(argv[i + 2]);
+        } else if (a == "--child" && i + 3 < argc && std::string(argv[i + 1]) == "exit") {
+            return child_exit(argv[i + 2], argv[i + 3]);
         } else if (a == "--child" && i + 4 < argc && std::string(argv[i + 1]) == "dlclose") {
             g_case = "dlclose";
             return child_dlclose(argv[i + 2], argv[i + 3], argv[i + 4]);
