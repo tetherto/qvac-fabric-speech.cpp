@@ -656,6 +656,24 @@ if (PARAKEET_BUILD_TESTS)
             LABELS "unit;coreml-runtime" TIMEOUT 120)
     endif()
 
+    # The Sortformer diarizer template refuses GGUFs whose encoder metadata
+    # the exporter refuses (causal or chunked convolution, chunked attention,
+    # causal downsampling), on twins of the shipped GGUF's metadata; with the
+    # staged GGUF, that file matches. No skip path.
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if (TARGET qvac-coreml-tool AND Python3_Interpreter_FOUND)
+        set(_qvp_sf_match_args --tool $<TARGET_FILE:qvac-coreml-tool>
+            --template-dir "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/sortformer-diar-f410")
+        if (PARAKEET_TEST_SORTFORMER_GENERATED_GGUF)
+            list(APPEND _qvp_sf_match_args --gguf "${PARAKEET_TEST_SORTFORMER_GENERATED_GGUF}")
+        endif()
+        add_test(NAME test-sortformer-diarizer-template-match
+            COMMAND ${Python3_EXECUTABLE} -B "${CMAKE_CURRENT_SOURCE_DIR}/test/test_sortformer_diarizer_template_match.py"
+                    ${_qvp_sf_match_args})
+        set_tests_properties(test-sortformer-diarizer-template-match PROPERTIES
+            LABELS "unit;coreml-runtime" TIMEOUT 300)
+    endif()
+
     # Helper: register a built test target with CTest. Same shape as
     # the standard llama-style `llama_test()` macro: every harness
     # ends up surfaced via `ctest` against the build dir, with labels

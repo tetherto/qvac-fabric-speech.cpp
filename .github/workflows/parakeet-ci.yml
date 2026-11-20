@@ -376,7 +376,8 @@ jobs:
           python3 engines/parakeet/scripts/check-ctest-junit.py \
             build-coreml/coreml-runtime-results.xml \
             --require test-coreml-scheduler --require test-parakeet-coreml-route \
-            --require test-coreml-encoder-owner-stub-tdt
+            --require test-coreml-encoder-owner-stub-tdt \
+            --require test-sortformer-diarizer-template-match
 
       # The generated diarizers on the device (Nemotron 3 Diarization and
       # Sortformer v2.1): an empty cache, the staged GGUF alone, and the

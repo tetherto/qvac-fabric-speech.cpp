@@ -290,7 +290,11 @@ Generation needs macOS 15, a `cache_dir` (the CLI defaults to one) and
 `generate = background`. The GGUF must match the template: for Nemotron 3
 Diarization architecture `sortformer` and version `v3`, for Sortformer v2.1
 architecture `parakeet-ctc`, model type `sortformer` and variant
-`sortformer-streaming-v2.1-aosc`; then the template's hyperparameters and
+`sortformer-streaming-v2.1-aosc`, with the encoder settings the exporter
+accepts (symmetric convolution, `conv_context_style` `regular`, regular
+full-context attention, non-causal 8x subsampling; any other value, such as a
+causal convolution, gets `no_template` and runs on ggml); then the template's
+hyperparameters and
 every tensor's name and shape, with matrices in f32, f16, bf16, q8_0, q6_k,
 q5_k or q4_k (Sortformer v2.1 also q4_0, and its depthwise convolutions in
 f32, f16 or bf16). The
