@@ -1547,7 +1547,9 @@ std::string file_text(const fs::path & p) {
 
 // pocket-cli's paths, on Core ML off (POCKET_COREML_DISABLE, so only ggml
 // runs): --coreml-status-json is refused before synthesis when it names the
-// output, a model input or (through a symlink) an existing output, and after
+// output, a model input, a compiled sidecar's or the Core ML cache's file
+// (directly or through a symlink or hard link) or (through a symlink) an
+// existing output, and after
 // synthesis when only the filesystem equates it with the output (a
 // case-insensitive volume), the audio then kept. The cache directory: the
 // explicit option, else QVAC_COREML_CACHE_DIR, else Application Support under
@@ -1608,6 +1610,40 @@ int cli_paths(const fs::path & bundle, const std::string & cli) {
     } else {
         std::puts("[cli] case-sensitive volume: no case alias to check");
     }
+    // Compiled Core ML weights: an adjacent sidecar's file (directly, through
+    // a symlink, or through a hard link outside the bundle) and the cache's
+    // files are refused; their bytes stay as they were.
+    const fs::path weights = dir / "bundle" / "mimi-decoder.mlmodelc" / "weights" / "weight.bin";
+    fs::create_directories(weights.parent_path());
+    std::ofstream(weights, std::ios::binary) << "compiled weights";
+    const fs::path cached = dir / "gen-cache" / "artifact" / "model.mlmodelc" / "weights" / "weight.bin";
+    const fs::path hints = dir / "gen-cache" / "hints.json";
+    fs::create_directories(cached.parent_path());
+    std::ofstream(cached, std::ios::binary) << "generated weights";
+    std::ofstream(hints, std::ios::binary) << "{}";
+    fs::create_hard_link(weights, dir / "weights-link.bin");
+    fs::create_symlink(weights, dir / "weights-symlink.json");
+    fs::create_hard_link(hints, dir / "hints-link.json");
+    const std::string cache_flag = " --coreml-cache-dir '" + (dir / "gen-cache").string() + "'";
+    struct Alias {
+        fs::path status;
+        const char * message;
+    };
+    for (const Alias & a : {Alias{weights, "inside a compiled Core ML model"},
+                            Alias{dir / "weights-symlink.json", "inside a compiled Core ML model"},
+                            Alias{dir / "weights-link.bin", "names a file of a Core ML sidecar"},
+                            Alias{cached, "inside a compiled Core ML model"},
+                            Alias{hints, "inside the Core ML cache"},
+                            Alias{dir / "gen-cache" / "new-status.json", "inside the Core ML cache"},
+                            Alias{dir / "hints-link.json", "names a file of the Core ML cache"}}) {
+        r = run("--output '" + out.string() + "'" + cache_flag + " --coreml-status-json '" + a.status.string() + "'");
+        require(r.first == 1 && r.second.find(a.message) != std::string::npos &&
+                    file_text(weights) == "compiled weights" && file_text(cached) == "generated weights" &&
+                    file_text(hints) == "{}" && !fs::exists(dir / "gen-cache" / "new-status.json"),
+                "status " + a.status.string() + " is refused, the Core ML files byte-identical: " + r.second);
+    }
+    fs::remove_all(dir / "bundle" / "mimi-decoder.mlmodelc");
+    std::puts("[cli] Core ML sidecar and cache files: refused, bytes kept");
 #ifdef TTS_CPP_USE_COREML
     // The cache directory each way.
     const fs::path status = dir / "status.json";

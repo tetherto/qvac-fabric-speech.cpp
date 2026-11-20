@@ -197,10 +197,98 @@ std::vector<std::pair<std::string, std::string>> protected_files(const Arguments
             {"--flow-lm", opts.flow_lm_path}, {"--mimi", opts.mimi_path}, {"--frontend", opts.frontend_path},
             {"--voice", opts.voice_path}, {"--reference-audio", opts.reference_audio_path}};
 }
-void check_status_path(const Arguments & args, const EngineOptions & opts, const std::string & status_path) {
+std::filesystem::path resolved(const std::string & p) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path r = fs::weakly_canonical(fs::absolute(p, ec), ec);
+    return ec ? fs::path() : r;
+}
+bool is_within(const std::filesystem::path & path, const std::filesystem::path & dir) {
+    if (path.empty() || dir.empty()) return false;
+    auto p = path.begin();
+    for (auto d = dir.begin(); d != dir.end(); ++d, ++p) {
+        if (d->empty()) continue;  // a trailing separator
+        if (p == path.end() || *p != *d) return false;
+    }
+    return true;
+}
+bool is_compiled_bundle(const std::filesystem::path & p) {
+    const auto ext = p.extension().string();
+    return ext == ".mlmodelc" || ext == ".mlpackage";
+}
+// The Core ML files --coreml-status-json must never replace, as directories:
+// every compiled sidecar next to the FlowLM and Mimi GGUFs (prebuilt, used or
+// not), the Core ML cache directory (generated sidecars and warm hints) and,
+// with an engine, each stage's resolved sidecar path from its status.
+std::vector<std::pair<std::string, std::filesystem::path>> protected_coreml_dirs(const EngineOptions & opts,
+                                                                                 const Engine * engine) {
+    namespace fs = std::filesystem;
+    std::vector<std::pair<std::string, fs::path>> dirs;
+    std::error_code ec;
+    for (const std::string & gguf : {opts.flow_lm_path, opts.mimi_path}) {
+        // The directory the GGUF is named in (the Engine looks for sidecars
+        // there, even when the GGUF itself is a symlink).
+        const fs::path parent = gguf.empty() ? fs::path() : resolved(fs::absolute(gguf, ec).parent_path().string());
+        ec.clear();
+        if (parent.empty()) continue;
+        for (fs::directory_iterator it(parent, ec), end; !ec && it != end; it.increment(ec)) {
+            if (is_compiled_bundle(it->path())) dirs.push_back({"a Core ML sidecar", resolved(it->path().string())});
+        }
+        ec.clear();
+    }
+    std::string cache = opts.coreml.cache_dir.value_or("");
+    if (cache.empty()) {
+        const char * shared = std::getenv("QVAC_COREML_CACHE_DIR");
+        if (shared != nullptr) cache = shared;
+    }
+    if (engine != nullptr) {
+        const Json status = Json::parse(engine->coreml_status(), nullptr, false);
+        if (status.is_object()) {
+            if (status.contains("cache_dir") && status["cache_dir"].is_string() && cache.empty())
+                cache = status["cache_dir"].get<std::string>();
+            if (status.contains("stages") && status["stages"].is_array()) {
+                for (const Json & stage : status["stages"]) {
+                    if (stage.contains("path") && stage["path"].is_string())
+                        dirs.push_back({"a Core ML sidecar", resolved(stage["path"].get<std::string>())});
+                }
+            }
+        }
+    }
+    if (!cache.empty()) dirs.push_back({"the Core ML cache", resolved(cache)});
+    return dirs;
+}
+void check_status_path(const Arguments & args, const EngineOptions & opts, const std::string & status_path,
+                       const Engine * engine = nullptr) {
+    namespace fs = std::filesystem;
     for (const auto & [name, path] : protected_files(args, opts)) {
         if (same_file(status_path, path))
             throw std::runtime_error("--coreml-status-json names the same file as " + name + " (" + path + ")");
+    }
+    // Inside a compiled bundle anywhere, or inside a protected Core ML
+    // directory (after symlinks resolve), or another name of one of its files
+    // (a hard link): refused, since opening the status truncates it.
+    const fs::path target = resolved(status_path);
+    for (fs::path p = target; !p.empty() && p != p.parent_path(); p = p.parent_path()) {
+        if (is_compiled_bundle(p))
+            throw std::runtime_error("--coreml-status-json is inside a compiled Core ML model (" + p.string() + ")");
+    }
+    std::error_code ec;
+    const bool exists = fs::exists(status_path, ec);
+    for (const auto & [what, dir] : protected_coreml_dirs(opts, engine)) {
+        if (dir.empty()) continue;
+        if (is_within(target, dir))
+            throw std::runtime_error("--coreml-status-json is inside " + what + " (" + dir.string() + ")");
+        if (!exists) continue;
+        ec.clear();
+        if (fs::is_regular_file(dir, ec) && fs::equivalent(status_path, dir, ec))
+            throw std::runtime_error("--coreml-status-json names a file of " + what + " (" + dir.string() + ")");
+        ec.clear();
+        for (fs::recursive_directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+            std::error_code fe;
+            if (it->is_regular_file(fe) && fs::equivalent(status_path, it->path(), fe))
+                throw std::runtime_error("--coreml-status-json names a file of " + what + " (" + it->path().string() +
+                                         ")");
+        }
     }
 }
 double seconds_since(Clock::time_point start) {
@@ -238,6 +326,8 @@ int run_synthesis(const Arguments & args, const EngineOptions & opts, const std:
     if (!status_path.empty()) check_status_path(args, opts, status_path);
     const auto start = Clock::now(); Engine engine(opts);
     const double load = seconds_since(start);
+    // Again with the stages' resolved sidecars (generated ones in the cache).
+    if (!status_path.empty()) check_status_path(args, opts, status_path, &engine);
     std::fprintf(stderr, "Pocket FlowLM: %s%s; Mimi: %s%s; device: %s\n", engine.flow_lm_backend_name(),
                  engine.flow_lm_on_coreml() ? " (generation steps on the Core ML sidecar)" : "", engine.mimi_backend_name(),
                  engine.mimi_on_coreml() ? " (decoding on the Core ML sidecar)" : "", engine.device_name());
@@ -259,7 +349,7 @@ int run_synthesis(const Arguments & args, const EngineOptions & opts, const std:
         // Checked again now that the audio and report exist: a spelling only
         // the filesystem equates with one of them is caught here, before the
         // status file is opened (and truncated).
-        check_status_path(args, opts, status_path);
+        check_status_path(args, opts, status_path, &engine);
         std::ofstream file(status_path); file << engine.coreml_status() << '\n';
         if (!file) throw std::runtime_error("cannot write the Core ML status");
     }

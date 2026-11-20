@@ -308,7 +308,11 @@ or `QVAC_COREML_CACHE_DIR` it uses `~/Library/Application
 Support/qvac-speech/coreml` (not `Library/Caches`, which macOS may purge,
 costing a cold compile). `--coreml-status-json` refuses a path that names the
 output WAV, the report or a model input (also through a symlink or another
-spelling of the same file) before synthesizing.
+spelling of the same file) before synthesizing. It also refuses any path inside
+a compiled Core ML model (`.mlmodelc` / `.mlpackage`), inside the Core ML cache
+directory, or naming (through a symlink or a hard link) a file of a sidecar
+next to the GGUFs, of the cache or of a stage's resolved sidecar, so the status
+never truncates compiled weights.
 
 A generated route needs the stage's units to be validated for memory (see
 fit below); otherwise the stage reports `unsupported(unvalidated_units)` and
