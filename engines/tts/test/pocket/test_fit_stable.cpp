@@ -161,7 +161,7 @@ int write_hints(const fs::path & cache, const std::string & step_units, const st
 // every generated-schedule run on the validated hosts, so the margin is
 // 1.0): the step's and the decoder's resident parts summed plus the larger
 // transient. A change of either template's memory changes this on purpose.
-constexpr uint64_t POCKET_ENVELOPE = 689963008;
+constexpr uint64_t POCKET_ENVELOPE = 1190133760;
 
 void template_charges(const pd::CoremlRoute & step, const pd::CoremlRoute & decoder) {
 #if defined(TTS_CPP_USE_COREML) && defined(__APPLE__) && TARGET_OS_OSX

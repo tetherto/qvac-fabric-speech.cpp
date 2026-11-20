@@ -142,13 +142,13 @@
   },
   "memory": {
     "runtime_weight_bytes": 169075712,
-    "workspace_bytes": 137515904,
+    "workspace_bytes": 378688384,
     "compile_peak_bytes": 75497472,
     "ane_compile_reserve_bytes": null,
     "load_peak_bytes": {
       "cpu_and_ane": null,
       "all": null,
-      "cpu_and_gpu": 329252864,
+      "cpu_and_gpu": 588251136,
       "cpu_only": null
     },
     "margin": 1.0,
@@ -167,9 +167,9 @@
     ],
     "measured": {
       "margin": 1.25,
-      "runs": 30,
-      "resident_bytes": 331783296,
-      "basis": "Each constant is 1.25 x the largest value measured over every overlapped generated-schedule run on the validated_for hosts (30 run reports: 27 on an Apple M2, macOS 27.2.1; 3 on the CI runner's Apple M4 Max, macOS 26.7.2), rounded up to 1 MiB, so the envelope's own margin is 1.0. The schedule (test-pocket-coreml --generated BUNDLE --memory-schedule DIR) generates, compiles, loads and warms both Pocket sidecars in the background (one Core ML job at a time) while ggml FlowLM and Mimi keep working: the prepare charge (generation_peak_bytes + 8 MiB + compile_peak_bytes) covers this stage's prepare over the footprint just before it began, and load_peak_bytes its load and warm-up over the footprint just before the load. The two templates' resident parts (weights, 2 x I/O, the step's KV state and the step's workspace_bytes) together cover 1.25 x the largest steady state with both sidecars running, over the footprint just before the first load (274.9 MiB, M4 Max): on the M4 Max the step on cpu_and_gpu holds GPU working memory the M2 does not (steady 2.6 x the M2's largest, 103.3 MiB), which the step's workspace_bytes carries; Mimi's workspace is 0. The step runs on cpu_and_gpu, which never compiles for the Neural Engine."
+      "runs": 42,
+      "resident_bytes": 572955776,
+      "basis": "Each constant is 1.25 x the largest value measured over every overlapped generated-schedule run on the validated_for hosts (42 run reports: 27 on an Apple M2, macOS 27.2.1; 15 on the CI runners' Apple M4 Max, macOS 26.7.2), rounded up to 1 MiB, so the envelope's own margin is 1.0. The schedule (test-pocket-coreml --generated BUNDLE --memory-schedule DIR) generates, compiles, loads and warms both Pocket sidecars in the background (one Core ML job at a time) while ggml FlowLM and Mimi keep working: the prepare charge (generation_peak_bytes + 8 MiB + compile_peak_bytes) covers this stage's prepare over the footprint just before it began, and load_peak_bytes its load and warm-up over the footprint just before the load. The two templates' resident parts (weights, 2 x I/O, the step's KV state and the step's workspace_bytes) together cover 1.25 x the largest steady state with both sidecars running, over the footprint just before the first load (458.5 MiB, M4 Max): on the M4 Max the step on cpu_and_gpu holds GPU working memory the M2 does not (steady up to 4.4 x the M2's largest, 103.3 MiB), which the step's workspace_bytes carries; Mimi's workspace is 0. The step runs on cpu_and_gpu, which never compiles for the Neural Engine."
     }
   },
   "prefer_ggml_on": [],
