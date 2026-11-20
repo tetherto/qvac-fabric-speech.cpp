@@ -312,9 +312,10 @@ Each generated capacity takes about 200 MB in the cache (232 MB for
 Sortformer v2.1). `parakeet-fit-params` charges the generated capacities'
 Core ML memory in the Core ML-inclusive verdict (every generated capacity
 under `prewarm = all`, otherwise those the workload's calls, and any shorter
-single pass, can load, or fall back to when a capacity fails; the Sortformer
-v2.1 capacity always, because construction loads it and every AOSC step uses
-it); see
+single pass, can load, or fall back to when a capacity fails; for Sortformer
+v2.1, every capacity up to the full AOSC step slab of a default stream, 409
+frames, since the slab grows with the speaker cache and FIFO, together with
+any adjacent prebuilt bundles on the way); see
 [docs/backends.md](docs/backends.md#generated-diarizers).
 
 ## Backend selection

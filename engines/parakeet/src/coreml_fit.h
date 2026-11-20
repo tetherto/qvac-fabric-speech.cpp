@@ -6,6 +6,7 @@
 // before and after the first load (test-parakeet-coreml-route "fit-stable").
 
 #include "fit_util.h"
+#include "parakeet/diarization.h"
 #include "parakeet/fit.h"
 #include "parakeet_coreml_path.h"
 
@@ -245,6 +246,29 @@ inline CoremlDiarizersCharge coreml_diarizers_charge(std::vector<CoremlDiarizerC
         if (s == slots.size()) break;
     }
     return worst;
+}
+
+// The largest AOSC step slab of a Sortformer v2.1 stream with the default
+// SortformerStreamingOptions, in encoder frames of `encoder_frame_ms`: the
+// full speaker cache and FIFO plus one chunk with its left (80 ms, the
+// stream's default for v2.1) and right context; 409 at 80 ms.
+inline int sortformer_default_aosc_slab_frames(int encoder_frame_ms) {
+    constexpr int kDefaultLeftContextMs = 80;
+    const SortformerStreamingOptions d;
+    const int ms = std::max(1, encoder_frame_ms);
+    return d.spkcache_len + d.fifo_len + kDefaultLeftContextMs / ms + d.chunk_ms / ms + d.chunk_right_context_ms / ms;
+}
+
+// The Sortformer diarizer calls a fit projection charges: the offline pass
+// over the whole input (`offline_frames` encoder frames) and, for a model
+// that streams with the speaker cache (v2.1 AOSC; `aosc_slab_frames` > 0),
+// every step slab from the first chunk up to the full one: the slab grows
+// with the speaker cache and FIFO, so each capacity on the way loads,
+// whatever the input's length.
+inline std::vector<CoremlFrameRange> sortformer_diarizer_demand(int offline_frames, int aosc_slab_frames) {
+    std::vector<CoremlFrameRange> out = {CoremlFrameRange{offline_frames, offline_frames}};
+    if (aosc_slab_frames > 0) out.push_back(CoremlFrameRange{1, aosc_slab_frames});
+    return out;
 }
 
 // The generated capacities' charge alone (capacities that are neither

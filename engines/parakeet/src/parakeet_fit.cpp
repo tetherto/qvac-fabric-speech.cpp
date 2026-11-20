@@ -900,12 +900,18 @@ FitResult fit_params(const FitOptions & opts) {
         }
         r.host_bytes = host;
     }
-    // Sortformer diarizer demand: the offline pass over the whole input.
+    // Sortformer diarizer demand: the offline pass over the whole input and,
+    // for v2.1, every AOSC step slab of a default stream.
     std::vector<CoremlFrameRange> diarizer_demand;
     if (model.model_type == ParakeetModelType::SORTFORMER) {
         r.coreml_bytes = legacy_diarizer_bytes(opts.model_gguf_path,
                                                {CoremlFrameRange{total_enc, total_enc}}, opts);
-        diarizer_demand.push_back(CoremlFrameRange{total_enc, total_enc});
+        const int encoder_frame_ms = 1000 * model.mel_cfg.hop_length * model.encoder_cfg.subsampling_factor /
+                                     std::max(1, model.mel_cfg.sample_rate);
+        diarizer_demand = sortformer_diarizer_demand(
+            total_enc, model.model_variant == "sortformer-streaming-v2.1-aosc"
+                           ? sortformer_default_aosc_slab_frames(encoder_frame_ms)
+                           : 0);
     }
 
     r.device.weights_bytes         = lm.weights_bytes + lm.repack_bytes;

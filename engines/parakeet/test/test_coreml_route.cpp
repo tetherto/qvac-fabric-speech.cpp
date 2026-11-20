@@ -1196,6 +1196,54 @@ void case_generated_diarizer_envelope() {
           "prewarm all: prebuilt capacities alone charge nothing");
 }
 
+// Sortformer v2.1: an AOSC stream's step slab grows from the first chunk to
+// the full speaker cache and FIFO plus one chunk (409 frames by default), so
+// every capacity up to it loads whatever the input's length. Prebuilt 128
+// and 256 (220 MiB weights each) with the generated 410 (the template's
+// 137 MiB resident, 121 MiB transient, margin 1.0), for a 5 s input (63
+// encoder frames), exact bytes.
+void case_sortformer_aosc_diarizer_charge() {
+    constexpr uint64_t MiB = 1024ull * 1024;
+    CHECK(sortformer_default_aosc_slab_frames(80) == 409, "the default AOSC slab is 409 encoder frames");
+    const std::vector<CoremlFrameRange> offline = sortformer_diarizer_demand(63, 0);
+    const std::vector<CoremlFrameRange> aosc = sortformer_diarizer_demand(63, sortformer_default_aosc_slab_frames(80));
+    CHECK(offline.size() == 1 && offline[0].min_frames == 63 && offline[0].max_frames == 63,
+          "without AOSC streaming the demand is the offline pass alone");
+    CHECK(aosc.size() == 2 && aosc[1].min_frames == 1 && aosc[1].max_frames == 409,
+          "with AOSC streaming the demand covers every slab from 1 to 409 frames");
+    auto pre = [](int frames, uint64_t weights) {
+        CoremlDiarizerCharge c{frames};
+        c.prebuilt = true;
+        c.weights_bytes = weights;
+        return c;
+    };
+    const std::vector<CoremlDiarizerCharge> caps = {pre(128, 220 * MiB), pre(256, 220 * MiB),
+                                                    CoremlDiarizerCharge{410, true, 137 * MiB, 121 * MiB, 1.0}};
+    auto charge = [&](const std::vector<CoremlFrameRange> & demand) {
+        return coreml_diarizers_charge(caps, demand, CoremlDiarizerPrewarm::minimal, CoremlFitUnits::cpu_and_ane);
+    };
+    // Offline only: 128 (construction and the pass), falling back to 256 or
+    // 410 one at a time; the worst is one bundle, 2 x 220 + 160 = 600 MiB
+    // resident and its 55 MiB load transient.
+    const CoremlDiarizersCharge before = charge(offline);
+    CHECK(before.charge.resident == 600 * MiB && before.charge.transient == 55 * MiB && before.prebuilt,
+          "offline demand: one capacity at a time, 655 MiB");
+    // AOSC: 128, 256 and 410 all stay resident: 2 x 440 + 160 + 137 =
+    // 1177 MiB, plus the larger transient (the generated 121): 1298 MiB.
+    const CoremlDiarizersCharge after = charge(aosc);
+    CHECK(after.charge.resident == 1177 * MiB && after.charge.transient == 121 * MiB && after.prebuilt,
+          "AOSC demand: every capacity up to the full slab resident, 1298 MiB");
+    // A budget between the two: the offline charge fits, the stream's does not.
+    auto fits = [](const CoremlDiarizersCharge & c) {
+        FitResult r;
+        r.device_shares_host_memory = true;
+        r.device_free_bytes = 1000 * MiB + 1000 * MiB;
+        apply_coreml_verdicts(r, 1000 * MiB, true, "", c.charge, false, CoremlCharge{});
+        return r.coreml.fits;
+    };
+    CHECK(fits(before) && !fits(after), "a 1000 MiB Core ML budget: refused once the AOSC slabs are charged");
+}
+
 // coreml.validated: true only when the charged bytes are all generated
 // envelopes. A prebuilt diarizer or encoder charge in the bytes is today's
 // unvalidated estimate.
@@ -1891,6 +1939,7 @@ int main() {
     case_options();
     case_fit_envelope();
     case_generated_diarizer_envelope();
+    case_sortformer_aosc_diarizer_charge();
     case_coreml_verdicts_validated();
 #if defined(QVAC_COREML_HAVE_GGML)
     case_generated_sidecar();
