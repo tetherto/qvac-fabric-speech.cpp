@@ -11,14 +11,16 @@
 // consumers; this generator version knows:
 //   t f32 f64 f16 add mul div recip clip reshape permute take concat (+ let)
 //   slice neg zeros ones lit
+//   meta_f meta_s provided
 // and `patch` lines of dtype fp16 and fp32, which rewrite inline constants of
-// the spec (model.mlmodel) in place. `patch ... str`, provided() and
-// meta_f/meta_s belong to later generator versions; the parser rejects them.
+// the spec (model.mlmodel) in place, and `patch ... str <len>` lines, which
+// rewrite a fixed-length string of the spec (meta_s(key), a GGUF metadata
+// string of exactly that length).
 //
 // Arithmetic is IEEE in the operand dtype with no FMA contraction (the
-// interpreter is compiled with -ffp-contract=off). No op of this vocabulary is
-// a reduction, a transcendental or provided(), so every blob is `exact`;
-// compare_blob() already implements the `ulp` rule later ops flag into.
+// interpreter is compiled with -ffp-contract=off). A blob whose expression
+// contains provided() is `ulp` (compare_blob()); every other blob of this
+// vocabulary is `exact`.
 
 #include "qvac_coreml/slot.h"
 
@@ -94,7 +96,8 @@ struct Item {
     std::string name;     // let
     uint64_t offset = 0;  // blob: MILBlob metadata offset; patch: byte offset in model.mlmodel
     BlobType dtype = BlobType::fp16;
-    uint64_t count = 0;  // blob, patch: element count
+    uint64_t count = 0;  // blob, patch: element count (patch str: byte length)
+    bool str = false;    // patch str: `expr` is meta_s(key), written as `count` bytes
     ExprP expr;
     int line = 0;
     bool ulp = false;  // blob tolerance class (see compare_blob)
@@ -121,11 +124,21 @@ struct PatchSite {
     std::string sentinel_hex;  // lowercase hex, 2 * len characters
 };
 
+// template.json `provided` entry: the shape (numpy order) of the f32 array
+// provided(key, ...) yields. The values come from the ProvidedFn registered
+// under `key` (register_provided).
+struct ProvidedDecl {
+    std::string key;
+    std::vector<int64_t> shape;
+};
+
 // What parse() checks a recipe against besides its own text: the template's
-// literals and, when known, its spec and patch sites. A default context
-// declares no literal and no patch site.
+// literals, its provided() declarations and, when known, its spec and patch
+// sites. A default context declares no literal, no provided() and no patch
+// site.
 struct ParseContext {
     std::vector<Literal> literals;     // `data` set: lit() can be evaluated
+    std::vector<ProvidedDecl> provided;
     const uint8_t * spec = nullptr;    // model.mlmodel; null: patch bounds and sentinels are not checked
     size_t spec_size = 0;
     std::vector<PatchSite> patches;    // must equal the recipe's patch lines when `spec` is set
@@ -140,10 +153,15 @@ struct Recipe {
     std::vector<Meta> meta;
     std::vector<Item> items;  // let, blob and patch lines, in file order
     std::vector<Literal> literals;  // from the ParseContext
+    std::vector<ProvidedDecl> provided;  // from the ParseContext
 
     const Source * find_source(std::string_view name) const;
+    const Meta * find_meta(std::string_view key) const;
     const Literal * find_literal(std::string_view id) const;
+    const ProvidedDecl * find_provided(std::string_view key) const;
     size_t patch_count() const;
+    // The provided() keys the recipe's items use, sorted.
+    std::vector<std::string> provided_keys() const;
 };
 
 class RecipeError : public std::runtime_error {
@@ -210,6 +228,33 @@ public:
     virtual std::string meta_json(const std::string & key) const = 0;
 };
 
+// ---- provided() ----------------------------------------------------------------
+
+// One provided(key, [deps...]) call: the declared shape and the tensors and
+// metadata keys it names as dependencies. Every dependency is a declared
+// source or meta line, so the source digest covers what the function reads.
+struct ProvidedCall {
+    std::string key;
+    std::vector<int64_t> shape;        // numpy order, from template.json `provided`
+    std::vector<std::string> tensors;  // t("...") dependencies, in call order
+    std::vector<std::string> meta;     // meta_f("...") / meta_s("...") dependencies, in call order
+    int line = 0;
+};
+
+// Computes provided(key, ...) into `out` (row-major, `call.shape` elements).
+// `src` reads only the call's dependencies (any other tensor or key is
+// absent), through the job's own source. A plain function pointer: it cannot
+// capture an engine. A non-ok Error aborts the evaluation with its class.
+using ProvidedFn = Error (*)(TensorSource & src, const ProvidedCall & call, std::vector<float> & out);
+
+// The process-wide table of this namespace: an engine registers its
+// implementations before it probes a template that uses them (registering a
+// key again with the same function is a no-op; another function throws
+// std::logic_error). Every implementation is part of the generator, so a
+// change to one that alters its output must bump GENERATOR_VERSION.
+void register_provided(const std::string & key, ProvidedFn fn);
+ProvidedFn find_provided_fn(std::string_view key);
+
 // ---- Evaluation --------------------------------------------------------------
 
 struct BlobOut {
@@ -239,11 +284,12 @@ using ReadObserver = std::function<Error(const std::string & name, const std::ar
 Error evaluate(const Recipe & r, TensorSource & src, const std::function<Error(const BlobOut &)> & sink,
                EvalStats * stats = nullptr, const ReadObserver & observer = nullptr);
 
-// One evaluated patch line: `bytes` little-endian fp16 / fp32 values to write
-// at `offset` in model.mlmodel.
+// One evaluated patch line: `bytes` little-endian fp16 / fp32 values (or, for
+// a str line, the string's bytes) to write at `offset` in model.mlmodel.
 struct PatchOut {
     uint64_t offset = 0;
     BlobType dtype = BlobType::fp16;
+    bool str = false;
     uint64_t count = 0;
     const uint8_t * data = nullptr;
     size_t bytes = 0;
@@ -370,8 +416,9 @@ struct MatchResult {
 };
 
 // template.json `match`: general.architecture, the required metadata
-// values, every recipe `source` (name, allowed type, shape) and every `meta`
-// declaration (present, declared type).
+// values, every recipe `source` (name, allowed type, shape), every `meta`
+// declaration (present, declared type) and, for each provided() key the
+// recipe uses, a registered implementation.
 MatchResult match(const Template & t, const TensorSource & src);
 
 }  // namespace recipe

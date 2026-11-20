@@ -68,6 +68,11 @@ int main(int argc, char ** argv) {
         opts.frontend_path = dir+"/frontend.json"; opts.voice_path = dir+"/voice.gguf";
         opts.use_gpu = argc == 4 && std::string(argv[3]) == "--gpu";
         opts.backend = argc == 4 && !opts.use_gpu ? argv[3] : "";
+        // Pin readiness: a Core ML sidecar next to the GGUFs (or one in
+        // QVAC_COREML_CACHE_DIR) otherwise loads in the background, so one
+        // call could run on ggml and the next on Core ML, and the comparisons
+        // below would depend on load timing. Every Engine here inherits it.
+        opts.coreml.wait = tts_cpp::CoremlOptions::Wait::construct;
         check_eos_tail(opts);
         check_parallel_instances(opts);
         Engine engine(opts);
@@ -96,6 +101,8 @@ int main(int argc, char ** argv) {
             return true;
         });
         if (stream.cancelled || !stream.pcm.empty() || callbacks < 2) throw std::runtime_error("invalid stream result");
+        if (batch.coreml_pending || stream.coreml_pending)
+            throw std::runtime_error("a chunk waited for a Core ML sidecar: readiness is not pinned");
         compare(batch.pcm, streamed);
         callbacks = 0;
         auto cancelled = engine.synthesize_stream(text, [&](const float *, size_t, int) { ++callbacks; return false; });

@@ -28,11 +28,21 @@ struct FitOptions {
 // scratch bound is tied to the reviewed fabric ggml F32 paths; see the guide.
 // SDK/JS copies and application buffers are outside
 // this native engine projection. Never throws; see tts-cpp/fit.h for status codes.
-// Core ML: when a step sidecar (flow-lm-step.mlmodelc) or Mimi decoder
-// sidecar (mimi-decoder.mlmodelc) sits next to its GGUF in a TTS_CPP_COREML
-// build and POCKET_COREML_DISABLE is unset, the result is Error with reason
-// "coreml-memory-estimate-unavailable": resident Core ML models and their
-// buffers cannot be projected by the native fitter. Detection is
-// presence-only, as for the Engine's load attempt.
+// Core ML (FitResult::coreml): each stage's route, from engine.coreml and the
+// POCKET_COREML_* environment, decided without reading the cache.
+//   - A prebuilt step sidecar (flow-lm-step.mlmodelc) or Mimi decoder sidecar
+//     (mimi-decoder.mlmodelc) next to its GGUF in a TTS_CPP_COREML build, not
+//     disabled, keeps the result Error with reason
+//     "coreml-memory-estimate-unavailable": its resident model and buffers are
+//     not projected.
+//   - Generated sidecars (engine.coreml.cache_dir set, template match, macOS
+//     15) add the templates' Core ML envelope to the projection: both resident
+//     parts plus the larger stage transient. Every verdict is held to the
+//     smaller of FitOptions::memory_budget_bytes and
+//     engine.coreml.memory_budget_bytes. Only the latter (the budget the
+//     Engine's constructor decides with) enables memory-degrade: when only
+//     the ggml projection fits min(free, that budget), use = off
+//     (coreml.disabled_reason "memory", the ggml verdict). A fit-only budget
+//     never degrades; between the two projections it reports does-not-fit.
 TTS_CPP_API FitResult fit_params(const FitOptions & options);
 }

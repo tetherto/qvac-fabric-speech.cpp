@@ -46,8 +46,10 @@ struct CacheRows {
 // utterance; prefill and advance check capacity before changing the cache.
 class FlowLM {
 public:
+    // `on_open` (optional) receives the descriptor the load reads the GGUF
+    // through, before the first read (see pocket/gguf_file.h).
     explicit FlowLM(const std::string & gguf, int context = 2048, int threads = 2,
-                    ggml_backend_device * device = nullptr);
+                    ggml_backend_device * device = nullptr, const LoadedFileRecorder & on_open = {});
     ~FlowLM();
     FlowLM(const FlowLM &) = delete;
     FlowLM & operator=(const FlowLM &) = delete;

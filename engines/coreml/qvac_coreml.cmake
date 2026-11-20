@@ -2,7 +2,8 @@
 # own namespace; no new library is installed and the headers under include/
 # are BUILD_INTERFACE only.
 #
-#   qvac_coreml_add_to(<engine-lib> NAMESPACE <ns> PREFIX <P> ENABLE <bool> [TEMPLATES <dirs>])
+#   qvac_coreml_add_to(<engine-lib> NAMESPACE <ns> PREFIX <P> ENABLE <bool> [TEMPLATES <dirs>]
+#                      [PROVIDED <sources>])
 #       Compiles the runtime into <engine-lib> with QVAC_COREML_NS=<ns> when
 #       ENABLE is true (the engine's Apple-only <P>_COREML option). <P> is the
 #       engine's CMake option prefix (TTS_CPP, PARAKEET, AUDIOGEN).
@@ -14,13 +15,18 @@
 #       {id, file, begin, end, sha256} table (src/templates.h). Configure fails
 #       when the embedded files exceed QVAC_COREML_TEMPLATE_BUDGET_MB (default
 #       32) per library. The template_dir / QVAC_COREML_TEMPLATE_DIR override is
-#       compiled in only with <P>_BUILD_TESTS or QVAC_COREML_DEV.
+#       compiled in only with <P>_BUILD_TESTS or QVAC_COREML_DEV. PROVIDED
+#       lists the engine's provided() implementations
+#       (engines/<engine>/coreml-provided/*.cpp), compiled into the generator
+#       with it.
 #   qvac_coreml_add_tests([REQUIRE_GGML])
 #       Portable tests (Linux and macOS): test-coreml-scheduler,
 #       test-coreml-recipe, test-coreml-milblob, test-coreml-cache, plus the
 #       host CLI qvac-coreml-tool when a `ggml` target exists (the generator's
 #       GgufSource and the tool need ggml-base; the tests then also cover real
-#       GGUFs). Each engine calls it from its *_BUILD_TESTS block with
+#       GGUFs). The tool compiles every engine's provided() implementations
+#       (engines/*/coreml-provided/*.cpp), so it generates any template in the
+#       tree. Each engine calls it from its *_BUILD_TESTS block with
 #       REQUIRE_GGML, so a missing `ggml` target fails configure instead of
 #       silently dropping the GGUF cases and the tool; only the standalone
 #       engines/coreml build leaves them optional. The first call wins in the
@@ -220,7 +226,7 @@ ${table_body}
 endfunction()
 
 function(qvac_coreml_add_to target)
-    cmake_parse_arguments(QCA "" "NAMESPACE;PREFIX;ENABLE" "TEMPLATES" ${ARGN})
+    cmake_parse_arguments(QCA "" "NAMESPACE;PREFIX;ENABLE" "TEMPLATES;PROVIDED" ${ARGN})
     if (NOT TARGET ${target})
         message(FATAL_ERROR "qvac_coreml_add_to: ${target} is not a target")
     endif()
@@ -261,6 +267,10 @@ function(qvac_coreml_add_to target)
         _qvac_coreml_embed_templates(${target} ${QCA_NAMESPACE} "${CMAKE_CURRENT_BINARY_DIR}/qvac-coreml-${target}"
                                      tpl_srcs ${QCA_TEMPLATES})
         list(APPEND srcs ${gen_srcs} "${dir}/src/gguf_source.cpp" "${dir}/src/apple/compile.mm" ${tpl_srcs})
+        foreach (p IN LISTS QCA_PROVIDED)
+            get_filename_component(p "${p}" ABSOLUTE)
+            list(APPEND srcs "${p}")
+        endforeach()
     elseif (QCA_TEMPLATES)
         message(STATUS "${target}: ${QCA_PREFIX}_COREML_GENERATE is OFF; no Core ML template is embedded")
     endif()
@@ -399,7 +409,10 @@ function(qvac_coreml_add_tests)
 
     if (have_ggml)
         # Host CLI (README.md): dump | twin | f32 | generate | digest | verify.
-        add_executable(qvac-coreml-tool "${dir}/tools/qvac-coreml-tool.cpp")
+        # Every engine's provided() implementations, so `generate` covers every
+        # template in the tree (each registers itself when linked).
+        file(GLOB provided_srcs CONFIGURE_DEPENDS "${dir}/../*/coreml-provided/*.cpp")
+        add_executable(qvac-coreml-tool "${dir}/tools/qvac-coreml-tool.cpp" ${provided_srcs})
         target_compile_definitions(qvac-coreml-tool PRIVATE QVAC_COREML_NS=qvac_coreml_test)
         target_include_directories(qvac-coreml-tool PRIVATE "${dir}/include" "${dir}/src" "${dir}/third_party")
         target_compile_features(qvac-coreml-tool PRIVATE cxx_std_17)

@@ -151,13 +151,25 @@ the same sidecar under `cpu_and_ane` to 54 dB. The M2's 54 dB gate under
 `all` is checked by the device run, not by CI. See
 [Parler-TTS generated sidecar](docs/parler.md#generated-sidecar-and-background-loading).
 
+Pocket TTS's FlowLM step and Mimi decoder sidecars are generated the same way
+from `flow-lm.gguf` and `mimi.gguf` (templates `pocket-step-c1024` and
+`pocket-mimi`): with a cache directory and no prebuilt sidecar, each stage
+runs on ggml until its sidecar is ready, and each chunk takes its backends at
+its start. The step stays on `cpu_and_gpu` (an explicit `cpu_and_ane` is
+refused when options are resolved) and the decoder on `cpu_and_ane`. See
+[Pocket TTS generated sidecars](docs/pocket-tts.md#generated-sidecars-and-background-loading).
+
 CosyVoice3 HiFT sidecars use FP32 for waveform parity. With enabled Chatterbox,
-Pocket TTS, CosyVoice3 or prebuilt Parler-TTS sidecars present, `fit_params` returns `Error` with
+CosyVoice3 or prebuilt Parler-TTS or Pocket TTS sidecars present, `fit_params` returns `Error` with
 `coreml-memory-estimate-unavailable`; it cannot project Core ML resident memory.
 A generated Parler-TTS DAC is projected: fit adds its template's Core ML memory envelope,
 963 MiB under `all` (1.25 times the largest values measured on an M2 and on the M4 Max CI
 runner, where `all` runs on the GPU, with no further margin). Phones are not affected today, since sidecars are generated
 on macOS only; see [Parler-TTS memory validation](docs/parler.md#generated-sidecar-and-background-loading).
+Generated Pocket TTS sidecars are projected the same way: both resident parts plus one transient,
+1135 MiB (1.25 times the largest values measured on an M2 and on the M4 Max CI runner); see
+[Pocket TTS fit](docs/pocket-tts.md#generated-sidecars-and-background-loading). `pocket-cli
+--coreml-ignore-prebuilt` measures the generated route on a bundle that ships prebuilt sidecars.
 Re-export CosyVoice3 LM sidecars with the current exporter for correct cache
 feedback on macOS 15 and 26; see [CosyVoice3 Core ML](docs/cosyvoice3.md#core-ml-sidecars).
 

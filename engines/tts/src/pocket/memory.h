@@ -1,8 +1,14 @@
 #pragma once
 #include <cstdint>
+#include <functional>
 #include <string>
 
 namespace tts_cpp::pocket::detail {
+// Called once by a FlowLM or Mimi load with the descriptor it reads the GGUF
+// through, before the first read (pocket/gguf_file.h): the Engine records the
+// loaded file's identity from it, so Core ML generation asks for that file,
+// never whatever the path names later.
+using LoadedFileRecorder = std::function<void(int fd, const std::string & path)>;
 // Reviewed qvac-ext-ggml speech 06f1b668, ggml_cl_init(): uncapped Adreno
 // initialization pools. Device allocation limits/build flags can only lower
 // these reservations. Re-audit when the backend's F32 dispatch/pools change.

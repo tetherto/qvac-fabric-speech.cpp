@@ -1,0 +1,125 @@
+mlrecipe 1
+template pocket-mimi
+spec_sha256 1be19af5dd221cef70971994363980c010035008816fad799750cc79c6991db7
+weight_bin_size 20621824
+blobs 46
+# Pocket TTS Mimi streaming decoder, one latent frame per prediction (scripts/export-pocket-coreml.py
+# on mimi.gguf, scripts/pocket_coreml_mimi.py, fp16, streaming state as explicit inputs and outputs).
+# Convolution kernels go from the GGUF's [K, out, in] to [out, in, K]; the upsample and the three
+# transposed convolutions are written in two-tap phase form. The zeros blobs are the biases
+# coremltools gives bias-free linears. The final convolution's single bias is inlined in the spec
+# (a patch), and the spec records the checkpoint's source hash, which the engine checks.
+source "quantizer.output_proj.weight" f32,f16 [512,32]
+source "upsample.convtr.convtr.weight" f32,f16 [32,512]
+source "dec.layers.0.norm1.weight" f32,f16 [512]
+source "dec.layers.0.norm1.bias" f32,f16 [512]
+source "dec.layers.0.self_attn.in_proj.weight" f32,f16 [1536,512]
+source "dec.layers.0.self_attn.out_proj.weight" f32,f16 [512,512]
+source "dec.layers.0.layer_scale_1.scale" f32,f16 [512]
+source "dec.layers.0.norm2.weight" f32,f16 [512]
+source "dec.layers.0.norm2.bias" f32,f16 [512]
+source "dec.layers.0.linear1.weight" f32,f16 [2048,512]
+source "dec.layers.0.linear2.weight" f32,f16 [512,2048]
+source "dec.layers.0.layer_scale_2.scale" f32,f16 [512]
+source "dec.layers.1.norm1.weight" f32,f16 [512]
+source "dec.layers.1.norm1.bias" f32,f16 [512]
+source "dec.layers.1.self_attn.in_proj.weight" f32,f16 [1536,512]
+source "dec.layers.1.self_attn.out_proj.weight" f32,f16 [512,512]
+source "dec.layers.1.layer_scale_1.scale" f32,f16 [512]
+source "dec.layers.1.norm2.weight" f32,f16 [512]
+source "dec.layers.1.norm2.bias" f32,f16 [512]
+source "dec.layers.1.linear1.weight" f32,f16 [2048,512]
+source "dec.layers.1.linear2.weight" f32,f16 [512,2048]
+source "dec.layers.1.layer_scale_2.scale" f32,f16 [512]
+source "decoder.model.0.conv.weight" f32,f16 [7,512,512]
+source "decoder.model.0.conv.bias" f32,f16 [512]
+source "decoder.model.2.convtr.weight" f32,f16 [12,256,512]
+source "decoder.model.2.convtr.bias" f32,f16 [256]
+source "decoder.model.3.block.1.conv.weight" f32,f16 [3,128,256]
+source "decoder.model.3.block.1.conv.bias" f32,f16 [128]
+source "decoder.model.3.block.3.conv.weight" f32,f16 [1,256,128]
+source "decoder.model.3.block.3.conv.bias" f32,f16 [256]
+source "decoder.model.5.convtr.weight" f32,f16 [10,128,256]
+source "decoder.model.5.convtr.bias" f32,f16 [128]
+source "decoder.model.6.block.1.conv.weight" f32,f16 [3,64,128]
+source "decoder.model.6.block.1.conv.bias" f32,f16 [64]
+source "decoder.model.6.block.3.conv.weight" f32,f16 [1,128,64]
+source "decoder.model.6.block.3.conv.bias" f32,f16 [128]
+source "decoder.model.8.convtr.weight" f32,f16 [8,64,128]
+source "decoder.model.8.convtr.bias" f32,f16 [64]
+source "decoder.model.9.block.1.conv.weight" f32,f16 [3,32,64]
+source "decoder.model.9.block.1.conv.bias" f32,f16 [32]
+source "decoder.model.9.block.3.conv.weight" f32,f16 [1,64,32]
+source "decoder.model.9.block.3.conv.bias" f32,f16 [64]
+source "decoder.model.11.conv.weight" f32,f16 [3,1,64]
+source "decoder.model.11.conv.bias" f32,f16 [1]
+meta "pocket.source_sha256" str
+blob 64 fp16 16384 f16(t("quantizer.output_proj.weight"))
+blob 32896 fp16 512 f16(zeros([512]))
+# Upsample as a grouped two-tap convolution: [c * 16 + j, 0, 0] = w[16 + j, c], [c * 16 + j, 0, 1] = w[j, c].
+let up = t("upsample.convtr.convtr.weight")
+blob 33984 fp16 16384 f16(reshape(permute(concat(2,
+    reshape(slice(up, 0, 16, 32), [16,512,1]),
+    reshape(slice(up, 0, 0, 16), [16,512,1])),
+  [1,0,2]), [8192,1,2]))
+blob 66816 fp16 512 f16(t("dec.layers.0.norm1.weight"))
+blob 67904 fp16 512 f16(t("dec.layers.0.norm1.bias"))
+blob 68992 fp16 786432 f16(t("dec.layers.0.self_attn.in_proj.weight"))
+blob 1641920 fp16 1536 f16(zeros([1536]))
+blob 1645056 fp16 262144 f16(t("dec.layers.0.self_attn.out_proj.weight"))
+blob 2169408 fp16 512 f16(t("dec.layers.0.layer_scale_1.scale"))
+blob 2170496 fp16 512 f16(t("dec.layers.0.norm2.weight"))
+blob 2171584 fp16 512 f16(t("dec.layers.0.norm2.bias"))
+blob 2172672 fp16 1048576 f16(t("dec.layers.0.linear1.weight"))
+blob 4269888 fp16 2048 f16(zeros([2048]))
+blob 4274048 fp16 1048576 f16(t("dec.layers.0.linear2.weight"))
+blob 6371264 fp16 512 f16(t("dec.layers.0.layer_scale_2.scale"))
+blob 6372352 fp16 512 f16(t("dec.layers.1.norm1.weight"))
+blob 6373440 fp16 512 f16(t("dec.layers.1.norm1.bias"))
+blob 6374528 fp16 786432 f16(t("dec.layers.1.self_attn.in_proj.weight"))
+blob 7947456 fp16 262144 f16(t("dec.layers.1.self_attn.out_proj.weight"))
+blob 8471808 fp16 512 f16(t("dec.layers.1.layer_scale_1.scale"))
+blob 8472896 fp16 512 f16(t("dec.layers.1.norm2.weight"))
+blob 8473984 fp16 512 f16(t("dec.layers.1.norm2.bias"))
+blob 8475072 fp16 1048576 f16(t("dec.layers.1.linear1.weight"))
+blob 10572288 fp16 1048576 f16(t("dec.layers.1.linear2.weight"))
+blob 12669504 fp16 512 f16(t("dec.layers.1.layer_scale_2.scale"))
+blob 12670592 fp16 1835008 f16(permute(t("decoder.model.0.conv.weight"), [1, 2, 0]))
+blob 16340672 fp16 512 f16(t("decoder.model.0.conv.bias"))
+# decoder.model.2.convtr, ratio 6, phase form: [p * 256 + o, i, 0] = k[6 + p, o, i], [p * 256 + o, i, 1] = k[p, o, i].
+blob 16341760 fp16 1572864 f16(reshape(concat(3,
+    reshape(slice(t("decoder.model.2.convtr.weight"), 0, 6, 12), [6,256,512,1]),
+    reshape(slice(t("decoder.model.2.convtr.weight"), 0, 0, 6), [6,256,512,1])),
+  [1536,512,2]))
+blob 19487552 fp16 256 f16(t("decoder.model.2.convtr.bias"))
+blob 19488128 fp16 98304 f16(permute(t("decoder.model.3.block.1.conv.weight"), [1, 2, 0]))
+blob 19684800 fp16 128 f16(t("decoder.model.3.block.1.conv.bias"))
+blob 19685120 fp16 32768 f16(permute(t("decoder.model.3.block.3.conv.weight"), [1, 2, 0]))
+blob 19750720 fp16 256 f16(t("decoder.model.3.block.3.conv.bias"))
+# decoder.model.5.convtr, ratio 5, phase form: [p * 128 + o, i, 0] = k[5 + p, o, i], [p * 128 + o, i, 1] = k[p, o, i].
+blob 19751296 fp16 327680 f16(reshape(concat(3,
+    reshape(slice(t("decoder.model.5.convtr.weight"), 0, 5, 10), [5,128,256,1]),
+    reshape(slice(t("decoder.model.5.convtr.weight"), 0, 0, 5), [5,128,256,1])),
+  [640,256,2]))
+blob 20406720 fp16 128 f16(t("decoder.model.5.convtr.bias"))
+blob 20407040 fp16 24576 f16(permute(t("decoder.model.6.block.1.conv.weight"), [1, 2, 0]))
+blob 20456256 fp16 64 f16(t("decoder.model.6.block.1.conv.bias"))
+blob 20456448 fp16 8192 f16(permute(t("decoder.model.6.block.3.conv.weight"), [1, 2, 0]))
+blob 20472896 fp16 128 f16(t("decoder.model.6.block.3.conv.bias"))
+# decoder.model.8.convtr, ratio 4, phase form: [p * 64 + o, i, 0] = k[4 + p, o, i], [p * 64 + o, i, 1] = k[p, o, i].
+blob 20473216 fp16 65536 f16(reshape(concat(3,
+    reshape(slice(t("decoder.model.8.convtr.weight"), 0, 4, 8), [4,64,128,1]),
+    reshape(slice(t("decoder.model.8.convtr.weight"), 0, 0, 4), [4,64,128,1])),
+  [256,128,2]))
+blob 20604352 fp16 64 f16(t("decoder.model.8.convtr.bias"))
+blob 20604544 fp16 6144 f16(permute(t("decoder.model.9.block.1.conv.weight"), [1, 2, 0]))
+blob 20616896 fp16 32 f16(t("decoder.model.9.block.1.conv.bias"))
+blob 20617024 fp16 2048 f16(permute(t("decoder.model.9.block.3.conv.weight"), [1, 2, 0]))
+blob 20621184 fp16 64 f16(t("decoder.model.9.block.3.conv.bias"))
+blob 20621376 fp16 192 f16(permute(t("decoder.model.11.conv.weight"), [1, 2, 0]))
+# The checkpoint hash the spec's metadata records (pocket.source_sha256), which the engine checks.
+patch 1061 str 64 meta_s("pocket.source_sha256")
+# The final convolution's single bias, which coremltools inlines in the spec (p_final_b). The
+# reference manifest widens this one-value tensor's range so that twins A and B differ in it.
+patch 88155 fp16 1 f16(t("decoder.model.11.conv.bias"))
+end
