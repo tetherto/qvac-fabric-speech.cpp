@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Checks overlapped memory schedules against the templates' memory envelope.
 
-Reads the JSON reports of nemotron-diarization-coreml-memory (one per run,
+Reads the JSON reports of diarizer-coreml-memory (one per run,
 generated schedule) and the templates they exercised, prints one table row per
 run plus the maxima over the runs, and fails when a measurement exceeds what
 the envelope charges.
@@ -26,7 +26,10 @@ compare the raw measurement, since those totals already carry the margin.
     run's steady growth over ggml against the sum of those parts;
   - ANECompilerService's growth during the loads (its peak less its size when
     the first load started), against ane_compile_reserve_bytes (the runtime's
-    cold-load memory admission).
+    cold-load memory admission). Each row labels that baseline clean (the
+    service held at most 32 MiB), dirty (it already held more, so its growth
+    understates a cold compile on a clean host) or unknown (no sample before
+    the load, or a report without the label).
 
 Every template stage must show a generate, a compile and a load segment in
 every run, each with footprint samples, every load must have sampled
@@ -38,7 +41,10 @@ by the capacity that served it. The compiler's growth is checked over the
 whole run and per load (each load from the service's size when it started, so
 a service that shrank between loads cannot hide a later compile), and a run
 whose compiler grew less than 64 MiB is not a cold run and fails. A stage seen
-more than once in a phase is checked at its largest value.
+more than once in a phase is checked at its largest value. The run must have
+overlapped inference with the background work: among its pass_intervals, a
+ggml pass ran during a prepare (generate or compile) and one during a load or
+warm (one pass spanning both counts for both).
 
 A null constant means the runtime's default: runtime weights = weight.bin;
 compile 0.5 x weight.bin; load 0.25 x weight.bin for cpu_and_ane and 1.0 x for
@@ -154,6 +160,23 @@ def prepares(segs):
     return [max(0, p["peak"] - p["before"]) for p in out]
 
 
+def overlap_failures(path, r):
+    """The schedule must overlap inference with the background work: a ggml
+    pass ([t0, t1, coreml] in pass_intervals) running during a prepare
+    (generate or compile segment) and one during a load or warm (one pass
+    spanning both counts for both)."""
+    intervals = r.get("pass_intervals")
+    if intervals is None:
+        return [f"{path}: no pass_intervals (an older tool's report)"]
+    segments = r.get("segments", [])
+    out = []
+    for label, phases in (("prepare", ("generate", "compile")), ("load or warm", ("load",))):
+        spans = [(float(s["t0"]), float(s["t1"])) for s in segments if s["phase"] in phases]
+        if not any(not int(p[2]) and any(float(p[0]) < b and a < float(p[1]) for a, b in spans) for p in intervals):
+            out.append(f"{path}: no ggml pass ran during a {label}: the schedule was not overlapped")
+    return out
+
+
 def check_run(path, r, templates):
     """Returns (row, failures) for one report."""
     failures = []
@@ -177,6 +200,7 @@ def check_run(path, r, templates):
             failures.append(f"{path}: {s['stage']} {s['phase']} segment without footprint samples")
     for stage in sorted(set(by_stage) - set(templates)):
         failures.append(f"{path}: no template for {stage}")
+    failures += overlap_failures(path, r)
 
     row = {"prepare": 0, "load": 0, "resident": 0, "prepare_lim": None, "load_lim": None, "resident_lim": None,
            "reserve_lim": None, "resident_sum": 0}
@@ -228,6 +252,7 @@ def check_run(path, r, templates):
         failures.append(f"{path}: no ane_compiler_before_loads (an older tool's report)")
     growth = max(0, peak - int(r.get("ane_compiler_before_loads", 0)))
     row["ane_growth"], row["ane_peak"] = growth, peak
+    row["ane_baseline"] = r.get("ane_compiler_baseline", "unknown")
     if growth < COLD_COMPILER_FLOOR:
         failures.append(f"{path}: ANECompilerService grew {mib(growth)} MiB during the loads, below the "
                         f"{mib(COLD_COMPILER_FLOOR)} MiB of a cold run (a warm run measures no compile)")
@@ -289,7 +314,8 @@ def main(argv=None):
         print(f"| {Path(path).name} | {row['units']} | {mib(row['increment'])} | {mib(row['envelope'])} | "
               f"{mib(row['prepare'])} | {mib(row['prepare_lim'] or 0)} | {mib(row['load'])} | "
               f"{mib(row['load_lim'] or 0)} | {mib(row['resident'])} | {mib(row['resident_lim'] or 0)} | "
-              f"{mib(row['steady'])} | {mib(row['ane_growth'])} (peak {mib(row['ane_peak'])}) | "
+              f"{mib(row['steady'])} | {mib(row['ane_growth'])} (peak {mib(row['ane_peak'])}, "
+              f"{row['ane_baseline']} baseline) | "
               f"{mib(row['reserve_lim'] or 0)} |")
     if rows:
         worst = {k: max(r[k] for r in rows) for k in ("increment", "prepare", "load", "resident", "steady",

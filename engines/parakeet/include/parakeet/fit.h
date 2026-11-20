@@ -49,6 +49,7 @@
 #include "export.h"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 
 namespace parakeet {
@@ -111,6 +112,13 @@ struct FitOptions {
     // Free-memory headroom that must remain on the device for the projection
     // to count as fitting.
     uint64_t margin_bytes = 256ull * 1024 * 1024;
+
+    // The free memory the verdicts charge against. Unset (the default) reads
+    // the device's free memory now; set, the projection uses this figure
+    // instead (for example a memory budget the host enforces), so the same
+    // projection gives the same verdicts whatever the device reports.
+    // FitResult::device_free_bytes carries the figure used.
+    std::optional<uint64_t> device_free_bytes;
 
     // Same semantics as EngineOptions::backend: "auto" (or empty) follows
     // n_gpu_layers; "cpu", "opencl", "hexagon" or an exact ggml device name

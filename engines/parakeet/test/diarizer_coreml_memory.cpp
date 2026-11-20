@@ -1,5 +1,8 @@
-// Memory validation of the Nemotron 3 Diarization Core ML diarizers under
-// overlapped schedules: diarizer passes run in a loop while the runtime
+// Memory validation of the generated Core ML diarizers (Nemotron 3
+// Diarization, Sortformer v2.1) under overlapped schedules: diarizer passes,
+// one pass size per capacity of the model's templates (the clip alone for
+// the smallest capacity, then the clip after cache rows that fill each larger
+// capacity exactly), run in a loop while the runtime
 // prepares (generates and compiles), loads and warms the capacities in the
 // background (prewarm = all, wait = none). A sampler thread reads this
 // process's phys_footprint every 2 ms and the slots' states every 10 ms; a
@@ -14,23 +17,25 @@
 // capacity ready before it, or less the ggml-only run's peak for the first.
 // The steps add up to the run's steady growth over ggml. It also records
 // ANECompilerService's growth during the loads (its peak less its size when
-// the first load starts), and compares the run's peak footprint with the
+// the first load starts, that baseline labelled clean, dirty or unknown), and compares the run's peak footprint with the
 // Core ML bytes fit charges for the same options, as an increment over a
 // ggml-only run of the same passes (--baseline-bytes, from --ggml-only).
 // A sample that could not be read (task_info, or ps failing) is dropped and
 // counted in the report's sampler_errors, so a report with missing
 // measurements is never taken for a quiet one.
 //
-//   nemotron-diarization-coreml-memory --gguf M.gguf --wav A.wav --cache-dir DIR
+//   diarizer-coreml-memory --gguf M.gguf --wav A.wav --cache-dir DIR
 //       [--ggml-only] [--baseline-bytes N] [--passes-after-ready N] [--json OUT]
 //
 // The generated schedule needs a GGUF with no adjacent diarizer bundle and
 // an empty DIR; the prebuilt schedule a GGUF beside its bundles. A fresh
 // process identity (scripts/coreml/fresh-host.sh) and fresh paths make every
-// ANE load cold. Exit status: 0 when every capacity became ready, each
-// served --passes-after-ready Core ML passes after that (counted by the
-// capacity that served them), and the peak increment stays within the charged
-// envelope (always 0 with --ggml-only); 1 otherwise; 2 on usage or setup
+// ANE load cold. Every pass's interval is recorded, with the ggml passes that
+// overlapped a prepare and a load or warm. Exit status: 0 when every capacity
+// became ready, each served --passes-after-ready Core ML passes after that
+// (counted by the capacity that served them), a ggml pass ran during a
+// prepare and one during a load or warm, and the peak increment stays within
+// the charged envelope (always 0 with --ggml-only); 1 otherwise; 2 on usage or setup
 // errors. The ANECompilerService size is also recorded at the start of each
 // load, so the checker can hold each load's own compile growth to the reserve.
 
@@ -38,6 +43,7 @@
 #include "parakeet/fit.h"
 #include "parakeet_ctc.h"
 #include "parakeet_diarization_v3.h"
+#include "parakeet_sortformer.h"
 
 #include <mach/mach.h>
 
@@ -49,6 +55,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <initializer_list>
 #include <map>
 #include <mutex>
 #include <string>
@@ -61,9 +68,13 @@ using Clock = std::chrono::steady_clock;
 
 constexpr int kThreads = 4;
 constexpr int kGpuLayers = 99;
-constexpr int kCapacities[] = {358, 745, 1125};  // the embedded Nemotron templates
 constexpr double kMiB = 1048576.0;
 constexpr double kTraceSeconds = 0.1;  // the bucket of the report's footprint trace
+// ANECompilerService at or below this size before the first load counts as a
+// clean start: its growth then stands for a cold compile on a clean host. A
+// service that already holds more (a dirty start) reuses some of it, so its
+// growth understates one.
+constexpr uint64_t kAneCompilerCleanBytes = 32ull * 1024 * 1024;
 
 uint64_t footprint_now() {
     task_vm_info_data_t info{};
@@ -134,6 +145,29 @@ struct Segment {
     double t0 = 0, t1 = 0;
 };
 
+// One diarizer pass: [t0, t1), and whether it ran on Core ML.
+struct PassInterval {
+    double t0 = 0, t1 = 0;
+    bool coreml = false;
+};
+
+// The ggml passes that ran while a segment of one of `phases` did.
+int ggml_passes_overlapping(const std::vector<PassInterval> & passes, const std::vector<Segment> & segments,
+                            std::initializer_list<const char *> phases) {
+    int n = 0;
+    for (const PassInterval & p : passes) {
+        if (p.coreml) continue;
+        for (const Segment & seg : segments) {
+            const bool phase = std::any_of(phases.begin(), phases.end(), [&](const char * x) { return seg.phase == x; });
+            if (phase && p.t0 < seg.t1 && seg.t0 < p.t1) {
+                ++n;
+                break;
+            }
+        }
+    }
+    return n;
+}
+
 std::vector<Segment> segments_of(const std::vector<StateSample> & states, double t_end) {
     std::vector<Segment> out;
     std::map<std::string, Segment> open;
@@ -169,6 +203,76 @@ bool load_model(const std::string & gguf, const parakeet::CoremlOptions & option
     const int status = parakeet::load_from_gguf(gguf, model, kThreads, kGpuLayers, false, "auto", options);
     if (disable_coreml) unsetenv("PARAKEET_COREML_DISABLE");
     return status == 0;
+}
+
+// The capacities of the model's embedded diarizer templates, ascending:
+// Nemotron 3 Diarization's three, or the Sortformer v2.1 AOSC variant's one.
+std::vector<int> template_capacities(const parakeet::ParakeetCtcModel & model) {
+    if (model.model_type == parakeet::ParakeetModelType::NEMOTRON_DIARIZATION) return {358, 745, 1125};
+    if (model.model_type == parakeet::ParakeetModelType::SORTFORMER &&
+        model.model_variant == "sortformer-streaming-v2.1-aosc") {
+        return {410};
+    }
+    return {};
+}
+
+// The clip's encoder frames and the rows a pass feeds the diarizer.
+struct Clip {
+    int frames = 0;              // encoder frames of the clip alone
+    int width = 0;               // encoder width
+    std::vector<float> cache;    // Nemotron: speaker cache rows (filled to the largest capacity)
+    std::vector<float> rows;     // Sortformer: the clip's pre-encode rows, tiled to the largest capacity
+};
+
+bool prepare_clip(parakeet::ParakeetCtcModel & model, const std::vector<float> & mel, int mel_frames,
+                  int largest, Clip & clip) {
+    if (model.model_type == parakeet::ParakeetModelType::NEMOTRON_DIARIZATION) {
+        clip.frames = parakeet::nemotron_diarization_encoder_frames(model, mel_frames);
+        clip.width = model.nemotron_diarization_cfg.encoder_width;
+        clip.cache.assign(static_cast<size_t>(largest) * clip.width, 0.01f);
+        return true;
+    }
+    std::vector<float> pre_encode;
+    if (parakeet::run_subsampling(model, mel.data(), mel_frames, model.mel_cfg.n_mels, pre_encode,
+                                  clip.frames) != 0 || clip.frames <= 0) {
+        return false;
+    }
+    clip.width = model.encoder_cfg.sortformer_fc_d_model;
+    clip.rows.resize(static_cast<size_t>(largest) * clip.width);
+    for (int row = 0; row < largest; ++row) {
+        std::copy_n(pre_encode.begin() + static_cast<size_t>(row % clip.frames) * clip.width, clip.width,
+                    clip.rows.begin() + static_cast<size_t>(row) * clip.width);
+    }
+    return true;
+}
+
+// One diarizer pass of `frames` encoder frames: on the covering capacity
+// when it is ready, on ggml otherwise. Nemotron runs the clip after
+// frames - clip.frames cache rows; Sortformer the first `frames` rows, as an
+// AOSC step does (a sidecar, else the ggml encoder and speaker head).
+// Returns 0 and sets *coreml, or the failing status.
+int run_pass(parakeet::ParakeetCtcModel & model, const std::vector<float> & mel, int mel_frames, const Clip & clip,
+             int frames, bool * coreml) {
+    if (model.model_type == parakeet::ParakeetModelType::NEMOTRON_DIARIZATION) {
+        const int cache_rows = frames - clip.frames;
+        parakeet::NemotronDiarizationChunk chunk;
+        const int rc = parakeet::run_nemotron_diarization_chunk(
+            model, mel.data(), mel_frames, cache_rows > 0 ? clip.cache.data() : nullptr, cache_rows, chunk);
+        *coreml = chunk.used_coreml;
+        return rc;
+    }
+    parakeet::SortformerDiarizationResult result;
+    if (parakeet::sortformer_diarize_coreml(model, clip.rows.data(), frames, clip.width, {}, result)) {
+        *coreml = true;
+        return 0;
+    }
+    *coreml = false;
+    parakeet::EncoderOutputs encoded;
+    if (const int rc = parakeet::run_encoder_bypass_pre_encode(model, clip.rows.data(), frames, clip.width, encoded);
+        rc != 0) {
+        return rc;
+    }
+    return parakeet::sortformer_diarize_ggml(model, encoded.encoder_out.data(), frames, clip.width, {}, result);
 }
 
 }  // namespace
@@ -287,36 +391,44 @@ int main(int argc, char ** argv) {
         std::fprintf(stderr, "cannot read %s\n", wav.c_str());
         return 2;
     }
-    const int offline = parakeet::nemotron_diarization_encoder_frames(model, mel_frames);
-    const int width = model.nemotron_diarization_cfg.encoder_width;
-    if (offline > kCapacities[0]) {
+    const std::vector<int> capacities = template_capacities(model);
+    Clip clip;
+    if (capacities.empty() || !prepare_clip(model, mel, mel_frames, capacities.back(), clip)) {
         finish();
-        std::fprintf(stderr, "%s is longer than the smallest capacity (%d encoder frames)\n", wav.c_str(), offline);
+        std::fprintf(stderr, "%s has no diarizer template, or its clip could not be prepared\n", gguf.c_str());
         return 2;
     }
-    // Three pass sizes, one per capacity: the clip alone, and the clip after
-    // cache rows that fill the second and the largest capacity exactly.
-    const std::vector<int> caches = {0, kCapacities[1] - offline, kCapacities[2] - offline};
-    const std::vector<float> cache(static_cast<size_t>(kCapacities[2]) * width, 0.01f);
+    if (clip.frames > capacities.front()) {
+        finish();
+        std::fprintf(stderr, "%s is longer than the smallest capacity (%d encoder frames)\n", wav.c_str(),
+                     clip.frames);
+        return 2;
+    }
+    // One pass size per capacity: the clip alone, and the clip after cache
+    // rows that fill each larger capacity exactly.
+    std::vector<int> sizes = {clip.frames};
+    for (size_t k = 1; k < capacities.size(); ++k) sizes.push_back(capacities[k]);
 
     int passes = 0, coreml_passes = 0, ggml_after_ready = 0;
     // Core ML passes after every stage is ready, by the capacity that served
     // them (a larger capacity standing in for a failed one counts as itself).
     std::map<int, int> coreml_by_capacity;
+    std::vector<PassInterval> intervals;
     double t_all_ready = -1;
     const auto deadline = Clock::now() + std::chrono::minutes(10);
     for (;;) {
-        const int c = caches[passes % caches.size()];
-        parakeet::NemotronDiarizationChunk chunk;
+        const int size = sizes[passes % sizes.size()];
+        bool used_coreml = false;
         if (!ggml_only) parakeet::model_coreml_reset_call_stats(model);
-        if (parakeet::run_nemotron_diarization_chunk(model, mel.data(), mel_frames, c > 0 ? cache.data() : nullptr,
-                                                     c, chunk) != 0) {
+        const double pass_t0 = now_s();
+        if (run_pass(model, mel, mel_frames, clip, size, &used_coreml) != 0) {
             finish();
             std::fprintf(stderr, "a diarizer pass failed\n");
             return 2;
         }
+        intervals.push_back(PassInterval{pass_t0, now_s(), used_coreml});
         ++passes;
-        if (chunk.used_coreml) {
+        if (used_coreml) {
             ++coreml_passes;
         }
         if (ggml_only) {
@@ -324,13 +436,14 @@ int main(int argc, char ** argv) {
             continue;
         }
         const std::map<std::string, std::string> st = stage_states(parakeet::model_coreml_status_json(model));
-        const bool all_ready = st.size() == 3 && std::all_of(st.begin(), st.end(), [](const auto & kv) {
-            return kv.second == "ready";
-        });
+        const bool all_ready = st.size() == capacities.size() &&
+                               std::all_of(st.begin(), st.end(), [](const auto & kv) {
+                                   return kv.second == "ready";
+                               });
         if (all_ready && t_all_ready < 0) t_all_ready = now_s();
-        if (all_ready && !chunk.used_coreml) ++ggml_after_ready;
-        if (all_ready && chunk.used_coreml) ++coreml_by_capacity[parakeet::model_coreml_call_stats(model).capacity];
-        const bool enough = all_ready && std::all_of(std::begin(kCapacities), std::end(kCapacities), [&](int k) {
+        if (all_ready && !used_coreml) ++ggml_after_ready;
+        if (all_ready && used_coreml) ++coreml_by_capacity[parakeet::model_coreml_call_stats(model).capacity];
+        const bool enough = all_ready && std::all_of(capacities.begin(), capacities.end(), [&](int k) {
             return coreml_by_capacity[k] >= passes_after_ready;
         });
         if (enough || Clock::now() > deadline) break;
@@ -395,10 +508,17 @@ int main(int argc, char ** argv) {
         if (seg.phase == "load" && (first_load < 0 || seg.t0 < first_load)) first_load = seg.t0;
     }
     uint64_t ane_before_loads = 0;
+    bool ane_sampled_before = false;
     for (const AneSample & s : ane) {
         if (first_load < 0 || s.t > first_load) break;
         ane_before_loads = s.rss;
+        ane_sampled_before = true;
     }
+    // The baseline the growth is measured from: clean, dirty, or unknown (no
+    // sample at or before the first load).
+    const char * ane_baseline = !ane_sampled_before                         ? "unknown"
+                                : ane_before_loads <= kAneCompilerCleanBytes ? "clean"
+                                                                             : "dirty";
     // Resident steps, in the order the loads end (a capacity is ready).
     std::vector<size_t> ready;
     for (size_t i = 0; i < segments.size(); ++i) {
@@ -478,16 +598,31 @@ int main(int argc, char ** argv) {
         by_capacity += (by_capacity.empty() ? "\"" : ",\"") + std::to_string(k) + "\":" + std::to_string(n);
     }
     const uint64_t ane_growth = ane_load_peak > ane_before_loads ? ane_load_peak - ane_before_loads : 0;
+    // The schedule is overlapped only when inference ran during the
+    // background work: a ggml pass during a prepare (generate or compile) and
+    // one during a load or warm (one pass spanning both counts for both).
+    const int overlap_prepare = ggml_passes_overlapping(intervals, segments, {"generate", "compile"});
+    const int overlap_load = ggml_passes_overlapping(intervals, segments, {"load"});
+    std::snprintf(buf, sizeof(buf), "],\"ggml_passes_during_prepare\":%d,\"ggml_passes_during_load\":%d,"
+                  "\"pass_intervals\":[", overlap_prepare, overlap_load);
+    json += buf;
+    first = true;
+    for (const PassInterval & p : intervals) {
+        std::snprintf(buf, sizeof(buf), "%s[%.4f,%.4f,%d]", first ? "" : ",", p.t0, p.t1, p.coreml ? 1 : 0);
+        json += buf;
+        first = false;
+    }
     std::snprintf(buf, sizeof(buf),
                   "],\"max_generate_increment\":%llu,\"max_compile_increment\":%llu,\"max_load_increment\":%llu,"
                   "\"max_resident_increment\":%llu,\"steady_increment_over_baseline\":%llu,"
                   "\"ane_compiler_peak_during_load\":%llu,\"ane_compiler_before_loads\":%llu,"
-                  "\"ane_compiler_growth\":%llu,\"ane_compiler_max_load_growth\":%llu,"
+                  "\"ane_compiler_baseline\":\"%s\",\"ane_compiler_growth\":%llu,"
+                  "\"ane_compiler_max_load_growth\":%llu,"
                   "\"peak_increment_over_baseline\":%llu,\"coreml_passes_by_capacity\":{%s},\"trace\":[",
                   (unsigned long long) generate_inc, (unsigned long long) compile_inc,
                   (unsigned long long) load_inc, (unsigned long long) resident_max,
                   (unsigned long long) steady_increment, (unsigned long long) ane_load_peak,
-                  (unsigned long long) ane_before_loads, (unsigned long long) ane_growth,
+                  (unsigned long long) ane_before_loads, ane_baseline, (unsigned long long) ane_growth,
                   (unsigned long long) ane_load_growth, (unsigned long long) increment, by_capacity.c_str());
     json += buf;
     // The footprint in kTraceSeconds buckets: [start, min, max].
@@ -520,10 +655,10 @@ int main(int argc, char ** argv) {
     if (!ggml_only) {
         std::printf("increments: generate %.1f MiB, compile %.1f MiB, load+warm %.1f MiB, largest resident step "
                     "%.1f MiB (steady %.1f MiB over ggml); ANECompilerService peak %.1f MiB (min %.1f), %.1f MiB "
-                    "before the loads, growth %.1f MiB\n",
+                    "before the loads (%s baseline), growth %.1f MiB\n",
                     generate_inc / kMiB, compile_inc / kMiB, load_inc / kMiB, resident_max / kMiB,
                     steady_increment / kMiB, ane_peak / kMiB, ane_min / kMiB, ane_before_loads / kMiB,
-                    ane_growth / kMiB);
+                    ane_baseline, ane_growth / kMiB);
         std::printf("peak increment over the ggml-only baseline %.1f MiB, envelope %.1f MiB: %s\n",
                     increment / kMiB, fr.coreml.bytes / kMiB,
                     baseline == 0 ? "no baseline" : (increment <= fr.coreml.bytes ? "WITHIN" : "OVER"));
@@ -532,7 +667,13 @@ int main(int argc, char ** argv) {
             std::printf("not every capacity became ready before the deadline\n");
             return 1;
         }
-        for (int k : kCapacities) {
+        std::printf("ggml passes overlapping a prepare: %d, a load or warm: %d\n", overlap_prepare, overlap_load);
+        if (overlap_prepare == 0 || overlap_load == 0) {
+            std::printf("no ggml pass ran during a %s: the schedule was not overlapped\n",
+                        overlap_prepare == 0 ? "prepare" : "load or warm");
+            return 1;
+        }
+        for (int k : capacities) {
             if (coreml_by_capacity[k] < passes_after_ready) {
                 std::printf("capacity %d served %d Core ML passes after readiness (%d required)\n", k,
                             coreml_by_capacity[k], passes_after_ready);
