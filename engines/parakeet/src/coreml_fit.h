@@ -259,14 +259,15 @@ inline int sortformer_default_aosc_slab_frames(int encoder_frame_ms) {
     return d.spkcache_len + d.fifo_len + kDefaultLeftContextMs / ms + d.chunk_ms / ms + d.chunk_right_context_ms / ms;
 }
 
-// The Sortformer diarizer calls a fit projection charges: the offline pass
-// over the whole input (`offline_frames` encoder frames) and, for a model
-// that streams with the speaker cache (v2.1 AOSC; `aosc_slab_frames` > 0),
-// every step slab from the first chunk up to the full one: the slab grows
-// with the speaker cache and FIFO, so each capacity on the way loads,
-// whatever the input's length.
+// The Sortformer diarizer calls a fit projection charges: offline passes of
+// any length up to the whole input (`offline_frames` encoder frames; the
+// instance also serves shorter calls, and keeps the capacities they load)
+// and, for a model that streams with the speaker cache (v2.1 AOSC;
+// `aosc_slab_frames` > 0), every step slab from the first chunk up to the
+// full one: the slab grows with the speaker cache and FIFO, so each capacity
+// on the way loads, whatever the input's length.
 inline std::vector<CoremlFrameRange> sortformer_diarizer_demand(int offline_frames, int aosc_slab_frames) {
-    std::vector<CoremlFrameRange> out = {CoremlFrameRange{offline_frames, offline_frames}};
+    std::vector<CoremlFrameRange> out = {CoremlFrameRange{1, std::max(1, offline_frames)}};
     if (aosc_slab_frames > 0) out.push_back(CoremlFrameRange{1, aosc_slab_frames});
     return out;
 }

@@ -1207,8 +1207,8 @@ void case_sortformer_aosc_diarizer_charge() {
     CHECK(sortformer_default_aosc_slab_frames(80) == 409, "the default AOSC slab is 409 encoder frames");
     const std::vector<CoremlFrameRange> offline = sortformer_diarizer_demand(63, 0);
     const std::vector<CoremlFrameRange> aosc = sortformer_diarizer_demand(63, sortformer_default_aosc_slab_frames(80));
-    CHECK(offline.size() == 1 && offline[0].min_frames == 63 && offline[0].max_frames == 63,
-          "without AOSC streaming the demand is the offline pass alone");
+    CHECK(offline.size() == 1 && offline[0].min_frames == 1 && offline[0].max_frames == 63,
+          "without AOSC streaming the demand is every offline pass up to the input's length");
     CHECK(aosc.size() == 2 && aosc[1].min_frames == 1 && aosc[1].max_frames == 409,
           "with AOSC streaming the demand covers every slab from 1 to 409 frames");
     auto pre = [](int frames, uint64_t weights) {
@@ -1242,6 +1242,37 @@ void case_sortformer_aosc_diarizer_charge() {
         return r.coreml.fits;
     };
     CHECK(fits(before) && !fits(after), "a 1000 MiB Core ML budget: refused once the AOSC slabs are charged");
+
+    // A generated 410 and an adjacent prebuilt 512 (220 MiB weights), prewarm
+    // minimal, a 300 s projection (3750 frames, longer than both). The AOSC
+    // slabs load 410; a shorter offline call of 500 frames loads 512 while
+    // 410 stays resident. Charging the offline pass only at 3750 frames (no
+    // capacity) left 410 alone, which falls back to 512 one at a time:
+    // 600 + 55 = 655 MiB. Every offline length up to 3750 holds both:
+    // 600 + 137 = 737 MiB resident plus the larger transient (121): 858 MiB.
+    const std::vector<CoremlDiarizerCharge> mixed = {CoremlDiarizerCharge{410, true, 137 * MiB, 121 * MiB, 1.0},
+                                                     pre(512, 220 * MiB)};
+    const std::vector<CoremlFrameRange> long_input =
+        sortformer_diarizer_demand(3750, sortformer_default_aosc_slab_frames(80));
+    const CoremlDiarizersCharge reachable =
+        coreml_diarizers_charge(mixed, long_input, CoremlDiarizerPrewarm::minimal, CoremlFitUnits::cpu_and_ane);
+    CHECK(reachable.charge.resident == 737 * MiB && reachable.charge.transient == 121 * MiB && reachable.prebuilt,
+          "a 3750-frame projection charges the 410 and the 512 a shorter offline call loads: 858 MiB");
+    const CoremlDiarizersCharge single_length = coreml_diarizers_charge(
+        mixed, {CoremlFrameRange{3750, 3750}, CoremlFrameRange{1, 409}}, CoremlDiarizerPrewarm::minimal,
+        CoremlFitUnits::cpu_and_ane);
+    CHECK(single_length.charge.resident == 600 * MiB && single_length.charge.transient == 55 * MiB,
+          "the offline length alone reaches one capacity at a time: 655 MiB");
+    // 700 MiB available for Core ML: the residents alone (737 MiB) exceed it.
+    auto fits_in = [](const CoremlDiarizersCharge & c, uint64_t coreml_room) {
+        FitResult r;
+        r.device_shares_host_memory = true;
+        r.device_free_bytes = 1000 * MiB + coreml_room;
+        apply_coreml_verdicts(r, 1000 * MiB, true, "", c.charge, false, CoremlCharge{});
+        return r.coreml.fits;
+    };
+    CHECK(fits_in(single_length, 700 * MiB) && !fits_in(reachable, 700 * MiB),
+          "700 MiB for Core ML: refused once the shorter offline calls are charged");
 }
 
 // coreml.validated: true only when the charged bytes are all generated

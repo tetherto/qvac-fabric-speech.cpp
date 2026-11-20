@@ -136,6 +136,13 @@ TemplateCharge template_charge(const char * id) {
     return c;
 }
 
+// A template's capacity in encoder frames (its first input's first dimension).
+int template_frames(const std::string & id) {
+    std::ifstream in(std::string(PARAKEET_TEST_TEMPLATE_DIR) + "/" + id + "/template.json");
+    const nlohmann::json j = nlohmann::json::parse(in);
+    return j.at("functions").at(0).at("inputs").at(0).at("shape").at(0).get<int>();
+}
+
 // The warm-hint records of the model's generated capacities in `cache`, by
 // the artifact each names (<template id>.<key>/model.mlmodelc).
 std::vector<std::filesystem::path> template_hints(const std::string & cache) {
@@ -376,6 +383,42 @@ int main(int argc, char ** argv) {
     const std::string kept = engine_status(gguf, roomy);
     check(contains(kept, "\"generation\":{\"reason\":null,\"supported\":true}"),
           "a budget with room for Core ML keeps generation on");
+
+    // A prebuilt bundle one capacity above the largest template (220 MiB of
+    // weights) beside the GGUF, prewarm minimal, the default 300 s workload:
+    // the stream loads the smallest capacity, and a shorter offline call that
+    // only the bundle covers loads it beside the capacities already resident.
+    // The charge holds every template capacity and the bundle at once:
+    // 2 x 220 MiB + 160 MiB runtime for the bundle, the templates' residents,
+    // and the largest transient (the bundle's is a quarter of its weights).
+    // A budget just under that turns Core ML off for memory.
+    {
+        constexpr uint64_t kBundleWeights = 220ull * 1024 * 1024;
+        const std::filesystem::path dir = std::filesystem::path(cache).parent_path() /
+                                          (std::filesystem::path(cache).filename().string() + "-adjacent");
+        std::filesystem::remove_all(dir, ec);
+        std::filesystem::create_directories(dir);
+        const std::string linked = (dir / "model.gguf").string();
+        std::filesystem::create_symlink(std::filesystem::absolute(gguf), linked, ec);
+        const int bundle_frames = template_frames(g_templates.back()) + 102;
+        const std::filesystem::path weights =
+            dir / ("model-diarizer-" + std::to_string(bundle_frames) + ".mlmodelc") / "weights" / "weight.bin";
+        std::filesystem::create_directories(weights.parent_path());
+        std::ofstream(weights, std::ios::binary).put('\0');
+        std::filesystem::resize_file(weights, kBundleWeights, ec);
+        const parakeet::FitResult mixed = project(linked, coreml_options(cache));
+        print("generated + adjacent bundle", mixed);
+        const uint64_t expected = residents + 2 * kBundleWeights + 160ull * 1024 * 1024 +
+                                  std::max(transient, kBundleWeights / 4);
+        std::printf("expected %llu\n", (unsigned long long) expected);
+        check(mixed.coreml.bytes == expected,
+              "an adjacent bundle above the templates: the charge holds every capacity and the bundle together");
+        parakeet::CoremlOptions under = coreml_options(cache);
+        under.memory_budget_bytes = static_cast<int64_t>(mixed.ggml_required_bytes + expected - 1024 * 1024);
+        check(contains(engine_status(linked, under), "\"generation\":{\"reason\":\"memory\",\"supported\":false}"),
+              "a budget 1 MiB under that charge: generation off, reason memory");
+        std::filesystem::remove_all(dir, ec);
+    }
 
     std::filesystem::remove_all(cache, ec);
     std::printf("%s\n", g_passed ? "PASS" : "FAIL");
