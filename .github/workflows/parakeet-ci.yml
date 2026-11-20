@@ -361,7 +361,8 @@ jobs:
           python3 engines/parakeet/scripts/check-ctest-junit.py \
             build-coreml/coreml-generated-results.xml \
             --require test-nemotron-diarization-coreml-generated-parity \
-            --require test-fit-coreml-generated-diarizers
+            --require test-fit-coreml-generated-diarizers \
+            --require test-nemotron-diarization-coreml-source
 
       # Real-weights gate: for each Nemotron template, the unchanged exporter on
       # the staged GGUF dequantised by ggml against the C++ generator on the

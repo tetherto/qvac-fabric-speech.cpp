@@ -2121,7 +2121,7 @@ static void maybe_init_coreml_diarizers(const std::string & gguf_path,
         model.model_type == ParakeetModelType::NEMOTRON_DIARIZATION ? nemotron_diarizer_templates() : kNoTemplates;
     // Without the descriptor's identity nothing is generated (source_changed).
     pcm::SourceStat loaded = model.impl->source;
-    loaded.changed = !model.impl->source_ok;
+    loaded.changed = loaded.changed || !model.impl->source_ok;
     model.impl->coreml_diarizers = discover_coreml_diarizers(gguf_path, *model.impl->coreml, templates, loaded);
     const std::vector<int> capacities =
         model.impl->coreml_diarizers ? model.impl->coreml_diarizers->capacities() : std::vector<int>();
@@ -2779,6 +2779,7 @@ static int load_from_gguf_impl(const std::string & gguf_path,
             return 1;
         }
         impl->source_ok = pcm::generation::source_stat_fd(fileno(gguf_file.get()), gguf_path, impl->source);
+        if (GgufLoadObserver observer = g_gguf_load_observer.load()) observer("opened");
     }
     impl->gguf = gguf_file ? gguf_init_from_file_ptr(gguf_file.get(), params)
                            : gguf_init_from_file(gguf_path.c_str(), params);
@@ -2900,6 +2901,17 @@ static int load_from_gguf_impl(const std::string & gguf_path,
             ggml_backend_tensor_set(t, buf.data(), 0, nbytes);
         }
 #ifdef PARAKEET_USE_COREML
+        // The descriptor again after the last tensor read: a file written in
+        // place during the upload (same inode, a new size or mtime) may have
+        // given some tensors the new bytes, so the identity taken at the open
+        // is not the loaded weights' and must never join a job for it.
+        if (gguf_file && impl->source_ok) {
+            pcm::SourceStat after;
+            const bool same = pcm::generation::source_stat_fd(fileno(gguf_file.get()), gguf_path, after) &&
+                              after.size == impl->source.size && after.mtime_ns == impl->source.mtime_ns &&
+                              after.ino == impl->source.ino && after.dev == impl->source.dev;
+            if (!same) impl->source.changed = true;
+        }
         if (GgufLoadObserver observer = g_gguf_load_observer.load()) observer("read");
 #endif
     }
