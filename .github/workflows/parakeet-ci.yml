@@ -404,6 +404,8 @@ jobs:
       # the staged GGUF dequantised by ggml against the C++ generator on the
       # GGUF itself, weight.bin blob by blob and the spec.
       - name: Install the pinned coremltools venv
+        id: coreml-venv
+        if: ${{ !cancelled() && steps.coreml-build.outcome == 'success' }}
         env:
           PYTHONDONTWRITEBYTECODE: '1'
         run: |
@@ -423,7 +425,10 @@ jobs:
             --template-dir engines/parakeet/coreml-templates/nemotron-diar-f1125 \
             --json nemotron-real-gate.json
 
+      # Runs whenever the build and the venv succeeded, so a failing test in
+      # an earlier step (which still fails the job) does not hide it.
       - name: Real-weights gate (Sortformer template on the staged q8_0)
+        if: ${{ !cancelled() && steps.coreml-venv.outcome == 'success' }}
         env:
           PYTHONDONTWRITEBYTECODE: '1'
         run: |
@@ -483,9 +488,10 @@ jobs:
           if-no-files-found: warn
 
       # The same validation for the Sortformer v2.1 template, on this runner's
-      # chip: diarizer passes on the sample clip (342 frames) while the engine generates, compiles,
-      # loads and warms its capacity in the background, from a re-signed copy
-      # of the tool and an empty cache each run.
+      # chip: diarizer passes on the sample clip (342 frames) while the
+      # engine generates, compiles, loads and warms its capacity in the
+      # background, from a re-signed copy of the tool and an empty cache each
+      # run.
       - name: Memory schedule (generated Sortformer diarizer, overlapped, this runner)
         id: sortformer-memory
         if: ${{ !cancelled() && steps.coreml-build.outcome == 'success' }}
