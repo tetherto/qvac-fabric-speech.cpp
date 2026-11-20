@@ -1,0 +1,2620 @@
+{
+ "gguf_version": 3,
+ "metadata": [
+  {
+   "gguf_type": 8,
+   "key": "general.architecture",
+   "value": "supertonic2"
+  },
+  {
+   "gguf_type": 8,
+   "key": "general.name",
+   "value": "Supertonic 2"
+  },
+  {
+   "gguf_type": 8,
+   "key": "general.description",
+   "value": "Supertone/supertonic-2 ONNX weights/assets converted for a model-specific ggml runtime."
+  },
+  {
+   "gguf_type": 8,
+   "key": "supertonic.arch",
+   "value": "supertonic2"
+  },
+  {
+   "gguf_type": 8,
+   "key": "supertonic.reference_repo",
+   "value": "Supertone/supertonic-2"
+  },
+  {
+   "gguf_type": 8,
+   "key": "supertonic.ftype",
+   "value": "f32"
+  },
+  {
+   "gguf_type": 8,
+   "key": "supertonic.tts_version",
+   "value": "v1.6.0"
+  },
+  {
+   "gguf_type": 8,
+   "key": "supertonic.split",
+   "value": "opensource-multilingual"
+  },
+  {
+   "gguf_type": 4,
+   "key": "supertonic.sample_rate",
+   "value": 44100
+  },
+  {
+   "gguf_type": 4,
+   "key": "supertonic.base_chunk_size",
+   "value": 512
+  },
+  {
+   "gguf_type": 4,
+   "key": "supertonic.ttl_chunk_compress_factor",
+   "value": 6
+  },
+  {
+   "gguf_type": 4,
+   "key": "supertonic.latent_dim",
+   "value": 24
+  },
+  {
+   "gguf_type": 4,
+   "key": "supertonic.latent_channels",
+   "value": 144
+  },
+  {
+   "gguf_type": 4,
+   "key": "supertonic.vector_text_attn_heads",
+   "value": 4
+  },
+  {
+   "elem_type": 5,
+   "gguf_type": 9,
+   "key": "supertonic.text_convnext_dilations",
+   "value": [
+    1,
+    1,
+    1,
+    1,
+    1,
+    1
+   ]
+  },
+  {
+   "gguf_type": 4,
+   "key": "supertonic.default_steps",
+   "value": 5
+  },
+  {
+   "gguf_type": 6,
+   "key": "supertonic.default_speed",
+   "value": 1.0499999523162842
+  },
+  {
+   "gguf_type": 4,
+   "key": "supertonic.language_wrap",
+   "value": 1
+  },
+  {
+   "gguf_type": 8,
+   "key": "supertonic.language_wrap_mode",
+   "value": "open_close"
+  },
+  {
+   "elem_type": 8,
+   "gguf_type": 9,
+   "key": "supertonic.languages",
+   "value": [
+    "en",
+    "ko",
+    "es",
+    "pt",
+    "fr"
+   ]
+  },
+  {
+   "gguf_type": 8,
+   "key": "supertonic.tts_json",
+   "value": "{\"tts_version\":\"v1.6.0\",\"split\":\"opensource-multilingual\",\"ttl_ckpt_path\":\"unknown.pt\",\"dp_ckpt_path\":\"unknown.pt\",\"ae_ckpt_path\":\"unknown.pt\",\"ttl_train\":\"unknown\",\"dp_train\":\"unknown\",\"ae_train\":\"unknown\",\"ttl\":{\"latent_dim\":24,\"chunk_compress_factor\":6,\"batch_expander\":{\"n_batch_expand\":6},\"normalizer\":{\"scale\":0.25},\"text_encoder\":{\"char_dict_path\":\"resources/metadata/char_dict/opensource-multilingual2/char_dict.json\",\"text_embedder\":{\"char_dict_path\":\"resources/metadata/char_dict/opensource-multilingual2/char_dict.json\",\"char_emb_dim\":256},\"convnext\":{\"idim\":256,\"ksz\":5,\"intermediate_dim\":1024,\"num_layers\":6,\"dilation_lst\":[1,1,1,1,1,1]},\"attn_encoder\":{\"hidden_channels\":256,\"filter_channels\":1024,\"n_heads\":4,\"n_layers\":4,\"p_dropout\":0.1},\"proj_out\":{\"idim\":256,\"odim\":256}},\"flow_matching\":{\"sig_min\":0},\"style_encoder\":{\"proj_in\":{\"ldim\":24,\"chunk_compress_factor\":6,\"odim\":256},\"convnext\":{\"idim\":256,\"ksz\":5,\"intermediate_dim\":1024,\"num_layers\":6,\"dilation_lst\":[1,1,1,1,1,1]},\"style_token_layer\":{\"input_dim\":256,\"n_style\":50,\"style_key_dim\":256,\"style_value_dim\":256,\"prototype_dim\":256,\"n_units\":256,\"n_heads\":2}},\"speech_prompted_text_encoder\":{\"text_dim\":256,\"style_dim\":256,\"n_units\":256,\"n_heads\":2},\"uncond_masker\":{\"prob_both_uncond\":0.04,\"prob_text_uncond\":0.01,\"std\":0.1,\"text_dim\":256,\"n_style\":50,\"style_key_dim\":256,\"style_value_dim\":256},\"vector_field\":{\"proj_in\":{\"ldim\":24,\"chunk_compress_factor\":6,\"odim\":512},\"time_encoder\":{\"time_dim\":64,\"hdim\":256},\"main_blocks\":{\"n_blocks\":4,\"time_cond_layer\":{\"idim\":512,\"time_dim\":64},\"style_cond_layer\":{\"idim\":512,\"style_dim\":256},\"text_cond_layer\":{\"idim\":512,\"text_dim\":256,\"n_heads\":4,\"use_residual\":true,\"rotary_base\":10000,\"rotary_scale\":10},\"convnext_0\":{\"idim\":512,\"ksz\":5,\"intermediate_dim\":1024,\"num_layers\":4,\"dilation_lst\":[1,2,4,8]},\"convnext_1\":{\"idim\":512,\"ksz\":5,\"intermediate_dim\":1024,\"num_layers\":1,\"dilation_lst\":[1]},\"convnext_2\":{\"idim\":512,\"ksz\":5,\"intermediate_dim\":1024,\"num_layers\":1,\"dilation_lst\":[1]}},\"last_convnext\":{\"idim\":512,\"ksz\":5,\"intermediate_dim\":1024,\"num_layers\":4,\"dilation_lst\":[1,1,1,1]},\"proj_out\":{\"idim\":512,\"chunk_compress_factor\":6,\"ldim\":24}}},\"ae\":{\"sample_rate\":44100,\"n_delay\":0,\"base_chunk_size\":512,\"chunk_compress_factor\":1,\"ldim\":24,\"encoder\":{\"spec_processor\":{\"n_fft\":2048,\"win_length\":2048,\"hop_length\":512,\"n_mels\":228,\"sample_rate\":44100,\"eps\":1e-05,\"norm_mean\":0.0,\"norm_std\":1.0},\"ksz_init\":7,\"ksz\":7,\"num_layers\":10,\"dilation_lst\":[1,1,1,1,1,1,1,1,1,1],\"intermediate_dim\":2048,\"idim\":1253,\"hdim\":512,\"odim\":24},\"decoder\":{\"ksz_init\":7,\"ksz\":7,\"num_layers\":10,\"dilation_lst\":[1,2,4,1,2,4,1,1,1,1],\"intermediate_dim\":2048,\"idim\":24,\"hdim\":512,\"head\":{\"idim\":512,\"hdim\":2048,\"odim\":512,\"ksz\":3}}},\"dp\":{\"latent_dim\":24,\"chunk_compress_factor\":6,\"normalizer\":{\"scale\":1.0},\"sentence_encoder\":{\"char_emb_dim\":64,\"char_dict_path\":\"resources/metadata/char_dict/opensource-multilingual2/char_dict.json\",\"text_embedder\":{\"char_dict_path\":\"resources/metadata/char_dict/opensource-multilingual2/char_dict.json\",\"char_emb_dim\":64},\"convnext\":{\"idim\":64,\"ksz\":5,\"intermediate_dim\":256,\"num_layers\":6,\"dilation_lst\":[1,1,1,1,1,1]},\"attn_encoder\":{\"hidden_channels\":64,\"filter_channels\":256,\"n_heads\":2,\"n_layers\":2,\"p_dropout\":0.0},\"proj_out\":{\"idim\":64,\"odim\":64}},\"style_encoder\":{\"proj_in\":{\"ldim\":24,\"chunk_compress_factor\":6,\"odim\":64},\"convnext\":{\"idim\":64,\"ksz\":5,\"intermediate_dim\":256,\"num_layers\":4,\"dilation_lst\":[1,1,1,1]},\"style_token_layer\":{\"input_dim\":64,\"n_style\":8,\"style_key_dim\":0,\"style_value_dim\":16,\"prototype_dim\":64,\"n_units\":64,\"n_heads\":2}},\"predictor\":{\"sentence_dim\":64,\"n_style\":8,\"style_dim\":16,\"hdim\":128,\"n_layer\":2}}}"
+  },
+  {
+   "gguf_type": 8,
+   "key": "supertonic.voice.F1.metadata",
+   "value": "{\"source_file\":\"F1.wav\",\"source_sample_rate\":44100,\"target_sample_rate\":44100,\"extracted_at\":\"2026-01-06T16:15:45.221483\"}"
+  },
+  {
+   "gguf_type": 8,
+   "key": "supertonic.voice.F2.metadata",
+   "value": "{\"source_file\":\"F2.wav\",\"source_sample_rate\":44100,\"target_sample_rate\":44100,\"extracted_at\":\"2026-01-06T16:15:49.385376\"}"
+  },
+  {
+   "gguf_type": 8,
+   "key": "supertonic.voice.F3.metadata",
+   "value": "{\"source_file\":\"F3.wav\",\"source_sample_rate\":24000,\"target_sample_rate\":44100,\"extracted_at\":\"2026-01-06T16:16:01.476050\"}"
+  },
+  {
+   "gguf_type": 8,
+   "key": "supertonic.voice.F4.metadata",
+   "value": "{\"source_file\":\"F4.wav\",\"source_sample_rate\":24000,\"target_sample_rate\":44100,\"extracted_at\":\"2026-01-06T16:16:05.353198\"}"
+  },
+  {
+   "gguf_type": 8,
+   "key": "supertonic.voice.F5.metadata",
+   "value": "{\"source_file\":\"F5.wav\",\"source_sample_rate\":24000,\"target_sample_rate\":44100,\"extracted_at\":\"2026-01-06T16:16:17.410323\"}"
+  },
+  {
+   "gguf_type": 8,
+   "key": "supertonic.voice.M1.metadata",
+   "value": "{\"source_file\":\"M1.wav\",\"source_sample_rate\":44100,\"target_sample_rate\":44100,\"extracted_at\":\"2026-01-06T16:15:53.333609\"}"
+  },
+  {
+   "gguf_type": 8,
+   "key": "supertonic.voice.M2.metadata",
+   "value": "{\"source_file\":\"M2.wav\",\"source_sample_rate\":44100,\"target_sample_rate\":44100,\"extracted_at\":\"2026-01-06T16:15:57.310982\"}"
+  },
+  {
+   "gguf_type": 8,
+   "key": "supertonic.voice.M3.metadata",
+   "value": "{\"source_file\":\"M3.wav\",\"source_sample_rate\":24000,\"target_sample_rate\":44100,\"extracted_at\":\"2026-01-06T16:16:09.483379\"}"
+  },
+  {
+   "gguf_type": 8,
+   "key": "supertonic.voice.M4.metadata",
+   "value": "{\"source_file\":\"M4.wav\",\"source_sample_rate\":24000,\"target_sample_rate\":44100,\"extracted_at\":\"2026-01-06T16:16:13.416040\"}"
+  },
+  {
+   "gguf_type": 8,
+   "key": "supertonic.voice.M5.metadata",
+   "value": "{\"source_file\":\"M5.wav\",\"source_sample_rate\":24000,\"target_sample_rate\":44100,\"extracted_at\":\"2026-01-06T16:16:21.471876\"}"
+  },
+  {
+   "elem_type": 8,
+   "gguf_type": 9,
+   "key": "supertonic.voice_names",
+   "value": [
+    "F1",
+    "F2",
+    "F3",
+    "F4",
+    "F5",
+    "M1",
+    "M2",
+    "M3",
+    "M4",
+    "M5"
+   ]
+  },
+  {
+   "gguf_type": 8,
+   "key": "supertonic.default_voice",
+   "value": "F1"
+  },
+  {
+   "elem_type": 8,
+   "gguf_type": 9,
+   "key": "supertonic.tensor_names",
+   "value": [
+    "supertonic/vocoder/t0000",
+    "supertonic/vocoder/t0007",
+    "supertonic/vocoder/t0008",
+    "supertonic/vocoder/t0010",
+    "supertonic/vocoder/t0011",
+    "supertonic/vocoder/t0012",
+    "supertonic/vocoder/t0013",
+    "supertonic/vocoder/t0014",
+    "supertonic/vocoder/t0015",
+    "supertonic/vocoder/t0016",
+    "supertonic/vocoder/t0017",
+    "supertonic/vocoder/t0018",
+    "supertonic/vocoder/t0019",
+    "supertonic/vocoder/t0020",
+    "supertonic/vocoder/t0021",
+    "supertonic/vocoder/t0022",
+    "supertonic/vocoder/t0023",
+    "supertonic/vocoder/t0025",
+    "supertonic/vocoder/t0026",
+    "supertonic/vocoder/t0027",
+    "supertonic/vocoder/t0028",
+    "supertonic/vocoder/t0029",
+    "supertonic/vocoder/t0030",
+    "supertonic/vocoder/t0031",
+    "supertonic/vocoder/t0032",
+    "supertonic/vocoder/t0033",
+    "supertonic/vocoder/t0035",
+    "supertonic/vocoder/t0036",
+    "supertonic/vocoder/t0037",
+    "supertonic/vocoder/t0038",
+    "supertonic/vocoder/t0039",
+    "supertonic/vocoder/t0040",
+    "supertonic/vocoder/t0041",
+    "supertonic/vocoder/t0042",
+    "supertonic/vocoder/t0043",
+    "supertonic/vocoder/t0044",
+    "supertonic/vocoder/t0045",
+    "supertonic/vocoder/t0046",
+    "supertonic/vocoder/t0047",
+    "supertonic/vocoder/t0048",
+    "supertonic/vocoder/t0049",
+    "supertonic/vocoder/t0050",
+    "supertonic/vocoder/t0051",
+    "supertonic/vocoder/t0052",
+    "supertonic/vocoder/t0053",
+    "supertonic/vocoder/t0054",
+    "supertonic/vocoder/t0055",
+    "supertonic/vocoder/t0056",
+    "supertonic/vocoder/t0057",
+    "supertonic/vocoder/t0058",
+    "supertonic/vocoder/t0059",
+    "supertonic/vocoder/t0060",
+    "supertonic/vocoder/t0061",
+    "supertonic/vocoder/t0062",
+    "supertonic/vocoder/t0063",
+    "supertonic/vocoder/t0064",
+    "supertonic/vocoder/t0065",
+    "supertonic/vocoder/t0066",
+    "supertonic/vocoder/t0067",
+    "supertonic/vocoder/t0068",
+    "supertonic/vocoder/t0069",
+    "supertonic/vocoder/t0070",
+    "supertonic/vocoder/t0071",
+    "supertonic/vocoder/t0072",
+    "supertonic/vocoder/t0073",
+    "supertonic/vocoder/t0074",
+    "supertonic/vocoder/t0075",
+    "supertonic/vocoder/t0076",
+    "supertonic/vocoder/t0077",
+    "supertonic/vocoder/t0078",
+    "supertonic/vocoder/t0079",
+    "supertonic/vocoder/t0080",
+    "supertonic/vocoder/t0081",
+    "supertonic/vocoder/t0082",
+    "supertonic/vocoder/t0083",
+    "supertonic/vocoder/t0084",
+    "supertonic/vocoder/t0085",
+    "supertonic/vocoder/t0086",
+    "supertonic/vocoder/t0087",
+    "supertonic/vocoder/t0088",
+    "supertonic/vocoder/t0089",
+    "supertonic/vocoder/t0090",
+    "supertonic/vocoder/t0091",
+    "supertonic/vocoder/t0092",
+    "supertonic/vocoder/t0093",
+    "supertonic/vocoder/t0094",
+    "supertonic/vocoder/t0095",
+    "supertonic/vocoder/t0096",
+    "supertonic/vocoder/t0097",
+    "supertonic/vocoder/t0098",
+    "supertonic/vocoder/t0099",
+    "supertonic/vocoder/t0100",
+    "supertonic/vocoder/t0101",
+    "supertonic/vocoder/t0102",
+    "supertonic/vocoder/t0103",
+    "supertonic/vocoder/t0104",
+    "supertonic/vocoder/t0105",
+    "supertonic/vocoder/t0106",
+    "supertonic/vocoder/t0107",
+    "supertonic/vocoder/t0108",
+    "supertonic/vocoder/t0109",
+    "supertonic/vocoder/t0110",
+    "supertonic/vocoder/t0112",
+    "supertonic/vocoder/t0113",
+    "supertonic/vocoder/t0114",
+    "supertonic/vocoder/t0115"
+   ]
+  },
+  {
+   "elem_type": 8,
+   "gguf_type": 9,
+   "key": "supertonic.source_names",
+   "value": [
+    "vocoder:tts.ttl.normalizer.scale",
+    "vocoder:tts.ae.latent_std",
+    "vocoder:tts.ae.latent_mean",
+    "vocoder:onnx::Conv_1440",
+    "vocoder:onnx::Conv_1441",
+    "vocoder:tts.ae.decoder.convnext.0.dwconv.net.weight",
+    "vocoder:tts.ae.decoder.convnext.0.dwconv.net.bias",
+    "vocoder:tts.ae.decoder.convnext.0.norm.norm.weight",
+    "vocoder:tts.ae.decoder.convnext.0.norm.norm.bias",
+    "vocoder:tts.ae.decoder.convnext.0.pwconv1.weight",
+    "vocoder:tts.ae.decoder.convnext.0.pwconv1.bias",
+    "vocoder:/decoder/convnext.0/act/Constant_output_0",
+    "vocoder:/decoder/convnext.0/act/Constant_1_output_0",
+    "vocoder:/decoder/convnext.0/act/Constant_2_output_0",
+    "vocoder:tts.ae.decoder.convnext.0.pwconv2.weight",
+    "vocoder:tts.ae.decoder.convnext.0.pwconv2.bias",
+    "vocoder:tts.ae.decoder.convnext.0.gamma",
+    "vocoder:tts.ae.decoder.convnext.1.dwconv.net.weight",
+    "vocoder:tts.ae.decoder.convnext.1.dwconv.net.bias",
+    "vocoder:tts.ae.decoder.convnext.1.norm.norm.weight",
+    "vocoder:tts.ae.decoder.convnext.1.norm.norm.bias",
+    "vocoder:tts.ae.decoder.convnext.1.pwconv1.weight",
+    "vocoder:tts.ae.decoder.convnext.1.pwconv1.bias",
+    "vocoder:tts.ae.decoder.convnext.1.pwconv2.weight",
+    "vocoder:tts.ae.decoder.convnext.1.pwconv2.bias",
+    "vocoder:tts.ae.decoder.convnext.1.gamma",
+    "vocoder:tts.ae.decoder.convnext.2.dwconv.net.weight",
+    "vocoder:tts.ae.decoder.convnext.2.dwconv.net.bias",
+    "vocoder:tts.ae.decoder.convnext.2.norm.norm.weight",
+    "vocoder:tts.ae.decoder.convnext.2.norm.norm.bias",
+    "vocoder:tts.ae.decoder.convnext.2.pwconv1.weight",
+    "vocoder:tts.ae.decoder.convnext.2.pwconv1.bias",
+    "vocoder:tts.ae.decoder.convnext.2.pwconv2.weight",
+    "vocoder:tts.ae.decoder.convnext.2.pwconv2.bias",
+    "vocoder:tts.ae.decoder.convnext.2.gamma",
+    "vocoder:tts.ae.decoder.convnext.3.dwconv.net.weight",
+    "vocoder:tts.ae.decoder.convnext.3.dwconv.net.bias",
+    "vocoder:tts.ae.decoder.convnext.3.norm.norm.weight",
+    "vocoder:tts.ae.decoder.convnext.3.norm.norm.bias",
+    "vocoder:tts.ae.decoder.convnext.3.pwconv1.weight",
+    "vocoder:tts.ae.decoder.convnext.3.pwconv1.bias",
+    "vocoder:tts.ae.decoder.convnext.3.pwconv2.weight",
+    "vocoder:tts.ae.decoder.convnext.3.pwconv2.bias",
+    "vocoder:tts.ae.decoder.convnext.3.gamma",
+    "vocoder:tts.ae.decoder.convnext.4.dwconv.net.weight",
+    "vocoder:tts.ae.decoder.convnext.4.dwconv.net.bias",
+    "vocoder:tts.ae.decoder.convnext.4.norm.norm.weight",
+    "vocoder:tts.ae.decoder.convnext.4.norm.norm.bias",
+    "vocoder:tts.ae.decoder.convnext.4.pwconv1.weight",
+    "vocoder:tts.ae.decoder.convnext.4.pwconv1.bias",
+    "vocoder:tts.ae.decoder.convnext.4.pwconv2.weight",
+    "vocoder:tts.ae.decoder.convnext.4.pwconv2.bias",
+    "vocoder:tts.ae.decoder.convnext.4.gamma",
+    "vocoder:tts.ae.decoder.convnext.5.dwconv.net.weight",
+    "vocoder:tts.ae.decoder.convnext.5.dwconv.net.bias",
+    "vocoder:tts.ae.decoder.convnext.5.norm.norm.weight",
+    "vocoder:tts.ae.decoder.convnext.5.norm.norm.bias",
+    "vocoder:tts.ae.decoder.convnext.5.pwconv1.weight",
+    "vocoder:tts.ae.decoder.convnext.5.pwconv1.bias",
+    "vocoder:tts.ae.decoder.convnext.5.pwconv2.weight",
+    "vocoder:tts.ae.decoder.convnext.5.pwconv2.bias",
+    "vocoder:tts.ae.decoder.convnext.5.gamma",
+    "vocoder:tts.ae.decoder.convnext.6.dwconv.net.weight",
+    "vocoder:tts.ae.decoder.convnext.6.dwconv.net.bias",
+    "vocoder:tts.ae.decoder.convnext.6.norm.norm.weight",
+    "vocoder:tts.ae.decoder.convnext.6.norm.norm.bias",
+    "vocoder:tts.ae.decoder.convnext.6.pwconv1.weight",
+    "vocoder:tts.ae.decoder.convnext.6.pwconv1.bias",
+    "vocoder:tts.ae.decoder.convnext.6.pwconv2.weight",
+    "vocoder:tts.ae.decoder.convnext.6.pwconv2.bias",
+    "vocoder:tts.ae.decoder.convnext.6.gamma",
+    "vocoder:tts.ae.decoder.convnext.7.dwconv.net.weight",
+    "vocoder:tts.ae.decoder.convnext.7.dwconv.net.bias",
+    "vocoder:tts.ae.decoder.convnext.7.norm.norm.weight",
+    "vocoder:tts.ae.decoder.convnext.7.norm.norm.bias",
+    "vocoder:tts.ae.decoder.convnext.7.pwconv1.weight",
+    "vocoder:tts.ae.decoder.convnext.7.pwconv1.bias",
+    "vocoder:tts.ae.decoder.convnext.7.pwconv2.weight",
+    "vocoder:tts.ae.decoder.convnext.7.pwconv2.bias",
+    "vocoder:tts.ae.decoder.convnext.7.gamma",
+    "vocoder:tts.ae.decoder.convnext.8.dwconv.net.weight",
+    "vocoder:tts.ae.decoder.convnext.8.dwconv.net.bias",
+    "vocoder:tts.ae.decoder.convnext.8.norm.norm.weight",
+    "vocoder:tts.ae.decoder.convnext.8.norm.norm.bias",
+    "vocoder:tts.ae.decoder.convnext.8.pwconv1.weight",
+    "vocoder:tts.ae.decoder.convnext.8.pwconv1.bias",
+    "vocoder:tts.ae.decoder.convnext.8.pwconv2.weight",
+    "vocoder:tts.ae.decoder.convnext.8.pwconv2.bias",
+    "vocoder:tts.ae.decoder.convnext.8.gamma",
+    "vocoder:tts.ae.decoder.convnext.9.dwconv.net.weight",
+    "vocoder:tts.ae.decoder.convnext.9.dwconv.net.bias",
+    "vocoder:tts.ae.decoder.convnext.9.norm.norm.weight",
+    "vocoder:tts.ae.decoder.convnext.9.norm.norm.bias",
+    "vocoder:tts.ae.decoder.convnext.9.pwconv1.weight",
+    "vocoder:tts.ae.decoder.convnext.9.pwconv1.bias",
+    "vocoder:tts.ae.decoder.convnext.9.pwconv2.weight",
+    "vocoder:tts.ae.decoder.convnext.9.pwconv2.bias",
+    "vocoder:tts.ae.decoder.convnext.9.gamma",
+    "vocoder:tts.ae.decoder.final_norm.norm.weight",
+    "vocoder:tts.ae.decoder.final_norm.norm.bias",
+    "vocoder:tts.ae.decoder.final_norm.norm.running_mean",
+    "vocoder:tts.ae.decoder.final_norm.norm.running_var",
+    "vocoder:tts.ae.decoder.head.layer1.net.weight",
+    "vocoder:tts.ae.decoder.head.layer1.net.bias",
+    "vocoder:onnx::PRelu_1505",
+    "vocoder:tts.ae.decoder.head.layer2.weight"
+   ]
+  },
+  {
+   "elem_type": 8,
+   "gguf_type": 9,
+   "key": "supertonic.tensor_shapes",
+   "value": [
+    "[1]",
+    "[1,24,1]",
+    "[1,24,1]",
+    "[512,24,7]",
+    "[512]",
+    "[512,1,7]",
+    "[512]",
+    "[512]",
+    "[512]",
+    "[2048,512,1]",
+    "[2048]",
+    "[1]",
+    "[1]",
+    "[1]",
+    "[512,2048,1]",
+    "[512]",
+    "[1,512,1]",
+    "[512,1,7]",
+    "[512]",
+    "[512]",
+    "[512]",
+    "[2048,512,1]",
+    "[2048]",
+    "[512,2048,1]",
+    "[512]",
+    "[1,512,1]",
+    "[512,1,7]",
+    "[512]",
+    "[512]",
+    "[512]",
+    "[2048,512,1]",
+    "[2048]",
+    "[512,2048,1]",
+    "[512]",
+    "[1,512,1]",
+    "[512,1,7]",
+    "[512]",
+    "[512]",
+    "[512]",
+    "[2048,512,1]",
+    "[2048]",
+    "[512,2048,1]",
+    "[512]",
+    "[1,512,1]",
+    "[512,1,7]",
+    "[512]",
+    "[512]",
+    "[512]",
+    "[2048,512,1]",
+    "[2048]",
+    "[512,2048,1]",
+    "[512]",
+    "[1,512,1]",
+    "[512,1,7]",
+    "[512]",
+    "[512]",
+    "[512]",
+    "[2048,512,1]",
+    "[2048]",
+    "[512,2048,1]",
+    "[512]",
+    "[1,512,1]",
+    "[512,1,7]",
+    "[512]",
+    "[512]",
+    "[512]",
+    "[2048,512,1]",
+    "[2048]",
+    "[512,2048,1]",
+    "[512]",
+    "[1,512,1]",
+    "[512,1,7]",
+    "[512]",
+    "[512]",
+    "[512]",
+    "[2048,512,1]",
+    "[2048]",
+    "[512,2048,1]",
+    "[512]",
+    "[1,512,1]",
+    "[512,1,7]",
+    "[512]",
+    "[512]",
+    "[512]",
+    "[2048,512,1]",
+    "[2048]",
+    "[512,2048,1]",
+    "[512]",
+    "[1,512,1]",
+    "[512,1,7]",
+    "[512]",
+    "[512]",
+    "[512]",
+    "[2048,512,1]",
+    "[2048]",
+    "[512,2048,1]",
+    "[512]",
+    "[1,512,1]",
+    "[512]",
+    "[512]",
+    "[512]",
+    "[512]",
+    "[2048,512,3]",
+    "[2048]",
+    "[1,1]",
+    "[512,2048,1]"
+   ]
+  },
+  {
+   "elem_type": 8,
+   "gguf_type": 9,
+   "key": "supertonic.tensor_dtypes",
+   "value": [
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32",
+    "float32"
+   ]
+  },
+  {
+   "elem_type": 8,
+   "gguf_type": 9,
+   "key": "supertonic.tensor_sha256",
+   "value": [
+    "75e253f50979177eba47b2d0805ad36038789108924514d2a761a70de057d16f",
+    "dcf5cc764e39d93a22620e38069b22353b2facf44230aef55557c687be79f129",
+    "06ef02d1859eb88adaaecb5ab6ff0856379cde9ae745d06ebf8a475629f6262e",
+    "7f6a32a5848dd83ab889912f1c228340c1787d339b273214fbf2dbbc7b234ebe",
+    "60cb34c9a994efbbe864ef426cfd6558a7f24fb60775e81e1d3703e9ba3f269f",
+    "03e312bc632bb501144e0ac051648ef400ec1bc5c77565dcf0c781ab32ebb5e1",
+    "d1084aa726957208041fd3397cc198ef175b3a779837d97923c8197692a9d428",
+    "c38b9abee065b7319973a5b1ad70c98df51f9bfd71cf64f09e3219a271784473",
+    "95c9a4f54ef96c2d30a62b783b42f701d5d9f09bf1141a6366b1d3435f2853b1",
+    "e9ffab9c2f7facb81190f2d44959a8833e58e80a9f6a15ed63eb214963cc5c90",
+    "c31d8707e4bb8d64ab5da92a8fe72fb4be55d4495923a96b5b5ef481ea1050ff",
+    "9c16095ed50248c0e1658be07f5bafe5dc11382843a99c6fb3a87c141808ceeb",
+    "e00e5eb9444182f352323374ef4e08ebcb784725fdd4fd612d7730540b3e0c8c",
+    "d99e58435243d9fef9c88273b8d553b4fba4d0baf8009d29eae74fa99e0d9f57",
+    "02835d22180cfd43f8ca5daf463d171e8cd54f48fdb3c2fa7caf37cf1c8ca764",
+    "fb79ef2baec50ba3e5eb77c57ece9e390825ddaef5e5f8cc383ea8afaa35d568",
+    "ff2e63508ba6763fc0bcb4d0223d87d4e6728127221f5a58792e62c2ea8c08ea",
+    "25c29909f43cb2c2028dff30782d3384374421bbd8e6c0480ad4d78ba35676ae",
+    "bdec4710a65287673f20ae9e1bf2bb1c81c7de1972757f770a3cab0dd6e77e5b",
+    "0deafab5e5c0b11886ea3b3050be539002d3a97ce7df0d198bf61317f3488f44",
+    "b84aca52a8093f1beb2b58e3f0ccba9553099df890ab72bba25369771d3e6372",
+    "8f51a365eb875f8e60d17a2f4a252e7426f5b84a526d0ef577ef35e9e830fb10",
+    "32493e6001a109d1d526bab5060208733296bf7b71f98ebf1d4864d783d938c5",
+    "914a95f3380d7ee072eb40d5e9b8f92ced818b8af99aa154c4f4fabc211b7514",
+    "6e3728d530f3d42267b16db75efc3e09841e5a17c5e9a977943230e27f96d17b",
+    "e24c3d6af9e316cb7e9bfb78c7bbbe11a204bb26e586ae69556bdac435c96887",
+    "f6af983ca68cee55f20ace8205ee79926f0d33f566bd00ed8f4e685d997801b9",
+    "cfe25cf25c91653212624c2f78c3932af038a5db8363278e1c079b391b4fe282",
+    "1185ecc629c899dfd6caa73769ba43613bc4486f9fc8fca63503cf4de745d91b",
+    "2112ef64953efeac48ea46de4e30dbaf85f7ea9b27518714626999066cfac874",
+    "a1cf85dc134b536978248cbf40c400f709ff5a0f935bdbeac30df24ea70583cb",
+    "eab47739d8dce2da167ea11f4e4d2882fb137906d6c2d270c5849b02b9af1815",
+    "514310e6de60934d0ef075d0f30365abddac0f9d52307ffff5015bfd498bbc09",
+    "502f07729fef33a3c676cc7c2763f516bfbbcd920e488b8067c1430ccd401881",
+    "7711414985880d286ff45e71ae658bc2428214aae875f270ed93ae696057589d",
+    "c839200199ca60e29d1e04bf062d10aac6a7d823a680ef838f5dde856284c1ab",
+    "d33df8828fb736289a4d88f23458664da01de99ddbb7a59d6e7b6c995088dc40",
+    "bcd015b8fdf2d1e487566804912e7a2ed6a67a815d08f18f77fdba3252503418",
+    "0cba4e7dab1c6d031ee9dd550f1544da749d28caa41b66945c46e4fb58da57b9",
+    "7a426d125c74470e001c9866fab526f52bd673a4c4d2dc4785ae3ba24dc0f722",
+    "5b65ee68a1c2900a046233afa0bd2f3305cf65e67dbd4cfd455e6d289dd3249d",
+    "501d8bab894ede6bfaa7a5282608738d2acd3ce8b6d3d03ab5bf2d21c021c5f9",
+    "9557fb1f68cbfd52ebd2a9ba37cf235959c421015e7960945f50f37c630e0b82",
+    "ac37d8ede17af332355d23822e13fec0aecf94e99a9abd3cf40fc0bce14644c3",
+    "674770b84e38a50e3f622cf73900c3a77512bdab69612c51cd3e429adeaf3904",
+    "706435ebd9b1e724fa0c18c05826d22fba9a41a6fbd7b3fecc466270787a6825",
+    "896b0468a04da20049f35136298cb60b2f55f509dc0e18ae5a4d970299116bf3",
+    "9ff5668f3ba1795930c80516dfe0bf61546f75c345ec7adc244d1a2549ff36ac",
+    "61d9ee4e3701c9eaf26a82d64f981f31b93640ec1c17c30e549539a475f63753",
+    "c9429cd8525b81d6ed84c74e6004cfa2cbd76a5402c706b662d2177b372cb2b8",
+    "1e28a81b1bd7648cb5f8548068531fda5255f7feb66e8194d516d64c9487d40a",
+    "869674cbd57a2ca6a9d7a32ce7805e82141e48e95e6e52f02489bfa12c0fcc77",
+    "9cd06623afd1e7249830566022c1b4e7b987b268b2511e12ea1ccb7d7553f736",
+    "1f77478d21ca4dd05b2bd996b74685a1fc1bccfadf521cb24fe47a62e70ce03f",
+    "059574b533b8bf3f76bb923614f5cd8d1676bee5d374d1b9fb2e18d719f64fa9",
+    "1a33fe9c949c82e617fef2b82a84acf1e83a3dffa7d694d07d3aa2473455bfe9",
+    "a567b4bc9b5fadab14361b9e9b9dba3e82afec75dc9d0ade3bbbc54cd9065183",
+    "9275593fb94eed7babfa58ff73e593b66974ee1ce2defa51f16bcde94577c252",
+    "0922814a24ff5ac1d315bc6221b48a11f81404d8acf941ac8238a72bf3da1fec",
+    "faab4fb523d2628504daf894d4e5cdfb518be11ad047b9e150bda6d28a72b2b5",
+    "1a044cc8493aa0fe15cef3234cdf352f009fa6508cfb7e60af94204d0879e008",
+    "90707895a13e4d01dab5843023872c196c706ae967bf89b89a7a7298f5a3bef8",
+    "55e6fc1c325fbd76ee02ad5faa4fb7fde77c0e7df69314a9111885e15b699c6f",
+    "d176fa660ae1a25ce3be2aa06b5ed71a83269555b96e122ee997408fc4673e0b",
+    "9b58c80d76ce994ab09dbf4734452280b29438e5de90403f0ceb36a0bb2a9484",
+    "9ca69c01807622d47f4176f3f9fad193bdf413d53af1c4c33b04df25ed75a6d2",
+    "df02d7929a6218de65dbedc419b0c69aa32bc3c2685e69b8e838f12bf005d691",
+    "765d42942e4529c2f455b48aaf7e66e8a74bcc8e079615fb92955b8b185059e1",
+    "4db53e04caf2aa4ef11491f82c3cc3164d5fd9a5687a20a2d69f05d2346e3dd3",
+    "c07297140aa23f8ab7d16e9612f7b0c8efcc95bdd77373b9f54e66aa17981268",
+    "18b6070074b837a206fba8260eb0b814bdbaaae402f0ce10e0d53d833ca6c593",
+    "ad461cde69685caae47663b4e474f1768669b694061b02a55c1dcc1e5127a9a3",
+    "74590100d57564500e9c280f5ea12f8e28886e6d5ecf05573c97a139366fd799",
+    "eaae75a4915c536e3c47b91a5fda65f0dc0438233d21a5c3192d4d3b03821303",
+    "1f315eb95a4a85d37b9dd8bab32de8322138515abfa6823d88b3479f54f19dce",
+    "42684a4622d126f8c92adade72e4c66ba2775d063ce11d6f5bfe551edcc25125",
+    "385142bd1560b5f03035cee57e251bc6e0ae7487ec3e0bd09a717d4370c9c076",
+    "74ebb45b105646193d26e020228080fa783851ab333c1097310b6edf5c366b71",
+    "df632d81efb99383a522e08e038d51954dec3115c243c4c4e00b7b0c3defa3cc",
+    "9c77c5cf0a8265d9eee5969cae2ae206887344bf1aff28481ede8feceb9d357c",
+    "e874f0fb926ef3b2d25ce1d390ef5aa914db6d019421924e6a4c634f24305c4f",
+    "07df76d9c650cda1b67937a3311f5f7e84bf956f53baeae52d394a8704349985",
+    "29b4b6748a4f99caa613b0dff958d727a064e253126c7c67fc6042a1e417d181",
+    "1bdab31ce507630d8fe71d1a3fa007e8f45ac7d8bcf669a3d83d21a13bd08acd",
+    "30b59c49bca26064faee6c53517cc2df7e2391ee0be99894ca46178a17b7f99d",
+    "74e048370f6c137c92567f28c608490ffb1de66a3593afecda2002911a38401f",
+    "9067f9116e90f80c18a9ff69e1ab3201301cd6f2409bd2f6afc25845f1569468",
+    "9975e5ab5ceac7e679073b0ea0f7428ab5396126a0d70e009a7af65ce1fc23c9",
+    "bd45eb6aed7b83ac3bb3e423c2dc0656e9c291a145068426c02f12300d27e66e",
+    "05640d8223e623c334b4503e787b528b356e99958430132654a6b0be7a799924",
+    "4ae10e99a988157c87a5df5f4df0e80ef1e05258f7a4039bfd38da0ae2ef662d",
+    "fc50de71bdf99d011134f384a4f3cb95b15bf0f9ef9252978cc957d436797d2d",
+    "cba7b0e10ad3f1aa2f44db8310a41e5d2966f46a885923cc578614ad052c653f",
+    "48fe010f705c8472095f912b9dbbf8ebc08c4b4ce528941edaeae0f0c129994a",
+    "908e11502cdf1e0e59d49139b4b1cce6b71bda53e7c7324700fe66c90a4122ca",
+    "b1ed74413283382a52143f8779031d493d68e2c9a295c98177901d7db9b0a0da",
+    "d5ca90b549dfa1aa028c5192b3a0ae84a9dce7cd3dc5bc3977de4dce63cc689a",
+    "e486aa943e0dc1e0661f2cf41ad121b1f1ed1a2074e83c8cdb2a9320dec33626",
+    "300db2178884a72c3db02cb121564772cba18752aa01c689e439cab426cde3bd",
+    "25c5ce541acbedc0593cf4b554542cdf662abeb1792bce2965266281b14628c8",
+    "0420fa1732dd6c9db037b1c9db243cc9913862803488a18bb37f0b773f7287c8",
+    "f79d6f4a0c39db1261b675ef6979cee2f697cf9adaebbc36bc6a3f2327f16cb4",
+    "3ccb8e2fd44cfc26d4c3a4c6dd6fad46ad59e000b1de8150c99876184c97deaf",
+    "0f5f416ac591ba365b1464f939e1d36686f9fcf7c65e8d5861beef0910f7d6c0",
+    "9ad63dd063309278b9b8f97cd61088fb0006c685e7d8eb0f9a4224f59641a181",
+    "09474068b6867bfbb937501bb98fd720a487811f694c15d2fc974c06e26299ba"
+   ]
+  },
+  {
+   "elem_type": 8,
+   "gguf_type": 9,
+   "key": "supertonic.source_aliases",
+   "value": [
+    "vocoder:node:/decoder/embed/net/Conv#1",
+    "vocoder:node:/decoder/embed/net/Conv#2",
+    "vocoder:node:/decoder/head/act/PRelu#1"
+   ]
+  },
+  {
+   "elem_type": 8,
+   "gguf_type": 9,
+   "key": "supertonic.source_alias_targets",
+   "value": [
+    "vocoder:onnx::Conv_1440",
+    "vocoder:onnx::Conv_1441",
+    "vocoder:onnx::PRelu_1505"
+   ]
+  },
+  {
+   "gguf_type": 4,
+   "key": "supertonic.vocoder.tensor_count",
+   "value": 106
+  },
+  {
+   "elem_type": 8,
+   "gguf_type": 9,
+   "key": "supertonic.pwconv_squeezed",
+   "value": [
+    "supertonic/vocoder/t0016",
+    "supertonic/vocoder/t0021",
+    "supertonic/vocoder/t0029",
+    "supertonic/vocoder/t0031",
+    "supertonic/vocoder/t0039",
+    "supertonic/vocoder/t0041",
+    "supertonic/vocoder/t0048",
+    "supertonic/vocoder/t0050",
+    "supertonic/vocoder/t0057",
+    "supertonic/vocoder/t0059",
+    "supertonic/vocoder/t0066",
+    "supertonic/vocoder/t0068",
+    "supertonic/vocoder/t0075",
+    "supertonic/vocoder/t0077",
+    "supertonic/vocoder/t0084",
+    "supertonic/vocoder/t0086",
+    "supertonic/vocoder/t0093",
+    "supertonic/vocoder/t0095",
+    "supertonic/vocoder/t0102",
+    "supertonic/vocoder/t0104",
+    "supertonic/vocoder/t0115"
+   ]
+  }
+ ],
+ "schema": 1,
+ "tensors": [
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0000",
+   "ne": [
+    1,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.3,
+    "mean": 0.25,
+    "min": 0.2,
+    "std": 0.024999999999999994
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "supertonic/vocoder/t0007",
+   "ne": [
+    1,
+    24,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.10581108182668686,
+    "mean": 0.03365890394585828,
+    "min": 0.02090926095843315,
+    "std": 0.016786580289805883
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "supertonic/vocoder/t0008",
+   "ne": [
+    1,
+    24,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 1.0408095121383667,
+    "mean": -0.02713514455050851,
+    "min": -0.6429828405380249,
+    "std": 0.34938336914813506
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "supertonic/vocoder/t0010",
+   "ne": [
+    7,
+    24,
+    512,
+    1
+   ],
+   "stats": {
+    "max": 3.002532958984375,
+    "mean": 0.00026772637835676197,
+    "min": -4.387773036956787,
+    "std": 0.24973735781159914
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0011",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 4.351432800292969,
+    "mean": 0.05015315513446694,
+    "min": -7.133088111877441,
+    "std": 1.1566757726156516
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "supertonic/vocoder/t0012",
+   "ne": [
+    7,
+    1,
+    512,
+    1
+   ],
+   "stats": {
+    "max": 1.1355509757995605,
+    "mean": -0.0004650993468767898,
+    "min": -1.0684174299240112,
+    "std": 0.23691869693541537
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0013",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0872717946767807,
+    "mean": 0.0003450201300942979,
+    "min": -0.05066864192485809,
+    "std": 0.012906957762617414
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0014",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.6734941005706787,
+    "mean": 0.27256735836635926,
+    "min": -0.0066721937619149685,
+    "std": 0.14680309120287877
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0015",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.4165138304233551,
+    "mean": 0.009564766814596837,
+    "min": -0.41810792684555054,
+    "std": 0.1021464302903207
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "supertonic/vocoder/t0016",
+   "ne": [
+    512,
+    2048,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 1.0706710815429688,
+    "mean": -0.0030212372425921785,
+    "min": -1.3768539428710938,
+    "std": 0.0991852204374993
+   },
+   "type": "q8_0"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0017",
+   "ne": [
+    2048,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.04363419860601425,
+    "mean": -0.0798081036859628,
+    "min": -0.32730135321617126,
+    "std": 0.04269259775718817
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0018",
+   "ne": [
+    1,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 1.4142135381698608,
+    "mean": 1.4142135381698608,
+    "min": 1.4142135381698608,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0019",
+   "ne": [
+    1,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 1.0,
+    "mean": 1.0,
+    "min": 1.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0020",
+   "ne": [
+    1,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.5,
+    "mean": 0.5,
+    "min": 0.5,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "supertonic/vocoder/t0021",
+   "ne": [
+    2048,
+    512,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 1.7847747802734375,
+    "mean": -0.0001568684820085764,
+    "min": -1.104583740234375,
+    "std": 0.09168984073152064
+   },
+   "type": "q8_0"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0022",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.18656040728092194,
+    "mean": -0.0005101160342348976,
+    "min": -0.27300456166267395,
+    "std": 0.041347095865618334
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "supertonic/vocoder/t0023",
+   "ne": [
+    1,
+    512,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.08607044070959091,
+    "mean": 0.02891035448828916,
+    "min": 0.006132439244538546,
+    "std": 0.010753150571525373
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "supertonic/vocoder/t0025",
+   "ne": [
+    7,
+    1,
+    512,
+    1
+   ],
+   "stats": {
+    "max": 1.0507638454437256,
+    "mean": 0.0003195885250661945,
+    "min": -1.0155434608459473,
+    "std": 0.22911537076881544
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0026",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.06469561904668808,
+    "mean": 0.0010332165115150005,
+    "min": -0.11550340056419373,
+    "std": 0.009680800890214723
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0027",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.9636668562889099,
+    "mean": 0.4152944948436925,
+    "min": 0.12272947281599045,
+    "std": 0.1018640785080401
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0028",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.2629449963569641,
+    "mean": 0.0007845242918875783,
+    "min": -0.38793277740478516,
+    "std": 0.0613223777935297
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "supertonic/vocoder/t0029",
+   "ne": [
+    512,
+    2048,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 1.147216796875,
+    "mean": -0.0007720135874933476,
+    "min": -1.2818984985351562,
+    "std": 0.10314200636012856
+   },
+   "type": "q8_0"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0030",
+   "ne": [
+    2048,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.035772889852523804,
+    "mean": -0.08504343817273963,
+    "min": -0.2593793272972107,
+    "std": 0.04538072917469548
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "supertonic/vocoder/t0031",
+   "ne": [
+    2048,
+    512,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 1.5648269653320312,
+    "mean": -0.0002734773079282604,
+    "min": -1.4175491333007812,
+    "std": 0.09229442370001188
+   },
+   "type": "q8_0"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0032",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.2311064749956131,
+    "mean": -0.0006914090996659183,
+    "min": -0.3110453188419342,
+    "std": 0.03703662986108839
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "supertonic/vocoder/t0033",
+   "ne": [
+    1,
+    512,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0901203528046608,
+    "mean": 0.029111456975897454,
+    "min": 0.0024414954241365194,
+    "std": 0.014071732458338019
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "supertonic/vocoder/t0035",
+   "ne": [
+    7,
+    1,
+    512,
+    1
+   ],
+   "stats": {
+    "max": 0.8779132962226868,
+    "mean": -0.0010744971630945851,
+    "min": -0.8977975249290466,
+    "std": 0.21144872432627623
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0036",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0714711844921112,
+    "mean": 0.0027452340403559816,
+    "min": -0.09177053719758987,
+    "std": 0.011079100167298279
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0037",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.814582884311676,
+    "mean": 0.43110799964051694,
+    "min": 0.25175660848617554,
+    "std": 0.08532895836218055
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0038",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.6100031137466431,
+    "mean": 0.0032797785037246285,
+    "min": -0.5015958547592163,
+    "std": 0.08921572944703714
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "supertonic/vocoder/t0039",
+   "ne": [
+    512,
+    2048,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 1.1162109375,
+    "mean": -0.0013215215490163246,
+    "min": -1.0105972290039062,
+    "std": 0.10412530444744199
+   },
+   "type": "q8_0"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0040",
+   "ne": [
+    2048,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.06030818447470665,
+    "mean": -0.08852420255936622,
+    "min": -0.4296211898326874,
+    "std": 0.05327172229732696
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "supertonic/vocoder/t0041",
+   "ne": [
+    2048,
+    512,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 1.375885009765625,
+    "mean": -9.94918218566454e-05,
+    "min": -1.7043533325195312,
+    "std": 0.09642359657041136
+   },
+   "type": "q8_0"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0042",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.27453726530075073,
+    "mean": 0.0024568234029480607,
+    "min": -0.11259898543357849,
+    "std": 0.03688817269154178
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "supertonic/vocoder/t0043",
+   "ne": [
+    1,
+    512,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.19072546064853668,
+    "mean": 0.03366318625148779,
+    "min": 0.0030211955308914185,
+    "std": 0.021832906545131307
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "supertonic/vocoder/t0044",
+   "ne": [
+    7,
+    1,
+    512,
+    1
+   ],
+   "stats": {
+    "max": 0.6691952347755432,
+    "mean": -0.00037819370973097525,
+    "min": -0.7311537265777588,
+    "std": 0.1474695342888389
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0045",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.09720577299594879,
+    "mean": 0.00021520800075158775,
+    "min": -0.14544081687927246,
+    "std": 0.01439561471959782
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0046",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.7736721634864807,
+    "mean": 0.37362098063749727,
+    "min": 0.06528789550065994,
+    "std": 0.1158476158409942
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0047",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.4382447302341461,
+    "mean": -7.270593073371856e-06,
+    "min": -0.33938273787498474,
+    "std": 0.06503870226198534
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "supertonic/vocoder/t0048",
+   "ne": [
+    512,
+    2048,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 1.2334518432617188,
+    "mean": -0.0009894418221847445,
+    "min": -1.1520614624023438,
+    "std": 0.10113768330296156
+   },
+   "type": "q8_0"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0049",
+   "ne": [
+    2048,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.07952681183815002,
+    "mean": -0.08879626289550124,
+    "min": -0.37347719073295593,
+    "std": 0.07237267548052376
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "supertonic/vocoder/t0050",
+   "ne": [
+    2048,
+    512,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 1.5347900390625,
+    "mean": 3.307453539491689e-05,
+    "min": -1.4253005981445312,
+    "std": 0.09446201019689017
+   },
+   "type": "q8_0"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0051",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.3254072964191437,
+    "mean": 0.0020494961209749363,
+    "min": -0.10780329257249832,
+    "std": 0.03385524081803514
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "supertonic/vocoder/t0052",
+   "ne": [
+    1,
+    512,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.47098785638809204,
+    "mean": 0.06737915054509358,
+    "min": 0.005526389926671982,
+    "std": 0.032044531348896205
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "supertonic/vocoder/t0053",
+   "ne": [
+    7,
+    1,
+    512,
+    1
+   ],
+   "stats": {
+    "max": 0.8753461837768555,
+    "mean": -0.0027348013990102465,
+    "min": -0.7382048964500427,
+    "std": 0.1666700703067718
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0054",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.1434224545955658,
+    "mean": 0.0013134294456840223,
+    "min": -0.08078528940677643,
+    "std": 0.01416163629880337
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0055",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 1.308993935585022,
+    "mean": 0.4541194130142685,
+    "min": 0.19988472759723663,
+    "std": 0.0872524847431524
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0056",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.3406250476837158,
+    "mean": 0.006671012686553013,
+    "min": -0.2538436949253082,
+    "std": 0.08061665226263119
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "supertonic/vocoder/t0057",
+   "ne": [
+    512,
+    2048,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 1.3070907592773438,
+    "mean": -0.0009086887703233515,
+    "min": -1.5134735107421875,
+    "std": 0.10241589148391875
+   },
+   "type": "q8_0"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0058",
+   "ne": [
+    2048,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.04887208715081215,
+    "mean": -0.09184093005545435,
+    "min": -0.2667931616306305,
+    "std": 0.0597049514891515
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "supertonic/vocoder/t0059",
+   "ne": [
+    2048,
+    512,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 1.9640274047851562,
+    "mean": 4.009749909528182e-05,
+    "min": -1.34100341796875,
+    "std": 0.1014290110849133
+   },
+   "type": "q8_0"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0060",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.37502285838127136,
+    "mean": 0.0035204886168713756,
+    "min": -0.11018859595060349,
+    "std": 0.03680266064607066
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "supertonic/vocoder/t0061",
+   "ne": [
+    1,
+    512,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.4584973454475403,
+    "mean": 0.07817294216329174,
+    "min": 0.006451421417295933,
+    "std": 0.04552616826287093
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "supertonic/vocoder/t0062",
+   "ne": [
+    7,
+    1,
+    512,
+    1
+   ],
+   "stats": {
+    "max": 0.5728546977043152,
+    "mean": 0.006052873924051738,
+    "min": -0.6385828852653503,
+    "std": 0.14505978643725173
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0063",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.17613086104393005,
+    "mean": 5.0904617175717704e-05,
+    "min": -0.1337670087814331,
+    "std": 0.023337177284919214
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0064",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.855605959892273,
+    "mean": 0.4188002411974594,
+    "min": 0.1986396610736847,
+    "std": 0.06889732994239021
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0065",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.3508625030517578,
+    "mean": 0.0008348161418325617,
+    "min": -0.3089046776294708,
+    "std": 0.09500971832388094
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "supertonic/vocoder/t0066",
+   "ne": [
+    512,
+    2048,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 1.996002197265625,
+    "mean": 8.490996424370678e-05,
+    "min": -1.546417236328125,
+    "std": 0.10679153119604096
+   },
+   "type": "q8_0"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0067",
+   "ne": [
+    2048,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.13956694304943085,
+    "mean": -0.0868591008021653,
+    "min": -0.39806675910949707,
+    "std": 0.07203976023894798
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "supertonic/vocoder/t0068",
+   "ne": [
+    2048,
+    512,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 1.6113357543945312,
+    "mean": -0.00012953793361702992,
+    "min": -1.7808990478515625,
+    "std": 0.11183900349384168
+   },
+   "type": "q8_0"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0069",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.4182860851287842,
+    "mean": 0.004165326013193749,
+    "min": -0.27430760860443115,
+    "std": 0.052635328567098995
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "supertonic/vocoder/t0070",
+   "ne": [
+    1,
+    512,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.6428453922271729,
+    "mean": 0.1274982191680465,
+    "min": 0.018623922020196915,
+    "std": 0.08240159311822023
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "supertonic/vocoder/t0071",
+   "ne": [
+    7,
+    1,
+    512,
+    1
+   ],
+   "stats": {
+    "max": 0.6908870935440063,
+    "mean": 0.0012494576985293548,
+    "min": -0.6041385531425476,
+    "std": 0.12946950523130396
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0072",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.16264604032039642,
+    "mean": 0.0002848569616098473,
+    "min": -0.38475725054740906,
+    "std": 0.02964200721900154
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0073",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 1.017472267150879,
+    "mean": 0.38384873358154437,
+    "min": 0.05692581459879875,
+    "std": 0.09406073820238652
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0074",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.4153473377227783,
+    "mean": -0.002292685161190633,
+    "min": -0.360515832901001,
+    "std": 0.0756238312380392
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "supertonic/vocoder/t0075",
+   "ne": [
+    512,
+    2048,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 1.5086288452148438,
+    "mean": -0.0014183645339471695,
+    "min": -1.2954635620117188,
+    "std": 0.10354726782560282
+   },
+   "type": "q8_0"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0076",
+   "ne": [
+    2048,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.14467962086200714,
+    "mean": -0.11942456103680854,
+    "min": -0.5624542236328125,
+    "std": 0.10067479344337743
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "supertonic/vocoder/t0077",
+   "ne": [
+    2048,
+    512,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 2.2847442626953125,
+    "mean": 0.00020209552258165786,
+    "min": -2.02313232421875,
+    "std": 0.1075601053215649
+   },
+   "type": "q8_0"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0078",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.44196969270706177,
+    "mean": 0.0032262914913303575,
+    "min": -0.2081173211336136,
+    "std": 0.054365467470826864
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "supertonic/vocoder/t0079",
+   "ne": [
+    1,
+    512,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.922109067440033,
+    "mean": 0.23258897782943677,
+    "min": 0.016532668843865395,
+    "std": 0.12695494163303478
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "supertonic/vocoder/t0080",
+   "ne": [
+    7,
+    1,
+    512,
+    1
+   ],
+   "stats": {
+    "max": 0.6537544131278992,
+    "mean": 0.0016984125356312837,
+    "min": -0.5690459609031677,
+    "std": 0.12831507175457366
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0081",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.10360906273126602,
+    "mean": 0.00011209960311475697,
+    "min": -0.2292672097682953,
+    "std": 0.030885983732543497
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0082",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.8827685713768005,
+    "mean": 0.4093490977247711,
+    "min": 0.17009784281253815,
+    "std": 0.07253765298663048
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0083",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.6090341210365295,
+    "mean": -0.004630559625852015,
+    "min": -0.5918033719062805,
+    "std": 0.10356351905792738
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "supertonic/vocoder/t0084",
+   "ne": [
+    512,
+    2048,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 2.1956024169921875,
+    "mean": -0.0026277988299625576,
+    "min": -1.4010772705078125,
+    "std": 0.10950671547091274
+   },
+   "type": "q8_0"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0085",
+   "ne": [
+    2048,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.09126090258359909,
+    "mean": -0.12825870196391165,
+    "min": -0.6023823022842407,
+    "std": 0.1052755008568362
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "supertonic/vocoder/t0086",
+   "ne": [
+    2048,
+    512,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 4.150909423828125,
+    "mean": 0.00044173980120376655,
+    "min": -4.34857177734375,
+    "std": 0.11241753914513557
+   },
+   "type": "q8_0"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0087",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.4986758530139923,
+    "mean": 0.0019249892600612384,
+    "min": -0.2089991718530655,
+    "std": 0.06160190759872049
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "supertonic/vocoder/t0088",
+   "ne": [
+    1,
+    512,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 1.2841609716415405,
+    "mean": 0.36869165157440875,
+    "min": 0.015188544057309628,
+    "std": 0.20755113315729384
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "supertonic/vocoder/t0089",
+   "ne": [
+    7,
+    1,
+    512,
+    1
+   ],
+   "stats": {
+    "max": 0.5308724045753479,
+    "mean": 0.0037678876699808344,
+    "min": -0.6399317979812622,
+    "std": 0.11521609709944985
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0090",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.1258670687675476,
+    "mean": 0.0012723229265816371,
+    "min": -0.19805879890918732,
+    "std": 0.03779025555944129
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0091",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.7449483871459961,
+    "mean": 0.39756705168110784,
+    "min": 0.12316181510686874,
+    "std": 0.0678916449737731
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0092",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.17890092730522156,
+    "mean": -0.018519333795694592,
+    "min": -0.26883664727211,
+    "std": 0.07055155830093758
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "supertonic/vocoder/t0093",
+   "ne": [
+    512,
+    2048,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 1.62005615234375,
+    "mean": 0.004141185753269383,
+    "min": -1.4795608520507812,
+    "std": 0.10894110970778384
+   },
+   "type": "q8_0"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0094",
+   "ne": [
+    2048,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.128898024559021,
+    "mean": -0.11076327070757941,
+    "min": -0.4622083604335785,
+    "std": 0.09071219285828626
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "supertonic/vocoder/t0095",
+   "ne": [
+    2048,
+    512,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 2.554107666015625,
+    "mean": 0.00014593937760309927,
+    "min": -2.8389739990234375,
+    "std": 0.11385000753496241
+   },
+   "type": "q8_0"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0096",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.5092268586158752,
+    "mean": -0.0016206400405849308,
+    "min": -0.3292396664619446,
+    "std": 0.06172194578479328
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "supertonic/vocoder/t0097",
+   "ne": [
+    1,
+    512,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 1.7501219511032104,
+    "mean": 0.5294602643662074,
+    "min": 0.018387390300631523,
+    "std": 0.28879884663813704
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "supertonic/vocoder/t0098",
+   "ne": [
+    7,
+    1,
+    512,
+    1
+   ],
+   "stats": {
+    "max": 0.4006497859954834,
+    "mean": -2.8229423444222794e-05,
+    "min": -0.41287416219711304,
+    "std": 0.06306219680868884
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0099",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.11555091291666031,
+    "mean": -0.00036371997046558135,
+    "min": -0.6068854331970215,
+    "std": 0.044903687391077605
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0100",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.6444424390792847,
+    "mean": 0.340707985451445,
+    "min": 0.13267385959625244,
+    "std": 0.07457437720775179
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0101",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.1220959946513176,
+    "mean": -0.008252543403472146,
+    "min": -0.17929032444953918,
+    "std": 0.04964168950099012
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "supertonic/vocoder/t0102",
+   "ne": [
+    512,
+    2048,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 1.6297454833984375,
+    "mean": -0.0013972298938824679,
+    "min": -1.6016464233398438,
+    "std": 0.10459181009501718
+   },
+   "type": "q8_0"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0103",
+   "ne": [
+    2048,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 2.290212631225586,
+    "mean": -0.05148841026820605,
+    "min": -0.4503327012062073,
+    "std": 0.2247318933309213
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "supertonic/vocoder/t0104",
+   "ne": [
+    2048,
+    512,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 1.6520309448242188,
+    "mean": 0.0001462735176573915,
+    "min": -1.8283767700195312,
+    "std": 0.15499681661481415
+   },
+   "type": "q8_0"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0105",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.15606029331684113,
+    "mean": -0.0005530087190379618,
+    "min": -0.3988162875175476,
+    "std": 0.044075872642172484
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "supertonic/vocoder/t0106",
+   "ne": [
+    1,
+    512,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 19.7490234375,
+    "mean": 2.1868928005278576,
+    "min": 0.13723285496234894,
+    "std": 2.2281782883730754
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0107",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.4715196192264557,
+    "mean": 0.023799170683560078,
+    "min": 0.005634407978504896,
+    "std": 0.031493189305986276
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0108",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.03375007584691048,
+    "mean": 0.00011972112530433954,
+    "min": -0.009796411730349064,
+    "std": 0.002033208251829305
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0109",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 19.7847900390625,
+    "mean": 0.0004714270207841764,
+    "min": -23.48238754272461,
+    "std": 3.474235646044304
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0110",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 3263.4345703125,
+    "mean": 44.66047863394488,
+    "min": 0.057951830327510834,
+    "std": 197.32368830566355
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "supertonic/vocoder/t0112",
+   "ne": [
+    3,
+    512,
+    2048,
+    1
+   ],
+   "stats": {
+    "max": 1.3399274349212646,
+    "mean": -1.0263293170143543e-05,
+    "min": -1.0705797672271729,
+    "std": 0.06944681406568984
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "supertonic/vocoder/t0113",
+   "ne": [
+    2048,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.00020463210239540786,
+    "mean": -0.019163041527932023,
+    "min": -0.2682313024997711,
+    "std": 0.018409547806475232
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "supertonic/vocoder/t0114",
+   "ne": [
+    1,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0003,
+    "mean": 0.00019999999999999998,
+    "min": 0.0001,
+    "std": 4.9999999999999996e-05
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "supertonic/vocoder/t0115",
+   "ne": [
+    2048,
+    512,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 1.3516616821289062,
+    "mean": -0.00022240062821765605,
+    "min": -1.1026458740234375,
+    "std": 0.04575216051658678
+   },
+   "type": "q8_0"
+  }
+ ]
+}

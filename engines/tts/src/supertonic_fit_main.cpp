@@ -42,7 +42,7 @@ void print_usage(const char * argv0) {
         "  --f16-weights N       -1 auto / 0 off / 1 on, as EngineOptions::f16_weights\n"
         "  --n-gpu-layers N      request the validated GPU backend when > 0\n"
         "                        (default 0 = CPU; support depends on graph path)\n"
-        "  --vulkan-device N     Vulkan adapter index (default 0)\n"
+        "  --vulkan-device N     Vulkan adapter index, -1 auto (default 0)\n"
         "  --backend NAME        auto | cpu | opencl | webgpu | hexagon | exact ggml device name,\n"
         "                        as EngineOptions::backend (no fallback)\n"
         "  --margin-mib MIB      free-memory headroom to require (default 256)\n"
@@ -129,8 +129,8 @@ extern "C" int supertonic_fit_cli_main(int argc, char ** argv) {
         } else if (a == "--backend" && i + 1 < argc) {
             opts.backend = argv[++i];
         } else if (a == "--vulkan-device" && i + 1 < argc) {
-            if (!parse_i32(argv[++i], opts.vulkan_device) || opts.vulkan_device < 0) {
-                std::fprintf(stderr, "--vulkan-device: '%s' is not a non-negative integer\n",
+            if (!parse_i32(argv[++i], opts.vulkan_device) || opts.vulkan_device < -1) {
+                std::fprintf(stderr, "--vulkan-device: '%s' is not -1 (auto) or an adapter index\n",
                              argv[i]);
                 return (int) tts_cpp::FitStatus::Error;
             }

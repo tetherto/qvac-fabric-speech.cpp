@@ -19,6 +19,7 @@
 #include "backend_selection.h"
 #include "bench_wav.h"
 #include "supertonic_internal.h"
+#include "supertonic_vocoder_coreml.h"
 #include "npy.h"
 // Vulkan adapter description in the bench backend annotator is now
 // resolved through the registry API
@@ -35,6 +36,7 @@
 #include <random>
 #include <stdexcept>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -79,6 +81,19 @@ void usage(const char * argv0) {
         "                               default off for accurate per-stage attribution on Vulkan)\n"
         "          [--bench-per-step]  (time each denoise step individually so the first-step\n"
         "                               cold-pipeline cost is distinguished from steady-state)\n"
+        "          [--coreml-cache-dir DIR]  (run the vocoder on the shared Core ML runtime:\n"
+        "                            a prebuilt sidecar next to the GGUF, or one generated\n"
+        "                            into DIR; until it is ready the vocoder runs on ggml)\n"
+        "          [--coreml-wait none|construct|call] [--coreml-units all|cpu_and_ane|cpu_and_gpu|cpu_only]\n"
+        "          [--coreml-require] [--coreml-prewarm none|minimal|predicted|all]\n"
+        "                            (any of these also selects the shared runtime;\n"
+        "                            --json-out then carries coreml_status)\n"
+        "          [--coreml-ignore-prebuilt]  (development: plan as if no prebuilt sidecar\n"
+        "                            were next to the GGUF, so the generated route is\n"
+        "                            measured beside the exporter's sidecar)\n"
+        "          [--coreml-expect-route prebuilt|generate|generated|cached|none]\n"
+        "                            (fail, exit 1, unless the vocoder stage planned and\n"
+        "                            ran that route; generate = generated or cached)\n"
         "          [--wav-out FILE] [--json-out FILE]\n",
         argv0);
 }
@@ -155,6 +170,23 @@ void write_json_stage(std::ofstream & os, const Stage & s, bool comma) {
        << "}" << (comma ? "," : "") << "\n";
 }
 
+// The vocoder stage's route in a Core ML status JSON ("prebuilt",
+// "generated", "cached", "none"; "" when absent).
+std::string status_stage_route(const std::string & status) {
+    const std::string key = "\"route\":\"";
+    const size_t at = status.find(key);
+    if (at == std::string::npos) return {};
+    const size_t end = status.find('"', at + key.size());
+    return end == std::string::npos ? std::string() : status.substr(at + key.size(), end - at - key.size());
+}
+
+// Whether `observed` (a status route) is the route an arm asked for:
+// "generate" accepts a fresh generation and an adopted cached artifact.
+bool route_matches(const std::string & expected, const std::string & observed) {
+    if (expected == "generate") return observed == "generated" || observed == "cached";
+    return observed == expected;
+}
+
 } // namespace
 
 int main(int argc, char ** argv) {
@@ -164,6 +196,10 @@ int main(int argc, char ** argv) {
     std::string voice = "M1", language = "en";
     std::string noise_npy;
     std::string json_out, wav_out;
+    tts_cpp::CoremlOptions coreml;
+    bool coreml_runtime = false;
+    bool coreml_ignore_prebuilt = false;
+    std::string coreml_expect_route;
     int steps = 5;
     float speed = 1.05f;
     int seed = 42;
@@ -291,6 +327,37 @@ int main(int argc, char ** argv) {
         else if (a == "--bench-per-step") bench_per_step = true;
         else if (a == "--wav-out") wav_out = next("--wav-out");
         else if (a == "--json-out") json_out = next("--json-out");
+        else if (a == "--coreml-cache-dir") { coreml.cache_dir = next("--coreml-cache-dir"); coreml_runtime = true; }
+        else if (a == "--coreml-units") { coreml.compute_units = next("--coreml-units"); coreml_runtime = true; }
+        else if (a == "--coreml-require") { coreml.use = tts_cpp::CoremlOptions::Use::require; coreml_runtime = true; }
+        else if (a == "--coreml-ignore-prebuilt") { coreml_ignore_prebuilt = true; coreml_runtime = true; }
+        else if (a == "--coreml-expect-route") {
+            coreml_expect_route = next("--coreml-expect-route");
+            if (coreml_expect_route != "prebuilt" && coreml_expect_route != "generate" &&
+                coreml_expect_route != "generated" && coreml_expect_route != "cached" &&
+                coreml_expect_route != "none") {
+                fprintf(stderr, "--coreml-expect-route: prebuilt, generate, generated, cached or none\n");
+                return 2;
+            }
+            coreml_runtime = true;
+        }
+        else if (a == "--coreml-wait") {
+            const std::string w = next("--coreml-wait");
+            if (w == "none") coreml.wait = tts_cpp::CoremlOptions::Wait::none;
+            else if (w == "construct") coreml.wait = tts_cpp::CoremlOptions::Wait::construct;
+            else if (w == "call") coreml.wait = tts_cpp::CoremlOptions::Wait::call;
+            else { fprintf(stderr, "--coreml-wait: none, construct or call\n"); return 2; }
+            coreml_runtime = true;
+        }
+        else if (a == "--coreml-prewarm") {
+            const std::string w = next("--coreml-prewarm");
+            if (w == "none") coreml.prewarm = tts_cpp::CoremlOptions::Prewarm::none;
+            else if (w == "minimal") coreml.prewarm = tts_cpp::CoremlOptions::Prewarm::minimal;
+            else if (w == "predicted") coreml.prewarm = tts_cpp::CoremlOptions::Prewarm::predicted;
+            else if (w == "all") coreml.prewarm = tts_cpp::CoremlOptions::Prewarm::all;
+            else { fprintf(stderr, "--coreml-prewarm: none, minimal, predicted or all\n"); return 2; }
+            coreml_runtime = true;
+        }
         else if (a == "-h" || a == "--help") { usage(argv[0]); return 0; }
         else { fprintf(stderr, "unknown arg: %s\n", a.c_str()); usage(argv[0]); return 2; }
     }
@@ -311,6 +378,10 @@ int main(int argc, char ** argv) {
     apply_vulkan_env_overrides(vulkan_env_overrides);
 
     supertonic_model model;
+    // With --coreml-*, the vocoder sidecar loads through the shared Core ML
+    // runtime (as in the Engine) instead of at GGUF load.
+    model.vocoder_coreml_managed = coreml_runtime;
+    const auto construct_t0 = std::chrono::steady_clock::now();
     if (!load_supertonic_gguf(model_path, model, n_gpu_layers,
                               /*verbose=*/false, f16_weights, precision,
                               vulkan_device, f16_weights_deny_list, backend)) {
@@ -318,6 +389,35 @@ int main(int argc, char ** argv) {
         return 1;
     }
     supertonic_set_n_threads(model, n_threads);
+    std::shared_ptr<supertonic_vocoder_coreml> vocoder_stage;
+    if (coreml_runtime) {
+        try {
+            vocoder_stage = supertonic_vocoder_coreml::create(model, model_path, coreml, /*memory_degrade=*/false,
+                                                              /*cpu_brand=*/{}, coreml_ignore_prebuilt);
+        } catch (const std::exception & e) {
+            fprintf(stderr, "Core ML vocoder: %s\n", e.what());
+            free_supertonic_model(model);
+            return 1;
+        }
+        if (!vocoder_stage) fprintf(stderr, "Core ML vocoder: this build has no Core ML runtime\n");
+        // The route this arm asked for, as planned (the timed runs below
+        // check it again on the stage's status).
+        if (!coreml_expect_route.empty()) {
+            const std::string planned = vocoder_stage ? vocoder_stage->route().route : std::string("none");
+            const bool ok = coreml_expect_route == "generated" || coreml_expect_route == "cached"
+                                ? planned == "generate"
+                                : planned == coreml_expect_route;
+            if (!ok) {
+                fprintf(stderr, "Core ML vocoder: planned route '%s' (%s), expected '%s'\n", planned.c_str(),
+                        vocoder_stage ? vocoder_stage->status_json().c_str() : "no stage",
+                        coreml_expect_route.c_str());
+                free_supertonic_model(model);
+                return 1;
+            }
+        }
+    }
+    const double construct_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - construct_t0).count();
     // F16 K/V flash-attention dispatch: same auto policy as Engine
     // (auto ⇒ on for GPU backends that pass the F16-K/V probe, off
     // for CPU; user can force).  See `supertonic_backend_supports_f16_kv_flash_attn`
@@ -390,6 +490,7 @@ int main(int argc, char ** argv) {
     Stage st_ve {st_ve_label, {}};
     Stage st_voc{"vocoder", {}};
     std::string vocoder_backend = "ggml";
+    bool vocoder_pending_any = false;  // a vocoder call ran on ggml while its Core ML sidecar was not ready
     Stage st_tot{"total", {}};
     // round 7 — per-denoise-step breakdown. Populated
     // only when `--bench-per-step` is on; otherwise stays empty
@@ -549,14 +650,16 @@ int main(int argc, char ** argv) {
         auto t4 = clk::now();
 
         std::vector<float> wav;
+        bool call_pending = false;
         if (!supertonic_vocoder_forward_ggml(model, latent.data(), latent_len, wav, &error,
-                                             &vocoder_backend)) {
+                                             &vocoder_backend, &call_pending)) {
             fprintf(stderr, "vocoder failed: %s\n", error.c_str());
             free_supertonic_model(model); return 1;
         }
         bench_sync_now();
         auto t5 = clk::now();
 
+        vocoder_pending_any = vocoder_pending_any || call_pending;
         double audio_s = (double) wav.size() / (double) sample_rate;
         double tot_ms = ms_t(t5 - t0).count();
         if (record) {
@@ -653,7 +756,9 @@ int main(int argc, char ** argv) {
         if (prewarm_ms > 0.0) {
             printf("  prewarm: %.1fms (cold-start, discarded)\n", prewarm_ms);
         }
-        printf("  vocoder backend: %s\n", vocoder_backend.c_str());
+        printf("  vocoder backend: %s%s\n", vocoder_backend.c_str(),
+               vocoder_pending_any ? " (a call ran on ggml while the Core ML sidecar was not ready)" : "");
+        if (vocoder_stage) printf("  coreml status: %s\n", vocoder_stage->status_json().c_str());
     }
     printf("  audio per run: %.3fs @ %d Hz\n", last_audio_s, model.hparams.sample_rate);
     printf("  runs: %d (warmup discarded: %d)\n", runs, warmup);
@@ -749,6 +854,15 @@ int main(int argc, char ** argv) {
         // sidecar's compute-unit label (e.g. "coreml-all").  Named after
         // SynthesisResult::vocoder_synthesis_backend.
         os << "  \"vocoder_synthesis_backend\": \"" << json_escape(vocoder_backend) << "\",\n";
+        // The shared Core ML runtime (--coreml-*): construction time (GGUF
+        // load + the vocoder stage, including a wait = construct), whether a
+        // call ran on ggml while the sidecar was not ready, and the stage's
+        // status (route, state, timings).
+        if (vocoder_stage) {
+            os << "  \"construct_ms\": " << construct_ms << ",\n";
+            os << "  \"vocoder_coreml_pending\": " << (vocoder_pending_any ? "true" : "false") << ",\n";
+            os << "  \"coreml_status\": " << vocoder_stage->status_json() << ",\n";
+        }
         // round 7 — Vulkan env-var overrides surfaced
         // verbatim so the JSON consumer can attribute drift to
         // a specific override (or its absence).  Always emitted
@@ -791,6 +905,17 @@ int main(int argc, char ** argv) {
         write_json_stage(os, st_tot, false);
         os << "  }\n";
         os << "}\n";
+    }
+
+    // The route the timed runs ran on, as the stage reports it.
+    if (!coreml_expect_route.empty()) {
+        const std::string observed = vocoder_stage ? status_stage_route(vocoder_stage->status_json()) : "none";
+        if (!route_matches(coreml_expect_route, observed)) {
+            fprintf(stderr, "Core ML vocoder: the runs ran on route '%s', expected '%s'\n", observed.c_str(),
+                    coreml_expect_route.c_str());
+            free_supertonic_model(model);
+            return 1;
+        }
     }
 
     free_supertonic_model(model);

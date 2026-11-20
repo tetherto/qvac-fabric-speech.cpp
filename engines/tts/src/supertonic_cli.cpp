@@ -1,4 +1,5 @@
 #include "tts-cpp/supertonic/engine.h"
+#include "supertonic_cli_coreml.h"
 #include "tts-cpp/voice_controls.h"
 #include "voice_controls_cli.h"
 #include "voice_features.h"  // kOutputSampleRateMin / kOutputSampleRateMax
@@ -49,6 +50,10 @@ void usage(const char * argv0) {
         "          [--f16-weights-deny PATTERN1,PATTERN2,...] (substring patterns,\n"
         "                            comma-separated; matching tensors stay F32 even\n"
         "                            when --f16-weights is on.  Default empty.)\n"
+        "          [--coreml-cache-dir DIR] (where the Core ML vocoder sidecar is\n"
+        "                            generated and cached; default\n"
+        "                            $QVAC_COREML_CACHE_DIR, then on macOS\n"
+        "                            ~/Library/Application Support/qvac-speech/coreml)\n"
         "          [--prewarm TEXT] (run one throwaway synth on TEXT at engine\n"
         "                            construction so first-real-call latency on\n"
         "                            Vulkan / OpenCL doesn't pay the shader-\n"
@@ -210,6 +215,7 @@ int main(int argc, char ** argv) {
             }
         }
         else if (arg == "--prewarm") opts.prewarm_text = next("--prewarm");
+        else if (arg == "--coreml-cache-dir") opts.coreml.cache_dir = next("--coreml-cache-dir");
         else if (arg == "--vulkan-prefer-host-memory") opts.vulkan_env_overrides["GGML_VK_PREFER_HOST_MEMORY"]      = "1";
         else if (arg == "--vulkan-disable-coopmat2")   opts.vulkan_env_overrides["GGML_VK_DISABLE_COOPMAT2"]        = "1";
         else if (arg == "--vulkan-disable-bfloat16")   opts.vulkan_env_overrides["GGML_VK_DISABLE_BFLOAT16"]        = "1";
@@ -248,6 +254,9 @@ int main(int argc, char ** argv) {
         usage(argv[0]);
         return 2;
     }
+    tts_cpp::supertonic::detail::apply_cli_coreml_cache_default(
+        opts.coreml, std::getenv("QVAC_COREML_CACHE_DIR"), std::getenv("HOME"),
+        tts_cpp::supertonic::detail::cli_on_macos());
     try {
         const bool streaming = opts.stream_chunk_tokens > 0;
         const bool stdout_pcm = (out == "-");

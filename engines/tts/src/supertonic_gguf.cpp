@@ -6,6 +6,12 @@
 #include "gguf.h"
 #include "coreml_sidecar_path.h"
 #include "supertonic_coreml_path.h"
+#include "supertonic_vocoder_coreml.h"
+
+#ifndef _WIN32
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 #ifdef TTS_CPP_USE_COREML
 #include "supertonic_coreml_vocoder.h"
@@ -2000,6 +2006,9 @@ static void attach_coreml_vocoder_sidecar(const std::string & gguf_path,
                                           bool verbose) {
     model.coreml_vocoder = nullptr;
     model.vocoder_on_coreml = false;
+    // The Engine loads the vocoder sidecar (prebuilt or generated) through the
+    // shared Core ML runtime instead (supertonic_vocoder_coreml.h).
+    if (model.vocoder_coreml_managed) return;
     if (!coreml_vocoder_sidecar_enabled()) return;
     const std::string sidecar = coreml_vocoder_sidecar_path(gguf_path);
     if (!::tts_cpp::detail::coreml_sidecar_exists(sidecar)) return;
@@ -2025,8 +2034,9 @@ static void attach_coreml_vocoder_sidecar(const std::string & gguf_path,
 #ifdef TTS_CPP_USE_COREML
     const int64_t samples_per_frame =
         (int64_t) model.hparams.base_chunk_size * model.hparams.ttl_chunk_compress_factor;
+    const char * units = std::getenv("SUPERTONIC_COREML_COMPUTE_UNITS");
     model.coreml_vocoder = supertonic_coreml_vocoder_init(
-        sidecar.c_str(), model.hparams.latent_channels, samples_per_frame);
+        sidecar.c_str(), model.hparams.latent_channels, samples_per_frame, units, nullptr);
     model.vocoder_on_coreml = model.coreml_vocoder != nullptr;
     if (!model.coreml_vocoder) {
         fprintf(stderr,
@@ -2119,7 +2129,31 @@ static bool load_supertonic_gguf_impl(const std::string & path,
     // Measure mode reads shapes only; the real load keeps the historical
     // full-copy open (its transient host cost is charged by the measure).
     gguf_init_params gp = { /*.no_alloc=*/ measure != nullptr, /*.ctx=*/ &tmp_ctx };
-    gguf_context * gguf_ctx = gguf_init_from_file(path.c_str(), gp);
+    // The real load reads the metadata and every weight in this one call,
+    // through one descriptor (POSIX), so fstat of it is the identity of the
+    // file the weights came from, whatever the path names meanwhile
+    // (supertonic_vocoder_source_record). Measure mode, Windows, or a failed
+    // open read the path as before.
+    gguf_context * gguf_ctx = nullptr;
+    bool read_through_fd = false;
+#ifndef _WIN32
+    if (!measure) {
+        const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+        supertonic_vocoder_source_record(model, fd, path);
+        if (fd >= 0) {
+            read_through_fd = true;
+            const int d = ::dup(fd);
+            FILE * f = d >= 0 ? ::fdopen(d, "rb") : nullptr;
+            if (!f && d >= 0) ::close(d);
+            if (f) {
+                gguf_ctx = gguf_init_from_file_ptr(f, gp);
+                std::fclose(f);
+            }
+            ::close(fd);
+        }
+    }
+#endif
+    if (!read_through_fd) gguf_ctx = gguf_init_from_file(path.c_str(), gp);
     if (!gguf_ctx) {
         fprintf(stderr, "load_supertonic_gguf: failed to open '%s'\n", path.c_str());
         print_supertonic_setup_hint();
@@ -3087,6 +3121,7 @@ void free_supertonic_model(supertonic_model & model) {
     model.encoder_on_coreml = false;
     model.coreml_vocoder = nullptr;
     model.vocoder_on_coreml = false;
+    model.vocoder_source.reset();
     // Drive every per-stage thread_local graph cache populated on this
     // thread through its normal `free_<type>_cache` path WHILE the
     // backend is still alive — that way the gallocr inside each

@@ -226,8 +226,10 @@ exporter rebuilds the vocoder in PyTorch from the GGUF tensors -- replicate
 `causal_replicate_pad_1d` in the ggml graph -- so it needs neither the ONNX
 bundle nor its runtime; `--parity-dir <ref>` checks that rebuild against
 `final_latent.npy` / `wav_full.npy` from `dump-supertonic-reference.py`
-first. With the sidecar present the engine reports it on
-`Engine::vocoder_on_coreml()` at load and per call on
+first. With the sidecar present the Engine loads it in the background
+(`EngineOptions::coreml.wait = construct` waits for it instead; until it is
+ready each call runs on ggml and reports `SynthesisResult::coreml_pending`)
+and reports it on `Engine::vocoder_on_coreml()` once it is ready and per call on
 `SynthesisResult::vocoder_synthesis_backend` ("mixed" when streamed chunks
 used different vocoder paths); `supertonic-bench` prints and emits the same
 label as `vocoder_synthesis_backend`.
@@ -259,8 +261,12 @@ skips the sidecar at load; `SUPERTONIC_COREML_COMPUTE_UNITS` in `cpu_only` /
 `SUPERTONIC_COREML_ALLOW_LOW_BIT=1` stages the sidecar on a tier below the
 weight floor anyway (for measuring that substitution);
 `SUPERTONIC_COREML_STRICT=1` (test-only) fails instead of falling back to the
-ggml graph. Any sidecar failure -- missing, malformed, wrong shape, or a
-prediction error -- falls back to the ggml vocoder for that call.
+ggml graph. On the Engine these variables are read once, at construction, and
+an explicit `CoremlOptions` field wins over them; once the vocoder stage has
+resolved to ggml (`use = off`, memory-degrade, no usable route) no call reads
+them again, and builds without Core ML ignore them. Any sidecar failure -- missing, malformed, wrong shape, or a
+prediction error -- falls back to the ggml vocoder for that call; a failed
+prediction also retires the sidecar, so later calls stay on ggml.
 
 `test-supertonic-coreml-path` locks the naming rule without a model;
 `test-supertonic-coreml-tier` locks the weight-width floor and the lookup that
@@ -274,6 +280,149 @@ sidecar, and runs one public `Engine` synthesis end to
 end; `test-supertonic-coreml-exporter` unit-tests the PyTorch rebuild
 (causality, unpack layout, squeezed pointwise re-expansion, receptive field,
 stem rule) without a checkpoint.
+
+## Generated vocoder sidecar
+
+With `EngineOptions::coreml.cache_dir` (or `QVAC_COREML_CACHE_DIR`) set, a
+`TTS_CPP_COREML` build with `TTS_CPP_COREML_GENERATE=ON` (the macOS default),
+macOS 15 or later and no prebuilt `<model>-vocoder.mlmodelc` next to the GGUF,
+the Engine generates the vocoder sidecar from the GGUF's own vocoder weights:
+it writes a Core ML package from a weight-free template embedded in the
+library, compiles it on the device and keeps it in the cache directory, keyed
+by the template and the weights it was built from. Nothing is downloaded and
+no Python runs. The vocoder runs on ggml until the sidecar is ready; each
+vocoder call takes its backend once, at its start, so a call never mixes the
+two.
+
+- **Templates.** `supertonic-vocoder-w64` serves GGUFs that store the
+  pointwise convolutions as `[OC, IC, 1]` (the converter's f32 and f16
+  tiers); `supertonic-vocoder-pw2d-w64` serves the requantised tiers
+  (`requantize-gguf.py` q8_0, q5_0, q4_0), which store them squeezed to
+  `[OC, IC]`. Both are the unchanged `export-supertonic-coreml.py` at its
+  default 64-frame window, and both read the vocoder tensors by the model's
+  own names through the GGUF's `supertonic.source_names` /
+  `supertonic.tensor_names` arrays and aliases, so one template serves
+  Supertonic 1, 2 and 3 (their vocoders have the same geometry) and GGUFs from
+  older converters.
+- **Tiers.** The sidecar is generated from the loaded tier's own weights
+  (dequantised, then fp16), so it accelerates the vocoder the GGUF ships
+  rather than substituting the reference one; the 8-bit floor above applies
+  to prebuilt sidecars only. A prebuilt sidecar below its floor is ignored
+  and a generated one is used instead.
+- **Source file.** The engine opens the GGUF once and reads its metadata and
+  every weight through that descriptor, and generates only from that file: a
+  GGUF replaced at the path since the load (an atomic rename, a re-pointed
+  symlink) fails generation with `source_changed`, and the vocoder stays on
+  ggml.
+- **CLI.** `supertonic-cli` takes `--coreml-cache-dir DIR`; without it, and
+  with `QVAC_COREML_CACHE_DIR` unset, it uses
+  `~/Library/Application Support/qvac-speech/coreml` on macOS, so a bare GGUF
+  a template matches generates its sidecar with no flag (not under
+  `Library/Caches`, whose purge would mean a new path and a cold compile).
+  Library users set `coreml.cache_dir` themselves. `supertonic-bench` runs
+  the vocoder on the shared runtime with any `--coreml-*` flag;
+  `--coreml-ignore-prebuilt` (development) plans as if no prebuilt sidecar
+  were next to the GGUF, so a generated sidecar can be measured beside the
+  exporter's, and `--coreml-expect-route prebuilt|generate|...` fails the run
+  (exit 1) unless the stage planned and ran that route.
+- **Device class.** Generation is skipped (`unsupported(device)` in the
+  status) on Max and Ultra parts (`prefer_ggml_on` in the templates;
+  `machdep.cpu.brand_string`), where the GPU runs the ggml vocoder faster than
+  the Neural Engine runs the sidecar (see the measurements below; this
+  default comes from one M3 Ultra measurement and may change).
+  `coreml.use = require` generates anyway. Prebuilt sidecars are not gated.
+- **Options and status.** `EngineOptions::coreml` (`tts-cpp/coreml_options.h`):
+  `wait = construct` makes the constructor wait for the sidecar, `prewarm =
+  none` defers it to the first synthesis (an Engine `prewarm_text` or
+  `warm_up()` call is one, on a CPU backend too) or to
+  `Engine::coreml_prewarm(scope, wait)`, `use = require` makes a sidecar that
+  cannot serve a call an error, `use = off` keeps ggml. `Engine::coreml_status()`
+  returns the stage's status JSON (route `generated` or `cached`, state,
+  timings, artifact key) and `Engine::coreml_wait(timeout_ms)` waits for it
+  (`Engine::cancel()` ends a wait that started before it).
+  `Engine::coreml_construction()` returns the construction group's result and
+  `coreml_prewarm` issues another group (every scope but `none` is the
+  vocoder; with `wait` it returns once the sidecar is ready or failed):
+  `success`, `nothing_to_prepare` (no usable route, or prewarm `none`), each
+  slot's final state and the stages skipped for having no route.
+- **Fit.** `supertonic::FitOptions::coreml` mirrors the Engine's options. A
+  generated route adds the template's Core ML memory envelope to the
+  projection (`FitResult::coreml`); with `coreml.memory_budget_bytes`, every
+  verdict (ggml, Core ML-inclusive, the final one and its headroom) compares
+  against the smaller of the free memory and the budget, and a budget only the
+  ggml projection fits makes the Engine resolve `use = off` (memory-degrade)
+  instead of refusing. The constructor repeats the fit to
+  decide this, with `EngineOptions::fit_text_tokens`, `fit_audio_seconds` and
+  `fit_margin_bytes` (defaults 128, 10 s and 256 MiB, as in `FitOptions`): set
+  them to the workload and headroom of the `fit_params` call that assessed the
+  engine, so the engine reaches the same decision. When that fit cannot
+  project the options (for example the per-step estimator path), a generated
+  sidecar stays off; fit options it rejects as invalid make the constructor
+  throw.
+
+Accuracy on an M2 (macOS 27.2.1, `all`, which places the program on the
+Neural Engine), waveform cosine against the ggml vocoder of the same GGUF on a
+padded (32 frames), an exact-window (64) and a stitched multi-window (171)
+latent:
+
+| GGUF | template | cosine |
+|---|---|---|
+| supertonic2 f32 | `supertonic-vocoder-w64` | 0.999963 / 0.999954 / 0.999956 |
+| supertonic2 f16 | `supertonic-vocoder-w64` | 0.999964 / 0.999955 / 0.999958 |
+| supertonic2 q8_0 | `supertonic-vocoder-pw2d-w64` | 0.999963 / 0.999954 / 0.999956 |
+| supertonic2 q4_0 | `supertonic-vocoder-pw2d-w64` | 0.999959 / 0.999954 / 0.999956 |
+| supertonic (1) f16 | `supertonic-vocoder-w64` | 0.999964 / 0.999955 / 0.999958 |
+| supertonic3 f16 | `supertonic-vocoder-w64` | 0.999964 / 0.999955 / 0.999958 |
+| supertonic3 q8_0 | `supertonic-vocoder-pw2d-w64` | 0.999963 / 0.999954 / 0.999956 |
+
+q4_0 holds 0.999 as well, so generated q4_0 sidecars are allowed. The
+generated `weight.bin` is byte-for-byte the exporter's on every GGUF above
+(the real-weights gate). On the M2 a cold generation is ready in about 1.7 s
+(digest 0.3-1.0 s, write 0.3-0.5 s, compile 0.05-0.1 s, cold Neural Engine
+load 0.9-1.0 s, warm-up 5 ms).
+
+**Memory.** The templates' memory constants (`template.json` `memory`) are
+1.25 times the largest value measured over the overlapped memory schedule
+(`test-supertonic-coreml-parity --memory-schedule`: ggml vocoder calls while
+the sidecar is generated, compiled, loaded and warmed in the background) on
+every validated host, rounded up to 1 MiB, with no further envelope margin.
+Hosts: an M2 (macOS 27.2.1, 14 runs) and the M4 Max CI runner (macOS 26.7.2,
+30 runs). Both templates compile the same program with the same weights, so
+the load, resident and compiler-reserve charges are taken over both
+templates' runs; the prepare is each template's own.
+
+| Largest measured (MiB) | M2 | M4 Max | charged |
+|---|---:|---:|---:|
+| prepare, `supertonic-vocoder-w64` | 23.3 | 27.0 | 34 |
+| prepare, `supertonic-vocoder-pw2d-w64` | 37.7 | 41.5 | 52 |
+| load and warm-up | 6.1 | 49.4 | 62 |
+| steady state from the load start | 6.5 | 49.8 | 63 (resident) |
+| `ANECompilerService` while loading (absolute) | 297.9 | 659.1 | 824 (reserve) |
+
+Envelope fit charges: 125 MiB for either template (resident 63 + the larger
+of prepare and load, 62). The requantised template's prepare is larger
+because generation dequantises the q8_0 pointwise weights. On the M2 the
+Neural Engine keeps the weights outside the process, so load and steady state
+stay under 7 MiB; nine of the 30 M4 Max runs held a weight-sized copy in the
+process (32-49 MiB), and the largest set the load and resident charges. `ANECompilerService`
+held 74-244 MiB before every M2 load and 168-622 MiB before every M4 Max load
+(no clean start; on the CI runner it depends on other jobs' compiles), so its growth during the load (at most 53 MiB) would
+understate a cold compile on a clean host; the reserve is 1.25 times its
+largest absolute size while loading on any validated host (659.1 MiB on the
+M4 Max), as for the Parler DAC. The CI step "Memory schedule (generated
+Supertonic vocoder, overlapped, this runner)" reruns the schedule on every
+change and fails when 1.25 times a phase's measurement exceeds its constant,
+when the whole run exceeds the envelope, or when a probe fails.
+
+**Tests.** `test-supertonic-coreml-route` (unit, every build: the device
+class of brand strings, gating with faked Max and Ultra brands, template
+choice, the prebuilt floor, the templates' memory charges, and route and fit
+stability on an empty cache, after a generation and with warm hints);
+`test-supertonic-coreml-parity --gguf MODEL.gguf --cache-dir DIR
+--require-coreml` (on the device: generation, parity, adoption by a second
+owner, the Engine, fit and near-budget memory-degrade); `--memory-schedule
+DIR` (the schedule above). CI runs them on Supertonic 2 at a pinned Hugging
+Face revision (f16 and requantised q8_0), with the real-weights gate.
 
 ## Core ML vector export defaults
 

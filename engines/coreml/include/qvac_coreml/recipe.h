@@ -11,6 +11,7 @@
 // consumers; this generator version knows:
 //   t f32 f64 f16 add mul div recip clip reshape permute take concat (+ let)
 //   slice neg zeros ones lit
+//   sub sqrt
 // and `patch` lines of dtype fp16 and fp32, which rewrite inline constants of
 // the spec (model.mlmodel) in place. `patch ... str`, provided() and
 // meta_f/meta_s belong to later generator versions; the parser rejects them.
@@ -26,11 +27,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #ifndef QVAC_COREML_NS
@@ -313,6 +316,26 @@ struct TemplateFile {
     std::array<uint8_t, 32> sha256{};
 };
 
+// template.json `names`: how the names a recipe reads (its `source` lines
+// and t() calls) map to the GGUF's tensor names, for a GGUF that stores its
+// tensors under generated names and lists the model's own names in metadata.
+// Built from the GGUF's metadata, the way the engine's loader resolves them:
+//   - `map` [from, to]: two string arrays of equal length; from[i] reads
+//     tensor to[i] (a later duplicate wins);
+//   - `aliases` [from, to], optional: from[i] reads what to[i] reads, unless
+//     from[i] already resolves (both arrays absent: no aliases);
+//   - `fallbacks` [[name, other], ...]: `name` reads what `other` reads when
+//     `name` does not resolve otherwise (names older converters did not write).
+// A name the table does not resolve is absent. Declared by the template, so
+// the same table applies in the engine, qvac-coreml-tool and the extraction
+// gates, and a change to it changes template_sha256.
+struct NameSpec {
+    std::string map_from, map_to;
+    std::string aliases_from, aliases_to;
+    std::vector<std::pair<std::string, std::string>> fallbacks;
+    bool empty() const { return map_from.empty(); }
+};
+
 struct TemplateInfo {
     std::string id;
     std::string family;
@@ -326,6 +349,7 @@ struct TemplateInfo {
     bool shareable = true;
     std::string match_architecture;
     std::string match_metadata_json;  // the `match.metadata` object as JSON text
+    NameSpec names;                   // template.json `names`; empty: the recipe uses the GGUF's own names
 };
 
 class Template {
@@ -362,6 +386,32 @@ private:
     TemplateInfo info_;
     Recipe recipe_;
     std::array<uint8_t, 32> sha256_{};
+};
+
+// A TensorSource that reads `base` under a NameSpec: tensor(), read_raw() and
+// read_f32() take the recipe's names; metadata reads pass through. A name the
+// table does not resolve is absent. When the GGUF's name arrays are absent or
+// malformed, error() says why and no tensor resolves.
+class RenamedSource final : public TensorSource {
+public:
+    RenamedSource(TensorSource & base, const NameSpec & spec);
+
+    const std::string & error() const { return error_; }
+    // The GGUF's own name for `name` ("" when it does not resolve).
+    std::string stored_name(const std::string & name) const;
+
+    const TensorInfo * tensor(const std::string & name) const override;
+    Error read_raw(const std::string & name, const std::function<bool(const uint8_t *, size_t)> & sink) override;
+    Error read_f32(const std::string & name, std::vector<float> & out, const RawTap & tap) override;
+    bool meta_canonical(const std::string & key, uint32_t & gguf_type, std::vector<uint8_t> & bytes,
+                        uint32_t * array_elem_type = nullptr) const override;
+    std::string meta_json(const std::string & key) const override;
+
+private:
+    TensorSource & base_;
+    std::map<std::string, std::string> stored_;  // recipe name -> GGUF name
+    std::map<std::string, TensorInfo> infos_;    // recipe name -> the GGUF tensor's info under the recipe name
+    std::string error_;
 };
 
 struct MatchResult {

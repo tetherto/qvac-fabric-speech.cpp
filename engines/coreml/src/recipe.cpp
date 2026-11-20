@@ -17,6 +17,7 @@
 #include <map>
 #include <set>
 #include <sstream>
+#include <tuple>
 
 namespace QVAC_COREML_NS {
 namespace recipe {
@@ -341,9 +342,10 @@ ExprP parse_expr(Cursor & c, int depth = 0) {
 
 // Ops of this generator version. Later generator versions add more.
 const std::set<std::string> kOps = {"t",    "f32",   "f64",  "f16",  "add",   "mul", "div",   "recip", "clip",
-                                    "reshape", "permute", "take", "concat", "slice", "neg", "zeros", "ones", "lit"};
+                                    "reshape", "permute", "take", "concat", "slice", "neg", "zeros", "ones", "lit",
+                                    "sub", "sqrt"};
 // Ops that exist in the language but belong to a later generator version.
-const std::set<std::string> kLaterOps = {"sub", "sqrt", "full",   "tile",   "exp",
+const std::set<std::string> kLaterOps = {"full",   "tile",   "exp",
                                          "sin", "cos",  "l2norm", "matmul", "meta_f", "meta_s", "provided"};
 
 std::string shape_str(const std::vector<int64_t> & s) {
@@ -502,6 +504,25 @@ private:
             return;
         }
         if (op == "recip") {
+            arity(e, 1);
+            value(*e.args[0]);
+            e.dtype = e.args[0]->dtype;
+            e.shape = e.args[0]->shape;
+            e.ulp = e.args[0]->ulp;
+            return;
+        }
+        if (op == "sub") {
+            arity(e, 2);
+            value(*e.args[0]);
+            value(*e.args[1]);
+            e.dtype = promote(e.args[0]->dtype, e.args[1]->dtype);
+            e.shape = broadcast(e.args[0]->shape, e.args[1]->shape, e.line);
+            e.ulp = e.args[0]->ulp || e.args[1]->ulp;
+            return;
+        }
+        if (op == "sqrt") {
+            // IEEE square root is correctly rounded in every dtype, so a
+            // sqrt() blob stays `exact`.
             arity(e, 1);
             value(*e.args[0]);
             e.dtype = e.args[0]->dtype;
@@ -1101,6 +1122,37 @@ void Template::init(bool hash_files) {
         if (auto m = it->find("metadata"); m != it->end()) {
             if (!m->is_object()) throw std::runtime_error("template.json: match.metadata must be an object");
             info_.match_metadata_json = m->dump();
+        }
+    }
+    if (auto it = j.find("names"); it != j.end()) {
+        auto pair_of = [](const nlohmann::json & v, const char * what) {
+            if (!v.is_array() || v.size() != 2 || !v[0].is_string() || !v[1].is_string() ||
+                v[0].get<std::string>().empty() || v[1].get<std::string>().empty()) {
+                throw std::runtime_error(std::string("template.json: names.") + what +
+                                         " must be [from, to], two metadata keys");
+            }
+            return std::make_pair(v[0].get<std::string>(), v[1].get<std::string>());
+        };
+        if (!it->is_object() || !it->contains("map")) {
+            throw std::runtime_error("template.json: names must be an object with a map");
+        }
+        std::tie(info_.names.map_from, info_.names.map_to) = pair_of((*it)["map"], "map");
+        if (auto a = it->find("aliases"); a != it->end()) {
+            std::tie(info_.names.aliases_from, info_.names.aliases_to) = pair_of(*a, "aliases");
+        }
+        if (auto f = it->find("fallbacks"); f != it->end()) {
+            if (!f->is_array()) throw std::runtime_error("template.json: names.fallbacks must be an array");
+            for (const auto & e : *f) {
+                if (!e.is_array() || e.size() != 2 || !e[0].is_string() || !e[1].is_string()) {
+                    throw std::runtime_error("template.json: a names.fallbacks entry must be [name, other]");
+                }
+                info_.names.fallbacks.emplace_back(e[0].get<std::string>(), e[1].get<std::string>());
+            }
+        }
+        for (auto k = it->begin(); k != it->end(); ++k) {
+            if (k.key() != "map" && k.key() != "aliases" && k.key() != "fallbacks") {
+                throw std::runtime_error("template.json: names." + k.key() + " is not a known field");
+            }
         }
     }
     if (auto it = j.find("provided"); it != j.end() && !(it->is_array() && it->empty())) {

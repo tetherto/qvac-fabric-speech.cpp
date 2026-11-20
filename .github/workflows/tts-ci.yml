@@ -1090,6 +1090,170 @@ jobs:
           SUPERTONIC_COREML_VECTOR_COMPUTE_UNITS: cpu_only
         run: ./build/test-supertonic-coreml-vector
 
+      # Supertonic 2 at a pinned Hugging Face revision, converted by the
+      # repo's converter (f16) and requantised by requantize-gguf.py (q8_0,
+      # pointwise convolutions squeezed to 2-D): the real-weights inputs of the
+      # generated vocoder sidecar (supertonic-vocoder-w64 for f16,
+      # supertonic-vocoder-pw2d-w64 for q8_0). The vocoder ONNX is checked
+      # against its SHA-256. Cache key: revision + converter and requantiser.
+      - name: Cache Supertonic 2 GGUFs (pinned revision)
+        if: runner.os == 'macOS'
+        id: supertonic2-pinned-cache
+        uses: actions/cache@v4
+        with:
+          path: supertonic2-pinned
+          key: supertonic2-75e67276-${{ hashFiles('engines/tts/scripts/convert-supertonic2-to-gguf.py', 'engines/tts/scripts/requantize-gguf.py', 'engines/parakeet/scripts/requirements-coreml.txt') }}
+
+      - name: Stage Supertonic 2 GGUFs (pinned revision)
+        if: runner.os == 'macOS' && steps.supertonic2-pinned-cache.outputs.cache-hit != 'true'
+        env:
+          SUPERTONIC2_REVISION: 75e6727618a02f323c720cba9478152d4bc16ca4
+        run: |
+          set -euo pipefail
+          if [ ! -x .venv-coreml/bin/python ]; then
+            coreml_python="$(command -v python3.11 || command -v python3)"
+            "$coreml_python" -m venv .venv-coreml
+            .venv-coreml/bin/python -m pip install --upgrade pip
+            .venv-coreml/bin/python -m pip install -r engines/parakeet/scripts/requirements-coreml.txt
+          fi
+          .venv-coreml/bin/python -m pip install -c engines/parakeet/scripts/requirements-coreml.txt \
+            "onnx==1.17.0" "onnxruntime==1.19.2" huggingface_hub
+          .venv-coreml/bin/python -c 'import os; from huggingface_hub import snapshot_download; snapshot_download("Supertone/supertonic-2", revision=os.environ["SUPERTONIC2_REVISION"], allow_patterns=["*.json", "onnx/*", "voice_styles/*"], local_dir="supertonic-2-hf")'
+          echo "19bd51f47a186069c752403518a40f7ea4c647455056d2511f7249691ecddf7c  supertonic-2-hf/onnx/vocoder.onnx" \
+            | shasum -a 256 -c -
+          mkdir -p supertonic2-pinned
+          .venv-coreml/bin/python engines/tts/scripts/convert-supertonic2-to-gguf.py --arch supertonic2 \
+            --onnx-dir supertonic-2-hf/onnx --ftype f16 --out supertonic2-pinned/supertonic2-f16.gguf
+          .venv-coreml/bin/python engines/tts/scripts/convert-supertonic2-to-gguf.py --arch supertonic2 \
+            --onnx-dir supertonic-2-hf/onnx --ftype f32 --out supertonic2-f32.gguf
+          .venv-coreml/bin/python engines/tts/scripts/requantize-gguf.py \
+            supertonic2-f32.gguf supertonic2-pinned/supertonic2-q8_0.gguf q8_0
+          rm -rf supertonic-2-hf supertonic2-f32.gguf
+          shasum -a 256 supertonic2-pinned/*.gguf
+
+      # The generated Supertonic vocoder sidecar on real weights, per template:
+      # - the real-weights gate: the C++ generator on the staged GGUF is
+      #   byte-equal to the unchanged exporter run on its f32 copy, and the
+      #   specs match;
+      # - generated from the GGUF alone into an empty cache, compiled and
+      #   loaded on the device, then parity against the ggml vocoder of the
+      #   same tier at cosine 0.999 on a padded, an exact-window and a
+      #   stitched multi-window latent; a second owner adopts the artifact;
+      #   the Engine, fit's envelope and near-budget memory-degrade; and the
+      #   device-class gating with faked brand strings. On a Max or Ultra
+      #   runner the template keeps a generated sidecar off by default, so the
+      #   gates run with use = require there (the log says so).
+      # --require-coreml fails the step if a gate would skip. The caches stay
+      # for the fit step below.
+      - name: Test (Core ML Supertonic vocoder generated sidecar, staged supertonic-2)
+        id: supertonic-vocoder-generated
+        if: runner.os == 'macOS'
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          set -euo pipefail
+          sw_vers
+          sysctl -n machdep.cpu.brand_string
+          if [ ! -x .venv-coreml/bin/python ]; then
+            coreml_python="$(command -v python3.11 || command -v python3)"
+            "$coreml_python" -m venv .venv-coreml
+            .venv-coreml/bin/python -m pip install -r engines/parakeet/scripts/requirements-coreml.txt
+          fi
+          for pair in "supertonic-vocoder-w64 f16" "supertonic-vocoder-pw2d-w64 q8_0"; do
+            set -- $pair
+            gguf="supertonic2-pinned/supertonic2-$2.gguf"
+            .venv-coreml/bin/python engines/coreml/python/coreml_template.py --tool build/qvac-coreml-tool real \
+              --template-dir "engines/tts/coreml-templates/$1" --gguf "$gguf"
+            rm -rf "supertonic-vocoder-cache-$2"
+            ./build/test-supertonic-coreml-parity --gguf "$gguf" --cache-dir "$PWD/supertonic-vocoder-cache-$2" \
+              --require-coreml
+          done
+
+      # The memory validation behind the Supertonic vocoder templates' memory
+      # constants, on this runner's chip: ggml vocoder calls run while the
+      # sidecar is generated, compiled, loaded and warmed in the background,
+      # three times per template, each from a re-signed copy of the test and
+      # an empty cache, so every Neural Engine load is cold. The schedule
+      # measures the generated route whatever the device class prefers. Each
+      # run prints its per-phase table and fails unless 1.25 x each phase it
+      # measured (the prepare, the load and warm-up, the steady state,
+      # ANECompilerService's absolute size while loading) fits the template
+      # constant that charges it, and the whole run fits the envelope; a failed
+      # probe, or a call that fails or runs on another backend, fails it too.
+      # The constants are 1.25 x the largest value of every run on every
+      # validated host, so a run that sets a new maximum fails until they are
+      # recomputed (docs/supertonic.md). Each run also prints the service's
+      # growth and its size before the load, labelled clean, dirty or unknown.
+      # Runs whenever the generated-sidecar step ran. Known failure mode, as
+      # for the Parler DAC's schedule: the service's size sums every instance
+      # on the Mac, so a co-hosted job that compiles for the Neural Engine
+      # during this load counts too: a run above 659 MiB fails the 824 MiB
+      # reserve and, by the rule above, raises it.
+      - name: Memory schedule (generated Supertonic vocoder, overlapped, this runner)
+        if: >-
+          !cancelled() && runner.os == 'macOS' &&
+          (steps.supertonic-vocoder-generated.outcome == 'success' || steps.supertonic-vocoder-generated.outcome == 'failure')
+        run: |
+          set -euo pipefail
+          sw_vers
+          sysctl -n machdep.cpu.brand_string hw.memsize
+          rm -rf supertonic-vocoder-memory
+          mkdir -p supertonic-vocoder-memory
+          status=0
+          for tier in f16 q8_0; do
+            for i in 1 2 3; do
+              id="qvac-memory-$(uuidgen)"
+              cp build/test-supertonic-coreml-parity "supertonic-vocoder-memory/$id"
+              codesign -s - -f -i "$id" "supertonic-vocoder-memory/$id"
+              "supertonic-vocoder-memory/$id" --gguf "supertonic2-pinned/supertonic2-$tier.gguf" \
+                --memory-schedule "$PWD/supertonic-vocoder-memory/cache-$tier-$i" || status=1
+              rm -rf "supertonic-vocoder-memory/cache-$tier-$i" "supertonic-vocoder-memory/$id" "$HOME/Library/Caches/$id"
+            done
+          done
+          rm -rf supertonic-vocoder-memory
+          exit "$status"
+
+      # The vocoder's route and fit are the same with an empty cache and with
+      # the caches the generated-sidecar step populated, whose hints are also
+      # rewritten stale and non-stale. The route compared is the generated one
+      # (use = require on this runner's device class, which prefers ggml), and
+      # fit must charge its envelope. Runs whenever that step ran.
+      - name: Test (Supertonic vocoder route and fit with an empty and a populated Core ML cache)
+        if: >-
+          !cancelled() && runner.os == 'macOS' &&
+          (steps.supertonic-vocoder-generated.outcome == 'success' || steps.supertonic-vocoder-generated.outcome == 'failure')
+        run: |
+          set -euo pipefail
+          status=0
+          for pair in "supertonic-vocoder-w64 f16" "supertonic-vocoder-pw2d-w64 q8_0"; do
+            set -- $pair
+            gguf="supertonic2-pinned/supertonic2-$2.gguf"
+            ./build/test-supertonic-coreml-route --gguf "$gguf" --template "$1" --fit || status=1
+            ./build/test-supertonic-coreml-route --gguf "$gguf" --template "$1" --fit \
+              --cache-dir "$PWD/supertonic-vocoder-cache-$2" || status=1
+          done
+          rm -rf supertonic-vocoder-cache-f16 supertonic-vocoder-cache-q8_0
+          exit "$status"
+
+      # A prebuilt-only build (the Core ML runtime without the generator, as
+      # on iOS): the Supertonic route test on the template twins must report
+      # the state this build plans (absent, no adjacent sidecar), not the one
+      # a build without Core ML reports. Builds only the test and the twin
+      # tool.
+      - name: Test (Supertonic vocoder route, Core ML runtime without generation)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          cmake -S engines/tts -B build-nogen \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DTTS_CPP_BUILD_TESTS=ON \
+            -DTTS_CPP_COREML=ON \
+            -DTTS_CPP_COREML_GENERATE=OFF \
+            -DCMAKE_PREFIX_PATH="$PWD/ggml-install"
+          cmake --build build-nogen -j4 --target test-supertonic-coreml-route qvac-coreml-tool
+          ctest --test-dir build-nogen -R '^test-supertonic-coreml-route(-twins.*|-self-test)?$' \
+            --no-tests=error --output-on-failure --timeout 300
+
   # GPU lane stub: opt-in until self-hosted GPU runners exist. Trial outcome
   # (QVAC-22775): hosted macos-14 exposes Metal but its Apple Paravirtual
   # device has no simdgroup matmul — kernel encode aborts with "unsupported

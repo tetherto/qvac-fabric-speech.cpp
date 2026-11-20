@@ -65,6 +65,7 @@ function(_qvac_coreml_generator_sources out_var)
         "${dir}/src/failed.cpp"
         "${dir}/src/interp.cpp"
         "${dir}/src/milblob.cpp"
+        "${dir}/src/names.cpp"
         "${dir}/src/recipe.cpp"
         "${dir}/src/source_stat.cpp"
         "${dir}/src/templates.cpp"

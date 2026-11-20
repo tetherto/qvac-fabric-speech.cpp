@@ -803,7 +803,7 @@ PrepareOutcome prepare(const PrepareInputs & in, PrepareContext * ctx) {
                               "source_changed");
     }
     Error err;
-    std::unique_ptr<OpenSource> src = in.open(in.expected.path, err);
+    std::unique_ptr<OpenSource> src = template_source(t, in.open(in.expected.path, err));
     if (!src) return failed_outcome(out, err.ok() ? Error::transient("cannot open " + in.expected.path) : err);
     SourceStat st0;
     if (!src->stat_now(st0)) return failed_outcome(out, io_error("fstat " + in.expected.path, errno));

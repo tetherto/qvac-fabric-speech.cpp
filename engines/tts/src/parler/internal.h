@@ -451,17 +451,19 @@ bool parler_dac_decode(const parler_model & model,
 // Fit's two verdicts for the generated DAC and memory-degrade. `required` is
 // the ggml-only projection (margin and, on unified memory, host extras
 // included); `coreml_bytes` the stage's Core ML envelope, charged only when
-// `generate`. Both verdicts compare against `device_free`. With a budget,
-// memory-degrade drops Core ML when the Core ML-inclusive projection exceeds
-// the capacity the verdict uses, min(device_free, budget), and the ggml one
-// fits it, so Core ML never turns a working ggml verdict into a refusal. No
-// budget, no memory-degrade.
+// `generate`. With a budget, a generated route decides both verdicts,
+// memory-degrade and the final verdict on one capacity, min(device_free,
+// budget); memory-degrade drops Core ML when the Core ML-inclusive projection
+// exceeds it and the ggml one fits it, so Core ML never turns a working ggml
+// verdict into a refusal. No budget, no memory-degrade: the capacity is
+// device_free.
 struct parler_coreml_fit_verdict {
     bool ggml_only_fits = false;
     bool coreml_fits    = false;
     bool degraded       = false;  // memory-degrade: use = off, reason "memory"
     bool fits           = false;  // the verdict for what the engine will run
-    uint64_t charged    = 0;      // what `fits` compares with device_free
+    uint64_t charged    = 0;      // what `fits` compares with `capacity`
+    uint64_t capacity   = 0;      // device_free, or min(device_free, budget)
 };
 parler_coreml_fit_verdict parler_decide_coreml_fit(uint64_t required, uint64_t coreml_bytes, bool generate,
                                                    uint64_t device_free,

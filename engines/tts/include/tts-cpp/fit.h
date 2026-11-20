@@ -56,7 +56,9 @@ struct FitBreakdown {
 struct FitCoreml {
     std::string route = "none";  // "prebuilt" | "generate" | "none"
     // The Core ML-inclusive verdict: the ggml projection (its residency kept)
-    // plus the stage's Core ML envelope.
+    // plus the stage's Core ML envelope. With coreml.memory_budget_bytes on a
+    // generated route, this, ggml_only_fits and FitResult::fits all compare
+    // against min(free memory, budget).
     bool        fits  = true;
     uint64_t    bytes = 0;       // the envelope: resident + one transient, with its margin
     bool        validated = false;  // the envelope was measured for the resolved compute units

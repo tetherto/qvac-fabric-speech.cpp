@@ -284,6 +284,19 @@ void run_synthetic_gates() {
                "synthetic near-INT_MAX text_tokens was not workload-too-large");
     }
     {
+        // -1 is the loader's automatic Vulkan adapter: a valid option, so
+        // the projection runs (and fails measuring the partial model).
+        tts_cpp::supertonic::FitOptions auto_dev = fopts;
+        auto_dev.vulkan_device = -1;
+        const tts_cpp::FitResult fr = tts_cpp::supertonic::fit_params(auto_dev);
+        expect(fr.reason != "invalid-arguments",
+               "synthetic automatic Vulkan adapter (-1) was invalid-arguments");
+        tts_cpp::supertonic::FitOptions bad = fopts;
+        bad.vulkan_device = -2;
+        expect(tts_cpp::supertonic::fit_params(bad).reason == "invalid-arguments",
+               "synthetic Vulkan adapter -2 was not invalid-arguments");
+    }
+    {
         tts_cpp::supertonic::FitOptions bad = fopts;
         bad.precision = "int4";
         const tts_cpp::FitResult fr = tts_cpp::supertonic::fit_params(bad);

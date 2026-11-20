@@ -142,6 +142,8 @@ int main() {
         tts_cpp::supertonic::EngineOptions options;
         options.model_gguf_path = path; options.n_gpu_layers = 0;
         options.prewarm_text = "Hello.";
+        // The vocoder sidecar loads in the background; wait for it here.
+        options.coreml.wait = tts_cpp::CoremlOptions::Wait::construct;
         tts_cpp::supertonic::Engine engine(options);
         check(engine.vector_estimator_on_coreml(),"public load status false");
         if (model.vocoder_on_coreml) check(engine.vocoder_on_coreml(),"public vocoder load status false");
