@@ -9,7 +9,8 @@
 // validated for generates nothing, and every capacity keeps a status entry
 // that says so; so does an Engine with generation off (generate = never).
 // The generated capacities' warm hints are found and made stale: the charge
-// and the verdicts at a fixed budget stay those of no hint and fresh hints.
+// and the returned verdicts at injected free-memory readings at the charge
+// and one byte under it are those of no hint and of fresh hints.
 // With prewarm = all the charge covers every generated capacity, and so does
 // the default 300 s workload: an instance projected for it also runs shorter
 // calls as one pass up to the long-form window (1125 frames for Nemotron),
@@ -96,10 +97,38 @@ parakeet::FitResult project(const std::string & gguf, const parakeet::CoremlOpti
     return parakeet::fit_params(opts);
 }
 
+// The same projection against an injected free-memory reading.
+parakeet::FitResult project_free(const std::string & gguf, const parakeet::CoremlOptions & coreml, uint64_t free) {
+    parakeet::FitOptions opts;
+    opts.model_gguf_path = gguf;
+    opts.n_gpu_layers = kGpuLayers;
+    opts.coreml = coreml;
+    opts.device_free_bytes = free;
+    return parakeet::fit_params(opts);
+}
+
 void print(const char * what, const parakeet::FitResult & r) {
     std::printf("%s: ggml %llu, coreml %llu (fits %d, validated %d), free %llu\n", what,
                 (unsigned long long) r.ggml_required_bytes, (unsigned long long) r.coreml.bytes, r.coreml.fits,
                 r.coreml.validated, (unsigned long long) r.device_free_bytes);
+}
+
+// The returned verdicts at an injected free-memory reading `budget`, in the
+// hint state `state`: the reading is the one used, the ggml-only verdict
+// passes, and the Core ML verdict passes exactly when the budget covers
+// `at_charge` (ggml-only total + Core ML charge without hints).
+void check_verdicts(const std::string & gguf, const parakeet::CoremlOptions & coreml, const char * state,
+                    uint64_t at_charge) {
+    for (const uint64_t budget : {at_charge, at_charge - 1}) {
+        const parakeet::FitResult r = project_free(gguf, coreml, budget);
+        const bool covers = budget == at_charge;
+        std::printf("%s, free %llu: ggml_only_fits %d, coreml.fits %d\n", state, (unsigned long long) budget,
+                    r.ggml_only_fits, r.coreml.fits);
+        const std::string label = std::string(state) + (covers ? ", free = the charge" : ", free = the charge - 1") +
+                                  ": the returned ggml-only verdict passes and the Core ML verdict " +
+                                  (covers ? "passes" : "fails");
+        check(r.device_free_bytes == budget && r.ggml_only_fits && r.coreml.fits == covers, label.c_str());
+    }
 }
 
 // One template's charge, from its template.json as the runtime computes it
@@ -211,6 +240,10 @@ int main(int argc, char ** argv) {
     check(before.coreml.disabled_reason.empty(), "Core ML is enabled for the projection");
     check(before.coreml.bytes > 0 && before.coreml.validated,
           "the generated capacities are charged, validated for the resolved units");
+    // The verdicts at fixed free-memory readings that straddle the charge;
+    // the same readings are checked again with fresh and with stale hints.
+    const uint64_t at_charge = before.ggml_required_bytes + before.coreml.bytes;
+    check_verdicts(gguf, coreml_options(cache), "no hint", at_charge);
 
     // prewarm = all loads every capacity at construction: the charge covers
     // all of them. The default workload (300 s, long form) reaches every
@@ -297,6 +330,7 @@ int main(int argc, char ** argv) {
         fresh = fresh && !j.is_discarded() && j.contains("stale_until") && j["stale_until"].is_null();
     }
     check(fresh, "the generated capacities' hints are not stale");
+    check_verdicts(gguf, coreml_options(cache), "fresh hints", at_charge);
     for (const std::filesystem::path & h : hints) {
         nlohmann::json j = read_json(h);
         j["stale_until"] = "2999-01-01T00:00:00Z";
@@ -313,19 +347,7 @@ int main(int argc, char ** argv) {
     check(stale_fit.coreml.bytes == before.coreml.bytes && stale_fit.coreml.validated == before.coreml.validated &&
               stale_fit.ggml_required_bytes == before.ggml_required_bytes,
           "fit-stable: stale hints give the same charge, validation and ggml-only total");
-    // The Engine's memory verdict (ggml-only fits, Core ML-inclusive does not)
-    // at a budget exactly at the charge and one byte under it.
-    const uint64_t at_charge = before.ggml_required_bytes + before.coreml.bytes;
-    auto coreml_fits = [](const parakeet::FitResult & r, uint64_t budget) {
-        return r.ggml_required_bytes + r.coreml.bytes <= budget;
-    };
-    for (const uint64_t budget : {at_charge, at_charge - 1}) {
-        check(coreml_fits(before, budget) == coreml_fits(after, budget) &&
-                  coreml_fits(before, budget) == coreml_fits(stale_fit, budget),
-              "fit-stable: no hint, a fresh hint and a stale one give the same verdict at a fixed budget");
-    }
-    check(coreml_fits(stale_fit, at_charge) && !coreml_fits(stale_fit, at_charge - 1),
-          "the fixed budgets straddle the charge");
+    check_verdicts(gguf, coreml_options(cache), "stale hints", at_charge);
     parakeet::CoremlOptions short_by_one = coreml_options(cache);
     short_by_one.memory_budget_bytes = static_cast<int64_t>(at_charge - 1);
     check(contains(engine_status(gguf, short_by_one), "\"generation\":{\"reason\":\"memory\",\"supported\":false}"),
@@ -413,6 +435,10 @@ int main(int argc, char ** argv) {
         std::printf("expected %llu\n", (unsigned long long) expected);
         check(mixed.coreml.bytes == expected,
               "an adjacent bundle above the templates: the charge holds every capacity and the bundle together");
+        const parakeet::FitResult tight_fit =
+            project_free(linked, coreml_options(cache), mixed.ggml_required_bytes + expected - 1024 * 1024);
+        check(tight_fit.ggml_only_fits && !tight_fit.coreml.fits,
+              "free memory 1 MiB under that charge: ggml-only fits, the Core ML verdict fails");
         parakeet::CoremlOptions under = coreml_options(cache);
         under.memory_budget_bytes = static_cast<int64_t>(mixed.ggml_required_bytes + expected - 1024 * 1024);
         check(contains(engine_status(linked, under), "\"generation\":{\"reason\":\"memory\",\"supported\":false}"),

@@ -672,7 +672,7 @@ FitResult fit_params(const FitOptions & opts) {
     {
         size_t free_b = 0, total_b = 0;
         backend_device_memory(backend, free_b, total_b);
-        r.device_free_bytes  = free_b;
+        r.device_free_bytes  = opts.device_free_bytes.value_or(free_b);
         r.device_total_bytes = total_b;
     }
 
