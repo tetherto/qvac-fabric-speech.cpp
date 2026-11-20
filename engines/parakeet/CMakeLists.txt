@@ -1979,7 +1979,27 @@ if (PARAKEET_BUILD_TESTS)
             LABELS "fixture;coreml;coreml-generated" TIMEOUT 1800)
         # The DER gate: the generated diarizers against the exporter's bundles on
         # the pinned clips, both on the Neural Engine, at most 0.2 pp apart.
-        if (PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF AND Python3_EXECUTABLE)
+        # Registered only where every input it uses exists: the exporter's
+        # three bundles beside PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF (a
+        # default path that may name no file), the pinned clips and the DER
+        # script. The CI Core ML lane stages only the GGUF, so it has no such
+        # test (a disabled one would fail its no-skip check).
+        get_filename_component(_qvp_der_dir "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}" DIRECTORY)
+        set(_qvp_der_inputs
+            "${PARAKEET_TEST_NEMOTRON_GENERATED_GGUF}" "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}"
+            "${_qvp_der_dir}/Nemotron-3-Diarization-diarizer-358.mlmodelc"
+            "${_qvp_der_dir}/Nemotron-3-Diarization-diarizer-745.mlmodelc"
+            "${_qvp_der_dir}/Nemotron-3-Diarization-diarizer-1125.mlmodelc"
+            "${CMAKE_CURRENT_SOURCE_DIR}/test/samples/abcba.wav" "${CMAKE_CURRENT_SOURCE_DIR}/test/samples/abcba.rttm"
+            "${CMAKE_CURRENT_SOURCE_DIR}/test/samples/abcdba.wav" "${CMAKE_CURRENT_SOURCE_DIR}/test/samples/abcdba.rttm"
+            "${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/benchmarks/compute-der.py")
+        set(_qvp_der_ready ${Python3_EXECUTABLE})
+        foreach (_qvp_der_input IN LISTS _qvp_der_inputs)
+            if (NOT EXISTS "${_qvp_der_input}")
+                set(_qvp_der_ready FALSE)
+            endif()
+        endforeach()
+        if (_qvp_der_ready)
             add_test(NAME test-nemotron-diarization-coreml-generated-der
                 COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check-generated-diarizer-der.py
                         --cli $<TARGET_FILE:parakeet-cli>
@@ -1990,6 +2010,9 @@ if (PARAKEET_BUILD_TESTS)
                         --work "${CMAKE_CURRENT_BINARY_DIR}/coreml-generated-der")
             set_tests_properties(test-nemotron-diarization-coreml-generated-der PROPERTIES
                 LABELS "fixture;coreml;coreml-generated" TIMEOUT 1800)
+        else()
+            message(STATUS "parakeet: test test-nemotron-diarization-coreml-generated-der not registered "
+                           "(it needs the exporter's diarizer bundles beside PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF)")
         endif()
         # A generated diarizer comes only from the file whose weights the model
         # loaded: the path names another file only while the GGUF is opened.
