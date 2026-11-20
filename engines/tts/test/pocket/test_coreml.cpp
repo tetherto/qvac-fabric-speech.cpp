@@ -1769,6 +1769,47 @@ int cli_paths(const fs::path & bundle, const std::string & cli) {
     }
 #endif
 #ifdef TTS_CPP_USE_COREML
+    // --coreml-ignore-prebuilt on a bundle with prebuilt sidecars: without it
+    // fit cannot project them; with it fit plans the generated route, and an
+    // unset disabled_reason is JSON null.
+    {
+        for (const char * sidecar : {"flow-lm-step.mlmodelc", "mimi-decoder.mlmodelc"}) {
+            fs::create_directories(dir / "bundle" / sidecar / "weights");
+            std::ofstream(dir / "bundle" / sidecar / "weights" / "weight.bin", std::ios::binary) << "w";
+        }
+        const fs::path report = dir / "fit.json";
+        auto fit = [&](const std::string & extra) {
+            const std::string cmd = "env -u QVAC_COREML_CACHE_DIR -u POCKET_COREML_DISABLE HOME='" +
+                                    (dir / "home").string() + "' '" + cli + "' --fit --model-dir '" +
+                                    (dir / "bundle").string() + "' --text 'Hi.' --coreml-cache-dir '" +
+                                    (dir / "fit-cache").string() + "' --report '" + report.string() + "' " + extra +
+                                    " > '" + log.string() + "' 2>&1";
+            run_command(cmd);
+            return nlohmann::json::parse(file_text(report));
+        };
+        const nlohmann::json with_prebuilt = fit("");
+        const nlohmann::json ignored = fit("--coreml-ignore-prebuilt");
+        std::printf("[cli] fit: prebuilt %s / %s; --coreml-ignore-prebuilt %s / %s\n",
+                    with_prebuilt.at("reason").get<std::string>().c_str(),
+                    with_prebuilt.at("coreml").at("route").get<std::string>().c_str(),
+                    ignored.at("reason").get<std::string>().c_str(),
+                    ignored.at("coreml").at("route").get<std::string>().c_str());
+        require(with_prebuilt.at("coreml").at("route") == "prebuilt" &&
+                    with_prebuilt.at("reason") == "coreml-memory-estimate-unavailable",
+                "fit without the flag uses the prebuilt sidecars: " + with_prebuilt.dump());
+        require(ignored.at("coreml").at("route") != "prebuilt" && ignored.at("coreml").at("disabled_reason").is_null(),
+                "fit with --coreml-ignore-prebuilt plans the generated route, disabled_reason null: " +
+                    ignored.dump());
+        const auto plain = pd::coreml_plan_route(pd::CoremlStage::decoder, [&] {
+            EngineOptions e = bundle_options(dir / "bundle");
+            e.coreml.cache_dir = (dir / "fit-cache").string();
+            e.coreml_ignore_prebuilt = true;
+            return pd::coreml_engine_options(e);
+        }());
+        require(ignored.at("coreml").at("route") == plain.route, "the CLI's route is the library's: " + plain.route);
+        for (const char * sidecar : {"flow-lm-step.mlmodelc", "mimi-decoder.mlmodelc"})
+            fs::remove_all(dir / "bundle" / sidecar);
+    }
     // The cache directory each way.
     const fs::path status = dir / "status.json";
     auto cache_dir = [&](const std::string & env, const std::string & extra) {

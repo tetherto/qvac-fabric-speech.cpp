@@ -242,6 +242,9 @@ struct CoremlEngineOptions {
     CoremlOptions coreml;
     std::string step_units, decoder_units, legacy_units;
     std::optional<bool> legacy_strict;
+    // EngineOptions::coreml_ignore_prebuilt: plan as if no sidecar sat next
+    // to the GGUFs (benchmarks of the generated route).
+    bool ignore_prebuilt = false;
     // The files FlowLM and Mimi were loaded from. A generated stage without
     // one (or whose path no longer names it) fails with source_changed.
     std::shared_ptr<const CoremlLoadedSource> step_source, decoder_source;

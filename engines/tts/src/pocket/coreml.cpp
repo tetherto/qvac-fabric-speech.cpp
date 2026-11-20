@@ -480,6 +480,7 @@ CoremlEngineOptions coreml_engine_options(const EngineOptions & o) {
     c.decoder_units = o.coreml_decoder_units;
     c.legacy_units = o.coreml_compute_units;
     c.legacy_strict = o.coreml_strict;
+    c.ignore_prebuilt = o.coreml_ignore_prebuilt;
     return c;
 }
 
@@ -719,7 +720,8 @@ planned plan_stage(CoremlStage stage, const CoremlEngineOptions & opts) {
     pcm::PlanInput in;
     in.coreml_built = true;
     in.generation_built = pcm::generation::built();
-    in.prebuilt_present = !gguf.empty() && ::tts_cpp::detail::coreml_sidecar_exists(out.prebuilt_path);
+    in.prebuilt_present =
+        !opts.ignore_prebuilt && !gguf.empty() && ::tts_cpp::detail::coreml_sidecar_exists(out.prebuilt_path);
     if (in.generation_built && !in.prebuilt_present && r.enabled() && !gguf.empty()) {
 #ifdef QVAC_COREML_GENERATE
         pcm::pocket_provided::register_all();

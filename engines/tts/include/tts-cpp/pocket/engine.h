@@ -56,6 +56,10 @@ struct EngineOptions {
     // Per-stage compute units; override coreml.compute_units for their stage.
     std::string coreml_step_units;
     std::string coreml_decoder_units;
+    // Development and benchmarks: plan both stages as if no sidecar sat next
+    // to the GGUFs, so a bundle with prebuilt sidecars measures the generated
+    // route (with coreml.cache_dir). fit_params follows it too.
+    bool coreml_ignore_prebuilt = false;
 
     // The workload and headroom of the fit_params call that assessed this
     // engine (FitOptions::text and FitOptions::margin_bytes; the defaults are

@@ -49,7 +49,7 @@ Arguments parse_arguments(int argc, char ** argv) {
     for (int i = 1; i < argc; ++i) {
         const std::string key = argv[i];
         if (key == "--help") { args.values[key] = "true"; return args; }
-        if (key == "--fit" || key == "--gpu") {
+        if (key == "--fit" || key == "--gpu" || key == "--coreml-ignore-prebuilt") {
             if (args.has(key)) throw std::runtime_error("duplicate option: "+key);
             args.values[key] = "true"; continue;
         }
@@ -76,7 +76,9 @@ void print_help() {
               "  default: QVAC_COREML_CACHE_DIR, else ~/Library/Application Support/qvac-speech/coreml;\n"
               "  --coreml-wait none|construct|call, --coreml-prewarm none|minimal|predicted|all,\n"
               "  --coreml-step-units / --coreml-decoder-units all|cpu_and_ane|cpu_and_gpu|cpu_only,\n"
-              "  --coreml-status-json FILE writes the Core ML status after the runs.\n"
+              "  --coreml-status-json FILE writes the Core ML status after the runs;\n"
+              "  --coreml-ignore-prebuilt (development) plans as if no sidecar sat next to the GGUFs, so --fit and\n"
+              "  synthesis use the generated route on a bundle with prebuilt sidecars.\n"
               "Fit exit status: 0 fits, 1 does not fit, 2 measurement error.");
 }
 // The CLI keeps generated sidecars and warm-load hints under Application
@@ -130,6 +132,7 @@ EngineOptions engine_options(const Arguments & args, const std::string & text) {
         else if (w == "all") opts.coreml.prewarm = tts_cpp::CoremlOptions::Prewarm::all;
         else throw std::runtime_error("--coreml-prewarm must be none, minimal, predicted or all");
     }
+    opts.coreml_ignore_prebuilt = args.has("--coreml-ignore-prebuilt");
     opts.coreml_step_units = args.get("--coreml-step-units", "");
     opts.coreml_decoder_units = args.get("--coreml-decoder-units", "");
     const int seed = args.integer("--seed", opts.seed);
@@ -161,7 +164,8 @@ int run_fit(const Arguments & args, const EngineOptions & opts, const std::strin
         {"available_bytes", result.device_free_bytes}, {"total_memory_bytes", result.device_total_bytes},
         {"margin_bytes", fit.margin_bytes}, {"budget_bytes", fit.memory_budget_bytes},
         {"coreml", {{"route", result.coreml.route}, {"bytes", result.coreml.bytes}, {"fits", result.coreml.fits},
-                    {"validated", result.coreml.validated}, {"disabled_reason", result.coreml.disabled_reason},
+                    {"validated", result.coreml.validated}, {"disabled_reason", result.coreml.disabled_reason.empty() ? Json(nullptr)
+                                                                                       : Json(result.coreml.disabled_reason)},
                     {"ggml_only_fits", result.coreml.ggml_only_fits}}},
         {"report", result.report}});
     return int(result.status);

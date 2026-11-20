@@ -302,7 +302,11 @@ sidecars after construction (scope `none` requests nothing), for example with
 `prewarm = none` to prepare them before the first synthesis, and returns that
 group's result the same way. `pocket-cli` takes `--coreml-cache-dir`, `--coreml-wait`,
 `--coreml-prewarm`, `--coreml-step-units`, `--coreml-decoder-units` and
-`--coreml-status-json`. Unlike the library (whose default is no cache, so no
+`--coreml-status-json`, and the development flag `--coreml-ignore-prebuilt`
+(`EngineOptions::coreml_ignore_prebuilt`), which plans both stages as if no
+sidecar sat next to the GGUFs so `--fit` and synthesis measure the generated
+route on a bundle that ships prebuilt sidecars. The `--fit --report` JSON
+writes an unset `coreml.disabled_reason` as `null`. Unlike the library (whose default is no cache, so no
 generation), `pocket-cli` generates by default: without `--coreml-cache-dir`
 or `QVAC_COREML_CACHE_DIR` it uses `~/Library/Application
 Support/qvac-speech/coreml` (not `Library/Caches`, which macOS may purge,

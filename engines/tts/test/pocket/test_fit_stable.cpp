@@ -286,6 +286,15 @@ void prebuilt_reserve(const std::string & mimi_gguf, const fs::path & scratch, c
         fprintf(stderr, "prebuilt reserve: no generated route here (%s), measured reserve not checked\n",
                 describe(generated).c_str());
     }
+    // The development flag plans the same bundle as if the sidecar were
+    // absent: the generated route (with a cache directory), for benchmarks.
+    e.coreml_ignore_prebuilt = true;
+    e.coreml.cache_dir = (scratch / "ignore-prebuilt-cache").string();
+    const pd::CoremlRoute ignored = route();
+    check(ignored.route == generated.route && ignored.route != "prebuilt",
+          "coreml_ignore_prebuilt plans the generated route next to a prebuilt: " + describe(ignored));
+    e.coreml_ignore_prebuilt = false;
+    e.coreml.cache_dir.reset();
     fs::resize_file(weights, 1 << 20);
     const pd::CoremlRoute other = route();
     check(other.route == "prebuilt" && other.ane_compile_reserve_bytes == uint64_t(1.6 * double(1 << 20)),
