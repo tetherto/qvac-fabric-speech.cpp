@@ -257,9 +257,11 @@ void cli_cache_default_gates(const std::string & gguf, const fs::path & scratch)
     std::fprintf(stderr, "CLI cache default (%s)\n", gguf.c_str());
     const fs::path home = scratch / "home";
     fs::create_directories(home);
-    const std::string expected = home.string() + CLI_COREML_CACHE_SUBDIR;
+    // HOME as the CLI reads it (a narrow string, also on Windows).
+    const std::string home_env = home.string();
+    const std::string expected = home_env + CLI_COREML_CACHE_SUBDIR;
     tts_cpp::CoremlOptions o;
-    apply_cli_coreml_cache_default(o, nullptr, home.c_str(), cli_on_macos());
+    apply_cli_coreml_cache_default(o, nullptr, home_env.c_str(), cli_on_macos());
     if (cli_on_macos()) {
         check(o.cache_dir && *o.cache_dir == expected, "macOS: Application Support default " + o.cache_dir.value_or("(unset)"));
     } else {
@@ -275,13 +277,13 @@ void cli_cache_default_gates(const std::string & gguf, const fs::path & scratch)
     }
     tts_cpp::CoremlOptions flag;
     flag.cache_dir = (scratch / "explicit").string();
-    apply_cli_coreml_cache_default(flag, "/env/dir", home.c_str(), true);
+    apply_cli_coreml_cache_default(flag, "/env/dir", home_env.c_str(), true);
     check(flag.cache_dir && *flag.cache_dir == (scratch / "explicit").string(), "an explicit directory wins");
     tts_cpp::CoremlOptions env;
-    apply_cli_coreml_cache_default(env, "/env/dir", home.c_str(), true);
+    apply_cli_coreml_cache_default(env, "/env/dir", home_env.c_str(), true);
     check(!env.cache_dir, "QVAC_COREML_CACHE_DIR is left to the library");
     tts_cpp::CoremlOptions other;
-    apply_cli_coreml_cache_default(other, nullptr, home.c_str(), false);
+    apply_cli_coreml_cache_default(other, nullptr, home_env.c_str(), false);
     apply_cli_coreml_cache_default(other, nullptr, "", true);
     check(!other.cache_dir, "no default off macOS or without a home");
     std::error_code ec;
