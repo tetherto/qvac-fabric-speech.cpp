@@ -614,6 +614,10 @@ bool transcribe_independent_segments(ParakeetCtcModel & model, TdtRuntimeWeights
     CoremlLaneStepper stepper(dec);
     const bool usable_decoder = dec && stepper.usable();
     const bool full_eu = model.model_variant == "transcribepsy-250m-eu";
+    // Without a held Core ML encoder (its sidecar still loading, or none), a
+    // standard model keeps the call's ggml plan: disjoint segments would
+    // change the attention context the sequential ggml pass gives.
+    if (!full_eu && !route.holds()) return false;
     if (dec && stepper.n_width != 1)
         PARAKEET_LOG_WARN("parakeet: Core ML decoder was exported at width=%lld; only width=1 is driven\n",
                           (long long) stepper.n_width);

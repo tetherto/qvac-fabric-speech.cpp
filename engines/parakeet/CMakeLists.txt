@@ -3363,6 +3363,17 @@ if (PARAKEET_BUILD_TESTS)
             ARGS     "--case" "sortformer" "--sortformer-gguf" "${_qvp_sfsv21_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
             REQUIRES "${_qvp_sfsv21_q8_gguf}" "${_qvp_jfk_wav}"
                      "${PARAKEET_TEST_MODEL_DIR}/diar_streaming_sortformer_4spk-v2.1-diarizer-410.mlmodelc")
+        # A standard TDT model with its decoder sidecar ready and its encoder
+        # sidecar still loading keeps the sequential ggml plan.
+        parakeet_register_test(test-parakeet-coreml-runtime-pending-encoder
+            LABEL    "fixture;coreml"
+            EXE      test-parakeet-coreml-runtime
+            ARGS     "--case" "pending-encoder" "--sub-gguf" "${_qvp_transcribepsy_gguf}"
+                     "--sub-encoder" "${_qvp_transcribepsy_coreml_encoder}"
+                     "--sub-decoder" "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-sub-coreml-decoder.mlmodelc"
+                     "--wav" "${_qvp_jfk_wav}"
+            REQUIRES "${_qvp_transcribepsy_gguf}" "${_qvp_transcribepsy_coreml_encoder}"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-sub-coreml-decoder.mlmodelc" "${_qvp_jfk_wav}")
         parakeet_register_test(test-parakeet-coreml-runtime-encoderless
             LABEL    "fixture;coreml"
             EXE      test-parakeet-coreml-runtime

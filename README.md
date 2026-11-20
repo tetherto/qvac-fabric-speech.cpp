@@ -143,6 +143,18 @@ contracts; see the engine guides before exporting or deploying one.
 | AudioGen | ACE-Step VAE decoder | [AudioGen backends](engines/audiogen/docs/backends.md#core-ml-vae-decoder-sidecar) |
 | AudioGen | MiniMax conditioner projection, or explicit full-network Core ML (`coreml_profile_dir` + `coreml_compute_units`, macOS 15+) | [MiniMax Core ML](engines/audiogen/docs/backends.md#minimax-core-ml-conditioner) |
 
+Nemotron 3 Diarization diarizers need no exported bundle on macOS: a build with
+`PARAKEET_COREML=ON` (the generator, `PARAKEET_COREML_GENERATE`, is on by default
+on macOS) generates each diarizer capacity from the GGUF on the device in the
+background, compiles it and keeps it in a cache directory, and diarization runs
+on ggml until a capacity is ready. Generation needs that cache directory: set
+`CoremlOptions::cache_dir` or `QVAC_COREML_CACHE_DIR` for the library (it has
+none by default, and then nothing is generated), or `--coreml-cache-dir` for
+the `parakeet` CLI (which defaults to
+`~/Library/Application Support/qvac-speech/coreml`). See
+[Generated sidecars](engines/parakeet/README.md#generated-sidecars) for the
+setup, options and memory.
+
 TranscribePsy conversion uses 60-second windows with 25% overlap for full EU
 and records its Apache-2.0 provenance. For EU-sub Core ML deployment, the
 repository provides an encoder-stripping tool and decoder output-projection
