@@ -482,7 +482,7 @@ jobs:
           if-no-files-found: warn
 
       # The same validation for the Sortformer v2.1 template, on this runner's
-      # chip: AOSC-sized diarizer passes while the engine generates, compiles,
+      # chip: diarizer passes on the sample clip (342 frames) while the engine generates, compiles,
       # loads and warms its capacity in the background, from a re-signed copy
       # of the tool and an empty cache each run.
       - name: Memory schedule (generated Sortformer diarizer, overlapped, this runner)
