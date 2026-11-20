@@ -2086,6 +2086,17 @@ if (PARAKEET_BUILD_TESTS)
                     "${CMAKE_CURRENT_BINARY_DIR}/coreml-generated-sortformer-fit-cache" sortformer-diar-f410)
         set_tests_properties(test-fit-coreml-generated-sortformer-diarizer PROPERTIES
             LABELS "fixture;coreml;coreml-generated" TIMEOUT 1800)
+        # use = require with no cache directory: an offline pass the
+        # status-only template capacity covers throws unsupported(no_cache_dir).
+        add_executable(test-sortformer-diarizer-coreml-require test/test_sortformer_diarizer_coreml_require.cpp)
+        target_link_libraries(test-sortformer-diarizer-coreml-require PRIVATE qvac-parakeet)
+        target_include_directories(test-sortformer-diarizer-coreml-require PRIVATE include)
+        parakeet_apply_ccache(test-sortformer-diarizer-coreml-require)
+        add_test(NAME test-sortformer-diarizer-coreml-require
+            COMMAND test-sortformer-diarizer-coreml-require "${PARAKEET_TEST_SORTFORMER_GENERATED_GGUF}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/test/samples/diarization-sample-16k.wav")
+        set_tests_properties(test-sortformer-diarizer-coreml-require PROPERTIES
+            LABELS "fixture;coreml;coreml-generated" TIMEOUT 1800)
         # The Sortformer diarizer is generated only from the file whose weights
         # the model loaded, as for Nemotron (same test, Sortformer GGUF).
         if (NOT TARGET test-nemotron-diarization-coreml-source)

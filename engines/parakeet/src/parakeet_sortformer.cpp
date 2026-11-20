@@ -715,18 +715,6 @@ void finish_diarization(const ParakeetCtcModel & model, int T_enc,
                           out.frame_stride_s, opts.threshold, out.segments);
 }
 
-int coreml_capacity(const ParakeetCtcModel & model) {
-#ifdef PARAKEET_USE_COREML
-    CoremlDiarizers * diarizers = model_coreml_diarizers(model);
-    if (!diarizers) return 0;
-    const std::vector<int> capacities = diarizers->capacities();
-    return capacities.empty() ? 0 : capacities.back();
-#else
-    (void) model;
-    return 0;
-#endif
-}
-
 }
 
 bool sortformer_diarize_coreml(const ParakeetCtcModel & model,
@@ -760,20 +748,16 @@ bool sortformer_diarize_mel_coreml(ParakeetCtcModel & model,
                                    const float * mel, int n_mel_frames,
                                    const SortformerDiarizationOptions & opts,
                                    SortformerDiarizationResult & out) {
-    const long long covered_mel =
-        (long long) coreml_capacity(model) * model.encoder_cfg.subsampling_factor;
     if (n_mel_frames <= 0) return false;
-    if (n_mel_frames > covered_mel) {
 #ifdef PARAKEET_USE_COREML
-        // Under use = require a pass too wide for every capacity is refused
-        // (covers() throws the capacity error); otherwise it runs on ggml.
-        const int sub = std::max(1, model.encoder_cfg.subsampling_factor);
-        if (CoremlDiarizers * diarizers = model_coreml_diarizers(model)) {
-            (void) diarizers->covers((int) ((n_mel_frames + sub - 1) / sub));
-        }
-#endif
-        return false;
-    }
+    // The pass goes to the diarizer when a capacity covers it, through the
+    // same acquisition as an AOSC step: under use = require a covering
+    // capacity that cannot serve (failed, or status-only such as
+    // unsupported(no_cache_dir)) throws there, and a pass longer than every
+    // capacity throws in covers(); otherwise both run on ggml.
+    CoremlDiarizers * diarizers = model_coreml_diarizers(model);
+    const int sub = std::max(1, model.encoder_cfg.subsampling_factor);
+    if (!diarizers || !diarizers->covers((n_mel_frames + sub - 1) / sub)) return false;
     std::vector<float> pre_encode;
     int T_enc = 0;
     if (run_subsampling(model, mel, n_mel_frames, model.mel_cfg.n_mels, pre_encode, T_enc) != 0) {
@@ -781,6 +765,10 @@ bool sortformer_diarize_mel_coreml(ParakeetCtcModel & model,
     }
     return sortformer_diarize_coreml(model, pre_encode.data(), T_enc,
                                      model.encoder_cfg.sortformer_fc_d_model, opts, out);
+#else
+    (void) model; (void) mel; (void) opts; (void) out;
+    return false;
+#endif
 }
 
 int sortformer_diarize_ggml(const ParakeetCtcModel & model,
