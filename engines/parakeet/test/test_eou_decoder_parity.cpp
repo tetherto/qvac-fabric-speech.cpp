@@ -118,7 +118,7 @@ int encode_reference(const std::string & gguf_path,
 
     EncoderOutputs enc_out;
     if (int rc = run_encoder(model, mel.data(), n_frames,
-                             model.mel_cfg.n_mels, enc_out); rc != 0) {
+                             model.mel_cfg.n_mels, enc_out, parakeet::EncoderRoute::ggml()); rc != 0) {
         std::fprintf(stderr, "  run_encoder failed rc=%d\n", rc);
         return 140 + rc;
     }

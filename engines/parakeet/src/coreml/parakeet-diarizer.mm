@@ -4,6 +4,8 @@
 
 #import "coreml/parakeet-diarizer.h"
 #include "coreml/coreml_diarizers.h"
+#include "coreml/parakeet_coreml_load_error.h"
+#include "coreml/parakeet_coreml_sidecars.h"
 #include "coreml/parakeet_coreml_units.h"
 #include "parakeet_coreml_path.h"
 #include "parakeet_log.h"
@@ -14,9 +16,11 @@
 #include <algorithm>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -62,13 +66,28 @@ bool is_contiguous(MLMultiArray * array, int64_t columns) {
     return strides.count == 1 || strides[strides.count - kTrailingDims].longLongValue == columns;
 }
 
+// A framework failure while binding (an array or provider Core ML could not
+// allocate), as opposed to a schema the wrapper cannot bind. Set on the
+// loading thread; read once the bind returns.
+thread_local parakeet_coreml_load_error t_bind_failure{};
+thread_local bool t_bind_failed = false;
+
+void record_bind_failure(NSError * error) {
+    t_bind_failed = true;
+    parakeet_coreml_record_load_error(error, &t_bind_failure);
+}
+
 MLMultiArray * float_array(MLMultiArrayConstraint * constraint) {
     if (constraint == nil || constraint.dataType != MLMultiArrayDataTypeFloat32) return nil;
     NSError * error = nil;
     MLMultiArray * array = [[MLMultiArray alloc] initWithShape:constraint.shape
                                                       dataType:MLMultiArrayDataTypeFloat32
                                                          error:&error];
-    return error == nil ? array : nil;
+    if (array == nil || error != nil) {
+        record_bind_failure(error);
+        return nil;
+    }
+    return array;
 }
 
 bool bind_array(MLMultiArrayConstraint * constraint, NSString * name, Binding & binding,
@@ -216,7 +235,10 @@ bool bind_model(parakeet_coreml_diarizer * ctx, MLModel * model) {
     NSError * error = nil;
     MLDictionaryFeatureProvider * provider =
         [[MLDictionaryFeatureProvider alloc] initWithDictionary:features error:&error];
-    if (provider == nil || error != nil) return false;
+    if (provider == nil || error != nil) {
+        record_bind_failure(error);
+        return false;
+    }
     MLPredictionOptions * options = [[MLPredictionOptions alloc] init];
     options.outputBackings = backings;
     ctx->provider = CFBridgingRetain(provider);
@@ -263,21 +285,44 @@ bool read_outputs(id<MLFeatureProvider> result, const parakeet_coreml_rows_out *
 
 struct parakeet_coreml_diarizer * parakeet_coreml_diarizer_init(const char * path_mlmodelc,
                                                                 const char * units_env) {
+    return parakeet_coreml_diarizer_init_with_units(
+        path_mlmodelc, units_env != nullptr ? std::getenv(units_env) : nullptr);
+}
+
+struct parakeet_coreml_diarizer * parakeet_coreml_diarizer_init_with_units(const char * path_mlmodelc,
+                                                                           const char * units) {
+    return parakeet_coreml_diarizer_init_with_units_error(path_mlmodelc, units, nullptr);
+}
+
+struct parakeet_coreml_diarizer * parakeet_coreml_diarizer_init_with_units_error(
+        const char * path_mlmodelc, const char * units, parakeet_coreml_load_error * error) {
+    if (error != nullptr) *error = parakeet_coreml_load_error{};
     if (path_mlmodelc == nullptr) return nullptr;
     @autoreleasepool {
         std::string label;
         MLModelConfiguration * config = [[MLModelConfiguration alloc] init];
-        config.computeUnits = parakeet_coreml_requested_units(
-            units_env, /*prefer_neural_engine=*/true, &label);
-        NSError * error = nil;
+        config.computeUnits = parakeet_coreml_units_for(
+            units, /*prefer_neural_engine=*/true, &label);
+        NSError * load_error = nil;
         NSURL * url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path_mlmodelc]];
-        MLModel * model = [MLModel modelWithContentsOfURL:url configuration:config error:&error];
-        if (model == nil || error != nil) return nullptr;
+        MLModel * model = [MLModel modelWithContentsOfURL:url configuration:config error:&load_error];
+        if (model == nil || load_error != nil) {
+            parakeet_coreml_record_load_error(load_error, error);
+            return nullptr;
+        }
         auto * ctx = new parakeet_coreml_diarizer();
         ctx->model = CFBridgingRetain(model);
         ctx->label = label;
+        t_bind_failed = false;
         if (!bind_model(ctx, model)) {
             parakeet_coreml_diarizer_free(ctx);
+            if (error != nullptr && t_bind_failed) {
+                *error = t_bind_failure;  // Core ML could not allocate: keep its error
+            } else if (error != nullptr) {
+                error->incompatible = 1;  // a schema the wrapper cannot bind
+                std::snprintf(error->message, sizeof(error->message), "%s",
+                              "unexpected diarizer inputs or outputs");
+            }
             return nullptr;
         }
         return ctx;
@@ -394,95 +439,204 @@ std::vector<CoremlDiarizerBundle> list_coreml_diarizer_bundles(const std::string
     return bundles;
 }
 
-CoremlDiarizers::CoremlDiarizers(std::string gguf_path, std::vector<int> capacities)
-    : gguf_path_(std::move(gguf_path)), slots_(capacities.size()) {
-    std::transform(capacities.begin(), capacities.end(), slots_.begin(),
-                   [](int capacity) { return Slot{capacity, nullptr, false}; });
-}
+namespace {
 
-CoremlDiarizers::~CoremlDiarizers() {
-    std::for_each(slots_.begin(), slots_.end(),
-                  [](Slot & slot) { parakeet_coreml_diarizer_free(slot.context); });
-}
-
-CoremlDiarizers::Slot * CoremlDiarizers::slot_for(int frames) {
-    for (Slot & slot : slots_) {
-        if (!slot.failed && slot.capacity >= frames) return &slot;
+// Runs on the runtime's load lane with the resolved units: never reads
+// the environment. The capacity the bundle reports must match its file name.
+pcm::LoadResult load_diarizer(const pcm::LoadRequest & request) {
+    pcm::LoadResult result;
+    // sidecar_geometry(diarizer, {capacity})
+    const int64_t capacity = request.geometry.size() == 2 ? request.geometry[1] : 0;
+    parakeet_coreml_load_error error{};
+    parakeet_coreml_diarizer * context = parakeet_coreml_diarizer_init_with_units_error(
+        request.artifact_path.c_str(), pcm::to_string(request.units), &error);
+    if (context != nullptr && parakeet_coreml_diarizer_capacity(context) != capacity) {
+        // A verified incompatibility: the bundle is not the capacity its name says.
+        error = parakeet_coreml_load_error{};
+        error.incompatible = 1;
+        std::snprintf(error.message, sizeof(error.message), "capacity %lld, expected %lld",
+                      (long long) parakeet_coreml_diarizer_capacity(context), (long long) capacity);
+        parakeet_coreml_diarizer_free(context);
+        context = nullptr;
     }
-    return nullptr;
-}
-
-bool CoremlDiarizers::load(Slot & slot) {
-    if (slot.context != nullptr) return true;
-    const std::string path = coreml_diarizer_sidecar_path(gguf_path_, slot.capacity);
-    slot.context = parakeet_coreml_diarizer_init(path.c_str(), kCoremlDiarizerUnitsEnv);
-    if (slot.context == nullptr ||
-        parakeet_coreml_diarizer_capacity(slot.context) != slot.capacity) {
-        PARAKEET_LOG_WARN("parakeet: failed to load Core ML diarizer at '%s'; using ggml\n",
-                          path.c_str());
-        quarantine(slot);
-        return false;
+    if (context == nullptr) {
+        result.error = sidecar_load_error("Core ML diarizer", error);
+        PARAKEET_LOG_WARN("parakeet: failed to load Core ML diarizer at '%s' (%s); using ggml\n",
+                          request.artifact_path.c_str(), result.error.message.c_str());
+        return result;
     }
-    label_ = parakeet_coreml_diarizer_label(slot.context);
-    PARAKEET_LOG_INFO("parakeet: Core ML diarizer loaded from '%s'\n", path.c_str());
-    return true;
+    PARAKEET_LOG_INFO("parakeet: Core ML diarizer loaded from '%s'\n", request.artifact_path.c_str());
+    result.model = std::shared_ptr<void>(context, [](void * p) {
+        parakeet_coreml_diarizer_free(static_cast<parakeet_coreml_diarizer *>(p));
+    });
+    return result;
 }
 
-void CoremlDiarizers::quarantine(Slot & slot) {
-    parakeet_coreml_diarizer_free(slot.context);
-    slot.context = nullptr;
-    slot.failed = true;
+// Failed, retired or never routable (disabled, absent): the next covering
+// capacity or ggml serves the pass.
+bool unusable(pcm::SlotState state) { return pcm::is_terminal(state); }
+
+}  // namespace
+
+struct CoremlDiarizers::State {
+    struct Capacity {
+        int frames = 0;
+        std::shared_ptr<pcm::Slot> slot;
+    };
+    std::string gguf_path;
+    bool strict = false;               // use = require
+    std::vector<Capacity> capacities;  // ascending
+    std::mutex mutex;                  // label and call stats
+    const std::atomic<bool> * cancel = nullptr;  // the owning engine's
+    std::string label;
+    CoremlDiarizerCallStats stats;
+};
+
+namespace {
+
+// Strict (use = require): a pass no capacity can hold is refused, like any
+// stage too wide for its sidecar, before any caller falls back to ggml.
+void refuse_too_wide(const CoremlDiarizers::State & state, int frames) {
+    if (state.capacities.empty() || state.capacities.back().frames >= frames) return;
+    throw pcm::CoremlError("coreml: a diarization pass of " + std::to_string(frames) +
+                               " frames is longer than every Core ML diarizer capacity (largest " +
+                               std::to_string(state.capacities.back().frames) + ") and Core ML is required",
+                           pcm::SlotState::ready, pcm::ErrorClass::deterministic);
 }
 
-CoremlDiarizers::Slot * CoremlDiarizers::loaded_slot_for(int frames) {
-    for (Slot * slot = slot_for(frames); slot != nullptr; slot = slot_for(frames)) {
-        if (load(*slot)) return slot;
+}  // namespace
+
+CoremlDiarizers::CoremlDiarizers(std::string gguf_path, std::vector<int> capacities,
+                                 CoremlSidecars & sidecars)
+    : state_(std::make_unique<State>()) {
+    state_->gguf_path = std::move(gguf_path);
+    state_->strict = sidecars.resolved().strict();
+    std::sort(capacities.begin(), capacities.end());
+    for (int capacity : capacities) {
+        SidecarRequest request;
+        request.stage = "diarizer-" + std::to_string(capacity);
+        request.path = coreml_diarizer_sidecar_path(state_->gguf_path, capacity);
+        request.present = true;
+        request.stage_default = pcm::ComputeUnits::cpu_and_ane;
+        request.load_fn = &load_diarizer;
+        request.geometry = sidecar_geometry(SidecarLoader::diarizer, {capacity});
+        // The smallest capacity is the minimal set; larger ones are
+        // requested by the call that needs them (or by prewarm = all).
+        request.minimal = state_->capacities.empty();
+        state_->capacities.push_back(State::Capacity{capacity, sidecars.add(request)});
     }
-    return nullptr;
 }
+
+CoremlDiarizers::~CoremlDiarizers() = default;
+
+void CoremlDiarizers::set_cancel(const std::atomic<bool> * cancel) { state_->cancel = cancel; }
 
 bool CoremlDiarizers::covers(int frames) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return frames > 0 && slot_for(frames) != nullptr;
+    if (frames <= 0) return false;
+    if (state_->strict) refuse_too_wide(*state_, frames);
+    for (const State::Capacity & c : state_->capacities) {
+        // Under strict a failed capacity still covers, so run() refuses the pass.
+        if (c.frames >= frames && (state_->strict || !unusable(c.slot->state()))) return true;
+    }
+    return false;
 }
 
 bool CoremlDiarizers::prepare(int frames) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return frames > 0 && loaded_slot_for(frames) != nullptr;
+    if (frames <= 0) return false;
+    for (const State::Capacity & c : state_->capacities) {
+        if (c.frames < frames || unusable(c.slot->state())) continue;
+        c.slot->request(pcm::Priority::current);
+        return c.slot->state() == pcm::SlotState::ready;
+    }
+    return false;
 }
 
 int CoremlDiarizers::run(int valid_frames,
                          const parakeet_coreml_rows * inputs, int n_inputs,
                          const parakeet_coreml_rows_out * outputs, int n_outputs) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    Slot * slot = valid_frames > 0 ? loaded_slot_for(valid_frames) : nullptr;
-    if (slot == nullptr) return kNoSidecar;
-    const int status = parakeet_coreml_diarizer_run(slot->context, valid_frames,
-                                                    inputs, n_inputs, outputs, n_outputs);
-    if (status != 0) {
-        PARAKEET_LOG_WARN("parakeet: Core ML diarizer (%d frames) failed (rc=%d); "
-                          "quarantining it and using ggml\n", slot->capacity, status);
-        quarantine(*slot);
+    if (valid_frames <= 0) return kNoSidecar;
+    const bool strict = state_->strict;
+    if (strict) refuse_too_wide(*state_, valid_frames);
+    // Strict: why the covering capacities tried so far could not serve the pass.
+    std::optional<pcm::CoremlError> refused;
+    for (const State::Capacity & c : state_->capacities) {
+        if (c.frames < valid_frames) continue;
+        // Strict acquisitions of a failed capacity throw; others skip it.
+        if (!strict && unusable(c.slot->state())) continue;
+        // One acquisition per pass (a chunk or block is the unit).
+        pcm::Acquired acquired;
+        try {
+            acquired = c.slot->acquire(pcm::Demand::now, std::nullopt, state_->cancel);
+        } catch (const pcm::CoremlError & error) {
+            // A failed capacity gives way to the next covering one; a timeout
+            // or a memory deferral refuses the pass at once.
+            if (!pcm::is_terminal(error.state)) throw;
+            if (!refused) refused = error;
+            continue;
+        }
+        if (!acquired.model) {
+            // Failed while this pass waited (wait = call): try the next capacity.
+            if (unusable(acquired.state)) continue;
+            std::lock_guard<std::mutex> lock(state_->mutex);
+            ++state_->stats.not_ready;
+            return kNoSidecar;
+        }
+        auto * context = acquired.model->as<parakeet_coreml_diarizer>();
+        int status = 0;
+        {
+            auto prediction = acquired.model->lock_for_prediction();
+            status = parakeet_coreml_diarizer_run(context, valid_frames, inputs, n_inputs,
+                                                  outputs, n_outputs);
+        }
+        if (status != 0) {
+            const std::string reason = "prediction failed (rc=" + std::to_string(status) + ")";
+            PARAKEET_LOG_WARN("parakeet: Core ML diarizer (%d frames) failed (rc=%d); "
+                              "quarantining it%s\n", c.frames, status, strict ? "" : " and using ggml");
+            c.slot->retire(reason);
+            if (strict) {
+                throw pcm::CoremlError("coreml: " + c.slot->spec().stage + " " + reason +
+                                           " and Core ML is required",
+                                       pcm::SlotState::retired, pcm::ErrorClass::transient);
+            }
+            return status;
+        }
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        state_->label = parakeet_coreml_diarizer_label(context);
+        ++state_->stats.coreml;
+        state_->stats.label = state_->label;
+        return 0;
     }
-    return status;
+    if (refused) throw *refused;
+    return kNoSidecar;
 }
 
 std::string CoremlDiarizers::label() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return label_.empty() ? parakeet_coreml_diarizer_label(nullptr) : label_;
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    return state_->label.empty() ? parakeet_coreml_diarizer_label(nullptr) : state_->label;
 }
 
 std::vector<int> CoremlDiarizers::capacities() const {
-    std::vector<int> result(slots_.size());
-    std::transform(slots_.begin(), slots_.end(), result.begin(),
-                   [](const Slot & slot) { return slot.capacity; });
+    std::vector<int> result;
+    result.reserve(state_->capacities.size());
+    for (const State::Capacity & c : state_->capacities) result.push_back(c.frames);
     return result;
 }
 
-std::unique_ptr<CoremlDiarizers> discover_coreml_diarizers(const std::string & gguf_path) {
+void CoremlDiarizers::reset_call_stats() {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    state_->stats = CoremlDiarizerCallStats{};
+}
+
+CoremlDiarizerCallStats CoremlDiarizers::call_stats() {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    return state_->stats;
+}
+
+std::unique_ptr<CoremlDiarizers> discover_coreml_diarizers(const std::string & gguf_path,
+                                                           CoremlSidecars & sidecars) {
     std::vector<int> capacities = scan_capacities(gguf_path);
     if (capacities.empty()) return nullptr;
-    return std::make_unique<CoremlDiarizers>(gguf_path, std::move(capacities));
+    return std::make_unique<CoremlDiarizers>(gguf_path, std::move(capacities), sidecars);
 }
 
 }
