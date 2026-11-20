@@ -495,6 +495,65 @@ def wait_quiet(proto: dict, enabled: bool) -> float:
     return time.monotonic() - t0
 
 
+def pmset(*args) -> str:
+    """`pmset` output, or "" where there is no pmset (not macOS) or it fails.
+    Bytes that are not UTF-8 (a device name in another encoding) are replaced."""
+    try:
+        p = subprocess.run(["pmset", *args], capture_output=True, text=True, errors="replace", timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return p.stdout if p.returncode == 0 else ""
+
+
+def parse_power_source(batt: str) -> str:
+    """'ac', 'battery', another source in lower case (e.g. 'ups'), or 'unknown',
+    from `pmset -g batt` ("Now drawing from 'AC Power'")."""
+    mt = re.search(r"drawing from '([^']+)'", batt)
+    if not mt:
+        return "unknown"
+    name = mt.group(1).strip()
+    return {"AC Power": "ac", "Battery Power": "battery"}.get(name, re.sub(r"\s*power$", "", name, flags=re.I).lower())
+
+
+def parse_low_power(settings: str):
+    """Low Power Mode from `pmset -g`: True, False, or None when not reported.
+    Most Macs print `lowpowermode 0|1`; Macs with High Power Mode print
+    `powermode 0|1|2`, where 1 is Low Power Mode."""
+    mt = re.search(r"^\s*lowpowermode\s+(\d+)", settings, re.M)
+    if mt:
+        return mt.group(1) != "0"
+    mt = re.search(r"^\s*powermode\s+(\d+)", settings, re.M)
+    return mt.group(1) == "1" if mt else None
+
+
+def read_power(reader=pmset) -> dict:
+    """The power source and Low Power Mode now; `reader` runs pmset."""
+    return {"source": parse_power_source(reader("-g", "batt")), "low_power": parse_low_power(reader("-g"))}
+
+
+def power_compare(start: dict, p: dict):
+    """(changed, uncertain) for sample `p` against the start's, field by
+    field. A field pmset did not give (source 'unknown', low_power None) in
+    either sample is uncertain, never a change."""
+    changed = uncertain = False
+    for field, unavailable in (("source", "unknown"), ("low_power", None)):
+        a, b = start.get(field, unavailable), p.get(field, unavailable)
+        if a == unavailable or b == unavailable:
+            uncertain = True
+        elif a != b:
+            changed = True
+    return changed, uncertain
+
+
+def power_label(p) -> str:
+    """'AC', 'battery', 'AC, Low Power Mode', ... for messages and the report."""
+    if not p:
+        return "not recorded"
+    src = {"ac": "AC", "battery": "battery"}.get(p.get("source"), p.get("source") or "unknown")
+    lpm = p.get("low_power")
+    return src + (", Low Power Mode" if lpm else "" if lpm is False else ", Low Power Mode unknown")
+
+
 def run_json(cmd, env=None, timeout=3600, ok_codes=(0,)) -> dict:
     p = subprocess.run([str(c) for c in cmd], capture_output=True, text=True, env=env, timeout=timeout)
     lines = [ln for ln in p.stdout.splitlines() if ln.startswith("{")]
@@ -616,8 +675,15 @@ def sharing_verdict(increments, weight_bytes: int) -> str:
 
 
 class Runner:
-    def __init__(self, args, m: dict):
+    def __init__(self, args, m: dict, power_reader=None):
         self.args = args
+        # Power is read at the start and again after each measurement.
+        self.power_reader = power_reader or read_power
+        self.power_start = None
+        self.power_last = None
+        self.power_flagged: dict = {}    # kind -> rows flagged power_changed
+        self.power_uncertain: dict = {}  # kind -> rows flagged power_uncertain
+        self.power_warned: set = set()   # which of the two warnings were printed
         self.m = m
         self.proto = m["protocol"]
         self.models = models_root(args.models_root)
@@ -640,12 +706,72 @@ class Runner:
     def variants(self, cfg: dict):
         return [v for v in cfg.get("variants", self.m["variants"]) if not self.args.variant or v in self.args.variant]
 
-    def record(self, kind: str, **fields):
+    def record(self, kind: str, reading: dict | None = None, **fields):
+        """Appends a row. Every row but env carries a power reading: `reading`
+        when one driver process produced several rows (they share the reading
+        taken after it), else a new one."""
+        if kind != "env":
+            reading = reading or self._power_reading()
+            fields.update(reading)
+            for flag, counts in (("power_changed", self.power_flagged), ("power_uncertain", self.power_uncertain)):
+                if reading[flag]:
+                    counts[kind] = counts.get(kind, 0) + 1
         rec = {"kind": kind, "t": datetime.datetime.now(datetime.timezone.utc).isoformat(), **fields}
         with open(self.results, "a") as f:
             f.write(json.dumps(rec) + "\n")
         print(f"[{kind}] " + json.dumps({k: v for k, v in fields.items() if not isinstance(v, (list, dict))})[:300],
               flush=True)
+
+    def _power_reading(self) -> dict:
+        """Samples the power once, after a measurement. The flag is a
+        conservative adjacent-sample test: set when this sample or the one
+        before it differs from the start's, or when the two differ from each
+        other in a field both read. It can flag a measurement that ran wholly
+        on the start's power (the power came back before it began), and a
+        change that reverts between two samples goes unseen. A field pmset
+        could not give is not compared: the rows next to it are flagged
+        power_uncertain instead, unless a known field confirms a change."""
+        now = self.power_reader()
+        if self.power_start is None:
+            self.power_start = self.power_last = now
+        last = self.power_last
+        c_now, u_now = power_compare(self.power_start, now)
+        c_last, u_last = power_compare(self.power_start, last)
+        # The previous and current samples against each other: with a field
+        # missing from the start, two known readings can still prove a change.
+        c_step, _ = power_compare(last, now)
+        changed = c_now or c_last or c_step
+        uncertain = not changed and (u_now or u_last)
+        self.power_last = now
+        if changed and "changed" not in self.power_warned:
+            self.power_warned.add("changed")
+            # The two known samples that differ.
+            a, b = (self.power_start, now) if c_now else (last, now) if c_step else (self.power_start, last)
+            print(f"bench-load-time: warning: power changed from {power_label(a)} to "
+                  f"{power_label(b)}; flagging rows (power_changed) and continuing", file=sys.stderr, flush=True)
+        if uncertain and "uncertain" not in self.power_warned:
+            self.power_warned.add("uncertain")
+            print(f"bench-load-time: warning: could not read the power source or Low Power Mode (pmset gave "
+                  f"{power_label(now)}, started on {power_label(self.power_start)}); flagging rows "
+                  "(power_uncertain) and continuing", file=sys.stderr, flush=True)
+        return {"power": now, "power_changed": changed, "power_uncertain": uncertain}
+
+    def power_warning(self) -> str | None:
+        """The end-of-run warning when any row was flagged, else None."""
+        def rows(counts):
+            return f"{sum(counts.values())} rows", ", ".join(f"{k} {c}" for k, c in counts.items())
+
+        out = []
+        if self.power_flagged:
+            n, kinds = rows(self.power_flagged)
+            out.append(f"bench-load-time: warning: the power source or Low Power Mode changed during the run "
+                       f"(started on {power_label(self.power_start)}); {n} are flagged power_changed ({kinds}). "
+                       "Their numbers may not compare with the rest; re-run those measurements on steady power.")
+        if self.power_uncertain:
+            n, kinds = rows(self.power_uncertain)
+            out.append(f"bench-load-time: warning: pmset could not be read for some power samples; {n} are flagged "
+                       f"power_uncertain ({kinds}): whether the power changed while they were measured is unknown.")
+        return "\n".join(out) or None
 
     def need(self, what: Path, label: str):
         if what is None or not Path(what).exists():
@@ -654,7 +780,7 @@ class Runner:
     # ---- environment ----
     def environment(self):
         sysctl = lambda k: subprocess.run(["sysctl", "-n", k], capture_output=True, text=True).stdout.strip()
-        power = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True).stdout
+        power = self.power_start = self.power_last = self.power_reader()
         ident = run_json([self.driver, "identity"]) if self.driver.exists() else {}
         digests = {}
         for v in self.m["variants"]:
@@ -666,10 +792,10 @@ class Runner:
         self.record("env", git=self.git, manifest_sha256=sha256_file(self.args.manifest),
                     chip=sysctl("machdep.cpu.brand_string"), memsize=int(sysctl("hw.memsize") or 0),
                     os_build=ident.get("os_build"), os_version=ident.get("os_version"),
-                    ac_power="AC Power" in power, units=self.units, sidecars=digests,
+                    ac_power=power["source"] == "ac", power=power, units=self.units, sidecars=digests,
                     models_root=str(self.models))
-        if "AC Power" not in power and not self.args.allow_battery:
-            raise SystemExit("bench-load-time: benchmark runs need AC power (pmset reports battery); "
+        if power["source"] != "ac" and not self.args.allow_battery:
+            raise SystemExit(f"bench-load-time: benchmark runs need AC power (pmset reports {power['source']}); "
                              "pass --allow-battery only for a smoke run")
 
     # ---- sizes ----
@@ -737,8 +863,9 @@ class Runner:
                         model = d / sidecar(self.m, self.models, v, s, st).name
                         r = run_json([host, "load", "--model", model, "--units", self.units, "--predict", "1",
                                       *sum((["--function", n] for n in names), [])])
+                        pw = self._power_reading()  # one process loaded every function
                         for fr in r["functions"]:
-                            self.record("load_cold", **common, stage=st, function=fr["function"],
+                            self.record("load_cold", reading=pw, **common, stage=st, function=fr["function"],
                                         load_ms=fr["load_ms"], predict_ms=fr.get("predict_ms"),
                                         error=fr.get("error"), quiet_wait_s=waited)
                     for i in range(self.runs(cfg["warm_runs"])):
@@ -938,7 +1065,16 @@ def summarize(recs: list) -> dict:
     by = {}
     for r in recs:
         by.setdefault(r["kind"], []).append(r)
-    s: dict = {"env": (by.get("env") or [{}])[-1]}
+    # A run is an env row followed by its measurement rows. An attempt that
+    # stopped before measuring anything (such as one refused on battery power)
+    # still wrote its env row; it contributed nothing and is not a run here.
+    runs, current = [], None
+    for r in recs:
+        if r["kind"] == "env":
+            current = r
+        elif current is not None and (not runs or runs[-1] is not current):
+            runs.append(current)
+    s: dict = {"env": (runs or by.get("env") or [{}])[-1], "runs": runs}
 
     # Results appended by several runs into one --out: one row per artifact.
     s["sizes"] = list({(r["variant"], r["set"], r["stage"]): r for r in by.get("sizes", [])}.values())
@@ -1012,7 +1148,52 @@ def summarize(recs: list) -> dict:
     for r in by.get("synthesis", []):
         syn.setdefault((r["variant"], r["config"]), []).append(r)
     s["synthesis"] = syn
+
+    # Per measurement kind, in the order rows were first recorded: how many
+    # rows ran on each power source, with Low Power Mode, and flagged.
+    power: dict = {}
+    for r in recs:
+        if r["kind"] == "env":
+            continue
+        e = power.setdefault(r["kind"], {"rows": 0, "ac": 0, "battery": 0, "other": 0, "unavailable": 0,
+                                         "not_recorded": 0, "low_power": 0, "changed": 0, "uncertain": 0})
+        e["rows"] += 1
+        p = r.get("power")
+        if not p:
+            e["not_recorded"] += 1
+            continue
+        src = p.get("source")
+        e[src if src in ("ac", "battery") else "unavailable" if src in (None, "unknown") else "other"] += 1
+        e["low_power"] += bool(p.get("low_power"))
+        e["changed"] += bool(r.get("power_changed"))
+        e["uncertain"] += bool(r.get("power_uncertain"))
+    s["power"] = power
     return s
+
+
+def start_power(runs: list):
+    """The power block's sentence on how the runs started: the starting power
+    of every run whose rows the report holds, or None without a run record.
+    It lives in the generated block so a refresh of a report keeps it in step
+    with the tables."""
+    if not runs:
+        return None
+    if len(runs) == 1 and not runs[0].get("power"):
+        # Recorded before the power was read per row: only the starting AC flag.
+        said = {True: "on AC power", False: "not on AC power"}.get(runs[0].get("ac_power"))
+        return (f"The run recorded only whether it started on AC power: it started {said}; the power during the "
+                "run was not recorded." if said else "The run did not record its power source.")
+    labels = [power_label(e["power"]) if e.get("power") else
+              {True: "AC", False: "not AC"}.get(e.get("ac_power"), "not recorded") for e in runs]
+    if len(runs) == 1:
+        return f"Power at the start of the run: {labels[0]}."
+    counts: dict = {}
+    for x in labels:
+        counts[x] = counts.get(x, 0) + 1
+    if len(counts) == 1:
+        return f"Power at the start of each of the {len(runs)} runs: {labels[0]}."
+    return (f"Power at the start of the {len(runs)} runs: " + ", ".join(f"{k} ({n})" for k, n in counts.items())
+            + f"; the latest started on {labels[-1]}.")
 
 
 def render(s: dict) -> str:
@@ -1037,7 +1218,7 @@ def render(s: dict) -> str:
     w("")
     if env:
         w(f"- Host: {env.get('chip', '—')}, {(env.get('memsize') or 0) / 2**30:.0f} GB, macOS "
-          f"{env.get('os_version', '—')} ({env.get('os_build', '—')}), AC power: {env.get('ac_power')}.")
+          f"{env.get('os_version', '—')} ({env.get('os_build', '—')}).")
         w(f"- Commit `{(env.get('git') or '—')[:12]}`, manifest sha256 `{(env.get('manifest_sha256') or '—')[:16]}…`, "
           f"compute units `{env.get('units', '—')}`.")
         w("- Sidecars exported locally with `engines/tts/scripts/export-chatterbox-coreml.py` from the pinned f32 "
@@ -1047,14 +1228,64 @@ def render(s: dict) -> str:
           "with `bench-load-time.py report`.")
     w("")
 
+    begin("power")
+    w("## Power source per row")
+    w("")
+    w("`run` samples the power source (`pmset -g batt`) and Low Power Mode (`pmset -g`) at the start and once after "
+      "each measurement. A row's `power` in `results.jsonl` is the sample taken after it was measured; the rows one "
+      "process produces, such as every function of a cold load, share it. `power_changed` is a conservative flag "
+      "from adjacent samples: it is set when the row's sample or the one before it differs from the start's, or when "
+      "the two differ from each other in a field both read. It can flag a row measured wholly on the start's power "
+      "(the power came back before the measurement began), and it misses a change that reverts between two "
+      "samples. A field `pmset` could not give (source `unknown`, `low_power` null) is never counted as a change: "
+      "the rows next to it get `power_uncertain` instead, unless a field that was read confirms a change.")
+    w("")
+    pw = s["power"]
+    recorded = sum(e["rows"] - e["not_recorded"] for e in pw.values())
+    starts = start_power(s.get("runs") or [])
+    if starts:
+        w(starts)
+        w("")
+    if not pw:
+        w("Not measured yet.")
+    elif not recorded:
+        w(f"None of the {sum(e['rows'] for e in pw.values())} rows carries a power reading: they were recorded "
+          "before `run` read the power source per row.")
+    else:
+        total = sum(e["rows"] for e in pw.values())
+        changed = sum(e["changed"] for e in pw.values())
+        uncertain = sum(e["uncertain"] for e in pw.values())
+        if changed:
+            kinds = ", ".join(k for k, e in pw.items() if e["changed"])
+            w(f"**Warning: the power source or Low Power Mode changed during the run.** {changed} of {total} rows "
+              f"are flagged changed ({kinds}); their numbers may not compare with the rest. Re-run those "
+              "measurements on steady power.")
+            w("")
+        if uncertain:
+            kinds = ", ".join(k for k, e in pw.items() if e["uncertain"])
+            w(f"**Warning: `pmset` could not be read for some samples.** {uncertain} of {total} rows are flagged "
+              f"uncertain ({kinds}): whether the power changed while they were measured is unknown.")
+            w("")
+        w("| Measurement | Rows | AC | Battery | Other | Unavailable | Not recorded | Low Power Mode | Changed | "
+          "Uncertain |")
+        w("|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|")
+        for k, e in pw.items():
+            w(f"| {k} | {e['rows']} | {e['ac']} | {e['battery']} | {e['other']} | {e['unavailable']} | "
+              f"{e['not_recorded']} | {e['low_power']} | {e['changed']} | {e['uncertain']} |")
+    w("")
+    end("power")
+
     begin("setup")
     w("## Setup and usage")
     w("")
     w("Requirements:")
     w("")
     w("- Apple silicon, macOS 15 or later, Xcode command-line tools (`xcrun clang++`) and Python 3.9 or later. "
-      "The published numbers come from an otherwise idle M2 on macOS 15.7.3; `run` refuses battery power unless "
-      "`--allow-battery` is given.")
+      "The published numbers come from an otherwise idle M2 on macOS 15.7.3; `run` refuses to start on battery "
+      "power unless `--allow-battery` is given. When the power source or Low Power Mode changes mid-run, `run` "
+      "keeps going, flags each row whose own sample or the one before it differs from the start's "
+      "(`power_changed`) and warns at the end; the report counts them under \"Power source per row\", which also "
+      "says what the samples miss.")
     w("- The Chatterbox GGUFs pinned in `bench-manifest.json` (`variants`, with SHA-256 and Hugging Face "
       "revisions) under the models root: `--models-root DIR`, or `QVAC_BENCH_MODELS`.")
     w("- The Core ML sidecars for each width set in `sidecar_sets`, exported from the pinned f32 GGUFs with "
@@ -1323,6 +1554,9 @@ def cmd_run(args, m) -> int:
         subprocess.run(["bash", str(FRESH_HOST), "cleanup-all"], capture_output=True,
                        env=dict(os.environ, QVAC_BENCH_HOSTS=str(r.hosts)))
         shutil.rmtree(r.work, ignore_errors=True)
+        warning = r.power_warning()
+        if warning:
+            print(warning, file=sys.stderr)
     print(f"results: {r.results}")
     return 0
 
@@ -1370,6 +1604,10 @@ def cmd_smoke(args, m) -> int:
 
 
 REPORT_BLOCK_RE = re.compile(r"^<!-- report:([a-z0-9-]+) -->\n.*?^<!-- /report:\1 -->$", re.S | re.M)
+REPORT_MARKER_RE = re.compile(r"^<!-- (/?)report:([a-z0-9-]+) -->$", re.M)
+# Generated blocks added after reports were first written, and the existing
+# block each goes in front of when a report being refreshed lacks it.
+REPORT_NEW_BLOCKS = {"power": "setup"}
 
 
 class ReportError(Exception):
@@ -1381,12 +1619,26 @@ def merge_report(existing: str, rendered: str) -> str:
     `rendered`; text outside the blocks is kept as it is."""
     new = {m.group(1): m.group(0) for m in REPORT_BLOCK_RE.finditer(rendered)}
     old = [m.group(1) for m in REPORT_BLOCK_RE.finditer(existing)]
+    # Every marker must belong to exactly one well-formed block: an opening
+    # marker whose closing one was deleted would otherwise look like a missing
+    # block, and the replacement would then swallow the text after it.
+    markers = [(m.group(2), m.group(1)) for m in REPORT_MARKER_RE.finditer(existing)]
+    broken = sorted({n for n, _ in markers
+                     if markers.count((n, "")) != old.count(n) or markers.count((n, "/")) != old.count(n)})
+    if broken:
+        raise ReportError(f"unpaired or nested markers for the generated sections {broken}; each needs one "
+                          f"<!-- report:NAME --> line and one <!-- /report:NAME --> line. Fix them by hand")
     if not old:
         raise ReportError("no generated sections (<!-- report:NAME --> ... <!-- /report:NAME -->); refusing to "
                           "replace hand-written text. Write the report to a new file instead")
     dup = sorted({n for n in old if old.count(n) > 1})
     missing = [n for n in new if n not in old]
     unknown = [n for n in old if n not in new]
+    if not dup and not unknown and missing and all(REPORT_NEW_BLOCKS.get(n) in old for n in missing):
+        for n in missing:  # a report written before the block existed: add it, keep the hand-written text
+            at = next(m.start() for m in REPORT_BLOCK_RE.finditer(existing) if m.group(1) == REPORT_NEW_BLOCKS[n])
+            existing = existing[:at] + new[n] + "\n\n" + existing[at:]
+        missing = []
     if dup or missing or unknown:
         raise ReportError(f"generated sections do not match the report: duplicated {dup}, missing {missing}, "
                           f"unknown {unknown}; add or remove the markers by hand")
