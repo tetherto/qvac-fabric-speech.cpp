@@ -238,7 +238,10 @@ public:
     // predicted, so the resident cap never releases them, and with prewarm
     // predicted (or all) request them at `current` priority, ahead of
     // unstarted construction loads. With prewarm none or minimal nothing is
-    // requested here: a width loads when a call demands it.
+    // requested here: a width loads when a call demands it. `calls` are the
+    // S3Gen calls in the order they will acquire: each acquire() drops the
+    // first call still ahead, so only the calls ahead stay predicted and a
+    // width that only finished calls used can make room for a later one.
     void predict(const std::vector<s3gen_call_shape> & calls);
     // The call ended: nothing is predicted any more.
     void end_call();
@@ -246,7 +249,8 @@ public:
     bool predicting() const;
 
     // Acquires the models one call of `shape` runs on (see
-    // s3gen_acquire_coreml_plan).
+    // s3gen_acquire_coreml_plan); between predict() and end_call() it then
+    // drops the first predicted call still ahead.
     std::shared_ptr<S3genCoremlPlan> acquire(const s3gen_call_shape & shape,
                                              std::chrono::steady_clock::time_point deadline,
                                              const std::atomic<bool> * cancel = nullptr);

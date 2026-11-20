@@ -136,7 +136,11 @@ Neither construction nor synthesis waits for a load by default.
   construction loads; `minimal` stops after construction; `all` loads every
   function; `none` loads only on demand. Outside `all`, at most three encoder
   and three CFM functions stay loaded; the least recently used one that no
-  running call holds and the current request does not need is released first.
+  running call holds and no sentence (or streamed chunk) still ahead in the
+  current request needs is released first. A sentence's widths stop being
+  protected once it has acquired its models, so a request whose sentences need
+  more widths than that still gets each one, a finished sentence's width
+  making room for a later, wider one.
 - **Waiting** (`CoremlOptions::wait`, `--coreml-wait`): `none` (default) never
   blocks, except for a bounded wait when this host loaded the function quickly
   before (a warm hint, kept in `cache_dir`): the call waits while the load
@@ -289,7 +293,8 @@ blocking, a ready short width and a pending long one, a call longer than
 predicted, a ready wider function serving a narrower call, the call's own
 width loading right after the one in flight, a stale hint never holding a call
 past its deadline, retirement, the resident cap keeping held and predicted
-widths, a ready covering function serving `wait = call` and `use = require`
+widths, four sentences of ascending widths all served under `use = require`, a
+ready covering function serving `wait = call` and `use = require`
 without waiting, a lone unusable sidecar refused under `require`, `prewarm`
 `none` and `minimal` loading nothing ahead of a call, and destruction
 mid-load returning in under 100 ms.

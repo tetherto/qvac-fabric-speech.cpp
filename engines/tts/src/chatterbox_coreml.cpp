@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <sstream>
 #include <stdexcept>
@@ -788,6 +789,10 @@ struct s3gen_sidecars::impl {
     mutable std::mutex mu;  // construction
     std::shared_ptr<pcm::Group> construction;
     std::atomic<bool> predicting{false};
+    // The current call's S3Gen calls not acquired yet, in order (predict()
+    // to end_call()); each acquisition drops the first.
+    std::mutex ahead_mu;
+    std::deque<s3gen_call_shape> ahead;
 
     std::vector<std::shared_ptr<pcm::Slot>> all_slots() const {
         std::vector<std::shared_ptr<pcm::Slot>> out;
@@ -899,6 +904,31 @@ struct s3gen_sidecars::impl {
         if (st.slots.empty()) return -1;
         if (s == s3gen_stage::hift) return 0;
         return coreml_pick_bucket(st.widths, need);
+    }
+
+    // Marks HiFT and the exact widths of the calls still ahead as predicted,
+    // so the resident cap never releases them; a width only finished calls
+    // used becomes evictable. With `request`, also requests them at
+    // `current` priority, HiFT first, then the widths in call order. Called
+    // under ahead_mu.
+    void mark_predicted(bool request) {
+        std::vector<std::shared_ptr<pcm::Slot>> predicted[S3GEN_STAGES];
+        auto add = [&](s3gen_stage s, const std::shared_ptr<pcm::Slot> & slot) {
+            auto & list = predicted[(int) s];
+            if (slot && std::find(list.begin(), list.end(), slot) == list.end()) list.push_back(slot);
+        };
+        add(s3gen_stage::hift, slot(s3gen_stage::hift, 0));
+        for (const auto & call : ahead) {
+            for (s3gen_stage s : {s3gen_stage::encoder, s3gen_stage::cfm}) {
+                const int exact = exact_of(s, need_of(s, call));
+                if (exact >= 0) add(s, slot(s, exact));
+            }
+        }
+        for (s3gen_stage s : {s3gen_stage::hift, s3gen_stage::encoder, s3gen_stage::cfm}) {
+            if (stages[(int) s].pool) stages[(int) s].pool->set_predicted(predicted[(int) s]);
+            if (!request) continue;
+            for (const auto & sl : predicted[(int) s]) sl->request(pcm::Priority::current);
+        }
     }
 };
 
@@ -1055,32 +1085,19 @@ void s3gen_sidecars::start_construction(const std::atomic<bool> * cancel) {
 std::string s3gen_sidecars::construction_json() const { return p_->construction_json(); }
 
 void s3gen_sidecars::predict(const std::vector<s3gen_call_shape> & calls) {
-    std::vector<std::shared_ptr<pcm::Slot>> predicted[S3GEN_STAGES];
-    auto add = [&](s3gen_stage s, const std::shared_ptr<pcm::Slot> & slot) {
-        auto & list = predicted[(int) s];
-        if (slot && std::find(list.begin(), list.end(), slot) == list.end()) list.push_back(slot);
-    };
-    add(s3gen_stage::hift, p_->slot(s3gen_stage::hift, 0));
-    for (const auto & call : calls) {
-        for (s3gen_stage s : {s3gen_stage::encoder, s3gen_stage::cfm}) {
-            const int exact = p_->exact_of(s, impl::need_of(s, call));
-            if (exact >= 0) add(s, p_->slot(s, exact));
-        }
-    }
     // Only prewarm = predicted (and all) loads a call's predictions ahead of
     // time; none and minimal load a width when a call demands it. Every scope
     // keeps the predicted widths from the resident cap's evictions.
     const bool speculative = p_->resolved.prewarm == pcm::Prewarm::predicted || p_->resolved.prewarm == pcm::Prewarm::all;
-    // HiFT first (every call uses it), then the widths in call order.
+    std::lock_guard<std::mutex> lock(p_->ahead_mu);
+    p_->ahead.assign(calls.begin(), calls.end());
     p_->predicting = true;
-    for (s3gen_stage s : {s3gen_stage::hift, s3gen_stage::encoder, s3gen_stage::cfm}) {
-        if (p_->stages[(int) s].pool) p_->stages[(int) s].pool->set_predicted(predicted[(int) s]);
-        if (!speculative) continue;
-        for (const auto & slot : predicted[(int) s]) slot->request(pcm::Priority::current);
-    }
+    p_->mark_predicted(speculative);
 }
 
 void s3gen_sidecars::end_call() {
+    std::lock_guard<std::mutex> lock(p_->ahead_mu);
+    p_->ahead.clear();
     for (const auto & st : p_->stages) {
         if (st.pool) st.pool->clear_predicted();
     }
@@ -1172,6 +1189,16 @@ std::shared_ptr<S3genCoremlPlan> s3gen_sidecars::acquire(const s3gen_call_shape 
         }
         out.pending = got.pending;
         ready_covering(s);
+    }
+    // This call no longer needs its predictions: the plan holds what it
+    // runs on. Only the calls still ahead stay predicted, so a width that
+    // only earlier calls used can make room for a later, wider one.
+    {
+        std::lock_guard<std::mutex> lock(p_->ahead_mu);
+        if (p_->predicting && !p_->ahead.empty()) {
+            p_->ahead.pop_front();
+            p_->mark_predicted(false);
+        }
     }
     return plan;
 }

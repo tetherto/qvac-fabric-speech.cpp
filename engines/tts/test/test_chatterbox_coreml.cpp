@@ -1103,7 +1103,9 @@ int pending_fixture() {
         settle(*set, "cap");
         auto held = set->acquire(shape(8), steady::now());
         require(view(held, S::cfm).bucket == 16, "a call holds frames_16");
-        set->predict({shape(12)});
+        // Five calls predicted at frames_24: each acquisition below drops
+        // one, so frames_24 stays predicted for the one still ahead.
+        set->predict({shape(12), shape(12), shape(12), shape(12), shape(12)});
         settle(*set, "cap");
         size_t most = 0;
         for (int tokens : {16, 20, 16, 20}) {
@@ -1226,6 +1228,51 @@ int pending_fixture() {
                     again ? ("frames_" + std::to_string(view(again, S::cfm).bucket)).c_str() : error.c_str());
         require(again && view(again, S::cfm).bucket == 24,
                 "use = require serves a call whose exact function retired from a ready covering one");
+    }
+
+    // 14. Four sentences of ascending widths under use = require: one width
+    //     per stage more than the resident cap. Each sentence acquires after
+    //     its T3 and releases its models once rendered, the next one
+    //     acquiring while the previous one still renders (the overlap). Only
+    //     the sentences still ahead stay predicted, so the fourth width
+    //     replaces a finished sentence's width instead of failing the call.
+    {
+        CoremlOptions require_opts = routing_options();
+        require_opts.use = CoremlOptions::Use::require;
+        require_opts.strict_wait_ms = 60000;  // a load that never gets a place fails, never hangs
+        auto set = cb::s3gen_sidecars::create(routing_case(fixture, root.path, "ascending-require", all),
+                                              require_opts);
+        const std::vector<int> sentences = {8, 12, 16, 20};
+        std::vector<cb::s3gen_call_shape> calls;
+        for (int tokens : sentences) calls.push_back(shape(tokens));
+        set->predict(calls);
+        std::shared_ptr<S3genCoremlPlan> rendering;
+        size_t most = 0;
+        std::string served;
+        for (int tokens : sentences) {
+            std::shared_ptr<S3genCoremlPlan> plan;
+            std::string error;
+            try {
+                plan = set->acquire(shape(tokens), steady::now() + std::chrono::seconds(60));
+            } catch (const std::exception & e) {
+                error = e.what();
+            }
+            most = std::max({most, set->live(S::cfm), set->live(S::encoder)});
+            if (!plan) std::printf("[ascending require] sentence of %d tokens: %s\n", tokens, error.c_str());
+            require(plan != nullptr, "use = require serves every sentence of four ascending widths");
+            require(view(plan, S::encoder).bucket == tokens && view(plan, S::cfm).bucket == 2 * tokens &&
+                        view(plan, S::hift).model,
+                    "each sentence runs on its exact widths");
+            served += (served.empty() ? "" : ", ") + std::to_string(view(plan, S::encoder).bucket) + "/" +
+                      std::to_string(view(plan, S::cfm).bucket);
+            rendering = std::move(plan);  // the previous sentence finished rendering
+        }
+        rendering.reset();
+        set->end_call();
+        settle(*set, "ascending-require");
+        most = std::max({most, set->live(S::cfm), set->live(S::encoder)});
+        std::printf("[ascending require] encoder/CFM widths %s; at most %zu live per stage\n", served.c_str(), most);
+        require(most <= cb::COREML_RESIDENT_CAP, "ascending widths: never more live functions than the cap");
     }
     return 0;
 #endif
