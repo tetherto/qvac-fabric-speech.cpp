@@ -8,6 +8,8 @@
 // both keeps generation on. An Engine on compute units the templates were not
 // validated for generates nothing, and every capacity keeps a status entry
 // that says so; so does an Engine with generation off (generate = never).
+// The generated capacities' warm hints are found and made stale: the charge
+// and the verdicts at a fixed budget stay those of no hint and fresh hints.
 // With prewarm = all the charge covers every generated capacity, and so does
 // the default 300 s workload: an instance projected for it also runs shorter
 // calls as one pass up to the long-form window (1125 frames for Nemotron),
@@ -134,6 +136,29 @@ TemplateCharge template_charge(const char * id) {
     return c;
 }
 
+// The warm-hint records of the model's generated capacities in `cache`, by
+// the artifact each names (<template id>.<key>/model.mlmodelc).
+std::vector<std::filesystem::path> template_hints(const std::string & cache) {
+    std::vector<std::filesystem::path> out;
+    std::error_code ec;
+    for (const auto & e :
+         std::filesystem::directory_iterator(std::filesystem::path(cache) / "qvac-coreml-v1" / "hints", ec)) {
+        std::ifstream in(e.path());
+        const nlohmann::json j = nlohmann::json::parse(in, nullptr, false);
+        if (j.is_discarded() || !j.contains("artifact") || !j["artifact"].is_string()) continue;
+        const std::string artifact = j["artifact"].get<std::string>();
+        for (const std::string & id : g_templates) {
+            if (artifact.find("/" + id + ".") != std::string::npos) out.push_back(e.path());
+        }
+    }
+    return out;
+}
+
+nlohmann::json read_json(const std::filesystem::path & path) {
+    std::ifstream in(path);
+    return nlohmann::json::parse(in, nullptr, false);
+}
+
 // The Engine's Core ML status, and its construction group in `construction`.
 std::string engine_status(const std::string & gguf, parakeet::CoremlOptions coreml,
                           std::string * construction = nullptr) {
@@ -252,6 +277,52 @@ int main(int argc, char ** argv) {
                   (after.ggml_required_bytes + after.coreml.bytes <= after.device_free_bytes),
               "fit-stable: the Core ML verdict follows the unchanged charge (free memory moved)");
     }
+
+    // The hints the generated capacities' loads wrote: one per capacity, not
+    // stale. The fit never reads them: with every hint stale (stale_until
+    // ahead) the charge and the verdicts at a fixed budget are those of no
+    // hint (the empty cache) and of fresh hints.
+    const std::vector<std::filesystem::path> hints = template_hints(cache);
+    check(hints.size() >= g_templates.size(), "every generated capacity's load wrote a warm hint");
+    bool fresh = !hints.empty();
+    for (const std::filesystem::path & h : hints) {
+        const nlohmann::json j = read_json(h);
+        fresh = fresh && !j.is_discarded() && j.contains("stale_until") && j["stale_until"].is_null();
+    }
+    check(fresh, "the generated capacities' hints are not stale");
+    for (const std::filesystem::path & h : hints) {
+        nlohmann::json j = read_json(h);
+        j["stale_until"] = "2999-01-01T00:00:00Z";
+        std::ofstream(h, std::ios::trunc) << j.dump();
+    }
+    bool stale = !hints.empty();
+    for (const std::filesystem::path & h : hints) {
+        const nlohmann::json j = read_json(h);
+        stale = stale && j.contains("stale_until") && j["stale_until"] == "2999-01-01T00:00:00Z";
+    }
+    check(stale, "every hint now has a future stale_until");
+    const parakeet::FitResult stale_fit = project(gguf, coreml_options(cache));
+    print("stale hints", stale_fit);
+    check(stale_fit.coreml.bytes == before.coreml.bytes && stale_fit.coreml.validated == before.coreml.validated &&
+              stale_fit.ggml_required_bytes == before.ggml_required_bytes,
+          "fit-stable: stale hints give the same charge, validation and ggml-only total");
+    // The Engine's memory verdict (ggml-only fits, Core ML-inclusive does not)
+    // at a budget exactly at the charge and one byte under it.
+    const uint64_t at_charge = before.ggml_required_bytes + before.coreml.bytes;
+    auto coreml_fits = [](const parakeet::FitResult & r, uint64_t budget) {
+        return r.ggml_required_bytes + r.coreml.bytes <= budget;
+    };
+    for (const uint64_t budget : {at_charge, at_charge - 1}) {
+        check(coreml_fits(before, budget) == coreml_fits(after, budget) &&
+                  coreml_fits(before, budget) == coreml_fits(stale_fit, budget),
+              "fit-stable: no hint, a fresh hint and a stale one give the same verdict at a fixed budget");
+    }
+    check(coreml_fits(stale_fit, at_charge) && !coreml_fits(stale_fit, at_charge - 1),
+          "the fixed budgets straddle the charge");
+    parakeet::CoremlOptions short_by_one = coreml_options(cache);
+    short_by_one.memory_budget_bytes = static_cast<int64_t>(at_charge - 1);
+    check(contains(engine_status(gguf, short_by_one), "\"generation\":{\"reason\":\"memory\",\"supported\":false}"),
+          "with stale hints, a budget one byte under the charge still turns Core ML off for memory");
 
     // Units the templates were not validated for: nothing is generated or
     // loaded from the cache, and every capacity keeps an entry that says why.
