@@ -90,12 +90,6 @@ engine, not every backend ggml can compile.
 | LavaSR denoiser | language agnostic | input PCM | rate preserving | yes | yes (+ optional Core ML model) | yes | yes | yes | untested |
 | LavaSR enhancer | language agnostic | input PCM | 48 kHz | yes | yes (+ optional Core ML model) | yes | yes | yes | untested |
 
-Process exit with Core ML: a process that exits while a sidecar is still compiling or loading in the
-background waits for that load (at most 15 s on macOS, 2 s on iOS) when its main thread is armed. The main
-thread is armed automatically when it makes the engine; a host that makes engines on another thread (as the
-qvac addons do) calls `coreml_arm_exit_guard()` on its main or JS thread, or `coreml_shutdown_for_exit()`
-before it exits (`tts-cpp/coreml_exit.h`). See [the runtime's README](../coreml/README.md#process-exit).
-
 ¹ MOSS CUDA/Vulkan: generated-model CPU parity; quantized TTS/TTSD,
 SoundEffect and Speech checkpoint smoke cases. Vulkan also covers the
 F16 TTS/TTSD/SoundEffect and BF16 Speech cases. The full-checkpoint TTS quality
@@ -112,6 +106,13 @@ These are the TTS models whose automatic GPU selection admits WebGPU
 (CosyVoice3 on Windows and desktop Linux, like Vulkan and CUDA). The
 LM-based ones need a fabric ggml whose WebGPU kernels honour
 `GGML_PREC_F32` (qvac-fabric-llm.cpp `be6e387b` or later).
+
+Process exit with Core ML: a process that exits while a sidecar is still compiling or loading in the
+background waits for that load (by default at most 15 s on macOS, 2 s on iOS) when its main thread is armed.
+The main thread is armed automatically when it makes the engine; a host that makes engines on another thread
+(as the qvac addons do) calls `coreml_arm_exit_guard()` on its main thread, or the terminal
+`coreml_shutdown_for_exit()` right before the process exits (`tts-cpp/coreml_exit.h`). See
+[the runtime's README](../coreml/README.md#process-exit).
 
 LavaSR denoiser and enhancer GPU selection includes ARM Mali/Immortalis
 through Vulkan when GPU execution is requested, and excludes WebGPU: the
