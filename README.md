@@ -34,6 +34,10 @@ chunks to prevent phrase loss. Small PCM writes and final tail flushing remain
 supported; full TranscribePsy EU retains its separate streaming policy. See the
 [Parakeet streaming contract](engines/parakeet/docs/api.md).
 
+The standard TDT ggml encoder masks right-padding in attention and convolution,
+so padding cannot alter valid encoder frames. Offline TDT still re-encodes
+windows in push streams; accuracy can vary with the available context.
+
 | Engine | Model families | Capabilities and limitations |
 |---|---|---|
 | [Whisper](docs/WHISPER.md) | tiny, base, small, medium, large v1/v2/v3, large-v3-turbo; Silero v5.1.2/v6.2.0 | ASR, multilingual-to-English translation, VAD, tinydiarize speaker turns; metadata-only memory fit from a model or its weightless description; `.en` checkpoints are English-only and turbo is intended for transcription; tiny/base/small/large-v3-turbo validated on WebGPU |
