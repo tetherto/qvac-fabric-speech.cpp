@@ -1,6 +1,7 @@
 #include "pocket/coreml.h"
 
 #include "coreml_sidecar_path.h"
+#include "json.hpp"
 
 #ifdef TTS_CPP_USE_COREML
 #include "moss/coreml/runner.h"
@@ -534,7 +535,9 @@ pcm::Options to_runtime_options(const CoremlOptions & o) {
 
 // Resolves one stage's options. A step resolved to cpu_and_ane from the
 // environment or the legacy all-stage units keeps its default units instead
-// (an explicit request throws in validate_options).
+// (an explicit request throws in validate_options). The legacy value outranks
+// POCKET_COREML_COMPUTE_UNITS, so it becomes the step's default here, before
+// the environment is consulted: a lower-priority setting never replaces it.
 pcm::Resolved resolve_stage(const CoremlEngineOptions & opts, CoremlStage stage) {
     validate_fields(opts);
     const CoremlOptions o = coreml_stage_options(opts, stage);
@@ -542,11 +545,17 @@ pcm::Resolved resolve_stage(const CoremlEngineOptions & opts, CoremlStage stage)
                                 !(stage == CoremlStage::step ? opts.step_units : opts.decoder_units).empty();
     validate_options(o, stage, units_explicit);
     CoremlOptions runtime = o;
+    bool legacy_fallback = false;
     if (stage == CoremlStage::step && !units_explicit && runtime.compute_units &&
         *runtime.compute_units == "cpu_and_ane") {
-        runtime.compute_units.reset();
+        runtime.compute_units = std::string(COREML_STEP_DEFAULT_UNITS);
+        legacy_fallback = true;
     }
     pcm::Resolved r = pcm::resolve_coreml(to_runtime_options(runtime), ENV_PREFIX);
+    if (legacy_fallback) {
+        r.warnings.push_back("the Core ML step cannot run on cpu_and_ane (Core ML state); it keeps " +
+                             std::string(COREML_STEP_DEFAULT_UNITS));
+    }
     if (stage == CoremlStage::step && r.compute_units && *r.compute_units == pcm::ComputeUnits::cpu_and_ane) {
         r.warnings.push_back("the Core ML step cannot run on cpu_and_ane (Core ML state); it keeps " +
                              std::string(COREML_STEP_DEFAULT_UNITS));
@@ -719,6 +728,20 @@ planned plan_stage(CoremlStage stage, const CoremlEngineOptions & opts) {
             pcm::generation::probe({step ? STEP_TEMPLATE_ID : DECODER_TEMPLATE_ID}, gguf, r);
         if (!c.empty()) out.candidate = std::move(c.front());
     }
+    // A prebuilt sidecar on the Neural Engine is admitted against the cold
+    // compile it causes. When the stage's template matches this GGUF and
+    // holds as many weight bytes as the prebuilt, the prebuilt is that graph:
+    // it waits for the template's measured reserve, as the generated route
+    // does. Any other prebuilt keeps the on-disk estimate.
+    std::optional<pcm::generation::Candidate> reserve_template;
+    if (in.generation_built && in.prebuilt_present && r.enabled() && !gguf.empty()) {
+#ifdef QVAC_COREML_GENERATE
+        pcm::pocket_provided::register_all();
+#endif
+        std::vector<pcm::generation::Candidate> c =
+            pcm::generation::probe({step ? STEP_TEMPLATE_ID : DECODER_TEMPLATE_ID}, gguf, r);
+        if (!c.empty() && c.front().available && c.front().matched) reserve_template = std::move(c.front());
+    }
     const bool available = out.candidate && out.candidate->available;
     const pcm::ComputeUnits stage_default =
         available && out.candidate->default_units
@@ -739,6 +762,15 @@ planned plan_stage(CoremlStage stage, const CoremlEngineOptions & opts) {
         out.route.reason = out.plan.reason;
         if (out.plan.none_state == pcm::SlotState::no_template && out.candidate && !out.candidate->reason.empty()) {
             out.route.reason += ": " + out.candidate->reason;
+        }
+    }
+    if (out.plan.route == pcm::Route::prebuilt && pcm::units_include_ane(out.units)) {
+        const uint64_t on_disk = file_bytes(out.prebuilt_path + "/weights/weight.bin");
+        out.route.ane_compile_reserve_bytes = uint64_t(ANE_COMPILE_RESERVE_FACTOR * double(on_disk));
+        if (reserve_template && reserve_template->memory.weight_bin_size == on_disk) {
+            out.route.ane_compile_reserve_bytes =
+                std::max(out.route.ane_compile_reserve_bytes,
+                         pcm::generation::ane_compile_reserve_bytes(reserve_template->memory, out.units));
         }
     }
     if (out.plan.route == pcm::Route::generate) {
@@ -801,10 +833,7 @@ void make_stage_slot(stage_slot & s, CoremlStage stage, const CoremlEngineOption
     spec.shareable = !step;
     if (spec.route == pcm::Route::prebuilt) {
         spec.artifact_path = s.plan.prebuilt_path;
-        spec.ane_compile_reserve_bytes =
-            pcm::units_include_ane(spec.units)
-                ? uint64_t(ANE_COMPILE_RESERVE_FACTOR * double(file_bytes(spec.artifact_path + "/weights/weight.bin")))
-                : 0;
+        spec.ane_compile_reserve_bytes = s.plan.route.ane_compile_reserve_bytes;
     } else {
         const pcm::generation::Candidate & c = *s.plan.candidate;
         // The file the stage's weights were read from (fstat of the load's
@@ -966,13 +995,7 @@ std::string CoremlStages::status_json() const {
     if (!gen.supported) {
         gen.reason = !pcm::generation::built() ? "build" : "os";
     } else {
-        bool all_unvalidated = true, any_generate = false;
-        for (const stage_slot * s : {&p_->step, &p_->decoder}) {
-            const bool unvalidated = s->plan.plan.route == pcm::Route::none && s->plan.plan.reason == "unvalidated_units";
-            all_unvalidated = all_unvalidated && unvalidated;
-            any_generate = any_generate || unvalidated || s->plan.plan.route == pcm::Route::generate;
-        }
-        if (any_generate && all_unvalidated) gen.reason = "unvalidated_units";
+        gen.reason = coreml_generation_reason({p_->step.plan.route, p_->decoder.plan.route});
     }
     std::vector<std::shared_ptr<pcm::Slot>> slots;
     for (const stage_slot * s : {&p_->step, &p_->decoder}) {
@@ -994,28 +1017,25 @@ std::string CoremlStages::status_json() const {
 }
 
 bool CoremlStages::wait(int64_t timeout_ms, const std::atomic<uint64_t> * cancels, uint64_t since) const {
-    const auto start = pcm::Clock::now();
     bool any = false;
     for (const stage_slot * s : {&p_->step, &p_->decoder}) any = any || s->slot != nullptr;
     if (!any) return false;
-    for (;;) {
-        bool all_ready = true;
-        for (const stage_slot * s : {&p_->step, &p_->decoder}) {
-            if (!s->slot) continue;
-            const pcm::SlotState st = s->slot->state();
-            if (st == pcm::SlotState::ready) continue;
-            // Terminal, or nothing will move it without a request: idle
-            // (prewarm none before the first chunk) and deferred(memory).
-            if (pcm::is_terminal(st) || st == pcm::SlotState::idle || st == pcm::SlotState::deferred_memory) {
-                return false;
+    return coreml_wait_loop(
+        [this] {
+            bool all_ready = true;
+            for (const stage_slot * s : {&p_->step, &p_->decoder}) {
+                if (!s->slot) continue;
+                const pcm::SlotState st = s->slot->state();
+                if (st == pcm::SlotState::ready) continue;
+                // Terminal, or nothing will move it without a request: idle
+                // (prewarm none before the first chunk) and deferred(memory).
+                if (pcm::is_terminal(st) || st == pcm::SlotState::idle || st == pcm::SlotState::deferred_memory)
+                    return CoremlWaitPoll::stop;
+                all_ready = false;
             }
-            all_ready = false;
-        }
-        if (all_ready) return true;
-        if (cancels && cancels->load() != since) return false;
-        if (timeout_ms >= 0 && pcm::Clock::now() - start >= std::chrono::milliseconds(timeout_ms)) return false;
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    }
+            return all_ready ? CoremlWaitPoll::ready : CoremlWaitPoll::pending;
+        },
+        timeout_ms, cancels, since);
 }
 
 std::string CoremlStages::construction_json() const { return pcm::to_json(p_->construction->result()); }
@@ -1073,16 +1093,101 @@ int CoremlStages::step_capacity() const { return 0; }
 bool CoremlStages::decoder_ready() const { return false; }
 std::string CoremlStages::status_json() const { return "{}"; }
 bool CoremlStages::wait(int64_t, const std::atomic<uint64_t> *, uint64_t) const { return false; }
-std::string CoremlStages::construction_json() const { return coreml_empty_group_json("construction"); }
+std::string CoremlStages::construction_json() const { return "{}"; }
 std::string CoremlStages::prewarm(CoremlOptions::Prewarm, bool, const std::atomic<uint64_t> *, uint64_t) {
-    return coreml_empty_group_json("prewarm");
+    return "{}";
 }
 
 #endif
 
-std::string coreml_empty_group_json(const char * group) {
-    return std::string("{\"group\":\"") + group +
-           "\",\"nothing_to_prepare\":true,\"skipped_route_none\":[],\"slots\":[],\"success\":true}";
+std::string coreml_generation_reason(const std::vector<CoremlRoute> & stages) {
+    bool any_candidate = false, all_suppressed = true;
+    for (const CoremlRoute & r : stages) {
+        const bool suppressed = r.route == "none" && r.reason == "unvalidated_units";
+        // A prebuilt or ggml-only stage is not a generation candidate.
+        if (!suppressed && r.route != "generate") continue;
+        any_candidate = true;
+        all_suppressed = all_suppressed && suppressed;
+    }
+    return any_candidate && all_suppressed ? "unvalidated_units" : "";
+}
+
+bool coreml_wait_loop(const std::function<CoremlWaitPoll()> & poll, int64_t timeout_ms,
+                      const std::atomic<uint64_t> * cancels, uint64_t since, int interval_ms) {
+    const auto cancelled = [&] { return cancels != nullptr && cancels->load() != since; };
+    const auto start = std::chrono::steady_clock::now();
+    for (;;) {
+        if (cancelled()) return false;
+        const CoremlWaitPoll p = poll();
+        if (p == CoremlWaitPoll::stop) return false;
+        // A cancel that arrived while the stages became ready still ends the
+        // wait unsuccessfully.
+        if (p == CoremlWaitPoll::ready) return !cancelled();
+        if (timeout_ms >= 0 && std::chrono::steady_clock::now() - start >= std::chrono::milliseconds(timeout_ms))
+            return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
+    }
+}
+
+namespace {
+
+// One stage's route-none record in a build without Core ML, in the shared
+// runtime's slot schema.
+nlohmann::json unbuilt_stage_json(const CoremlEngineOptions & opts, CoremlStage stage) {
+    const CoremlOptions o = coreml_stage_options(opts, stage);
+    const bool step = stage == CoremlStage::step;
+    std::string units = o.compute_units.value_or("");
+    if (units.empty()) {
+        const char * env = std::getenv(COREML_UNITS_ENV);
+        if (env != nullptr && coreml_valid_units(env)) units = env;
+    }
+    if (units.empty() || (step && units == "cpu_and_ane")) {
+        units = step ? COREML_STEP_DEFAULT_UNITS : COREML_DECODER_DEFAULT_UNITS;
+    }
+    nlohmann::json j;
+    j["stage"] = stage_name(stage);
+    j["function"] = "main";
+    j["state"] = "unsupported(build)";
+    j["route"] = "none";
+    j["compute_units"] = units;
+    j["label"] = GGML_STAGE_BACKEND;
+    j["artifact_key"] = nullptr;
+    j["path"] = nullptr;
+    j["hint"] = nullptr;
+    j["timings_ms"] = {{"queued", 0}, {"digest", 0}, {"write", 0}, {"compile", 0}, {"load", 0}, {"warm", 0}};
+    j["bytes_on_disk"] = 0;
+    j["error"] = nullptr;
+    j["error_class"] = nullptr;
+    return j;
+}
+
+}  // namespace
+
+std::string coreml_unbuilt_status_json(const CoremlEngineOptions & opts) {
+    std::string cache = opts.coreml.cache_dir.value_or("");
+    if (!opts.coreml.cache_dir) {
+        const char * shared = std::getenv("QVAC_COREML_CACHE_DIR");
+        if (shared != nullptr) cache = shared;
+    }
+    nlohmann::json j;
+    j["schema"] = 1;
+    j["engine"] = ENGINE_NAME;
+    j["cache_dir"] = cache;
+    j["generation"] = {{"supported", false}, {"reason", "build"}};
+    j["stages"] = nlohmann::json::array(
+        {unbuilt_stage_json(opts, CoremlStage::step), unbuilt_stage_json(opts, CoremlStage::decoder)});
+    return j.dump();
+}
+
+std::string coreml_unbuilt_group_json(const char * group, const CoremlEngineOptions & opts) {
+    nlohmann::json j;
+    j["group"] = group;
+    j["success"] = true;
+    j["nothing_to_prepare"] = true;
+    j["slots"] = nlohmann::json::array();
+    j["skipped_route_none"] = nlohmann::json::array(
+        {unbuilt_stage_json(opts, CoremlStage::step), unbuilt_stage_json(opts, CoremlStage::decoder)});
+    return j.dump();
 }
 
 } // namespace tts_cpp::pocket::detail

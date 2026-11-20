@@ -146,6 +146,105 @@ double cosine(const std::vector<float> & a, const std::vector<float> & b) {
     return dot / std::sqrt(na * nb);
 }
 
+// The blocking readiness wait against a controlled poll: a cancel that
+// arrives in the same polling interval as readiness ends the wait
+// unsuccessfully; a wait that starts after the cancel succeeds.
+void check_wait_cancel() {
+    using Poll = pd::CoremlWaitPoll;
+    std::atomic<uint64_t> cancels{0};
+    int calls = 0;
+    // Pending on the first poll; then cancel() is called and the loader
+    // finishes before the next poll.
+    bool ok = pd::coreml_wait_loop(
+        [&] {
+            if (++calls == 1) return Poll::pending;
+            cancels.fetch_add(1);
+            return Poll::ready;
+        },
+        -1, &cancels, 0, 1);
+    require(!ok && calls == 2, "a cancel that precedes readiness in one polling interval ends the wait (false)");
+    // Readiness seen first, then a cancel before the wait returns.
+    calls = 0;
+    const uint64_t since = cancels.load();
+    ok = pd::coreml_wait_loop(
+        [&] {
+            ++calls;
+            cancels.fetch_add(1);
+            return Poll::ready;
+        },
+        -1, &cancels, since, 1);
+    require(!ok && calls == 1, "a cancel seen after readiness, before returning, wins");
+    // Started after the cancels: it does not see them.
+    calls = 0;
+    ok = pd::coreml_wait_loop([&] { return ++calls < 3 ? Poll::pending : Poll::ready; }, -1, &cancels,
+                              cancels.load(), 1);
+    require(ok && calls == 3, "a wait started after a cancel succeeds");
+    require(!pd::coreml_wait_loop([] { return Poll::stop; }, -1, &cancels, cancels.load(), 1), "stop ends it");
+    require(!pd::coreml_wait_loop([] { return Poll::pending; }, 5, nullptr, 0, 1), "the timeout ends it");
+    require(pd::coreml_wait_loop([] { return Poll::ready; }, 0, nullptr, 0, 1), "a poll without a counter");
+    std::puts("[wait] readiness wait and cancel: ok");
+}
+
+// generation.reason aggregates over generation candidates only: a prebuilt
+// sibling does not hide that the only candidate was suppressed.
+void check_generation_reason() {
+    pd::CoremlRoute prebuilt, generated, suppressed, absent;
+    prebuilt.route = "prebuilt";
+    generated.route = "generate";
+    suppressed.route = "none";
+    suppressed.state = "unsupported";
+    suppressed.reason = "unvalidated_units";
+    absent.route = "none";
+    absent.state = "absent";
+    absent.reason = "no sidecar";
+    require(pd::coreml_generation_reason({prebuilt, suppressed}) == "unvalidated_units",
+            "prebuilt step, Mimi suppressed: the reason is reported");
+    require(pd::coreml_generation_reason({suppressed, prebuilt}) == "unvalidated_units", "either order");
+    require(pd::coreml_generation_reason({generated, suppressed}).empty(),
+            "one stage generated, one suppressed: generation runs, no reason");
+    require(pd::coreml_generation_reason({suppressed, suppressed}) == "unvalidated_units", "both suppressed");
+    require(pd::coreml_generation_reason({prebuilt, prebuilt}).empty(), "no candidate: no reason");
+    require(pd::coreml_generation_reason({absent, suppressed}) == "unvalidated_units",
+            "a stage without a route is not a candidate");
+    require(pd::coreml_generation_reason({generated, generated}).empty(), "both generated");
+    std::puts("[status] generation reason over candidates: ok");
+}
+
+// A build without Core ML still reports both stages: schema-1 status with
+// each stage unsupported(build) on route none, and successful empty groups
+// that list both as skipped (what Engine returns when TTS_CPP_COREML is off).
+void check_unbuilt_status() {
+    pd::CoremlEngineOptions o;
+    o.coreml.cache_dir = "/tmp/pocket-cache";
+    o.decoder_units = "cpu_only";
+    const nlohmann::json st = nlohmann::json::parse(pd::coreml_unbuilt_status_json(o));
+    require(st.at("schema") == 1 && st.at("engine") == "pocket" && st.at("cache_dir") == "/tmp/pocket-cache" &&
+                st.at("generation").at("supported") == false && st.at("generation").at("reason") == "build",
+            "unbuilt status header: " + st.dump());
+    auto stages_ok = [](const nlohmann::json & stages, const std::string & what) {
+        require(stages.is_array() && stages.size() == 2 && stages[0].at("stage") == "step" &&
+                    stages[1].at("stage") == "mimi",
+                what + ": both stages in order: " + stages.dump());
+        for (const nlohmann::json & s : stages) {
+            require(s.at("state") == "unsupported(build)" && s.at("route") == "none" && s.at("label") == "ggml" &&
+                        s.at("artifact_key").is_null() && s.at("path").is_null() && s.at("error").is_null() &&
+                        s.contains("timings_ms") && s.contains("bytes_on_disk") && s.contains("hint"),
+                    what + ": route-none record: " + s.dump());
+        }
+        require(stages[0].at("compute_units") == "cpu_and_gpu" && stages[1].at("compute_units") == "cpu_only",
+                what + ": resolved units: " + stages.dump());
+    };
+    stages_ok(st.at("stages"), "status");
+    for (const char * group : {"construction", "prewarm"}) {
+        const nlohmann::json g = nlohmann::json::parse(pd::coreml_unbuilt_group_json(group, o));
+        require(g.at("group") == group && g.at("success") == true && g.at("nothing_to_prepare") == true &&
+                    g.at("slots").empty(),
+                std::string(group) + " group: " + g.dump());
+        stages_ok(g.at("skipped_route_none"), std::string(group) + " skipped_route_none");
+    }
+    std::puts("[unbuilt] status and groups without Core ML: ok");
+}
+
 void check_policy() {
     env_guard units(pd::COREML_UNITS_ENV), strict(pd::COREML_STRICT_ENV), disabled(pd::COREML_DISABLE_ENV);
     unsetenv(pd::COREML_UNITS_ENV);
@@ -417,6 +516,16 @@ void check_coreml_options() {
             "legacy all-stage cpu_and_ane leaves the step on cpu_and_gpu");
     require(pd::coreml_plan_route(pd::CoremlStage::decoder, o).compute_units == "cpu_and_ane",
             "legacy all-stage units reach the decoder");
+    // The legacy value outranks the environment: with a conflicting
+    // POCKET_COREML_COMPUTE_UNITS the step still falls back to its default
+    // and the decoder keeps the legacy placement.
+    setenv(pd::COREML_UNITS_ENV, "cpu_only", 1);
+    require(pd::coreml_plan_route(pd::CoremlStage::step, o).compute_units == "cpu_and_gpu",
+            "legacy cpu_and_ane with POCKET_COREML_COMPUTE_UNITS=cpu_only: the step on cpu_and_gpu, got " +
+                pd::coreml_plan_route(pd::CoremlStage::step, o).compute_units);
+    require(pd::coreml_plan_route(pd::CoremlStage::decoder, o).compute_units == "cpu_and_ane",
+            "legacy cpu_and_ane with POCKET_COREML_COMPUTE_UNITS=cpu_only: the decoder on cpu_and_ane");
+    unsetenv(pd::COREML_UNITS_ENV);
     o.legacy_units.clear();
     setenv(pd::COREML_UNITS_ENV, "cpu_and_ane", 1);
     require(pd::coreml_plan_route(pd::CoremlStage::step, o).compute_units == "cpu_and_gpu",
@@ -1644,6 +1753,21 @@ int cli_paths(const fs::path & bundle, const std::string & cli) {
     }
     fs::remove_all(dir / "bundle" / "mimi-decoder.mlmodelc");
     std::puts("[cli] Core ML sidecar and cache files: refused, bytes kept");
+#ifndef TTS_CPP_USE_COREML
+    // Without Core ML the Engine still reports both stages, through the
+    // CLI's status file.
+    {
+        const fs::path status = dir / "status.json";
+        r = run("--output '" + out.string() + "' --coreml-status-json '" + status.string() + "'");
+        require(r.first == 0, "pocket-cli run without Core ML: " + r.second);
+        const nlohmann::json st = nlohmann::json::parse(file_text(status));
+        require(st.at("schema") == 1 && st.at("generation").at("reason") == "build" && st.at("stages").size() == 2 &&
+                    st.at("stages")[0].at("state") == "unsupported(build)" &&
+                    st.at("stages")[1].at("state") == "unsupported(build)",
+                "status without Core ML lists both stages unsupported(build): " + st.dump());
+        std::puts("[cli] status without Core ML: both stages unsupported(build)");
+    }
+#endif
 #ifdef TTS_CPP_USE_COREML
     // The cache directory each way.
     const fs::path status = dir / "status.json";
@@ -1725,6 +1849,9 @@ int main(int argc, char ** argv) {
 #endif
         }
         check_policy();
+        check_wait_cancel();
+        check_unbuilt_status();
+        check_generation_reason();
         check_coreml_options();
         check_naming();
         check_rope();

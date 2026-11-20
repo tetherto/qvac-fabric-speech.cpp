@@ -124,7 +124,8 @@ public:
     bool mimi_on_coreml() const noexcept;
     // Core ML status of both stages as JSON (schema 1: engine, cache_dir,
     // generation, stages with state, route, compute units, label, artifact
-    // key, timings and error); "{}" in builds without TTS_CPP_COREML.
+    // key, timings and error). In builds without TTS_CPP_COREML: both stages
+    // unsupported(build) on route none, generation unsupported for "build".
     std::string coreml_status() const;
     // Waits until every Core ML stage with a sidecar is ready or one has
     // failed, `timeout_ms` passes (< 0: no limit) or cancel() is called. True
@@ -144,7 +145,9 @@ public:
     // both sidecars (Pocket's minimal set). With `wait` it blocks until every
     // requested sidecar is ready or terminal, or cancel() is called. Returns
     // the group's result as JSON (as coreml_construction()); an Engine
-    // without Core ML stages returns an empty group that succeeded.
+    // without Core ML stages returns an empty group that succeeded, with
+    // every stage in "skipped_route_none" (unsupported(build) in builds
+    // without TTS_CPP_COREML).
     std::string coreml_prewarm(CoremlOptions::Prewarm scope, bool wait);
     const char * device_name() const noexcept;
     std::string model_source_sha256() const;

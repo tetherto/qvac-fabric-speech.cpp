@@ -53,6 +53,7 @@
 #include <optional>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <vector>
 
 namespace pd = tts_cpp::pocket::detail;
@@ -203,6 +204,95 @@ void template_charges(const pd::CoremlRoute & step, const pd::CoremlRoute & deco
               "), validated for both stages' units");
 }
 
+#if defined(TTS_CPP_USE_COREML) && defined(__APPLE__) && TARGET_OS_OSX
+// template.json weight_bin_size of pocket-mimi: the bytes a compiled Mimi
+// decoder of that graph holds in weights/weight.bin.
+constexpr uint64_t MIMI_WEIGHT_BIN = 20621824;
+
+uint64_t g_fake_available = 0;
+uint64_t fake_available() { return g_fake_available; }
+
+pcm::LoadResult failing_load(const pcm::LoadRequest &) {
+    pcm::LoadResult r;
+    r.error = pcm::Error::deterministic("test load");
+    return r;
+}
+
+// Whether a cold, unhinted cpu_and_ane load reserving `reserve` bytes waits
+// for memory (deferred) with `available` bytes free.
+bool defers(uint64_t reserve, uint64_t available, const fs::path & artifact) {
+    pcm::Config cfg;
+    g_fake_available = available;
+    cfg.available_memory = &fake_available;
+    cfg.memory_recheck = std::chrono::milliseconds(20);
+    const auto mgr = pcm::Manager::create(cfg);
+    pcm::SlotSpec spec;
+    spec.engine = "pocket";
+    spec.stage = "mimi";
+    spec.units = pcm::ComputeUnits::cpu_and_ane;
+    spec.route = pcm::Route::prebuilt;
+    spec.artifact_path = artifact.string();
+    spec.load_fn = &failing_load;
+    spec.ane_compile_reserve_bytes = reserve;
+    const auto slot = mgr->make_slot(std::move(spec), pcm::SlotPolicy{});
+    mgr->issue_group(pcm::GroupKind::construction, {{slot, pcm::Priority::minimal}}, false);
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    for (;;) {
+        const pcm::SlotState st = slot->state();
+        if (st == pcm::SlotState::deferred_memory) return true;
+        if (pcm::is_terminal(st)) return false;
+        if (std::chrono::steady_clock::now() > until) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+}
+
+// A compiled Mimi decoder next to the GGUF (prebuilt) that holds the
+// template's weight bytes is the generated graph: its cold Neural Engine load
+// waits for the template's measured reserve, like the generated route, not
+// for 1.6 x its weights. Another prebuilt keeps that on-disk estimate. With
+// available memory between the two, both routes' loads are deferred.
+void prebuilt_reserve(const std::string & mimi_gguf, const fs::path & scratch, const pd::CoremlRoute & generated) {
+    const fs::path dir = scratch / "prebuilt";
+    fs::create_directories(dir);
+    fs::create_symlink(fs::absolute(mimi_gguf), dir / "mimi.gguf");
+    const fs::path weights = dir / "mimi-decoder.mlmodelc" / "weights" / "weight.bin";
+    fs::create_directories(weights.parent_path());
+    std::ofstream(weights, std::ios::binary).put('\0');
+    fs::resize_file(weights, MIMI_WEIGHT_BIN);
+    tts_cpp::pocket::EngineOptions e;
+    e.flow_lm_path = (dir / "flow-lm.gguf").string();
+    e.mimi_path = (dir / "mimi.gguf").string();
+    const auto route = [&] {
+        return pd::coreml_plan_route(pd::CoremlStage::decoder, pd::coreml_engine_options(e));
+    };
+    const pd::CoremlRoute matching = route();
+    const uint64_t on_disk = uint64_t(1.6 * double(MIMI_WEIGHT_BIN));
+    check(matching.route == "prebuilt" && matching.compute_units == "cpu_and_ane",
+          "prebuilt Mimi decoder: route " + describe(matching));
+    if (generated.route == "generate") {
+        check(generated.ane_compile_reserve_bytes > on_disk &&
+                  matching.ane_compile_reserve_bytes == generated.ane_compile_reserve_bytes,
+              "prebuilt Mimi of the template's graph reserves the measured " +
+                  std::to_string(generated.ane_compile_reserve_bytes) + " bytes (got " +
+                  std::to_string(matching.ane_compile_reserve_bytes) + ", on-disk estimate " +
+                  std::to_string(on_disk) + ")");
+        const uint64_t between = (on_disk + generated.ane_compile_reserve_bytes) / 2;
+        check(defers(matching.ane_compile_reserve_bytes, between, dir / "mimi-decoder.mlmodelc") &&
+                  defers(generated.ane_compile_reserve_bytes, between, dir / "mimi-decoder.mlmodelc"),
+              "with " + std::to_string(between) + " bytes free both the prebuilt and the generated load defer");
+        check(!defers(on_disk, between, dir / "mimi-decoder.mlmodelc"),
+              "the on-disk estimate alone would admit that load (the case the measured reserve closes)");
+    } else {
+        fprintf(stderr, "prebuilt reserve: no generated route here (%s), measured reserve not checked\n",
+                describe(generated).c_str());
+    }
+    fs::resize_file(weights, 1 << 20);
+    const pd::CoremlRoute other = route();
+    check(other.route == "prebuilt" && other.ane_compile_reserve_bytes == uint64_t(1.6 * double(1 << 20)),
+          "another prebuilt keeps 1.6 x its weights: " + std::to_string(other.ane_compile_reserve_bytes));
+}
+#endif
+
 } // namespace
 
 int main(int argc, char ** argv) {
@@ -265,6 +355,9 @@ int main(int argc, char ** argv) {
 
     const auto routes0 = routes_at(empty);
     template_charges(routes0.first, routes0.second);
+#if defined(TTS_CPP_USE_COREML) && defined(__APPLE__) && TARGET_OS_OSX
+    prebuilt_reserve(mimi_gguf, scratch, routes0.second);
+#endif
     const std::string route0 = route_at(empty);
     const std::string fit0 = bundle.empty() ? std::string() : fit_at(empty);
     fprintf(stderr, "routes on an empty cache: %s\n", route0.c_str());

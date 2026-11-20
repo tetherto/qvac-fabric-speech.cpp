@@ -392,7 +392,10 @@ const char * Engine::flow_lm_backend_name() const noexcept { return impl_->lm->b
 const char * Engine::mimi_backend_name() const noexcept { return impl_->mimi->backend_name(); }
 bool Engine::flow_lm_on_coreml() const noexcept { return impl_->coreml && impl_->coreml->step_ready(); }
 bool Engine::mimi_on_coreml() const noexcept { return impl_->coreml && impl_->coreml->decoder_ready(); }
-std::string Engine::coreml_status() const { return impl_->coreml ? impl_->coreml->status_json() : std::string("{}"); }
+std::string Engine::coreml_status() const {
+    return impl_->coreml ? impl_->coreml->status_json()
+                         : detail::coreml_unbuilt_status_json(detail::coreml_engine_options(impl_->opts));
+}
 bool Engine::coreml_wait(int64_t timeout_ms) const {
     if (!impl_->coreml) return false;
     // A readiness poll has nothing to cancel and touches no flag.
@@ -403,10 +406,11 @@ bool Engine::coreml_wait(int64_t timeout_ms) const {
     return impl_->coreml->wait(timeout_ms, &impl_->wait_cancels, impl_->wait_cancels.load());
 }
 std::string Engine::coreml_construction() const {
-    return impl_->coreml ? impl_->coreml->construction_json() : detail::coreml_empty_group_json("construction");
+    return impl_->coreml ? impl_->coreml->construction_json()
+                         : detail::coreml_unbuilt_group_json("construction", detail::coreml_engine_options(impl_->opts));
 }
 std::string Engine::coreml_prewarm(CoremlOptions::Prewarm scope, bool wait) {
-    if (!impl_->coreml) return detail::coreml_empty_group_json("prewarm");
+    if (!impl_->coreml) return detail::coreml_unbuilt_group_json("prewarm", detail::coreml_engine_options(impl_->opts));
     return impl_->coreml->prewarm(scope, wait, &impl_->wait_cancels, impl_->wait_cancels.load());
 }
 const char * Engine::device_name() const noexcept { return impl_->device_name.c_str(); }

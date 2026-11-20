@@ -215,8 +215,11 @@ struct CoremlRoute {
     uint64_t load_peak_bytes = 0;     // load and warm-up transient for compute_units
     uint64_t transient_bytes = 0;     // max(prepare peak, load peak)
     double margin = 1.25;
-    // generate: the free memory a cold Neural Engine load waits for (runtime
-    // admission; fit does not charge it). 0 when compute_units has no ANE.
+    // The free memory a cold Neural Engine load waits for (runtime admission;
+    // fit does not charge it). 0 when compute_units has no ANE. generate: the
+    // template's measured reserve. prebuilt: the same when the stage's
+    // template matches the GGUF and holds as many weight bytes as the
+    // sidecar (the same graph), else 1.6 x the sidecar's weights.
     uint64_t ane_compile_reserve_bytes = 0;
 };
 
@@ -301,9 +304,31 @@ struct CoremlDecoderUse {
     std::function<void(const std::string &)> retire;
 };
 
-// The result of an empty request group (nothing to prepare, which succeeds)
-// as JSON: an Engine without Core ML stages, or a build without Core ML.
-std::string coreml_empty_group_json(const char * group);
+// The status's generation.reason on a supported build and OS:
+// "unvalidated_units" when every generation candidate (a stage whose route is
+// generate, or none because its units are not validated) was suppressed for
+// that reason; prebuilt and route-none stages are not candidates. "" (null)
+// otherwise.
+std::string coreml_generation_reason(const std::vector<CoremlRoute> & stages);
+
+// One poll of a blocking readiness wait: every stage ready, still on its way,
+// or one that will not get there without a request (terminal, idle or
+// deferred for memory).
+enum class CoremlWaitPoll { pending, ready, stop };
+// Polls every `interval_ms` until `poll` reports ready (true) or stop, the
+// timeout passes (< 0: none) or `cancels` moves past `since` (false). A cancel
+// wins over readiness seen in the same poll: the counter is read again after
+// readiness and before returning true.
+bool coreml_wait_loop(const std::function<CoremlWaitPoll()> & poll, int64_t timeout_ms,
+                      const std::atomic<uint64_t> * cancels, uint64_t since, int interval_ms = 20);
+
+// A build without Core ML (TTS_CPP_COREML off): the status (schema 1) with
+// both stages unsupported(build) on route none, generation unsupported for
+// the build, and the cache directory and compute units the options resolve
+// to; and a request group's result, empty and successful, listing both stages
+// as skipped (route none).
+std::string coreml_unbuilt_status_json(const CoremlEngineOptions & opts);
+std::string coreml_unbuilt_group_json(const char * group, const CoremlEngineOptions & opts);
 
 // Both stages of one Engine on the shared Core ML runtime.
 class CoremlStages {
