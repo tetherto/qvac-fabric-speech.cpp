@@ -617,8 +617,10 @@ jobs:
       # for sample, through the Engine and through tts-cli, and later calls
       # run on Core ML; the Engine sentence overlap against sequential
       # synthesis, cancellation, strict mode, a CFM failure rolled back to a
-      # whole ggml integration and a worker failure rendered again; then
-      # per-stage parity against ggml.
+      # whole ggml integration and a worker failure rendered again; Engine
+      # streaming with the loads held through the first chunk and released
+      # between two callbacks (per-chunk routing, the aggregate pending flag
+      # and the final chunk); then per-stage parity against ggml.
       - name: Test (Core ML Chatterbox runtime on staged Turbo)
         if: runner.os == 'macOS'
         env:
@@ -629,6 +631,7 @@ jobs:
           set -euo pipefail
           sw_vers -productVersion
           ./build/test-chatterbox-coreml --engine-fixture --slow-load
+          ./build/test-chatterbox-coreml --streaming-fixture
           ./build/test-chatterbox-coreml --stages-fixture
 
       # Pocket Core ML FlowLM step and Mimi decoder, all on random weights (no

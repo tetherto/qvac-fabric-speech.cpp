@@ -1902,6 +1902,140 @@ int engine_fixture(bool slow_load) {
 #endif
 }
 
+// Streaming through the Engine while its Core ML functions load. Every load
+// is held until the first chunk's callback, which releases them and waits
+// until they finished, between two callbacks. The first chunk runs on ggml,
+// marked pending, and equals a use = off stream's first chunk sample for
+// sample; every later chunk, across all three sentences, runs on Core ML on
+// the plan it acquires for itself. The request aggregates as mixed with
+// coreml_pending set; chunk indices run 0..n-1, only the last one is
+// is_last, it runs on Core ML and the chunks concatenate to result.pcm. A
+// second stream, everything loaded, runs on Core ML with nothing pending.
+int streaming_fixture() {
+#ifndef TTS_CPP_USE_COREML
+    std::puts("SKIP: built without TTS_CPP_COREML");
+    return SKIP;
+#else
+    const char * t3_env = std::getenv("CHATTERBOX_COREML_TEST_T3");
+    const char * s3gen_env = std::getenv("CHATTERBOX_COREML_TEST_S3GEN");
+    if (!t3_env || !*t3_env || !s3gen_env || !*s3gen_env) {
+        std::puts("SKIP: CHATTERBOX_COREML_TEST_T3 / CHATTERBOX_COREML_TEST_S3GEN are not set");
+        return SKIP;
+    }
+    const std::string t3 = t3_env, s3gen = s3gen_env;
+    for (const char * suffix : {cb::COREML_ENCODER_SUFFIX, cb::COREML_CFM_SUFFIX, cb::COREML_HIFT_SUFFIX}) {
+        if (!fs::exists(cb::coreml_stage_path(s3gen, suffix))) {
+            std::printf("SKIP: %s is missing\n", cb::coreml_stage_path(s3gen, suffix).c_str());
+            return SKIP;
+        }
+    }
+    env_guard units(cb::COREML_UNITS_ENV), strict(cb::COREML_STRICT_ENV), disabled(cb::COREML_DISABLE_ENV);
+    env_guard cache("QVAC_COREML_CACHE_DIR");
+    unsetenv(cb::COREML_UNITS_ENV);
+    unsetenv(cb::COREML_STRICT_ENV);
+    unsetenv(cb::COREML_DISABLE_ENV);
+    unsetenv("QVAC_COREML_CACHE_DIR");
+    temp_dir root("streaming");
+
+    auto stream_options = [&](CoremlOptions::Use use) {
+        EngineOptions opts = engine_options(t3, s3gen);
+        opts.stream_first_chunk_tokens = 10;
+        opts.stream_chunk_tokens = 25;
+        opts.stream_left_context_tokens = 25;
+        opts.coreml.use = use;
+        opts.coreml.cache_dir = (root.path / "cache").string();
+        return opts;
+    };
+    struct chunk {
+        std::vector<float> pcm;
+        int index = 0;
+        bool last = false;
+    };
+    auto stream = [](Engine & engine, std::vector<chunk> & chunks, const std::function<void(int)> & after) {
+        return engine.synthesize(OVERLAP_TEXT, [&](const float * pcm, std::size_t n, int index, bool last) {
+            chunks.push_back(chunk{std::vector<float>(pcm, pcm + n), index, last});
+            if (after) after(index);
+        });
+    };
+
+    std::vector<chunk> off_chunks;
+    {
+        Engine off_engine(stream_options(CoremlOptions::Use::off));
+        const SynthesisResult off = stream(off_engine, off_chunks, nullptr);
+        require(off.s3gen_backend == cb::GGML_STAGE_BACKEND && !off.coreml_pending && off_chunks.size() > 3,
+                "use = off streams on ggml, several chunks");
+    }
+
+    auto & hooks = cb::coreml_test();
+    hooks.hold_loads = true;
+    Engine engine(stream_options(CoremlOptions::Use::unset));
+    hooks.clear_events();
+    hooks.tracing = true;
+    std::vector<chunk> chunks;
+    bool released_settled = false;
+    std::string error;
+    SynthesisResult first;
+    try {
+        first = stream(engine, chunks, [&](int index) {
+            if (index != 0) return;
+            hooks.hold_loads = false;  // between the first and the second callback
+            released_settled = wait_for([&] { return engine_settled(engine); }, 900000);
+        });
+    } catch (const std::exception & e) {
+        error = e.what();
+    }
+    hooks.tracing = false;
+    hooks.hold_loads = false;
+    require(error.empty(), "the held stream finishes: " + error);
+    require(released_settled, "the functions load once released between two callbacks");
+
+    std::vector<std::string> routes;
+    for (const std::string & e : hooks.events()) {
+        if (e.rfind("chunk ", 0) == 0) routes.push_back(e);
+    }
+    std::string trace;
+    for (const auto & r : routes) trace += (trace.empty() ? "" : ", ") + r;
+    std::printf("[streaming] %zu chunks: %s\n", chunks.size(), trace.c_str());
+    std::printf("[streaming] aggregate backend=%s pending=%d; max |first chunk - use=off| = %.3e\n",
+                first.s3gen_backend.c_str(), (int) first.coreml_pending,
+                !chunks.empty() && !off_chunks.empty() && chunks[0].pcm.size() == off_chunks[0].pcm.size()
+                    ? max_abs(chunks[0].pcm, off_chunks[0].pcm)
+                    : -1.0);
+    require(chunks.size() > 3 && routes.size() == chunks.size(), "every chunk reports its routing");
+    require(routes[0] == "chunk 0 s3gen=ggml pending", "the first chunk runs on ggml while every load is held");
+    require(same_pcm(chunks[0].pcm, off_chunks[0].pcm), "the first chunk equals a use = off stream's first chunk");
+    for (size_t i = 1; i < routes.size(); ++i) {
+        require(routes[i] == "chunk " + std::to_string(i) + " s3gen=coreml-ane",
+                "every chunk after the release runs on Core ML (" + routes[i] + ")");
+    }
+    require(first.s3gen_backend == cb::MIXED_STAGE_BACKEND && first.coreml_pending,
+            "the request aggregates as mixed with coreml_pending set");
+    std::vector<float> joined;
+    for (size_t i = 0; i < chunks.size(); ++i) {
+        require(chunks[i].index == (int) i, "chunk indices run 0..n-1");
+        require(chunks[i].last == (i + 1 == chunks.size()), "only the final chunk is last");
+        joined.insert(joined.end(), chunks[i].pcm.begin(), chunks[i].pcm.end());
+    }
+    require(!chunks.back().pcm.empty(), "the final chunk carries audio");
+    require(same_pcm(joined, first.pcm), "the chunks concatenate to the result's PCM");
+    std::printf("[streaming] final chunk %d last=1 on Core ML, %zu samples; chunks join to result.pcm\n",
+                chunks.back().index, chunks.back().pcm.size());
+
+    std::vector<chunk> warm_chunks;
+    hooks.clear_events();
+    hooks.tracing = true;
+    const SynthesisResult warm = stream(engine, warm_chunks, nullptr);
+    hooks.tracing = false;
+    std::printf("[streaming] loaded: %zu chunks, backend=%s pending=%d\n", warm_chunks.size(),
+                warm.s3gen_backend.c_str(), (int) warm.coreml_pending);
+    require(warm.s3gen_backend == "coreml-ane" && !warm.coreml_pending && !warm_chunks.empty() &&
+                warm_chunks.back().last,
+            "once loaded, a stream runs every chunk on Core ML with nothing pending");
+    s3gen_unload();
+    return 0;
+#endif
+}
+
 } // namespace
 
 int main(int argc, char ** argv) {
@@ -1909,6 +2043,7 @@ int main(int argc, char ** argv) {
         if (argc > 1 && std::string(argv[1]) == "--stages-fixture") return stages_fixture();
         if (argc > 1 && std::string(argv[1]) == "--shape-fixture") return shape_fixture();
         if (argc > 1 && std::string(argv[1]) == "--pending-fixture") return pending_fixture();
+        if (argc > 1 && std::string(argv[1]) == "--streaming-fixture") return streaming_fixture();
         if (argc > 1 && std::string(argv[1]) == "--engine-fixture") {
             return engine_fixture(argc > 2 && std::string(argv[2]) == "--slow-load");
         }

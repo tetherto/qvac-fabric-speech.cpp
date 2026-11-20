@@ -312,8 +312,14 @@ unchanged by loads). `test-chatterbox-coreml-engine-slow-load` (`--slow-load`, a
 first synthesis, through the `Engine` and through `tts-cli`, equals a `use =
 off` run sample for sample, that later calls run on Core ML, and that
 `tts-cli` renders a sentence handed back by a failing CFM prediction again
-only after the next sentence's T3. Each reports a
-skip without its inputs. The macOS CI lane runs the exporter, shape and pending
+only after the next sentence's T3. `test-chatterbox-coreml-streaming`
+(`--streaming-fixture`, the same two GGUFs) streams through the `Engine` with
+every load held until the first chunk's callback, which releases them: the
+first chunk runs on ggml, marked pending, and equals a `use = off` stream's
+first chunk; every later chunk runs on Core ML on the plan it acquires; the
+request aggregates as `mixed` with `coreml_pending` set; only the final chunk
+is `is_last`; and a stream once everything loaded has nothing pending. Each
+reports a skip without its inputs. The macOS CI lane runs the exporter, shape and pending
 checks, and the engine fixtures on staged Turbo GGUFs.
 
 ### Adreno OpenCL

@@ -381,7 +381,9 @@ struct coreml_test_hooks {
     // in order: "t3 <i>" when T3 of sentence i finished, "handed back <i>"
     // when its S3Gen worker returned S3GEN_RC_COREML_REDO, "replay <i>
     // cfm=<label>" when the dispatching thread starts rendering it again;
-    // and per S3Gen call "cfm draws init=<n> end=<m>", the CFM noise draws
+    // per streamed chunk "chunk <i> s3gen=<backend>[ pending]", its S3Gen
+    // backend and whether a stage waited for a loading function; and per
+    // S3Gen call "cfm draws init=<n> end=<m>", the CFM noise draws
     // after the initial noise and after the whole integration (rollback
     // included).
     std::atomic<bool> tracing{false};

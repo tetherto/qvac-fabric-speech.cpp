@@ -907,6 +907,9 @@ struct Engine::Impl {
             }
             s3gen_backends.insert(chunk_backend);
             s3gen_ms_total += std::chrono::duration<double, std::milli>(s3_t1 - s3_t0).count();
+            detail::coreml_test().trace(
+                "chunk " + std::to_string(global_chunk_idx) + " s3gen=" + chunk_backend +
+                (copts.coreml_plan && detail::plan_pending(*copts.coreml_plan) ? " pending" : ""));
 
             // is_last is true only on the final chunk of the final segment.
             // chunk_index is the global monotonic counter (post-incremented so

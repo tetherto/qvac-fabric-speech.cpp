@@ -1604,8 +1604,12 @@ if (TTS_CPP_BUILD_TESTS)
     # use = off run, through the Engine and tts-cli (CHATTERBOX_COREML_TEST_CLI).
     tts_cpp_register_test(test-chatterbox-coreml-engine-slow-load
         EXE test-chatterbox-coreml LABEL "fixture" ARGS "--engine-fixture" "--slow-load")
+    # Engine streaming while the functions load: the first chunk on ggml, the
+    # loads released between two callbacks, every later chunk on Core ML.
+    tts_cpp_register_test(test-chatterbox-coreml-streaming
+        EXE test-chatterbox-coreml LABEL "fixture" ARGS "--streaming-fixture")
     set_tests_properties(test-chatterbox-coreml-stages test-chatterbox-coreml-shapes test-chatterbox-coreml-pending
-        test-chatterbox-coreml-engine test-chatterbox-coreml-engine-slow-load
+        test-chatterbox-coreml-engine test-chatterbox-coreml-engine-slow-load test-chatterbox-coreml-streaming
         PROPERTIES SKIP_RETURN_CODE 77)
 
     add_executable(test-cosyvoice-load test/test_cosyvoice_load.cpp ${_tcb_cosy_core_srcs})
