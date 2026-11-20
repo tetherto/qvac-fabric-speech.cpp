@@ -1941,6 +1941,20 @@ if (PARAKEET_BUILD_TESTS)
                     --cache-dir "${_qvp_gen_cache}")
         set_tests_properties(test-nemotron-diarization-coreml-generated-parity PROPERTIES
             LABELS "fixture;coreml;coreml-generated" TIMEOUT 1800)
+        # The DER gate: the generated diarizers against the exporter's bundles on
+        # the pinned clips, both on the Neural Engine, at most 0.2 pp apart.
+        if (PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF AND Python3_EXECUTABLE)
+            add_test(NAME test-nemotron-diarization-coreml-generated-der
+                COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check-generated-diarizer-der.py
+                        --cli $<TARGET_FILE:parakeet-cli>
+                        --generated-gguf "${PARAKEET_TEST_NEMOTRON_GENERATED_GGUF}"
+                        --prebuilt-gguf "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}"
+                        --samples ${CMAKE_CURRENT_SOURCE_DIR}/test/samples
+                        --der-script ${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/benchmarks/compute-der.py
+                        --work "${CMAKE_CURRENT_BINARY_DIR}/coreml-generated-der")
+            set_tests_properties(test-nemotron-diarization-coreml-generated-der PROPERTIES
+                LABELS "fixture;coreml;coreml-generated" TIMEOUT 1800)
+        endif()
         # A generated diarizer comes only from the file whose weights the model
         # loaded: the path names another file only while the GGUF is opened.
         add_executable(test-nemotron-diarization-coreml-source
