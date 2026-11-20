@@ -103,17 +103,21 @@ std::optional<int64_t> effective_fit_budget(uint64_t fit_budget, const std::opti
 }
 
 CoremlFitVerdict decide_coreml_fit(uint64_t required, uint64_t coreml_bytes, bool generate, uint64_t free,
-                                   const std::optional<int64_t> & budget) {
+                                   const std::optional<int64_t> & ceiling,
+                                   const std::optional<int64_t> & degrade_budget) {
     CoremlFitVerdict v;
-    // The budget caps the memory every verdict is held to, not only the
-    // memory-degrade decision.
-    if (budget.has_value()) free = std::min(free, uint64_t(std::max<int64_t>(*budget, 0)));
+    const auto cap = [free](const std::optional<int64_t> & b) {
+        return b.has_value() ? std::min(free, uint64_t(std::max<int64_t>(*b, 0))) : free;
+    };
+    // The ceiling holds every verdict; memory-degrade is decided as the Engine
+    // decides it, only with the Core ML budget, against min(free, that budget).
+    const uint64_t limit = cap(ceiling), degrade_limit = cap(degrade_budget);
     const uint64_t with_coreml = sat_add(required, generate ? coreml_bytes : 0);
-    v.ggml_only_fits = required <= free;
-    v.coreml_fits = with_coreml <= free;
-    v.degraded = generate && budget.has_value() && with_coreml > free && required <= free;
+    v.ggml_only_fits = required <= limit;
+    v.coreml_fits = with_coreml <= limit;
+    v.degraded = generate && degrade_budget.has_value() && with_coreml > degrade_limit && required <= degrade_limit;
     v.charged = generate && !v.degraded ? with_coreml : required;
-    v.fits = v.charged <= free;
+    v.fits = v.charged <= limit;
     return v;
 }
 
@@ -246,11 +250,14 @@ FitResult fit_params(const FitOptions & o) {
                 r.device_total_bytes = std::min(r.device_total_bytes, host_total);
             }
         }
-        // One ceiling for every verdict and for memory-degrade: the smaller
-        // of the fit's budget and the Core ML budget the engine is constructed
-        // with (the same value when an assessing fit passes it on).
+        // One ceiling for every verdict: the smaller of the fit's budget and
+        // the Core ML budget the engine is constructed with. Memory-degrade is
+        // decided only with the Core ML budget, as the Engine's constructor
+        // repeats it, so a fit-only budget never reports a degrade the Engine
+        // would not make.
         const std::optional<int64_t> budget = detail::effective_fit_budget(o.memory_budget_bytes,
                                                                             e.coreml.memory_budget_bytes);
+        const uint64_t raw_device_free = r.device_free_bytes, raw_host_free = host_free;
         if (budget) {
             r.device_free_bytes = std::min(r.device_free_bytes, uint64_t(*budget));
             host_free = std::min(host_free, uint64_t(*budget));
@@ -264,7 +271,8 @@ FitResult fit_params(const FitOptions & o) {
         // shares host memory, with the host otherwise.
         const bool shared = r.device_shares_host_memory;
         const auto v = detail::decide_coreml_fit(shared ? required : host_required, r.coreml.bytes, generate,
-                                                 shared ? r.device_free_bytes : host_free, budget);
+                                                 shared ? raw_device_free : raw_host_free, budget,
+                                                 e.coreml.memory_budget_bytes);
         r.coreml.ggml_only_fits = required <= r.device_free_bytes && (shared || host_required <= host_free);
         r.coreml.fits = shared ? v.coreml_fits : (required <= r.device_free_bytes && v.coreml_fits);
         if (v.degraded) r.coreml.disabled_reason = "memory";

@@ -37,9 +37,12 @@ struct FitOptions {
 //     not projected.
 //   - Generated sidecars (engine.coreml.cache_dir set, template match, macOS
 //     15) add the templates' Core ML envelope to the projection: both resident
-//     parts plus the larger stage transient. With
-//     engine.coreml.memory_budget_bytes, a budget only the ggml projection fits
-//     resolves use = off instead (memory-degrade: coreml.disabled_reason
-//     "memory", the ggml verdict).
+//     parts plus the larger stage transient. Every verdict is held to the
+//     smaller of FitOptions::memory_budget_bytes and
+//     engine.coreml.memory_budget_bytes. Only the latter (the budget the
+//     Engine's constructor decides with) enables memory-degrade: when only
+//     the ggml projection fits min(free, that budget), use = off
+//     (coreml.disabled_reason "memory", the ggml verdict). A fit-only budget
+//     never degrades; between the two projections it reports does-not-fit.
 TTS_CPP_API FitResult fit_params(const FitOptions & options);
 }

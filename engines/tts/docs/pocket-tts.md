@@ -504,9 +504,15 @@ the stages' prepare and load transients (one Core ML job runs at a time).
 for the resolved units, and the ggml-only verdict. A budget, either
 `FitOptions::memory_budget_bytes` or `engine.coreml.memory_budget_bytes`
 (the smaller when both are set), caps the available memory for every
-verdict; a budget only the ggml projection fits reports
-`disabled_reason = "memory"` and the ggml verdict (memory-degrade), and the
-Engine then runs ggml only.
+verdict. Memory-degrade needs `engine.coreml.memory_budget_bytes`, the budget
+the Engine decides it with: when only the ggml projection fits
+min(free, that budget), fit reports `disabled_reason = "memory"` and the ggml
+verdict, and the Engine then runs ggml only. A budget from
+`FitOptions::memory_budget_bytes` alone (or one smaller than the Core ML
+budget) never degrades, because that Engine would keep Core ML: fit charges
+the Core ML envelope and reports `does-not-fit` when only the ggml projection
+fits. Pass the budget as `engine.coreml.memory_budget_bytes` (as `pocket-cli`
+does) to get the degrade.
 
 With `coreml.memory_budget_bytes` set, the Engine's constructor repeats the
 fit to decide memory-degrade. It uses `EngineOptions::fit_text` and

@@ -437,27 +437,42 @@ void check_coreml_options() {
     require(pd::coreml_envelope_bytes(a, b) == 140, "only generated stages are charged");
     a.route = "prebuilt";
     require(pd::coreml_envelope_bytes(a, b) == 0, "no generated stage, no envelope");
-    // Verdicts: memory-degrade only with a budget that the ggml projection fits.
-    auto v = pd::decide_coreml_fit(100, 50, true, 120, std::nullopt);
+    // Verdicts: memory-degrade only with a Core ML budget that the ggml
+    // projection fits; the ceiling (either budget) holds every verdict.
+    const std::optional<int64_t> unset;
+    auto v = pd::decide_coreml_fit(100, 50, true, 120, unset, unset);
     require(v.ggml_only_fits && !v.coreml_fits && !v.degraded && !v.fits && v.charged == 150,
             "without a budget the Core ML-inclusive verdict stands");
-    v = pd::decide_coreml_fit(100, 50, true, 1000, int64_t(120));
-    require(v.degraded && v.fits && v.charged == 100, "a budget only ggml fits degrades");
-    v = pd::decide_coreml_fit(100, 50, true, 120, int64_t(1) << 50);
+    v = pd::decide_coreml_fit(100, 50, true, 1000, int64_t(120), int64_t(120));
+    require(v.degraded && v.fits && v.charged == 100, "a Core ML budget only ggml fits degrades");
+    v = pd::decide_coreml_fit(100, 50, true, 120, int64_t(1) << 50, int64_t(1) << 50);
     require(v.degraded && v.fits, "degrade is decided on min(free, budget)");
-    v = pd::decide_coreml_fit(100, 50, true, 1000, int64_t(90));
+    v = pd::decide_coreml_fit(100, 50, true, 1000, int64_t(90), int64_t(90));
     require(!v.degraded && !v.ggml_only_fits && !v.coreml_fits && !v.fits,
             "a budget below the ggml projection refuses, however much memory is free");
-    v = pd::decide_coreml_fit(100, 50, true, 1000, int64_t(160));
+    v = pd::decide_coreml_fit(100, 50, true, 1000, int64_t(160), int64_t(160));
     require(!v.degraded && v.fits && v.charged == 150, "a budget both fit keeps Core ML");
-    v = pd::decide_coreml_fit(100, 50, false, 120, int64_t(110));
+    v = pd::decide_coreml_fit(100, 50, false, 120, int64_t(110), int64_t(110));
     require(!v.degraded && v.fits && v.charged == 100, "no generated stage, no degrade");
-    v = pd::decide_coreml_fit(100, 50, false, 1000, int64_t(90));
+    v = pd::decide_coreml_fit(100, 50, false, 1000, int64_t(90), int64_t(90));
     require(!v.fits, "without a generated stage the budget still caps the ggml verdict");
+    // The Engine repeats the fit with the Core ML budget only: a fit-only
+    // budget between the projections does not degrade, so the verdict is the
+    // Core ML-inclusive one that Engine would use (does not fit).
+    v = pd::decide_coreml_fit(100, 50, true, 1000, int64_t(120), unset);
+    require(!v.degraded && !v.fits && v.charged == 150 && v.ggml_only_fits,
+            "a fit-only budget between the projections refuses instead of degrading");
+    // Fit's budget smaller than the Core ML budget: the Engine decides against
+    // the Core ML budget (both fit there, Core ML kept), so fit charges both
+    // and holds them to the smaller ceiling.
+    v = pd::decide_coreml_fit(100, 50, true, 1000, int64_t(120), int64_t(500));
+    require(!v.degraded && !v.fits && v.charged == 150, "the Core ML budget decides degrade, the smaller caps");
+    v = pd::decide_coreml_fit(100, 50, true, 1000, int64_t(120), int64_t(130));
+    require(v.degraded && v.fits && v.charged == 100, "degrade on the Core ML budget, held to the smaller ceiling");
     // One ceiling: the smaller of the fit's budget and the Core ML budget.
     require(!pd::effective_fit_budget(0, std::nullopt), "no budget set");
     require(pd::effective_fit_budget(0, int64_t(70)) == int64_t(70), "the Core ML budget alone");
-    require(pd::effective_fit_budget(80, std::nullopt) == int64_t(80), "the fit's budget alone enables degrade");
+    require(pd::effective_fit_budget(80, std::nullopt) == int64_t(80), "the fit's budget alone caps the verdicts");
     require(pd::effective_fit_budget(80, int64_t(70)) == int64_t(70) &&
                 pd::effective_fit_budget(60, int64_t(70)) == int64_t(60),
             "both set: the smaller");
@@ -1400,9 +1415,13 @@ int generated_fixture(const std::string & bundle, const std::string & cache_dir,
 
 // Budgets below the ggml projection, between it and the Core ML-inclusive
 // one, and above both, through the public fit (each budget source, and both
-// with the smaller winning) and, with `cli`, through pocket-cli --fit. One
-// ceiling holds every verdict: below refuses, between degrades, above keeps
-// Core ML (when the build generates).
+// with the fit's smaller) and, with `cli`, through pocket-cli --fit. One
+// ceiling holds every verdict: below refuses, above keeps Core ML (when the
+// build generates). Between degrades only where the Engine degrades, with the
+// Core ML budget; a fit-only budget (or a fit budget under a larger Core ML
+// budget) refuses, the Core ML-inclusive verdict that Engine would use. Each
+// case also constructs the Engine from the same options, which must make the
+// same memory-degrade decision.
 int fit_budgets(const fs::path & bundle, const std::string & cli) {
     EngineOptions e = bundle_options(bundle);
     const fs::path cache = fs::temp_directory_path() / ("pocket-fit-budgets-" + test_process_tag());
@@ -1438,6 +1457,11 @@ int fit_budgets(const fs::path & bundle, const std::string & cli) {
     if (envelope) cases.push_back({"between", between, true, true});
     for (const Case & c : cases) {
         for (int source = 0; source < 4; ++source) {
+            // Degrade needs the Core ML budget at this value (sources 1, 2);
+            // without it the between case is the Core ML-inclusive refusal.
+            const bool coreml_budget_here = source == 1 || source == 2;
+            const bool want_degraded = c.degraded && coreml_budget_here;
+            const bool want_fits = c.degraded ? coreml_budget_here : c.fits;
             tts_cpp::pocket::FitOptions g = f;
             const char * label = "";
             if (source == 0) { g.memory_budget_bytes = c.budget; label = "fit budget"; }
@@ -1455,8 +1479,27 @@ int fit_budgets(const fs::path & bundle, const std::string & cli) {
             const auto r = tts_cpp::pocket::fit_params(g);
             const bool degraded = r.coreml.disabled_reason == "memory";
             std::printf("[budgets] %s (%s): %s%s\n", c.name, label, r.reason.c_str(), degraded ? ", memory-degrade" : "");
-            require(r.fits == c.fits && degraded == c.degraded && r.device_free_bytes <= c.budget,
+            require(r.fits == want_fits && degraded == want_degraded && r.device_free_bytes <= c.budget,
                     std::string("budget ") + c.name + " via " + label + ": " + r.report);
+#ifdef TTS_CPP_USE_COREML
+            // The Engine from the same options (prewarm none: nothing loads)
+            // repeats the fit for memory-degrade; it must agree with this one.
+            EngineOptions eo = g.engine;
+            eo.fit_text = g.text;
+            eo.fit_margin_bytes = g.margin_bytes;
+            eo.coreml.prewarm = CoremlOptions::Prewarm::none;
+            Engine engine(eo);
+            const Json st = status_of(engine);
+            for (const char * stage : {"step", "mimi"}) {
+                const Json & ss = stage_status(st, stage);
+                // Nothing else disables a stage here (use and the environment
+                // are unset), so "disabled" is the memory-degrade.
+                const bool engine_degraded = ss.at("state") == "disabled";
+                require(engine_degraded == degraded,
+                        std::string("Engine and fit disagree on memory-degrade for budget ") + c.name + " via " +
+                            label + " (" + stage + "): " + st.dump());
+            }
+#endif
         }
     }
 #ifndef _WIN32

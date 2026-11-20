@@ -260,9 +260,10 @@ uint64_t coreml_envelope_bytes(const CoremlRoute & step, const CoremlRoute & dec
 
 // Fit's two verdicts for a projection `required` against `free` bytes: the
 // ggml-only one and the Core ML-inclusive one (plus `coreml_bytes` when a stage
-// is generated). With a budget (CoremlOptions::memory_budget_bytes), a
-// Core ML-inclusive projection over min(free, budget) that the ggml one fits
-// degrades to ggml (use = off).
+// is generated), both held to min(free, ceiling). Memory-degrade (use = off) is
+// decided as the Engine's constructor decides it: only with `degrade_budget`
+// (CoremlOptions::memory_budget_bytes), when a Core ML-inclusive projection
+// over min(free, degrade_budget) is one the ggml projection fits.
 struct CoremlFitVerdict {
     bool ggml_only_fits = true;
     bool coreml_fits = true;
@@ -271,10 +272,12 @@ struct CoremlFitVerdict {
     uint64_t charged = 0;
 };
 CoremlFitVerdict decide_coreml_fit(uint64_t required, uint64_t coreml_bytes, bool generate, uint64_t free,
-                                   const std::optional<int64_t> & budget);
-// The budget fit applies to every verdict and to memory-degrade: the smaller
-// of FitOptions::memory_budget_bytes (0: unset) and the engine's
-// coreml.memory_budget_bytes; nullopt when neither is set.
+                                   const std::optional<int64_t> & ceiling,
+                                   const std::optional<int64_t> & degrade_budget);
+// The ceiling fit holds every verdict to: the smaller of
+// FitOptions::memory_budget_bytes (0: unset) and the engine's
+// coreml.memory_budget_bytes; nullopt when neither is set. Memory-degrade
+// keys on the Core ML budget alone.
 std::optional<int64_t> effective_fit_budget(uint64_t fit_budget, const std::optional<int64_t> & coreml_budget);
 
 // One chunk's step, acquired once at the chunk's start on the producer thread.
