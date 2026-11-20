@@ -143,7 +143,8 @@ int main(int argc, char ** argv) {
 
     // A cached bundle the framework refuses.
     fs::path mil;
-    for (const auto & e : fs::recursive_directory_iterator(g_dir / "cache-plain" / "qvac-coreml-v1" / "artifacts", ec)) {
+    const fs::path artifacts = g_dir / "cache-plain" / "qvac-coreml-v1" / "artifacts";
+    for (const auto & e : fs::recursive_directory_iterator(artifacts, ec)) {
         if (e.path().filename() == "coremldata.bin" && e.path().parent_path().filename() == "model.mlmodelc" &&
             e.path().string().find("nemotron-diar-f358.") != std::string::npos) {
             mil = e.path();
