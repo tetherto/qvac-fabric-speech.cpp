@@ -1015,7 +1015,16 @@ jobs:
         run: |
           model=supertonic-coreml-fixture/supertonic2-vocoder.mlmodelc
           ./build/test-coreml-exit-load --model "$model" --runs 40 --max-delay-ms 400 \
-            --exit-wait-ms 0 --report-only | grep -E 'control load|signal|hang|^REPORT'
+            --exit-wait-ms 0 --report-only | tee exit-load-control.log | grep -E 'control load|signal|hang|^REPORT'
+          # The control's children crash on purpose: drop their reports (the
+          # crash reporter writes them a few seconds after the crash).
+          sleep 10
+          rm -f "$HOME"/Library/Logs/DiagnosticReports/qvac-exit-load-*
+          signals="$(sed -nE 's/.*\(([0-9]+) signals.*/\1/p' exit-load-control.log | tail -1)"
+          echo "::notice::Core ML exit control sweep (wait off): ${signals:-?} of 40 children crashed"
+          if [ "${signals:-0}" = 0 ]; then
+            echo "::warning::The control sweep did not crash on this runner: the sweep below proves less"
+          fi
           ./build/test-coreml-exit-load --model "$model"
 
       - name: Test (Core ML Supertonic encoder sidecar)
