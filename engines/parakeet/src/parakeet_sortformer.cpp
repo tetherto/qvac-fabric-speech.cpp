@@ -762,7 +762,18 @@ bool sortformer_diarize_mel_coreml(ParakeetCtcModel & model,
                                    SortformerDiarizationResult & out) {
     const long long covered_mel =
         (long long) coreml_capacity(model) * model.encoder_cfg.subsampling_factor;
-    if (n_mel_frames <= 0 || n_mel_frames > covered_mel) return false;
+    if (n_mel_frames <= 0) return false;
+    if (n_mel_frames > covered_mel) {
+#ifdef PARAKEET_USE_COREML
+        // Under use = require a pass too wide for every capacity is refused
+        // (covers() throws the capacity error); otherwise it runs on ggml.
+        const int sub = std::max(1, model.encoder_cfg.subsampling_factor);
+        if (CoremlDiarizers * diarizers = model_coreml_diarizers(model)) {
+            (void) diarizers->covers((int) ((n_mel_frames + sub - 1) / sub));
+        }
+#endif
+        return false;
+    }
     std::vector<float> pre_encode;
     int T_enc = 0;
     if (run_subsampling(model, mel, n_mel_frames, model.mel_cfg.n_mels, pre_encode, T_enc) != 0) {

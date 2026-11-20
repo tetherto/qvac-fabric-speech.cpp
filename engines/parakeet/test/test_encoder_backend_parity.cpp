@@ -276,12 +276,12 @@ int run_both_encoders(parakeet::ParakeetCtcModel & model_a,
                       parakeet::EncoderOutputs & out_a,
                       parakeet::EncoderOutputs & out_b) {
     if (int rc = run_encoder(model_a, mel_data, n_mel_frames, model_a.mel_cfg.n_mels,
-                             out_a, /*max_layers=*/-1, /*capture_intermediates=*/true); rc != 0) {
+                             out_a, parakeet::EncoderRoute::ggml(), /*max_layers=*/-1, /*capture_intermediates=*/true); rc != 0) {
         std::fprintf(stderr, "[backend-parity] run_encoder(A) rc=%d\n", rc);
         return 5;
     }
     if (int rc = run_encoder(model_b, mel_data, n_mel_frames, model_b.mel_cfg.n_mels,
-                             out_b, /*max_layers=*/-1, /*capture_intermediates=*/true); rc != 0) {
+                             out_b, parakeet::EncoderRoute::ggml(), /*max_layers=*/-1, /*capture_intermediates=*/true); rc != 0) {
         std::fprintf(stderr, "[backend-parity] run_encoder(B) rc=%d\n", rc);
         return 5;
     }
@@ -419,9 +419,9 @@ void run_layer_sweep(parakeet::ParakeetCtcModel & model_a,
     for (int L : plan) {
         parakeet::EncoderOutputs pa, pb;
         if (run_encoder(model_a, mel_data, n_mel_frames, model_a.mel_cfg.n_mels,
-                        pa, L, /*capture_intermediates=*/true) != 0) continue;
+                        pa, parakeet::EncoderRoute::ggml(), L, /*capture_intermediates=*/true) != 0) continue;
         if (run_encoder(model_b, mel_data, n_mel_frames, model_b.mel_cfg.n_mels,
-                        pb, L, /*capture_intermediates=*/true) != 0) continue;
+                        pb, parakeet::EncoderRoute::ggml(), L, /*capture_intermediates=*/true) != 0) continue;
         if (pa.encoder_out.empty() || pb.encoder_out.empty()) continue;
         const bool size_mismatch = pa.encoder_out.size() != pb.encoder_out.size();
         Metrics m = compute_metrics(pa.encoder_out, pb.encoder_out);

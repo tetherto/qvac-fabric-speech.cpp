@@ -64,17 +64,17 @@ void check_callbacks(ParakeetCtcModel & model, const std::vector<float> & mel, i
         ++calls;
         return kEncoderOutputHost;
     };
-    require(run_encoder(model, mel.data(), frames, model.mel_cfg.n_mels, output,
+    require(run_encoder(model, mel.data(), frames, model.mel_cfg.n_mels, output, parakeet::EncoderRoute::ggml(),
         -1, false, false, decline) == 0, "Declined consumer failed");
     require(calls == 1 && !output.encoder_consumed && output.encoder_out == reference.encoder_out,
         "Declined consumer did not preserve host output");
     calls = 0;
-    require(run_encoder(model, mel.data(), frames, model.mel_cfg.n_mels, output,
+    require(run_encoder(model, mel.data(), frames, model.mel_cfg.n_mels, output, parakeet::EncoderRoute::ggml(),
         -1, true, false, decline) == 0, "Diagnostic encode failed");
     require(calls == 0 && !output.encoder_consumed && !output.encoder_out.empty(),
         "Diagnostic capture invoked consumer");
     const EncoderOutputConsumer fail = [](ggml_tensor *, ggml_backend_t) { return kInjectedError; };
-    require(run_encoder(model, mel.data(), frames, model.mel_cfg.n_mels, output,
+    require(run_encoder(model, mel.data(), frames, model.mel_cfg.n_mels, output, parakeet::EncoderRoute::ggml(),
         -1, false, false, fail) == kInjectedError, "Consumer error was lost");
 }
 
@@ -108,7 +108,7 @@ void check_handoff(ParakeetCtcModel & model, TdtRuntimeWeights & runtime,
             }
             return decode(input, backend);
         };
-        require(run_encoder(model, mel.data(), frames, model.mel_cfg.n_mels, output,
+        require(run_encoder(model, mel.data(), frames, model.mel_cfg.n_mels, output, parakeet::EncoderRoute::ggml(),
             -1, false, false, consumer) == 0, "Device encode/decode failed");
         require(output.encoder_consumed == gpu, "Unexpected handoff selection");
         if (gpu) {
@@ -118,7 +118,7 @@ void check_handoff(ParakeetCtcModel & model, TdtRuntimeWeights & runtime,
             require(decode_host(model, runtime, output).token_ids == expected, "CPU fallback changed tokens");
         }
     }
-    require(run_encoder(model, mel.data(), frames, model.mel_cfg.n_mels, output,
+    require(run_encoder(model, mel.data(), frames, model.mel_cfg.n_mels, output, parakeet::EncoderRoute::ggml(),
         -1, false) == 0 && !output.encoder_consumed && !output.encoder_out.empty(),
         "Host reuse retained consumed state");
 }
@@ -163,7 +163,7 @@ void check_padded_handoff(ParakeetCtcModel & model, TdtRuntimeWeights & runtime,
     const int frames = kValidMelFrames + kPaddingMelFrames;
     EncoderOutputs reference;
     require(run_encoder(model, padded.data(), frames, model.mel_cfg.n_mels,
-        reference, -1, false) == 0, "Padded reference encode failed");
+        reference, parakeet::EncoderRoute::ggml(), -1, false) == 0, "Padded reference encode failed");
     require(reference.n_enc_frames == kValidEncoderFrames && reference.encoder_out.size() ==
         static_cast<size_t>(kPaddedEncoderFrames) * reference.d_model, "Expected padded encoder geometry");
     const auto expected = decode_host(model, runtime, reference);
@@ -177,7 +177,7 @@ void check_padded_handoff(ParakeetCtcModel & model, TdtRuntimeWeights & runtime,
         return decode(input, backend);
     };
     EncoderOutputs output;
-    require(run_encoder(model, padded.data(), frames, model.mel_cfg.n_mels, output,
+    require(run_encoder(model, padded.data(), frames, model.mel_cfg.n_mels, output, parakeet::EncoderRoute::ggml(),
         -1, false, false, consumer) == 0, "Padded consumer encode failed");
     require(calls == 0 && !output.encoder_consumed, "Consumer received padded encoder frames");
     require(output.n_enc_frames == kValidEncoderFrames && output.encoder_out == reference.encoder_out,
@@ -197,7 +197,7 @@ void run_test(const std::string & path, const std::string & wav, const std::stri
     require(compute_log_mel(samples.data(), (int) samples.size(), model.mel_cfg, mel, frames) == 0,
         "Mel computation failed");
     EncoderOutputs reference;
-    require(run_encoder(model, mel.data(), frames, model.mel_cfg.n_mels, reference,
+    require(run_encoder(model, mel.data(), frames, model.mel_cfg.n_mels, reference, parakeet::EncoderRoute::ggml(),
         -1, false) == 0, "Reference encoder failed");
     const auto expected = decode_host(model, runtime, reference);
     check_handoff(model, runtime, mel, frames, expected.token_ids);

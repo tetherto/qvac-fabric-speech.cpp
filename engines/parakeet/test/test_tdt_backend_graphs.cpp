@@ -65,7 +65,7 @@ int encode_on_cpu(const Opts & o, parakeet::EncoderOutputs & enc) {
     std::vector<float> mel;
     int n_frames = 0;
     if (compute_log_mel(samples.data(), (int) samples.size(), cpu.mel_cfg, mel, n_frames) != 0) return 1;
-    return run_encoder(cpu, mel.data(), n_frames, cpu.mel_cfg.n_mels, enc, -1, false) == 0 ? 0 : 1;
+    return run_encoder(cpu, mel.data(), n_frames, cpu.mel_cfg.n_mels, enc, parakeet::EncoderRoute::ggml(), -1, false) == 0 ? 0 : 1;
 }
 
 int check_decoder(const parakeet::ParakeetCtcModel & model, const parakeet::EncoderOutputs & enc) {

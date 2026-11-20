@@ -1,3 +1,4 @@
+#include "coreml_test_options.h"
 #include "mel_preprocess.h"
 #include "parakeet_ctc.h"
 #include "parakeet_diarization_v3.h"
@@ -86,7 +87,7 @@ void unset_env(const char * name) {
 
 bool load_model(const char * path, bool disable_coreml, parakeet::ParakeetCtcModel & model) {
     if (disable_coreml) set_env(kDisableEnv, "1");
-    const int status = parakeet::load_from_gguf(path, model, kThreads, kGpuLayers, false);
+    const int status = parakeet::load_from_gguf(path, model, kThreads, kGpuLayers, false, "auto", coreml_ready_options());
     if (disable_coreml) unset_env(kDisableEnv);
     return status == 0;
 }

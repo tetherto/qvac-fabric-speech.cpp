@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace parakeet {
@@ -40,6 +41,13 @@ struct DiarizationResult {
     // call ran no pass. Unlike Engine::encoder_on_coreml(), this reports
     // actual per-call routing rather than sidecar availability.
     bool   encoder_used_coreml = false;
+
+    // Per-call backend of the network passes: "ggml", a Core ML label, or
+    // "mixed" (see EngineResult::encoder_backend).
+    std::string encoder_backend = "ggml";
+    // True when a pass ran on ggml only because its Core ML sidecar (encoder
+    // or diarizer capacity) was still loading.
+    bool   coreml_pending = false;
 
     int    audio_samples   = 0;
     int    sample_rate     = 16000;
