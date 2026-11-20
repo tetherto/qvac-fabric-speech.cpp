@@ -150,12 +150,12 @@ constexpr uint64_t VOCODER_IO = 2 * (2 * (144 * 64 + 196608));  // latent and wa
 constexpr uint64_t GENERATION_PEAK = 18 * MIB;                  // generation_peak_bytes
 constexpr uint64_t VOCODER_LOAD = 62 * MIB;      // 1.25 x 49.4 MiB (an M4 Max run with the weights in the process)
 constexpr uint64_t VOCODER_RESIDENT = 63 * MIB;  // 1.25 x 49.8 MiB of steady state, the same run
-// 1.25 x 531.9 MiB, ANECompilerService's largest absolute size while loading
+// 1.25 x 659.1 MiB, ANECompilerService's largest absolute size while loading
 // on any validated host (the M4 Max)
-constexpr uint64_t VOCODER_ANE_RESERVE = 665 * MIB;
+constexpr uint64_t VOCODER_ANE_RESERVE = 824 * MIB;
 const std::map<std::string, uint64_t> TEMPLATE_PREPARE = {
     {SUPERTONIC_VOCODER_TEMPLATE_W64, 34 * MIB},       // 1.25 x 27.0 MiB (an M4 Max run)
-    {SUPERTONIC_VOCODER_TEMPLATE_PW2D_W64, 48 * MIB},  // 1.25 x 37.7 MiB (dequantising the pointwise weights)
+    {SUPERTONIC_VOCODER_TEMPLATE_PW2D_W64, 52 * MIB},  // 1.25 x 41.5 MiB (dequantising the pointwise weights)
 };
 
 void template_charges(const supertonic_vocoder_route & r) {

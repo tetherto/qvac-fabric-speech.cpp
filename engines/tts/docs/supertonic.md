@@ -387,28 +387,28 @@ load 0.9-1.0 s, warm-up 5 ms).
 the sidecar is generated, compiled, loaded and warmed in the background) on
 every validated host, rounded up to 1 MiB, with no further envelope margin.
 Hosts: an M2 (macOS 27.2.1, 14 runs) and the M4 Max CI runner (macOS 26.7.2,
-18 runs). Both templates compile the same program with the same weights, so
+30 runs). Both templates compile the same program with the same weights, so
 the load, resident and compiler-reserve charges are taken over both
 templates' runs; the prepare is each template's own.
 
 | Largest measured (MiB) | M2 | M4 Max | charged |
 |---|---:|---:|---:|
 | prepare, `supertonic-vocoder-w64` | 23.3 | 27.0 | 34 |
-| prepare, `supertonic-vocoder-pw2d-w64` | 37.7 | 37.2 | 48 |
+| prepare, `supertonic-vocoder-pw2d-w64` | 37.7 | 41.5 | 52 |
 | load and warm-up | 6.1 | 49.4 | 62 |
 | steady state from the load start | 6.5 | 49.8 | 63 (resident) |
-| `ANECompilerService` while loading (absolute) | 297.9 | 531.9 | 665 (reserve) |
+| `ANECompilerService` while loading (absolute) | 297.9 | 659.1 | 824 (reserve) |
 
 Envelope fit charges: 125 MiB for either template (resident 63 + the larger
 of prepare and load, 62). The requantised template's prepare is larger
 because generation dequantises the q8_0 pointwise weights. On the M2 the
 Neural Engine keeps the weights outside the process, so load and steady state
-stay under 7 MiB; two of the 18 M4 Max runs held a weight-sized copy in the
-process (49 MiB) and set the load and resident charges. `ANECompilerService`
-held 74-244 MiB before every M2 load and 374-490 MiB before every M4 Max load
-(no clean start), so its growth during the load (at most 53 MiB) would
+stay under 7 MiB; nine of the 30 M4 Max runs held a weight-sized copy in the
+process (32-49 MiB), and the largest set the load and resident charges. `ANECompilerService`
+held 74-244 MiB before every M2 load and 168-622 MiB before every M4 Max load
+(no clean start; on the CI runner it depends on other jobs' compiles), so its growth during the load (at most 53 MiB) would
 understate a cold compile on a clean host; the reserve is 1.25 times its
-largest absolute size while loading on any validated host (531.9 MiB on the
+largest absolute size while loading on any validated host (659.1 MiB on the
 M4 Max), as for the Parler DAC. The CI step "Memory schedule (generated
 Supertonic vocoder, overlapped, this runner)" reruns the schedule on every
 change and fails when 1.25 times a phase's measurement exceeds its constant,

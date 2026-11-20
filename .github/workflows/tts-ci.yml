@@ -1162,7 +1162,7 @@ jobs:
       # Runs whenever the generated-sidecar step ran. Known failure mode, as
       # for the Parler DAC's schedule: the service's size sums every instance
       # on the Mac, so a co-hosted job that compiles for the Neural Engine
-      # during this load counts too: a run above 532 MiB fails the 665 MiB
+      # during this load counts too: a run above 659 MiB fails the 824 MiB
       # reserve and, by the rule above, raises it.
       - name: Memory schedule (generated Supertonic vocoder, overlapped, this runner)
         if: >-
