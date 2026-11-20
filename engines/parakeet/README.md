@@ -166,6 +166,12 @@ they run 1.4-2.7x faster than ggml Metal. On an M3 Ultra, whose GPU is faster,
 they only tie with it (0.70-1.17x), so leave them out on Max and Ultra
 machines; see [the diarizer guide](docs/backends.md#core-ml-diarizer-sidecars).
 
+Process exit with Core ML: a process that exits while a sidecar is still compiling or loading in the
+background waits for that load (at most 15 s on macOS, 2 s on iOS) when its main thread is armed. The main
+thread is armed automatically when it makes the engine; a host that makes engines on another thread (as the
+qvac addons do) calls `coreml_arm_exit_guard()` on its main or JS thread, or `coreml_shutdown_for_exit()`
+before it exits (`parakeet/coreml_exit.h`). See [the runtime's README](../coreml/README.md#process-exit).
+
 ## Backend selection
 
 `parakeet --backend NAME` and `EngineOptions::backend` select the runtime device

@@ -110,6 +110,7 @@ set(AUDIOGEN_LIB_SOURCES
     src/acestep/vae_encode_windows.cpp
     src/acestep/vae_coreml_path.cpp
     src/acestep/vae_api.cpp
+    src/coreml_exit.cpp
     src/acestep/wav_reader.cpp
     src/acestep/dit_gguf.cpp
     src/acestep/dit_ggml.cpp
