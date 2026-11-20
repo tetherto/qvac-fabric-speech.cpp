@@ -1002,6 +1002,22 @@ jobs:
             exit 1
           fi
 
+      # Process exit while a real Core ML load is in flight (engines/coreml),
+      # with the staged vocoder: each run compiles a fresh copy under a fresh
+      # code-signing identity and exits at a different point of the load. The
+      # control sweep turns the exit wait off (the behaviour before it
+      # existed) and only reports how often this runner crashes without it;
+      # the second sweep must not crash, hang or fail a load. Run directly:
+      # ctest registers the test DISABLED, since the model is staged after
+      # configure.
+      - name: Test (Core ML exit during a load, on device)
+        if: runner.os == 'macOS'
+        run: |
+          model=supertonic-coreml-fixture/supertonic2-vocoder.mlmodelc
+          ./build/test-coreml-exit-load --model "$model" --runs 40 --max-delay-ms 400 \
+            --exit-wait-ms 0 --report-only | grep -E 'control load|signal|hang|^REPORT'
+          ./build/test-coreml-exit-load --model "$model"
+
       - name: Test (Core ML Supertonic encoder sidecar)
         if: runner.os == 'macOS'
         env:
