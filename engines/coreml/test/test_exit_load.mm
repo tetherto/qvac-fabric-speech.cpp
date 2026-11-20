@@ -5,9 +5,12 @@
 // rather than reusing a plan cached for an earlier path) and spawns a child.
 // The child makes a prebuilt slot on the per-image manager, requests it, waits
 // until the slot is loading, sleeps for that run's delay and returns from
-// main. The delays sweep 0..--max-delay-ms in equal steps, so some exits land
-// in each phase of the load: in-process compile and validation, the ANE
-// service round trip, and the load proper. Every child must exit with status
+// main. The delays sweep 0..--max-delay-ms in equal steps (default 60 runs
+// over 0-360 ms), so some exits land in each early phase of the load. The
+// fatal window is the in-process validation of the program for the Neural
+// Engine: for an exported Supertonic vocoder on an M2, exits 160-200 ms after
+// the load started crashed without the exit wait (3 of 40 runs over 0-400 ms;
+// 1 of 20 over 0-1200 ms). Every child must exit with status
 // 0: a signal (the failure this guards against is a SIGSEGV inside Apple's
 // compiler while exit() runs static destructors) or any other status fails.
 //
@@ -250,7 +253,7 @@ RunResult run_child(const std::string & self, const std::string & model, const s
 
 int main(int argc, char ** argv) {
     std::string model, units = "all";
-    int runs = 20, max_delay = 1500, finalizer_ms = 500;
+    int runs = 60, max_delay = 360, finalizer_ms = 500;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--child" && i + 4 < argc) {

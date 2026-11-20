@@ -431,7 +431,7 @@ function(qvac_coreml_add_tests)
         _qvac_coreml_apple_frameworks(exit_fws ON)
         target_link_libraries(test-coreml-exit-load PRIVATE qvac-coreml-test-runtime ${exit_fws})
         add_test(NAME test-coreml-exit-load
-                 COMMAND test-coreml-exit-load --model "${QVAC_COREML_TEST_EXIT_MODEL}" --runs 20)
+                 COMMAND test-coreml-exit-load --model "${QVAC_COREML_TEST_EXIT_MODEL}")
         set_tests_properties(test-coreml-exit-load PROPERTIES LABELS "fixture" TIMEOUT 1200)
         if (NOT QVAC_COREML_TEST_EXIT_MODEL OR NOT EXISTS "${QVAC_COREML_TEST_EXIT_MODEL}")
             set_property(TEST test-coreml-exit-load PROPERTY DISABLED TRUE)
