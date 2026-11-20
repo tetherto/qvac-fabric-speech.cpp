@@ -34,38 +34,40 @@ struct Graveyard {
     }
 };
 
-// Process exit. Core ML calls cannot be cancelled, and exit() destroys the
-// frameworks' static state, so a worker still inside a compile or load when
-// the frameworks' destructors run can crash in Apple's code. At exit the
-// runtime therefore sets the exit flag, which stops new work in this image,
-// and then waits up to exit_wait() for the jobs already running to return.
-// Past that bound exit continues and abandons the job.
-//
-// The wait must come before any framework destructor. Destructors and atexit
-// handlers run in reverse order of registration, and the frameworks register
-// theirs lazily, during the first compile or load, so an atexit handler
-// registered when the manager is created runs too late. The first thing
-// exit() runs is the destructors of the exiting thread's thread_local
-// objects, so arm_exit_guard() gives the main thread one whose destructor
-// waits. The atexit handler waits as well, for an exit from a thread without
-// the guard; it runs after the destructors registered since the manager was
-// created, so it is a fallback, not a guarantee.
+// Process exit (the public hooks and the contract are in manager.h). Core ML
+// calls cannot be cancelled, and exit() destroys the frameworks' static state,
+// some of it built lazily during the first compile, so its destructors run
+// first. The wait for a running job therefore has to come before every
+// destructor: from the exit guard (a thread_local of the main thread, whose
+// destructor is the first thing exit() runs on that thread) or from
+// shutdown_for_exit(). The atexit handler, registered when the first manager
+// is created, only stops new work.
 bool exiting();
 void register_atexit_once();
-// Arms the exit guard when called on the main thread; a no-op elsewhere.
-// Called after this image is pinned (the guard's destructor is code in it).
-void arm_exit_guard();
-// Brackets a job a worker runs (prepare, or load and warm-up). enter_job()
-// counts the job before it reads the exit flag, and returns false, with the
-// job not counted, once the process is exiting: either the exit wait sees the
-// job, or the worker sees the flag and starts nothing.
+// After this image is pinned: a child of fork() starts with no job counted.
+void register_fork_handler_once();
+bool on_main_thread();
+// Arms the exit guard on the main thread; false elsewhere. The caller has
+// pinned the image (the guard's destructor is code in it).
+bool arm_exit_guard();
+// Whether the main thread is armed automatically (set_automatic_exit_guard).
+bool automatic_exit_guard();
+void set_automatic_exit_guard_flag(bool on);
+// Brackets work a worker does that may call into Core ML: a job (prepare, or
+// load and warm-up) and the release of models outside mu. enter_job() counts
+// it before it reads the exit flag, and returns false, uncounted, once the
+// process is exiting: either the exit wait sees the work, or the worker sees
+// the flag and starts nothing.
 bool enter_job();
 void leave_job();
-// The bound on the exit wait.
+// The default bound of the exit wait (a test hook can replace it).
 std::chrono::milliseconds exit_wait();
-// Sets the exit flag and waits for the running jobs, up to exit_wait().
-// Returns false when the bound expired with a job still running.
-bool wait_for_jobs_at_exit();
+// Sets the exit flag and waits for the counted work, until this image's one
+// exit deadline: set by the first call to now + bound, shared by every later
+// call. Returns false when the deadline passed with work still running.
+bool wait_for_jobs_at_exit(std::chrono::milliseconds bound);
+// Logs kExitingReason once per image, the first time a request is refused.
+void note_refused_request();
 
 struct SlotCore;
 struct PoolCore;

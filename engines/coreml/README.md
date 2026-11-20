@@ -31,33 +31,70 @@ only.
 The scheduler's threads are never joined and its manager is leaked on
 purpose, but a Core ML compile or load cannot be cancelled, and `exit()`
 destroys the frameworks' static state. Apple's compiler builds some of that
-state lazily, during the first compile, so its destructors are the first ones
-`exit()` runs. A process that ended while a worker was still inside such a
-call used to crash there (a SIGSEGV in `ANECompiler` after the process had
-written its output).
+state lazily, during the first compile (a lookup table in
+`ANECompiler`, another in MetalPerformanceShadersGraph's validator), so its
+destructors are the first ones `exit()` runs. A process that ended while a
+worker was still inside such a call could crash there (a SIGSEGV in
+`ANECompiler` after the process had written its output), or spin on a freed
+table.
 
-At exit the runtime now stops new work in each engine library and waits for
-the job a worker is running (a prepare, or a load and its warm-up) to return,
-for at most 15 s. The wait runs before any destructor: the first time the main
-thread makes a slot that can load or requests work, the runtime gives the
-main thread a `thread_local` object, and the destructors of the exiting
-thread's `thread_local` objects are the first thing `exit()` runs. When exit
-starts on a thread that never got that object (another thread calls `exit()`,
-or the engine was made and loaded entirely off the main thread), the wait runs
-in an `atexit` handler instead. That handler was registered when the manager
-was created, so it runs after every destructor registered later, including
-those the frameworks register during the first compile, and such a process
-can still crash. Past the bound, exit continues and the job is abandoned as
-before.
+**What the runtime does.** Each engine library (tts-cpp, qvac-parakeet,
+audiogen-cpp: each has its own copy of the runtime) has one bounded exit wait:
+it stops new work in that library, then waits for the job its worker is
+running (a prepare, or a load and its warm-up, and any model the worker is
+releasing) to return. The bound is 15 s on macOS and 2 s on iOS, and it is one
+deadline per library: entering the wait again (the exit guard after an
+explicit shutdown, say) gets only what is left of it. Several libraries in one
+process each have their own. Admission closes when the wait starts: a job not
+yet started never starts, and a later request fails with the reason
+`the process is exiting: no new Core ML work starts` (logged once per library
+on stderr), so a strict caller gets an error instead of waiting.
 
-The cost is paid only by a process that ends with a job in flight: it exits
-after the rest of that job, which is at most the longest cold load (about
-1 s for the Supertonic vocoder, 6-11 s for Pocket, ACE-Step and the Parler
-DAC on an M2) and never more than 15 s; the compiled plan is then cached for
-the next process. A job still in its digest or generation phase notices the
-exit and stops within milliseconds. If the main thread ends with
-`pthread_exit()` while the process goes on (`dispatch_main()` does this), the
-runtime starts no new job afterwards, and its stages stay on ggml.
+The wait runs from:
+
+- **The exit guard**, a `thread_local` object of the main thread. The
+  destructors of the exiting thread's `thread_local` objects are the first
+  thing `exit()` runs (also after `return` from `main`), before every static
+  destructor and `atexit` handler, including those the frameworks register
+  during a compile. The guard is armed automatically when the main thread
+  makes a slot that can load or requests work, which pins the library image
+  first; or explicitly, by the arming hook below.
+- **The explicit shutdown hook**, which a host calls itself before it exits.
+
+When exit starts with neither (the engine was made and loaded off the main
+thread and nothing armed the main thread, or `exit()` is called on another
+thread), an `atexit` handler only stops new work, as before this wait existed.
+It runs after the destructors registered since the manager was created, and
+waiting there was measured to do harm: the job kept running on the destroyed
+tables, crashing or spinning until the bound. A load still running at that
+point can crash as it could before. The same holds past the bound.
+
+**Hooks for hosts.** Each engine re-exports them (`tts-cpp/coreml_exit.h`,
+`parakeet/coreml_exit.h`, `audiogen-cpp/coreml_exit.h`; no-ops in builds
+without Core ML):
+
+- `coreml_arm_exit_guard()`: call on the main thread. A JS host (Bare, Node)
+  whose engines are made in a worker, as the qvac addons do in `activate()`,
+  calls it on the JS thread, for example where the addon instance is created.
+  Until an addon does this, a desktop process that exits while a load runs is
+  not covered.
+- `coreml_shutdown_for_exit(timeout_ms)`: stops new work and waits, from any
+  thread, before the host exits, for example from the host's exit handler
+  while its main queue can still make progress.
+- `coreml_set_automatic_exit_guard(false)`: no automatic arming. A main thread
+  that ends with `pthread_exit()` while the process goes on
+  (`dispatch_main()` does this) runs the guard's destructor too, and the
+  runtime then starts no new work for the rest of the process: later requests
+  fail with the reason above. Hosts built that way turn automatic arming off
+  and call the shutdown hook before they exit.
+
+**Cost.** Only a process that ends with a job in flight pays: it exits after
+the rest of that job, at most the longest cold load (about 1 s for the
+Supertonic vocoder, 6-11 s for Pocket, ACE-Step and the Parler DAC on an M2)
+and never more than the bound; the compiled plan is then cached for the next
+process. A job in its digest or generation phase notices the exit and stops
+within milliseconds. On iOS an app is normally suspended or killed, with no
+`exit()`; when it does exit, the wait is 2 s at most.
 
 ## Engine build options
 
@@ -261,11 +298,14 @@ ctest --test-dir build-tts -L coreml-runtime
 ```
 
 `test-coreml-exit-load` (label `fixture`) checks process exit on the device
-with a real model: each run copies the model to a fresh path, so Core ML
-compiles it again, and starts a child process that exits at a different point
-of that load. Every child must exit 0. Point it at a compiled model whose cold
-load takes about a second or more and includes dilated convolutions, for
-example an exported Supertonic vocoder sidecar:
+with a real model. Each run copies the model to a fresh path and the program
+to a copy signed with a fresh identifier, so Core ML compiles it again into a
+cache of that run's own, and starts a child process that exits at a different
+point of that load. Every child must exit 0, within 5 s, with the slot not
+failed; a control child must first load the model to ready, and at least half
+of the runs must exit with the load in flight. Point it at a compiled model
+whose cold load takes about a second or more and includes dilated
+convolutions, for example an exported Supertonic vocoder sidecar:
 
 ```sh
 cmake -S engines/coreml -B build-coreml \
@@ -274,8 +314,11 @@ cmake --build build-coreml --target test-coreml-exit-load
 ctest --test-dir build-coreml -R test-coreml-exit-load --output-on-failure
 ```
 
-Without that option the test is registered DISABLED. It deletes the e5rt
-bundles its runs add to `~/Library/Caches/test-coreml-exit-load`.
+Without that option the test is registered DISABLED; the macOS tts CI job
+runs the binary directly on the vocoder it stages. Options for measurements:
+`--engine-thread worker` (the engine is made off the main thread, as in the
+addons), `--arm`, `--drain-ms D`, `--no-scribble`, `--exit-wait-ms 0` (no
+wait: the behaviour before it existed) and `--report-only`.
 
 The tool and the generator are compiled with `-ffp-contract=off`, so no
 floating-point expression is fused into an FMA and the output does not

@@ -13,6 +13,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 
 using namespace QVAC_COREML_NS;
 
@@ -70,6 +71,15 @@ QVAC_PLUGIN_EXPORT int qvac_coreml_plugin_start_deferred(const char * dir) {
     g_manager = new std::shared_ptr<Manager>(Manager::create(cfg));
     g_slot = new std::shared_ptr<Slot>((*g_manager)->make_slot(plugin_spec(dir), SlotPolicy{}));
     (*g_slot)->request(Priority::prewarm);
+    return 0;
+}
+
+// A slot that can load, made and dropped on a worker thread with nothing
+// requested: no exit guard can be armed there, so the image is not pinned
+// and the host can still unload it.
+QVAC_PLUGIN_EXPORT int qvac_coreml_plugin_slot_only(const char * dir) {
+    const std::string d = dir;
+    std::thread([d] { Manager::instance()->make_slot(plugin_spec(d.c_str()), SlotPolicy{}); }).join();
     return 0;
 }
 

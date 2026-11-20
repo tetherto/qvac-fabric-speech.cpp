@@ -17,11 +17,11 @@
 //
 // "Process-wide" means per engine library image: each engine library compiles
 // its own copy of this runtime in its own namespace. instance() is leaked on
-// purpose; on its first job it pins its own image (dladdr + dlopen
-// RTLD_NOLOAD | RTLD_NODELETE) so code and callbacks outlive any dlclose. At
-// process exit new work stops, and exit waits, up to a bound, for the job a
-// worker is running: Core ML calls cannot be cancelled and crash if the
-// frameworks' static state is destroyed under them (README, "Process exit").
+// purpose. The image pins itself (dladdr + dlopen RTLD_NOLOAD | RTLD_NODELETE)
+// so code and callbacks outlive any dlclose: at its first request for work,
+// when the main thread makes a slot that can load, or when the exit guard is
+// armed. Process exit is described with the exit hooks at the end of this
+// header and in the README ("Process exit").
 
 #include "qvac_coreml/options.h"
 #include "qvac_coreml/slot.h"
@@ -177,5 +177,49 @@ private:
     explicit Manager(std::shared_ptr<detail::Runtime> rt) : rt_(std::move(rt)) {}
     std::shared_ptr<detail::Runtime> rt_;
 };
+
+// ---- process exit -------------------------------------------------------------
+//
+// A Core ML compile or load cannot be cancelled, and exit() destroys framework
+// state that a running one still reads (some of it built lazily during the
+// first compile, so its destructors are the first ones exit() runs). Each
+// engine library therefore has one bounded exit wait for the job its worker
+// is running: 15 s on macOS, 2 s on iOS, one deadline per library however
+// many times it is entered. The wait runs:
+//  - from the exit guard: a thread_local object of the main thread, whose
+//    destructor runs before any static destructor or atexit handler when the
+//    main thread exits the process. It is armed automatically when the main
+//    thread makes a slot that can load or requests work, or explicitly by
+//    arm_exit_guard();
+//  - from shutdown_for_exit(), which a host calls before it exits.
+// When exit starts with neither (an engine made and loaded off the main
+// thread, or exit() called on another thread), an atexit handler only stops
+// new work: a job still running can then crash in the frameworks, as it could
+// before. Past the deadline the job is abandoned in the same way.
+// After exit has begun, a request fails with the reason in kExitingReason.
+
+// The reason of a slot whose request came after process exit began (or after
+// shutdown_for_exit(), or after the main thread ended with an armed guard).
+inline constexpr const char * kExitingReason = "the process is exiting: no new Core ML work starts";
+
+// Arms the exit guard if called on the main thread (for a JS host, the JS
+// thread, e.g. when the addon instance is created), pinning this library
+// image first. Returns true when the guard is armed, now or earlier; false on
+// another thread or when the image cannot be pinned.
+bool arm_exit_guard();
+
+// Stops new Core ML work in this library for the rest of the process, then
+// waits until the job a worker is running returns, up to `bound` (or what is
+// left of the library's exit deadline, if one was already set). Returns true
+// when no job is running. Callable from any thread; a job that calls it does
+// not wait for itself. Hosts call it before they exit, while their main queue
+// can still make progress.
+bool shutdown_for_exit(std::chrono::milliseconds bound);
+
+// With false, the main thread is no longer armed automatically. For hosts
+// whose main thread may end with pthread_exit() while the process goes on
+// (dispatch_main() does that): an armed guard would stop Core ML work for the
+// rest of the process. Such hosts call shutdown_for_exit() before exiting.
+void set_automatic_exit_guard(bool on);
 
 }  // namespace QVAC_COREML_NS
