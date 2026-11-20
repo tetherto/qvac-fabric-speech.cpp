@@ -16,10 +16,15 @@
 //
 // A run fails if the child dies of a signal (the failure this guards against
 // is a SIGSEGV inside Apple's compiler while exit() runs static destructors),
-// exits non-zero, takes longer than 5 s to exit (a hang), or reports the
-// slot failed. Before the sweep, one control child must load the model to
-// ready; and at least half of the runs must exit with the load in flight,
-// since a run whose load already finished checks nothing.
+// exits non-zero (also when its load never got in flight within 60 s), takes
+// longer than 20 s to exit (a hang: the exit wait's bound is 15 s), or ends
+// in any state but ready, loading or warming. Where the exit wait applies
+// (engine on the main thread, or armed, or drained), a run that exited with
+// the load in flight must also show that the native load returned before any
+// destructor registered during it had run. Before the sweep, one control
+// child must load the model to ready; and at least half of the runs must exit
+// with the load in flight, since a run whose load already finished checks
+// nothing.
 //
 // Before it starts the runtime, the child creates a static object whose
 // destructor blocks for --finalizer-ms (default 500), as ggml's Metal backend
@@ -57,6 +62,7 @@
 #import <CoreML/CoreML.h>
 #import <Foundation/Foundation.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -79,7 +85,7 @@ using namespace QVAC_COREML_NS;
 
 namespace {
 
-constexpr int kHangMs = 5000;
+constexpr int kHangMs = 20000;
 
 struct ExitTestOptions {
     std::string model;
@@ -111,8 +117,27 @@ MLComputeUnits ml_units(ComputeUnits u) {
     return MLComputeUnitsAll;
 }
 
+std::atomic<bool> g_torn_down{false};
+
+struct TearDownMarker {
+    ~TearDownMarker() { g_torn_down = true; }
+};
+
+// Written straight to stdout (fd 1): it may run while exit() is in progress.
+void report_line(const std::string & s) {
+    const std::string line = s + "\n";
+    (void) !::write(1, line.data(), line.size());
+}
+
 LoadResult load_mlmodel(const LoadRequest & r) {
+    // Built during the load, as the frameworks build their lazy statics, so
+    // its destructor is among the first that exit() runs.
+    static TearDownMarker lazy;
+    (void) lazy;
     LoadResult out;
+    struct Report {
+        ~Report() { report_line(std::string("load=") + (g_torn_down ? "torn-down" : "intact")); }
+    } report;
     @autoreleasepool {
         MLModelConfiguration * cfg = [MLModelConfiguration new];
         cfg.computeUnits = ml_units(r.units);
@@ -168,6 +193,10 @@ int child(const ExitTestOptions & o, int delay_ms) {
         std::this_thread::sleep_for(std::chrono::microseconds(200));
         st = (*slot)->state();
     }
+    if (!settled(st)) {
+        std::printf("state=%s never-in-flight\n", to_string(st));
+        return 70;
+    }
     if (delay_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
     st = (*slot)->state();
     std::printf("state=%s exit_ns=%lld\n", to_string(st), (long long) mono_ns());
@@ -180,6 +209,7 @@ struct RunResult {
     bool exited = false;
     int status = 0;
     std::string state;
+    std::string load;  // "intact", "torn-down" or "" (the load never returned)
     double exit_ms = -1;  // from the child's report (just before main returns) to its reaping
 };
 
@@ -280,6 +310,8 @@ RunResult run_once(const ExitTestOptions & o, const std::string & self, int dela
             if (std::sscanf(line, "state=%63s exit_ns=%lld", st, &ns) == 2) {
                 rr.state = st;
                 if (reaped_ns > 0) rr.exit_ms = double(reaped_ns - ns) / 1e6;
+            } else if (std::sscanf(line, "load=%63s", st) == 1) {
+                rr.load = st;
             }
         }
         std::fclose(f);
@@ -372,21 +404,27 @@ int main(int argc, char ** argv) {
     const bool control_ok = ctl.exited && WIFEXITED(ctl.status) && WEXITSTATUS(ctl.status) == 0 && ctl.state == "ready";
     std::printf("%s control load: state %s, %s\n", control_ok ? "ok  " : "FAIL",
                 ctl.state.empty() ? "?" : ctl.state.c_str(), describe(ctl).c_str());
-    int failures = control_ok ? 0 : 1, signals = 0, hangs = 0, in_flight = 0;
+    // Where the exit wait applies, an in-flight run's load must return intact.
+    const bool expect_wait = (!o.worker || o.arm || o.drain_ms > 0) && o.exit_wait_ms != 0;
+    int failures = control_ok ? 0 : 1, signals = 0, hangs = 0, in_flight = 0, torn = 0;
     double max_exit_ms = 0;
     for (int i = 0; i < o.runs; ++i) {
         const int d = o.runs == 1 ? 0 : o.max_delay * i / (o.runs - 1);
         const RunResult r = run_once(o, argv[0], d);
         const bool signalled = r.exited && WIFSIGNALED(r.status);
         const bool hung = !r.exited || r.exit_ms > kHangMs;
+        const bool loading = r.state == "loading" || r.state == "warming";
+        const bool not_waited = expect_wait && loading && r.load != "intact";
         const bool clean = r.exited && WIFEXITED(r.status) && WEXITSTATUS(r.status) == 0 && !hung &&
-                           r.state != "failed" && !r.state.empty();
-        if (r.state == "loading" || r.state == "warming") ++in_flight;
+                           (loading || r.state == "ready") && !not_waited;
+        if (loading) ++in_flight;
+        torn += not_waited ? 1 : 0;
         if (r.exit_ms > max_exit_ms) max_exit_ms = r.exit_ms;
         signals += signalled ? 1 : 0;
         hangs += hung ? 1 : 0;
-        std::printf("%s run %d delay %d ms: state %s, %s, exit took %.1f ms%s\n", clean ? "ok  " : "FAIL", i, d,
-                    r.state.empty() ? "?" : r.state.c_str(), describe(r).c_str(), r.exit_ms, hung ? " (hang)" : "");
+        std::printf("%s run %d delay %d ms: state %s, %s, exit took %.1f ms, load %s%s\n", clean ? "ok  " : "FAIL", i,
+                    d, r.state.empty() ? "?" : r.state.c_str(), describe(r).c_str(), r.exit_ms,
+                    r.load.empty() ? "not returned" : r.load.c_str(), hung ? " (hang)" : "");
         std::fflush(stdout);
         if (!clean) ++failures;
     }
@@ -396,9 +434,9 @@ int main(int argc, char ** argv) {
                     in_flight, o.runs);
     }
     const bool pass = failures == 0 && !vacuous;
-    std::printf("%s: %d runs, %d exited with the load in flight, %d failures (%d signals, %d hangs over %d ms), "
-                "slowest exit %.1f ms\n",
+    std::printf("%s: %d runs, %d exited with the load in flight, %d failures (%d signals, %d hangs over %d ms, "
+                "%d in-flight loads not waited for), slowest exit %.1f ms\n",
                 o.report_only ? "REPORT" : (pass ? "PASS" : "FAIL"), o.runs, in_flight, failures, signals, hangs,
-                kHangMs, max_exit_ms);
+                kHangMs, torn, max_exit_ms);
     return o.report_only || pass ? 0 : 1;
 }
