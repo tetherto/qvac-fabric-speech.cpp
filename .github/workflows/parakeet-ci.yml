@@ -393,6 +393,7 @@ jobs:
             build-coreml/coreml-generated-results.xml \
             --require test-nemotron-diarization-coreml-generated-parity \
             --require test-fit-coreml-generated-diarizers \
+            --require test-nemotron-diarization-coreml-source \
             --require test-sortformer-diarizer-coreml-generated-parity \
             --require test-fit-coreml-generated-sortformer-diarizer \
             --require test-sortformer-diarizer-coreml-source

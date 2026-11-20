@@ -2121,7 +2121,7 @@ static void maybe_init_coreml_diarizers(const std::string & gguf_path,
         diarizer_templates_for(model.model_type, model.model_variant);
     // Without the descriptor's identity nothing is generated (source_changed).
     pcm::SourceStat loaded = model.impl->source;
-    loaded.changed = !model.impl->source_ok;
+    loaded.changed = loaded.changed || !model.impl->source_ok;
     model.impl->coreml_diarizers = discover_coreml_diarizers(gguf_path, *model.impl->coreml, templates, loaded);
     const std::vector<int> capacities =
         model.impl->coreml_diarizers ? model.impl->coreml_diarizers->capacities() : std::vector<int>();
@@ -2781,6 +2781,7 @@ static int load_from_gguf_impl(const std::string & gguf_path,
             return 1;
         }
         impl->source_ok = pcm::generation::source_stat_fd(fileno(gguf_file.get()), gguf_path, impl->source);
+        if (GgufLoadObserver observer = g_gguf_load_observer.load()) observer("opened");
     }
     impl->gguf = gguf_file ? gguf_init_from_file_ptr(gguf_file.get(), params)
                            : gguf_init_from_file(gguf_path.c_str(), params);
@@ -2861,7 +2862,7 @@ static int load_from_gguf_impl(const std::string & gguf_path,
         // The tensor data comes through the descriptor the metadata did.
         FILE * data_file = gguf_file.get();
 #else
-        FILE * data_file = nullptr;
+        const void * data_file = nullptr;
 #endif
         std::ifstream f;
         if (data_file == nullptr) {
@@ -2885,10 +2886,13 @@ static int load_from_gguf_impl(const std::string & gguf_path,
             const size_t nbytes = ggml_nbytes(t);
             buf.resize(nbytes);
             bool read_ok = false;
+#ifdef PARAKEET_USE_COREML
             if (data_file != nullptr) {
                 read_ok = fseeko(data_file, (off_t) (data_offset + off), SEEK_SET) == 0 &&
                           std::fread(buf.data(), 1, nbytes, data_file) == nbytes;
-            } else {
+            } else
+#endif
+            {
                 f.seekg((std::streamoff)(data_offset + off), std::ios::beg);
                 read_ok = static_cast<bool>(f.read(buf.data(), nbytes));
             }
@@ -2899,6 +2903,17 @@ static int load_from_gguf_impl(const std::string & gguf_path,
             ggml_backend_tensor_set(t, buf.data(), 0, nbytes);
         }
 #ifdef PARAKEET_USE_COREML
+        // The descriptor again after the last tensor read: a file written in
+        // place during the upload (same inode, a new size or mtime) may have
+        // given some tensors the new bytes, so the identity taken at the open
+        // is not the loaded weights' and must never join a job for it.
+        if (gguf_file && impl->source_ok) {
+            pcm::SourceStat after;
+            const bool same = pcm::generation::source_stat_fd(fileno(gguf_file.get()), gguf_path, after) &&
+                              after.size == impl->source.size && after.mtime_ns == impl->source.mtime_ns &&
+                              after.ino == impl->source.ino && after.dev == impl->source.dev;
+            if (!same) impl->source.changed = true;
+        }
         if (GgufLoadObserver observer = g_gguf_load_observer.load()) observer("read");
 #endif
     }
@@ -3573,6 +3588,7 @@ CoremlCallStats model_coreml_call_stats(ParakeetCtcModel & m) {
         out.coreml_passes = stats.coreml;
         out.pending_passes = stats.not_ready;
         out.label = stats.label;
+        out.capacity = stats.capacity;
     }
 #else
     (void) m;
@@ -4496,6 +4512,14 @@ DwConvLowering select_dw_lowering(const ParakeetCtcModel & model, ggml_backend_t
     return DwConvLowering::Im2col;
 }
 
+ggml_tensor * mask_convolution_padding(ggml_context * ctx, ggml_tensor * x,
+                                       int valid_frames) {
+    if (valid_frames >= x->ne[1]) return x;
+    const int padding = static_cast<int>(x->ne[1]) - valid_frames;
+    auto * prefix = ggml_cont(ctx, valid_mel_prefix(ctx, x, valid_frames));
+    return zero_pad_dim1(ctx, prefix, 0, padding);
+}
+
 ggml_tensor * conformer_conv_graph(ggml_context * ctx, ggml_tensor * xn,
                                    const BlockWeights & W,
                                    int d_model, int /*T*/, int conv_kernel,
@@ -4503,7 +4527,7 @@ ggml_tensor * conformer_conv_graph(ggml_context * ctx, ggml_tensor * xn,
                                    bool glu_fused,
                                    ConvNormType conv_norm_type,
                                    bool conv_causal,
-                                   float layer_norm_eps) {
+                                   float layer_norm_eps, int valid_frames) {
     // Use the weight directly when the GGUF already stores it squeezed to
     // (d_model, 2*d_model): a reshape is a view node, and a view over a
     // CPU-repack weight drops the repack traits (the mul_mat would then read
@@ -4535,6 +4559,8 @@ ggml_tensor * conformer_conv_graph(ggml_context * ctx, ggml_tensor * xn,
                          (size_t) d_model * y->nb[0]));
         y = ggml_mul(ctx, half1, ggml_sigmoid(ctx, half2));
     }
+
+    y = mask_convolution_padding(ctx, y, valid_frames);
 
     const int pad_left  = conv_causal ? (conv_kernel - 1) : ((conv_kernel - 1) / 2);
     const int pad_right = conv_causal ? 0                 : ((conv_kernel - 1) / 2);
@@ -4620,7 +4646,7 @@ ggml_tensor * conformer_block_graph(ggml_context * ctx, ggml_tensor * x,
                                     bool glu_fused,
                                     ConvNormType conv_norm_type,
                                     bool conv_causal,
-                                    float ff_headroom) {
+                                    float ff_headroom, int valid_frames) {
     ggml_tensor * residual = x;
     ggml_tensor * y = conformer_ff_graph(ctx, x,
                                          W.norm_ff1_w, W.norm_ff1_b,
@@ -4637,7 +4663,7 @@ ggml_tensor * conformer_block_graph(ggml_context * ctx, ggml_tensor * x,
     residual = x;
     xn = layer_norm_affine(ctx, x, W.norm_conv_w, W.norm_conv_b, eps);
     y = conformer_conv_graph(ctx, xn, W, d_model, T, conv_kernel, dw_lowering, glu_fused,
-                             conv_norm_type, conv_causal, eps);
+                             conv_norm_type, conv_causal, eps, valid_frames);
     x = ggml_add(ctx, residual, y);
 
     residual = x;
@@ -4936,6 +4962,17 @@ void build_pos_proj_cache(const ParakeetCtcModel & model, EncoderGraph & g, ggml
     }
 }
 
+constexpr float kMaskedAttentionScore = -1.0e30f;
+
+void mask_attention_padding(std::vector<float> & mask, int frames, int valid_frames) {
+    if (valid_frames >= frames) return;
+    if (mask.empty()) mask.assign((size_t) frames * frames, 0.0f);
+    for (int query = 0; query < frames; ++query) {
+        auto row = mask.begin() + (size_t) query * frames;
+        std::fill(row + valid_frames, row + frames, kMaskedAttentionScore);
+    }
+}
+
 // `measure_compute` (fit projection): when non-null the graph is built
 // normally but its compute buffer is only *sized* into `*measure_compute`
 // instead of reserved; no compute buffer is allocated and
@@ -4987,6 +5024,13 @@ static int build_encoder_graph_cached(const ParakeetCtcModel & model,
         T  = L3;
     }
 
+    // Standard offline TDT follows NeMo's padding masks in attention and convolution.
+    const bool mask_tdt_padding = !bypass_pre_encode &&
+        model.model_type == ParakeetModelType::TDT &&
+        model.model_variant != kTranscribePsyEuVariant;
+    const int valid_frames = mask_tdt_padding
+        ? sub_out_len(sub_out_len(sub_out_len(mel_valid))) : T;
+
     g.pe_host = compute_rel_pos_encoding(T, d_model);
 
     // Build the chunked-limited attention mask host-side once per graph.
@@ -5006,13 +5050,8 @@ static int build_encoder_graph_cached(const ParakeetCtcModel & model,
         const int left  = enc.att_context_left;
         const int right = enc.att_context_right;
         const int chunk = right + 1;
-        // Use a large finite "very negative" sentinel rather than -inf:
-        // Apple Clang at -O3 emits `-Wnan-infinity-disabled` because some
-        // FP optimisations treat infinity as UB, which empirically
-        // corrupts the chunked-limited mask on the EOU offline encoder
-        // (CTC / TDT use full attention so they're unaffected). Softmax
-        // with -1e30 saturates to ~0 just like -inf, with no UB risk.
-        g.att_mask_host.assign((size_t) T * T, -1.0e30f);
+        // A finite score masks keys without relying on infinity under Apple fast-math.
+        g.att_mask_host.assign((size_t) T * T, kMaskedAttentionScore);
         for (int i = 0; i < T; ++i) {
             const int c          = i / chunk;
             const int win_start  = c * chunk - left;
@@ -5025,6 +5064,7 @@ static int build_encoder_graph_cached(const ParakeetCtcModel & model,
     } else {
         g.att_mask_host.clear();
     }
+    mask_attention_padding(g.att_mask_host, T, valid_frames);
 
     const size_t graph_slots = GGML_DEFAULT_GRAPH_SIZE * 16;
     const size_t overhead = ggml_tensor_overhead() * graph_slots
@@ -5055,7 +5095,7 @@ static int build_encoder_graph_cached(const ParakeetCtcModel & model,
         g.pre_encode_in = nullptr;
     }
     g.pe_in   = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, d_model, 2 * T - 1);
-    if (use_chunked_mask) {
+    if (!g.att_mask_host.empty()) {
         g.att_mask = ggml_new_tensor_4d(gctx, GGML_TYPE_F32, T, T, 1, 1);
         ggml_set_name(g.att_mask, "att_mask");
         ggml_set_input(g.att_mask);
@@ -5192,7 +5232,8 @@ static int build_encoder_graph_cached(const ParakeetCtcModel & model,
             residual = x;
             xn = layer_norm_affine(gctx, x, W.norm_conv_w, W.norm_conv_b, eps);
             y = conformer_conv_graph(gctx, xn, W, d_model, T, conv_kernel, dw_lowering,
-                                     model.impl->glu_fused, enc.conv_norm_type, enc.conv_causal, eps);
+                                     model.impl->glu_fused, enc.conv_norm_type, enc.conv_causal, eps,
+                                     valid_frames);
             x = ggml_add(gctx, residual, y);
             g.post_conv_0_node = x;
             ggml_set_name(g.post_conv_0_node, "block_0_post_conv");
@@ -5218,7 +5259,7 @@ static int build_encoder_graph_cached(const ParakeetCtcModel & model,
             x = conformer_block_graph(gctx, x, g.pe_in, layer_pos_proj(i), g.att_mask, model.blocks[i],
                                       d_model, H, HD, T, conv_kernel, eps,
                                       dw_lowering, model.impl->attn, model.impl->glu_fused,
-                                      enc.conv_norm_type, enc.conv_causal, ff_headroom);
+                                      enc.conv_norm_type, enc.conv_causal, ff_headroom, valid_frames);
         }
         if (model.eu_use_adapters) {
             for (const auto & a : model.eu_adapters) {
@@ -6569,7 +6610,7 @@ static int build_substage_graph(const ParakeetCtcModel & model,
         ggml_tensor * xn = layer_norm_affine(g.ctx, x, W.norm_conv_w, W.norm_conv_b, eps);
         ggml_tensor * y = conformer_conv_graph(g.ctx, xn, W, d_model, T, conv_kernel,
                                                select_dw_lowering(model, backend), model.impl->glu_fused,
-                                               enc.conv_norm_type, enc.conv_causal, eps);
+                                               enc.conv_norm_type, enc.conv_causal, eps, T);
         x = ggml_add(g.ctx, r, y);
     }
     if (stage == Substage::FF2 || stage == Substage::FULL_BLOCK) {

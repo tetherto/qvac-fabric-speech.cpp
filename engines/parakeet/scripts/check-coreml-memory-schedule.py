@@ -34,8 +34,14 @@ compare the raw measurement, since those totals already carry the margin.
 Every template stage must show a generate, a compile and a load segment in
 every run, each with footprint samples, every load must have sampled
 ANECompilerService, and the tool must report no sampler errors; otherwise the
-checks would pass without measuring anything. A stage seen more than once in a
-phase is checked at its largest value.
+checks would pass without measuring anything. A compile segment must follow a
+generate of its stage. Every template stage must end the run ready (and
+all_ready_s be set), and serve at least one Core ML pass after that, counted
+by the capacity that served it. The compiler's growth is checked over the
+whole run and per load (each load from the service's size when it started, so
+a service that shrank between loads cannot hide a later compile), and a run
+whose compiler grew less than 64 MiB is not a cold run and fails. A stage seen
+more than once in a phase is checked at its largest value.
 
 A null constant means the runtime's default: runtime weights = weight.bin;
 compile 0.5 x weight.bin; load 0.25 x weight.bin for cpu_and_ane and 1.0 x for
@@ -53,6 +59,7 @@ from pathlib import Path
 MIB = 1 << 20
 PREPARE_FIXED = 8 * MIB
 MARGIN = 1.25  # each stage constant is at least 1.25 x the largest measurement
+COLD_COMPILER_FLOOR = 64 * MIB  # a cold run's ANECompilerService grows at least this much
 
 
 def sh(cmd):
@@ -118,6 +125,19 @@ def over(path, what, raw, margin, limit):
             f"{mib(limit)} MiB")
 
 
+def orphan_compiles(segs):
+    """Compile segments with no generate of the stage before them (since the last load)."""
+    orphans, generating = 0, False
+    for s in sorted(segs, key=lambda s: s["t0"]):
+        if s["phase"] == "generate":
+            generating = True
+        elif s["phase"] == "load":
+            generating = False
+        elif s["phase"] == "compile" and not generating:
+            orphans += 1
+    return orphans
+
+
 def prepares(segs):
     """The increment of each prepare: a generate segment and the compile
     segments after it, up to the next generate or load."""
@@ -143,6 +163,12 @@ def check_run(path, r, templates):
     if r.get("mode") != "coreml" or not r.get("baseline_bytes"):
         return None, [f"{path}: not a Core ML run with a ggml-only baseline"]
     units = {s["stage"]: s.get("compute_units") for s in r.get("status", {}).get("stages", [])}
+    states = {s["stage"]: s.get("state") for s in r.get("status", {}).get("stages", [])}
+    if float(r.get("all_ready_s", -1)) < 0:
+        failures.append(f"{path}: not every capacity became ready (all_ready_s {r.get('all_ready_s')})")
+    by_capacity = r.get("coreml_passes_by_capacity")
+    if by_capacity is None:
+        failures.append(f"{path}: no coreml_passes_by_capacity (an older tool's report)")
     if "sampler_errors" not in r:
         failures.append(f"{path}: no sampler_errors (an older tool's report)")
     elif int(r["sampler_errors"]) != 0:
@@ -163,6 +189,13 @@ def check_run(path, r, templates):
         for phase in ("generate", "compile", "load"):
             if phase not in phases:
                 failures.append(f"{path}: {stage} has no {phase} segment")
+        if orphan_compiles(segs):
+            failures.append(f"{path}: {stage} has a compile segment without a generate before it")
+        if states.get(stage) != "ready":
+            failures.append(f"{path}: {stage} ended the run {states.get(stage)}, not ready")
+        frames = stage.rsplit("-", 1)[-1]
+        if by_capacity is not None and int(by_capacity.get(frames, 0)) <= 0:
+            failures.append(f"{path}: {stage} served no Core ML pass after every capacity was ready")
         margin = margin_of(template)
         p_lim, l_lim, r_lim, res_lim = charged(template, units.get(stage) or "cpu_and_ane")
         row["resident_sum"] += res_lim
@@ -182,6 +215,11 @@ def check_run(path, r, templates):
         # compiler must have been sampled while it ran.
         if any(int(s.get("ane_compiler_peak", 0)) <= 0 for s in loads):
             failures.append(f"{path}: no ANECompilerService sample during a {stage} load")
+        if any("ane_compiler_before" not in s for s in loads):
+            failures.append(f"{path}: {stage} load segment without ane_compiler_before (an older tool's report)")
+        load_growth = max((max(0, int(s.get("ane_compiler_peak", 0)) - int(s.get("ane_compiler_before", 0)))
+                           for s in loads), default=0)
+        row["ane_load_growth"] = max(row.get("ane_load_growth", 0), load_growth)
         inc = max((s.get("resident_increment", 0) for s in loads), default=0)
         row["resident"] = max(row["resident"], inc)
         failures.append(over(path, f"{stage} resident step", inc, margin, res_lim))
@@ -194,6 +232,16 @@ def check_run(path, r, templates):
     growth = max(0, peak - int(r.get("ane_compiler_before_loads", 0)))
     row["ane_growth"], row["ane_peak"] = growth, peak
     row["ane_baseline"] = r.get("ane_compiler_baseline", "unknown")
+    if growth < COLD_COMPILER_FLOOR:
+        failures.append(f"{path}: ANECompilerService grew {mib(growth)} MiB during the loads, below the "
+                        f"{mib(COLD_COMPILER_FLOOR)} MiB of a cold run (a warm run measures no compile)")
+    load_growth = row.get("ane_load_growth", 0)
+    if row["reserve_lim"] is not None:
+        need = with_margin(load_growth, row.get("margin", MARGIN))
+        if need > row["reserve_lim"]:
+            failures.append(f"{path}: ANECompilerService grew {mib(load_growth)} MiB during one load, from its "
+                            f"size when that load started (x {row.get('margin', MARGIN):g} = {mib(need)} MiB), "
+                            f"over the reserve {mib(row['reserve_lim'])} MiB")
     if row["reserve_lim"] is not None:
         need = with_margin(growth, row.get("margin", MARGIN))
         if need > row["reserve_lim"]:

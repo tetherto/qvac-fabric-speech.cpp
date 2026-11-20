@@ -55,14 +55,16 @@ def run_report():
         t += 2
     for i, stage in enumerate(STAGES):
         segs.append(segment(stage, "load", t, 100 * MIB, 120 * MIB, ane_compiler_peak=(450 + 50 * i) * MIB,
+                            ane_compiler_before=(280 + 20 * i) * MIB,
                             settled_after_ready=(105 + 5 * i) * MIB, resident_increment=5 * MIB))
         t += 1
     return {"mode": "coreml", "baseline_bytes": 100 * MIB, "fit_coreml_bytes": 1000 * MIB,
             "peak_increment_over_baseline": 50 * MIB, "steady_increment_over_baseline": 10 * MIB,
             "ane_compiler_before_loads": 280 * MIB, "coreml_passes": 10, "ggml_passes_after_ready": 0,
-            "sampler_errors": 0,
+            "sampler_errors": 0, "all_ready_s": 10.0,
+            "coreml_passes_by_capacity": {s.rsplit("-", 1)[-1]: 3 for s in STAGES},
             "segments": segs,
-            "status": {"stages": [{"stage": s, "compute_units": "cpu_and_ane"} for s in STAGES]}}
+            "status": {"stages": [{"stage": s, "compute_units": "cpu_and_ane", "state": "ready"} for s in STAGES]}}
 
 
 class CheckerTest(unittest.TestCase):
@@ -307,6 +309,52 @@ class CheckerTest(unittest.TestCase):
         self.assertFails(r, "3 sampler errors")
         del r["sampler_errors"]
         self.assertFails(r, "no sampler_errors (an older tool's report)")
+
+    # ---- completeness: every stage ready, served after readiness, cold
+
+    def test_a_stage_that_ended_failed_fails(self):
+        r = run_report()
+        r["status"]["stages"][1]["state"] = "failed"
+        r["all_ready_s"] = -1.0
+        rc, out = self.check(r)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("diarizer-745 ended the run failed, not ready", out)
+        self.assertIn("not every capacity became ready (all_ready_s -1.0)", out)
+
+    def test_a_capacity_with_no_core_ml_pass_after_readiness_fails(self):
+        r = run_report()
+        r["coreml_passes_by_capacity"] = {"745": 6}  # 745 served the 358 passes too
+        self.assertFails(r, "diarizer-358 served no Core ML pass after every capacity was ready")
+        r["coreml_passes_by_capacity"] = {}
+        rc, out = self.check(r)
+        self.assertIn("diarizer-745 served no Core ML pass", out)
+        del r["coreml_passes_by_capacity"]
+        self.assertFails(r, "no coreml_passes_by_capacity")
+
+    def test_a_compile_without_a_generate_before_it_fails(self):
+        r = run_report()
+        # A compile of 358 before its generate (a +512 MiB peak the prepare would not see).
+        r["segments"].insert(0, segment("diarizer-358", "compile", -5, 100 * MIB, 612 * MIB))
+        self.assertFails(r, "diarizer-358 has a compile segment without a generate before it")
+
+    def test_the_compiler_is_checked_per_load(self):
+        # 500 MiB before the loads, 10 MiB when the second load starts, 810 MiB
+        # during it: 310 MiB over the run, but that load grew 800 MiB.
+        r = run_report()
+        r["ane_compiler_before_loads"] = 500 * MIB
+        r["segments"][-2].update(ane_compiler_peak=520 * MIB, ane_compiler_before=500 * MIB)
+        r["segments"][-1].update(ane_compiler_peak=810 * MIB, ane_compiler_before=10 * MIB)
+        self.assertFails(r, "ANECompilerService grew 800.0 MiB during one load")
+        del r["segments"][-1]["ane_compiler_before"]
+        self.assertFails(r, "load segment without ane_compiler_before")
+
+    def test_a_warm_run_fails(self):
+        r = run_report()
+        r["ane_compiler_before_loads"] = 470 * MIB  # growth 30 MiB: the compile was cached
+        for s in r["segments"]:
+            if s["phase"] == "load":
+                s["ane_compiler_before"] = s["ane_compiler_peak"] - 20 * MIB
+        self.assertFails(r, "below the 64.0 MiB of a cold run")
 
     def test_every_run_is_checked(self):
         bad = run_report()

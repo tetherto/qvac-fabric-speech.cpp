@@ -11,6 +11,7 @@
 #include "cache.h"
 #include "device.h"
 #include "digest.h"
+#include "failed.h"
 #include "generation_internal.h"
 #include "gguf_source.h"
 #include "templates.h"
@@ -18,6 +19,7 @@
 #include "nlohmann/json.hpp"
 
 #include <climits>
+#include <ctime>
 #include <cstdlib>
 #include <map>
 #include <mutex>
@@ -168,6 +170,12 @@ std::shared_ptr<const recipe::Template> find_kept(const std::string & id, const 
     if (t) kept->emplace(key, t);
     return t;
 }
+
+int64_t unix_now() { return static_cast<int64_t>(std::time(nullptr)); }
+
+// Loads of a rejected artifact retried while its quarantine is busy or after
+// another process replaced it, counted by its load failure record.
+constexpr int kBusyRequeues = 3;
 
 std::string real_path(const std::string & p) {
     char buf[PATH_MAX];
@@ -349,9 +357,21 @@ bool begin_load(const LoadRequest & req, LoadResult & out) {
     std::string cache_dir, template_id, key32;
     if (!split_artifact_path(req.artifact_path, cache_dir, template_id, key32)) return true;
     cache::Layout l(cache_dir);
+    // A load failure promoted to deterministic (the same error in another
+    // process on this OS build) stops further loads of this (function, units).
+    const failed::Verdict v = failed::check(l.failed, key32, detail::device_os_build(), unix_now(), req.function,
+                                            to_string(req.units));
+    if (v.blocked && v.rec.cls == ErrorClass::deterministic) {
+        out.error = v.error;
+        return false;
+    }
     cache::Adoption a = cache::adopt(l, template_id, key32);
     switch (a.kind) {
-        case cache::Adoption::Kind::adopted: out.lease_fd = a.lease.release_fd(); return true;
+        case cache::Adoption::Kind::adopted:
+            // Under the shared lease: which publication this load adopted.
+            cache::artifact_identity(l, template_id, key32, out.artifact_dev, out.artifact_ino);
+            out.lease_fd = a.lease.release_fd();
+            return true;
         case cache::Adoption::Kind::would_block: out.would_block = true; return false;
         case cache::Adoption::Kind::missing:
             out.artifact_gone = true;  // the scheduler prepares it again
@@ -371,22 +391,43 @@ void end_load(const LoadRequest & req, LoadResult & out) {
     std::string cache_dir, template_id, key32;
     if (!split_artifact_path(req.artifact_path, cache_dir, template_id, key32)) return;
     const cache::Layout l(cache_dir);
+    const std::string units = to_string(req.units);
     if (out.model) {
         cache::touch_used(l, key32);
+        failed::clear(l.failed, key32, req.function, units);  // a success ends the failure streak
         return;
     }
     if (out.lease_fd >= 0) {
         ::close(out.lease_fd);
         out.lease_fd = -1;
     }
-    // The engine rejected an artifact that passed the inventory check (an
-    // invalid model, the wrong geometry): move it to quarantine/ under the
-    // key's exclusive lock and send the slot back to preparation, which
-    // regenerates it at the same key (the scheduler bounds the retries). A
-    // transient failure keeps the artifact, and so does one another holder
-    // of a lease is using.
-    if (out.error.cls != ErrorClass::deterministic) return;
-    if (cache::quarantine(l, template_id, key32, nullptr) == cache::KeyLock::Result::ok) out.artifact_gone = true;
+    if (out.error.ok()) return;
+    // The (function, units) load record: a repeat of the same error in
+    // another process on this OS build promotes it to deterministic (then
+    // begin_load stops loading it), except for resource errors.
+    const failed::Record rec = failed::record(l.failed, key32, failed::Stage::load, out.error, template_id,
+                                              detail::device_os_build(), unix_now(), req.function, units);
+    // The engine rejected an artifact that passed the inventory check (the
+    // framework refused the model, or its interface or geometry is wrong):
+    // move it to quarantine/ under the key's exclusive lock and send the slot
+    // back to preparation, which regenerates it at the same key (once). A
+    // resource error (memory, disk, timeout, interruption) keeps the artifact,
+    // and so does one another holder of a lease is using.
+    const bool rejected = out.rejected || out.error.cls == ErrorClass::deterministic;
+    if (!rejected || failed::is_resource(out.error.domain, out.error.code)) return;
+    out.rejected = true;
+    bool replaced = false;
+    const cache::KeyLock::Result q =
+        cache::quarantine_if(l, template_id, key32, out.artifact_dev, out.artifact_ino, &replaced, nullptr);
+    if (q == cache::KeyLock::Result::ok && !replaced) {
+        out.artifact_gone = true;
+    } else if ((q == cache::KeyLock::Result::would_block || (q == cache::KeyLock::Result::ok && replaced)) &&
+               rec.attempts <= kBusyRequeues) {
+        // Another holder's lease (the quarantine waits for it), or another
+        // process already replaced the publication (its repair is not
+        // quarantined): load again after the scheduler's backoff.
+        out.would_block = true;
+    }
 }
 
 #else  // !QVAC_COREML_GENERATE

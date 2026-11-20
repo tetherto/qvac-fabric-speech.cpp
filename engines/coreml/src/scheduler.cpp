@@ -948,7 +948,7 @@ void Runtime::fail_locked(const std::shared_ptr<Job> & j, const Error & e, SlotS
     bump_locked();
 }
 
-void Runtime::regenerate(const std::shared_ptr<Job> & j, const Error & e) {
+void Runtime::regenerate(const std::shared_ptr<Job> & j, const Error & e, int limit) {
     Graveyard gy;
     std::lock_guard<std::mutex> lk(mu);
     j->done = true;
@@ -962,7 +962,7 @@ void Runtime::regenerate(const std::shared_ptr<Job> & j, const Error & e) {
         if (!c) continue;
         c->job.reset();
         if (c->spec.route != Route::generate || c->spec.prepare_fn == nullptr ||
-            c->regenerations >= kMaxRegenerations || stopping_ || exiting()) {
+            c->regenerations >= limit || stopping_ || exiting()) {
             c->state = SlotState::failed;
             c->error = e;
             c->reason = e.message;
@@ -1074,7 +1074,10 @@ void Runtime::run_load(const std::shared_ptr<Job> & j) {
     }
     if (r.artifact_gone && !r.model) {
         if (r.lease_fd >= 0) ::close(r.lease_fd);
-        regenerate(j, r.error.ok() ? Error::transient("the generated artifact is gone") : r.error);
+        // A rejected artifact is regenerated once (its content is the same,
+        // only the compile is redone); a vanished one up to kMaxRegenerations.
+        regenerate(j, r.error.ok() ? Error::transient("the generated artifact is gone") : r.error,
+                   r.rejected ? 1 : kMaxRegenerations);
         return;
     }
     if (!r.error.ok() || !r.model) {

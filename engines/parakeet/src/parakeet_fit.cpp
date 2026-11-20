@@ -231,69 +231,52 @@ uint64_t legacy_diarizer_bytes(const std::string & gguf_path, const std::vector<
 #endif
 }
 
-// The diarizers' Core ML charge: the bundles construction loads for the
-// resolved prewarm scope (prewarm all loads every capacity) together with
-// the ones the workload's calls can load, resident; and the largest of their
-// load transients.
-CoremlCharge coreml_diarizer_charge(const std::string & gguf_path, std::vector<CoremlFrameRange> ranges,
-                                    const FitOptions & opts) {
-    CoremlCharge charge;
+// A diarizer model's Core ML charge (Nemotron 3 Diarization, Sortformer
+// v2.1): every capacity of the model in one ordered list (adjacent prebuilt
+// bundles, and the template capacities the engine would generate, chosen by
+// the same diarizer_templates_for() + diarizer_capacities() + plan() as
+// discovery; the others status-only), charged by coreml_diarizers_charge for
+// the calls in `ranges` and the construction prewarm. Never reads the cache's
+// contents.
+CoremlDiarizersCharge coreml_model_diarizers_charge(const ParakeetCtcModel & model, const FitOptions & opts,
+                                                    const std::vector<CoremlFrameRange> & ranges) {
 #ifdef PARAKEET_USE_COREML
     const auto resolved = resolve_parakeet_coreml(opts.coreml);
-    if (coreml_diarizers_disabled() || !resolved.enabled()) return charge;
-    const std::vector<CoremlDiarizerBundle> bundles = list_coreml_diarizer_bundles(gguf_path);
-    const CoremlDiarizerPrewarm prewarm =
-        resolved.prewarm == pcm::Prewarm::all ? CoremlDiarizerPrewarm::all
-        : resolved.prewarm == pcm::Prewarm::none ? CoremlDiarizerPrewarm::none
-                                                 : CoremlDiarizerPrewarm::minimal;
-    for (const CoremlFrameRange & r : coreml_diarizer_construction_ranges(prewarm)) ranges.push_back(r);
-    charge.resident = coreml_diarizer_resident_bytes(bundles, ranges);
-    if (charge.resident == 0) return charge;
-    const CoremlFitUnits units = fit_units(resolved.units_or(pcm::ComputeUnits::cpu_and_ane));
-    for (const CoremlDiarizerBundle & b : coreml_diarizer_loaded_bundles(bundles, ranges)) {
-        charge.transient = std::max(charge.transient, coreml_encoder_load_transient_bytes(b.weights_bytes, units));
-    }
-#else
-    (void) gguf_path;
-    (void) ranges;
-    (void) opts;
-#endif
-    return charge;
-}
-
-// The diarizer capacities the engine would generate for `model` (Nemotron 3
-// Diarization, Sortformer v2.1; route generate from plan(): a matching
-// template, a cache directory, generate != never, macOS 15, validated units;
-// never the cache's contents), chosen by the same diarizer_templates_for() +
-// diarizer_capacities() + plan() as discovery and charged at their templates'
-// Core ML envelope: the resident part of every capacity the ranges can load
-// (every generated capacity under prewarm = all) plus one transient, with
-// the templates' margin.
-CoremlCharge coreml_generated_diarizer_charge(const ParakeetCtcModel & model, const FitOptions & opts,
-                                              const std::vector<CoremlFrameRange> & ranges) {
-#ifdef PARAKEET_USE_COREML
-    if (coreml_diarizers_disabled()) return {};
+    if (coreml_diarizers_disabled() || !resolved.enabled()) return {};
     const std::vector<CoremlDiarizerTemplate> & templates =
         diarizer_templates_for(model.model_type, model.model_variant);
-    if (templates.empty()) return {};
     CoremlSidecars sidecars(opts.coreml);
-    // No capacity can route to generate (the probe would be wasted).
-    if (!sidecars.generation_status().supported) return {};
     std::vector<int> template_frames;
     std::vector<std::string> template_ids;
     for (const CoremlDiarizerTemplate & t : templates) {
         template_frames.push_back(t.frames);
         template_ids.emplace_back(t.template_id);
     }
+    const std::vector<CoremlDiarizerBundle> bundles = list_coreml_diarizer_bundles(opts.model_gguf_path);
     std::vector<int> prebuilt;
-    for (const CoremlDiarizerBundle & b : list_coreml_diarizer_bundles(opts.model_gguf_path)) {
-        prebuilt.push_back(b.capacity);
+    for (const CoremlDiarizerBundle & b : bundles) prebuilt.push_back(b.capacity);
+    // Without generation every template capacity is status-only (the probe
+    // would be wasted).
+    std::vector<pcm::generation::Candidate> probed;
+    if (sidecars.generation_status().supported) {
+        probed = probe_diarizer_templates(sidecars, opts.model_gguf_path, template_ids);
+    } else {
+        probed.resize(template_ids.size());
+        for (size_t i = 0; i < template_ids.size(); ++i) probed[i].template_id = template_ids[i];
     }
-    const std::vector<pcm::generation::Candidate> probed =
-        probe_diarizer_templates(sidecars, opts.model_gguf_path, template_ids);
-    const std::vector<CoremlDiarizerCharge> charges = diarizer_fit_charges(
+    std::vector<CoremlDiarizerCharge> charges = diarizer_fit_charges(
         sidecars, opts.model_gguf_path, diarizer_capacities(prebuilt, template_frames, probed));
-    return coreml_generated_diarizer_charge(charges, ranges, sidecars.resolved().prewarm == pcm::Prewarm::all);
+    for (CoremlDiarizerCharge & c : charges) {
+        for (const CoremlDiarizerBundle & b : bundles) {
+            if (c.prebuilt && b.capacity == c.frames) c.weights_bytes = b.weights_bytes;
+        }
+    }
+    const CoremlDiarizerPrewarm prewarm =
+        resolved.prewarm == pcm::Prewarm::all ? CoremlDiarizerPrewarm::all
+        : resolved.prewarm == pcm::Prewarm::none ? CoremlDiarizerPrewarm::none
+                                                 : CoremlDiarizerPrewarm::minimal;
+    return coreml_diarizers_charge(charges, ranges, prewarm,
+                                   fit_units(resolved.units_or(pcm::ComputeUnits::cpu_and_ane)));
 #else
     (void) model;
     (void) opts;
@@ -585,13 +568,15 @@ void project_nemotron_diarization(const ParakeetCtcModel & model, const GgufLoad
     // The instance also serves shorter calls than this workload, and keeps the
     // capacities they load: any input up to the single-pass graph (the
     // long-form window past the long-form threshold) runs as one pass, so the
-    // generated charge covers single passes from 1 frame up to it as well.
-    std::vector<CoremlFrameRange> generated_ranges = ranges;
-    generated_ranges.push_back(CoremlFrameRange{1, graphs.single_pass.frames});
+    // charge covers single passes from 1 frame up to it as well.
+    std::vector<CoremlFrameRange> demand = long_form_charge_ranges(ranges, long_form);
+    demand.push_back(CoremlFrameRange{1, graphs.single_pass.frames});
+    const CoremlDiarizersCharge diarizers = coreml_model_diarizers_charge(model, opts, demand);
+    // A charge holding a prebuilt bundle is today's estimate, not a validated
+    // envelope; one of generated capacities alone is.
     apply_coreml_verdicts(r, required, enabled, disabled_reason,
-                          coreml_diarizer_charge(opts.model_gguf_path, long_form_charge_ranges(ranges, long_form), opts),
-                          /*encoder_prebuilt=*/false, CoremlCharge{},
-                          coreml_generated_diarizer_charge(model, opts, generated_ranges));
+                          diarizers.prebuilt ? diarizers.charge : CoremlCharge{}, /*encoder_prebuilt=*/false,
+                          CoremlCharge{}, diarizers.prebuilt ? CoremlCharge{} : diarizers.charge);
     r.report = model_device_report(r) + nemotron_diarization_report(graphs, long_form) +
                device_projection_report(r, opts.margin_bytes, required,
                                         "every diarization graph shares one buffer") +
@@ -915,16 +900,12 @@ FitResult fit_params(const FitOptions & opts) {
         }
         r.host_bytes = host;
     }
-    // Sortformer v2.1 diarizer capacities on route generate: the one the
-    // offline input uses, and the smallest one, which construction loads (the
-    // minimal set) and every AOSC step up to its capacity uses, so it is
-    // charged whatever the input's length.
-    CoremlCharge generated_diarizers;
+    // Sortformer diarizer demand: the offline pass over the whole input.
+    std::vector<CoremlFrameRange> diarizer_demand;
     if (model.model_type == ParakeetModelType::SORTFORMER) {
         r.coreml_bytes = legacy_diarizer_bytes(opts.model_gguf_path,
                                                {CoremlFrameRange{total_enc, total_enc}}, opts);
-        generated_diarizers = coreml_generated_diarizer_charge(
-            model, opts, {CoremlFrameRange{total_enc, total_enc}, CoremlFrameRange{1, 1}});
+        diarizer_demand.push_back(CoremlFrameRange{total_enc, total_enc});
     }
 
     r.device.weights_bytes         = lm.weights_bytes + lm.repack_bytes;
@@ -942,12 +923,15 @@ FitResult fit_params(const FitOptions & opts) {
         bool encoder_prebuilt = false;
         const CoremlCharge encoder = coreml_encoder_fit_charge(model, opts, enabled, window_mel,
                                                                window_enc, encoder_prebuilt);
-        const CoremlCharge diarizers =
+        // A charge holding a prebuilt bundle is today's estimate, not a
+        // validated envelope; one of generated capacities alone is.
+        const CoremlDiarizersCharge diarizers =
             model.model_type == ParakeetModelType::SORTFORMER
-                ? coreml_diarizer_charge(opts.model_gguf_path, {CoremlFrameRange{total_enc, total_enc}}, opts)
-                : CoremlCharge{};
-        apply_coreml_verdicts(r, required, enabled, disabled_reason, diarizers, encoder_prebuilt, encoder,
-                              generated_diarizers);
+                ? coreml_model_diarizers_charge(model, opts, diarizer_demand)
+                : CoremlDiarizersCharge{};
+        apply_coreml_verdicts(r, required, enabled, disabled_reason,
+                              diarizers.prebuilt ? diarizers.charge : CoremlCharge{}, encoder_prebuilt, encoder,
+                              diarizers.prebuilt ? CoremlCharge{} : diarizers.charge);
     }
 
     // ── Report ─────────────────────────────────────────────────────────────

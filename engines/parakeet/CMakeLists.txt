@@ -906,6 +906,23 @@ if (PARAKEET_BUILD_TESTS)
         ARGS     "${_qvp_tdt_f16_gguf}" "${_qvp_jfk_wav}"
         REQUIRES "${_qvp_tdt_f16_gguf}" "${_qvp_jfk_wav}")
 
+    add_executable(test-tdt-padding
+        test/test_tdt_padding.cpp
+        src/parakeet_ctc.cpp
+        src/parakeet_log.cpp
+        src/mel_preprocess.cpp
+        src/sentencepiece_bpe.cpp)
+    target_link_libraries(test-tdt-padding PRIVATE ggml parakeet-backend-defs)
+    target_include_directories(test-tdt-padding PRIVATE src include ggml/include)
+    if (PARAKEET_F16_ACTIVATIONS)
+        target_compile_definitions(test-tdt-padding PRIVATE PARAKEET_F16_ACTIVATIONS=1)
+    endif()
+    parakeet_apply_backend_defs(test-tdt-padding)
+    parakeet_register_test(test-tdt-padding
+        LABEL    "fixture"
+        ARGS     "${_qvp_tdt_q8_gguf}"
+        REQUIRES "${_qvp_tdt_q8_gguf}")
+
     add_executable(test-parakeet-streaming test/test_streaming.cpp)
     target_link_libraries(test-parakeet-streaming PRIVATE qvac-parakeet)
     target_include_directories(test-parakeet-streaming PRIVATE include src ggml/include)
@@ -1942,6 +1959,20 @@ if (PARAKEET_BUILD_TESTS)
                     --cache-dir "${_qvp_gen_cache}")
         set_tests_properties(test-nemotron-diarization-coreml-generated-parity PROPERTIES
             LABELS "fixture;coreml;coreml-generated" TIMEOUT 1800)
+        # The DER gate: the generated diarizers against the exporter's bundles on
+        # the pinned clips, both on the Neural Engine, at most 0.2 pp apart.
+        if (PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF AND Python3_EXECUTABLE)
+            add_test(NAME test-nemotron-diarization-coreml-generated-der
+                COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check-generated-diarizer-der.py
+                        --cli $<TARGET_FILE:parakeet-cli>
+                        --generated-gguf "${PARAKEET_TEST_NEMOTRON_GENERATED_GGUF}"
+                        --prebuilt-gguf "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}"
+                        --samples ${CMAKE_CURRENT_SOURCE_DIR}/test/samples
+                        --der-script ${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/benchmarks/compute-der.py
+                        --work "${CMAKE_CURRENT_BINARY_DIR}/coreml-generated-der")
+            set_tests_properties(test-nemotron-diarization-coreml-generated-der PROPERTIES
+                LABELS "fixture;coreml;coreml-generated" TIMEOUT 1800)
+        endif()
         # A generated diarizer comes only from the file whose weights the model
         # loaded: the path names another file only while the GGUF is opened.
         add_executable(test-nemotron-diarization-coreml-source
@@ -1972,7 +2003,11 @@ if (PARAKEET_BUILD_TESTS)
         # not validated for report every capacity unsupported. Never skips.
         add_executable(test-fit-coreml-generated-diarizers test/test_fit_coreml_generated_diarizers.cpp)
         target_link_libraries(test-fit-coreml-generated-diarizers PRIVATE qvac-parakeet)
-        target_include_directories(test-fit-coreml-generated-diarizers PRIVATE include)
+        target_include_directories(test-fit-coreml-generated-diarizers PRIVATE include
+            ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/third_party)
+        # The expected charge is recomputed from the embedded templates' memory sections.
+        target_compile_definitions(test-fit-coreml-generated-diarizers PRIVATE
+            PARAKEET_TEST_TEMPLATE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates")
         parakeet_apply_ccache(test-fit-coreml-generated-diarizers)
         add_test(NAME test-fit-coreml-generated-diarizers
             COMMAND test-fit-coreml-generated-diarizers "${PARAKEET_TEST_NEMOTRON_GENERATED_GGUF}"
@@ -2040,12 +2075,15 @@ if (PARAKEET_BUILD_TESTS)
         if (NOT TARGET test-fit-coreml-generated-diarizers)
             add_executable(test-fit-coreml-generated-diarizers test/test_fit_coreml_generated_diarizers.cpp)
             target_link_libraries(test-fit-coreml-generated-diarizers PRIVATE qvac-parakeet)
-            target_include_directories(test-fit-coreml-generated-diarizers PRIVATE include)
+            target_include_directories(test-fit-coreml-generated-diarizers PRIVATE include
+                ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/third_party)
+            target_compile_definitions(test-fit-coreml-generated-diarizers PRIVATE
+                PARAKEET_TEST_TEMPLATE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates")
             parakeet_apply_ccache(test-fit-coreml-generated-diarizers)
         endif()
         add_test(NAME test-fit-coreml-generated-sortformer-diarizer
             COMMAND test-fit-coreml-generated-diarizers "${PARAKEET_TEST_SORTFORMER_GENERATED_GGUF}"
-                    "${CMAKE_CURRENT_BINARY_DIR}/coreml-generated-sortformer-fit-cache" 1)
+                    "${CMAKE_CURRENT_BINARY_DIR}/coreml-generated-sortformer-fit-cache" sortformer-diar-f410)
         set_tests_properties(test-fit-coreml-generated-sortformer-diarizer PROPERTIES
             LABELS "fixture;coreml;coreml-generated" TIMEOUT 1800)
         # The Sortformer diarizer is generated only from the file whose weights

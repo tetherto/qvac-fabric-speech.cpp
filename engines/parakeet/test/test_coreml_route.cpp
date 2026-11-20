@@ -1121,17 +1121,51 @@ void case_generated_diarizer_envelope() {
     CHECK(env({{300, 900}}) == 975, "resident sum, one transient, the largest margin");
     // Above every capacity: from the first covering capacity to the largest.
     CHECK(env({{400, 5000}}) == 825, "a range over the largest capacity loads every larger one");
-    // A range only the prebuilt 200 covers: if it fails to load, its calls go
-    // to 358, then 745, then 1125: (300 + 50) x 1.5 = 525.
-    CHECK(env({{1, 150}}) == 525, "a failing prebuilt capacity falls back to the generated ones");
-    // 200 (prebuilt, nothing generated below 358) and 358, which falls back to
-    // 745 or 1125: (300 + 50) x 1.5 = 525.
-    CHECK(env({{1, 358}}) == 525, "the largest selected capacity is charged at its largest fallback");
+    // A range only the uncharged 200 covers: if it fails to load, its calls go
+    // to 358, 745 or 1125, one at a time; the worst set is 1125 alone:
+    // (300 + 40) x 1.5 = 510 (358: 163; 745: 313).
+    CHECK(env({{1, 150}}) == 510, "a failing capacity falls back to the generated ones, one at a time");
+    // 200 (nothing generated below 358) and 358, which falls back to 745 or
+    // 1125: the worst set is again 1125 alone, 510.
+    CHECK(env({{1, 358}}) == 510, "the largest selected capacity is charged at its worst fallback");
     // 200 falls back below the next selected capacity only (358, 745), and
     // 1125 is charged on its own: (200 + 300 + 50) x 1.5 = 825.
     CHECK(env({{1, 150}, {1000, 1125}}) == 825, "a fallback stops at the next selected capacity");
-    // Two ranges: 200 (-> 358) and 745 (-> 1125): (100 + 300 + 50) x 1.5 = 675.
-    CHECK(env({{1, 150}, {700, 745}}) == 675, "ranges are unioned; each selected capacity has its fallback");
+    // Two ranges: 200 (-> 358) and 745 (-> 1125): the worst set is {358, 1125},
+    // (100 + 300 + max(30, 40)) x 1.5 = 660 ({358, 745}: 438).
+    CHECK(env({{1, 150}, {700, 745}}) == 660, "ranges are unioned; each selected capacity has its fallback");
+
+    // Prebuilt and generated capacities in one list (the reachable resident
+    // sets of both kinds), exact bytes. Prebuilt bundles: 2 x weights +
+    // 160 MiB resident, load transient weights / 4 on cpu_and_ane; generated
+    // capacities: the Nemotron templates' 137 MiB + 121 MiB, margin 1.0.
+    constexpr uint64_t MiB = 1024ull * 1024;
+    auto pre = [](int frames, uint64_t weights) {
+        CoremlDiarizerCharge c{frames};
+        c.prebuilt = true;
+        c.weights_bytes = weights;
+        return c;
+    };
+    const CoremlDiarizerCharge g358{358, true, 137 * MiB, 121 * MiB, 1.0};
+    const CoremlDiarizerCharge g1125{1125, true, 137 * MiB, 121 * MiB, 1.0};
+    auto mixed = [&](std::vector<CoremlDiarizerCharge> caps) {
+        return coreml_diarizers_charge(caps, {{1, 300}}, CoremlDiarizerPrewarm::minimal, CoremlFitUnits::cpu_and_ane);
+    };
+    // A broken prebuilt 358 (no weights), a 200 MiB prebuilt 745 and a
+    // generated 1125: 358 alone (160 MiB), 745 in its place (560 + 50) or
+    // 1125 (258): 610 MiB, holding a prebuilt bundle.
+    const CoremlDiarizersCharge l1 = mixed({pre(358, 0), pre(745, 200 * MiB), g1125});
+    CHECK(l1.charge.resident == 560 * MiB && l1.charge.transient == 50 * MiB && l1.prebuilt,
+          "broken prebuilt 358 + prebuilt 745 + generated 1125: the 745 fallback, 610 MiB");
+    // A generated 358 and only a prebuilt 745: 358 (258) or 745 in its place
+    // (610), never both: 610 MiB.
+    const CoremlDiarizersCharge l2 = mixed({g358, pre(745, 200 * MiB)});
+    CHECK(l2.charge.resident == 560 * MiB && l2.charge.transient == 50 * MiB && l2.prebuilt,
+          "generated 358 + prebuilt 745: the larger of the two exclusive sets, 610 MiB");
+    // Generated capacities alone: no prebuilt in the set (a validated envelope).
+    const CoremlDiarizersCharge g = mixed({g358, g1125});
+    CHECK(g.charge.resident == 137 * MiB && g.charge.transient == 121 * MiB && !g.prebuilt,
+          "generated 358 and 1125: one capacity at a time, 258 MiB");
     // Generated templates of one size (the Nemotron case): falling back costs
     // nothing more than the capacity itself, 137 + 121 once.
     const std::vector<CoremlDiarizerCharge> alike = {gen(358, 137, 121, 1.0), gen(745, 137, 121, 1.0),
@@ -1609,7 +1643,7 @@ void case_diarizer_capacities() {
 
     // No adjacent bundle and no cache directory (the library's default):
     // under require every pass a template capacity covers throws, up to the
-    // largest capacity; a longer pass runs on ggml.
+    // largest capacity, and so does a longer pass (longer than every capacity).
     {
         CoremlOptions require = base;
         require.use = CoremlOptions::Use::require;

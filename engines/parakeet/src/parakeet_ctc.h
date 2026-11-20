@@ -763,14 +763,16 @@ struct CoremlCallStats {
     int coreml_passes = 0;
     int pending_passes = 0;
     std::string label;
+    int capacity = 0;  // the diarizer capacity (frames) that served the last Core ML pass
 };
 CoremlCallStats model_coreml_call_stats(ParakeetCtcModel & m);
 #ifdef PARAKEET_USE_COREML
 class CoremlDiarizers;
 CoremlDiarizers * model_coreml_diarizers(const ParakeetCtcModel & m);
 // Tests: called with "open" just before load_from_gguf opens the GGUF (its
-// one open: metadata and tensor data are read through that descriptor) and
-// with "read" after its last read of tensor data. Null by default.
+// one open: metadata and tensor data are read through that descriptor), with
+// "opened" once the descriptor's identity is taken, and with "read" after its
+// last read of tensor data. Null by default.
 using GgufLoadObserver = void (*)(const char * point);
 void set_gguf_load_observer(GgufLoadObserver fn);
 #endif

@@ -6,7 +6,16 @@
 // descriptor the weights were read through is B's. The diarizers must not
 // generate from A: the prepare job fails with source_changed and the cache
 // holds no artifact. Loaded again with nothing swapped, the minimal capacity
-// is generated and ready.
+// is generated and ready. Then that cached bundle's coremldata.bin is
+// overwritten with garbage of the same size (it still passes the inventory
+// check; a garbage model.mil crashes Core ML itself, so it is not used): the
+// framework refuses it, the bundle is quarantined and generated again, and
+// the capacity is ready on the generated route. Last, a model whose GGUF is
+// written in place while its weights are read (same inode, new mtime) loads
+// while another model of the same file is still compiling its capacity: its
+// identity is marked changed after the last read, so it never joins that job
+// (whose bundle comes from the bytes before the write) and fails
+// source_changed.
 //
 // Usage: test-nemotron-diarization-coreml-source <q8_0 GGUF> <work dir>
 // The GGUF is Nemotron 3 Diarization or Sortformer v2.1 (both have diarizer
@@ -14,10 +23,16 @@
 // Never skips: every check needs Core ML generation (macOS 15, the generator
 // built in).
 
+#include "coreml/parakeet_coreml_sidecars.h"
 #include "parakeet_ctc.h"
+#include "qvac_coreml/generation.h"
 
+#include <atomic>
+#include <chrono>
 #include <cstdio>
+#include <thread>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <system_error>
 
@@ -42,11 +57,40 @@ void swap_around_open(const char * point) {
     if (std::string(point) == "open") {
         fs::rename(g_dir / "m.gguf", g_dir / "a.gguf", ec);
         fs::rename(g_dir / "b.gguf", g_dir / "m.gguf", ec);
-    } else {
+    } else if (std::string(point) == "read") {
         fs::rename(g_dir / "m.gguf", g_dir / "b.gguf", ec);
         fs::rename(g_dir / "a.gguf", g_dir / "m.gguf", ec);
     }
     if (ec) std::printf("swap at %s: %s\n", point, ec.message().c_str());
+}
+
+// Holds the first model's compile open until released; then fails it.
+std::atomic<bool> g_compile_entered{false};
+std::atomic<bool> g_compile_release{false};
+std::string held_compile(const std::string &, const std::string &) {
+    g_compile_entered = true;
+    while (!g_compile_release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    return "compile held by the test";
+}
+
+// "opened": rewrite the first byte with its own value (the file changes in
+// place: same inode and contents, a new mtime) while the weights are read.
+void touch_in_place(const char * point) {
+    if (std::string(point) != "opened") return;
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));  // a later mtime
+    std::fstream f(g_dir / "m.gguf", std::ios::in | std::ios::out | std::ios::binary);
+    char c = 0;
+    f.read(&c, 1);
+    f.seekp(0);
+    f.write(&c, 1);
+    f.flush();
+}
+
+std::string slot_json(const std::string & status, const char * stage_name) {
+    const size_t at = status.find(std::string("\"stage\":\"") + stage_name + "\"");
+    if (at == std::string::npos) return std::string();
+    const size_t from = status.rfind("{\"artifact_key\"", at);
+    return status.substr(from, at - from + 60);
 }
 
 std::string load_status(const fs::path & cache) {
@@ -98,6 +142,78 @@ int main(int argc, char ** argv) {
     check(plain.find("source_changed") == std::string::npos && plain.find("\"state\":\"ready\"") != std::string::npos &&
               has_artifacts(g_dir / "cache-plain"),
           "nothing swapped: the minimal capacity is generated and ready");
+
+    // A cached bundle the framework refuses.
+    fs::path mil;
+    const fs::path artifacts = g_dir / "cache-plain" / "qvac-coreml-v1" / "artifacts";
+    for (const auto & e : fs::recursive_directory_iterator(artifacts, ec)) {
+        if (e.path().filename() == "coremldata.bin" && e.path().parent_path().filename() == "model.mlmodelc" &&
+            e.path().string().find("nemotron-diar-f358.") != std::string::npos) {
+            mil = e.path();
+        }
+    }
+    check(!mil.empty(), "the generated 358 bundle is in the cache");
+    if (!mil.empty()) {
+        const uintmax_t size = fs::file_size(mil, ec);
+        {
+            std::ofstream out(mil, std::ios::binary | std::ios::trunc);
+            const std::string garbage(static_cast<size_t>(size), '#');
+            out.write(garbage.data(), static_cast<std::streamsize>(garbage.size()));
+        }
+        check(fs::file_size(mil, ec) == size, "coremldata.bin corrupted at the same size");
+        const std::string repaired = load_status(g_dir / "cache-plain");
+        std::printf("repaired: %s\n", repaired.c_str());
+        int quarantined = 0;
+        for (const auto & e : fs::directory_iterator(g_dir / "cache-plain" / "qvac-coreml-v1" / "quarantine", ec)) {
+            (void) e;
+            ++quarantined;
+        }
+        const size_t at = repaired.find("\"stage\":\"diarizer-358\"");
+        const size_t from = repaired.rfind("{\"artifact_key\"", at);
+        const std::string stage = at == std::string::npos ? std::string() : repaired.substr(from, at - from + 60);
+        check(quarantined == 1, "the refused bundle is quarantined (one entry)");
+        check(stage.find("\"state\":\"ready\"") != std::string::npos &&
+                  stage.find("\"route\":\"generated\"") != std::string::npos,
+              "capacity 358 is generated again and ready");
+    }
+
+    // A file written in place during the upload, beside a running job.
+    {
+        parakeet::pcm::generation::set_compile_override(&held_compile);
+        parakeet::CoremlOptions options;
+        options.cache_dir = (g_dir / "cache-join").string();
+        parakeet::ParakeetCtcModel first;
+        check(parakeet::load_from_gguf((g_dir / "m.gguf").string(), first, kThreads, kGpuLayers, false, "auto",
+                                       options) == 0,
+              "the first model loads");
+        for (int i = 0; i < 6000 && !g_compile_entered; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        check(g_compile_entered, "the first model's job is compiling (held open)");
+        parakeet::set_gguf_load_observer(&touch_in_place);
+        parakeet::ParakeetCtcModel second;
+        check(parakeet::load_from_gguf((g_dir / "m.gguf").string(), second, kThreads, kGpuLayers, false, "auto",
+                                       options) == 0,
+              "the second model loads");
+        parakeet::set_gguf_load_observer(nullptr);
+        // Its own job waits behind the held one (one Core ML job at a time);
+        // joined, it would share the running job's phase.
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        const std::string waiting = slot_json(parakeet::model_coreml_status_json(second), "diarizer-358");
+        std::printf("second model, 358, while the first compiles: %s\n", waiting.c_str());
+        check(waiting.find("\"state\":\"compiling\"") == std::string::npos,
+              "the second model did not join the first model's running job");
+        g_compile_release = true;
+        std::string second_358;
+        for (int i = 0; i < 3000; ++i) {
+            second_358 = slot_json(parakeet::model_coreml_status_json(second), "diarizer-358");
+            if (second_358.find("\"state\":\"failed\"") != std::string::npos) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        std::printf("second model, 358: %s\n", second_358.c_str());
+        check(second_358.find("\"state\":\"failed\"") != std::string::npos &&
+                  second_358.find("source_changed") != std::string::npos,
+              "written during its upload: source_changed, not the running job's bundle");
+        parakeet::pcm::generation::set_compile_override(nullptr);
+    }
 
     fs::remove_all(g_dir, ec);
     std::printf("%s\n", g_passed ? "PASS" : "FAIL");

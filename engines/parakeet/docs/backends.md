@@ -892,8 +892,13 @@ projected workload: any input up to the single-pass graph (the long-form
 window past the long-form threshold, 1125 frames by default) runs as one pass
 and keeps its capacity loaded, so the default 300 s projection charges all
 three capacities. A capacity that fails to load hands its calls to the next
-larger one that has not failed, so each selected capacity is charged at the
-largest generated capacity it can fall back to. The templates' constants are measured values that already carry a
+larger one that has not failed, so fit takes every capacity of the model,
+prebuilt and generated, in one ordered list, selects the ones the calls and
+the construction prewarm load, lets each hold any serving capacity from
+itself up to the next selected one, and charges the worst resident set that
+can result (prebuilt bundles at today's estimate, generated capacities at
+their envelope) plus its largest transient. Two capacities that replace each
+other are never charged together. The templates' constants are measured values that already carry a
 1.25 margin, so the envelope adds none (`memory.margin` is 1.0). The fit and
 the engine choose the generated capacities with the same code, so they cannot
 disagree. The route comes from the options and the GGUF, never from the cache,
@@ -922,20 +927,26 @@ the reports against the templates: the peak increment against what fit
 charges; each prepare, load, resident step and the compiler's growth, times
 1.25 and rounded up to 1 MiB, against the template's constant (the rule the
 constants were set by, so a constant that lost its margin fails); and the
-steady growth against the three capacities' resident parts. A run fails when a
-capacity shows no generate, compile or load phase, a phase has no footprint
-sample, a load has no `ANECompilerService` sample, or the tool reports sampler
-errors (a footprint or `ps` read that failed). The Core ML lane of `parakeet-ci.yml` runs the generated schedule and
+steady growth against the three capacities' resident parts. The compiler's
+growth is held to the reserve over the whole run and per load (from the
+service's size when that load started). A run fails when a capacity shows no
+generate, compile or load phase, a compile has no generate before it, a phase
+has no footprint sample, a load has no `ANECompilerService` sample, the tool
+reports sampler errors (a footprint or `ps` read that failed), a capacity does
+not end the run ready or serves no Core ML pass after every capacity is ready
+(counted by the capacity that served it), or the compiler grew less than
+64 MiB (a warm run). The tool itself exits 1 when a capacity never became
+ready or served too few passes. The Core ML lane of `parakeet-ci.yml` runs the generated schedule and
 the check on its macOS runner. Increments are over a ggml-only run of the same
 passes on the same host:
 
 | Host | Runs | Peak increment | Largest prepare | Largest load and warm | Largest resident step | Steady growth | `ANECompilerService` growth |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| M2, macOS 27.2.1 | 16 | 64.7-138.0 MiB | 64.8-86.1 MiB | 12.7-96.7 MiB | 6.6-108.8 MiB | 30.6-138.0 MiB | 280.0-557.1 MiB |
-| M4 Max, macOS 26.7.2 | 12 | 63.0-79.4 MiB | 63.6-84.4 MiB | 14.9-26.7 MiB | 5.9-24.9 MiB | 32.4-46.6 MiB | 279.9-615.3 MiB |
+| M2, macOS 27.2.1 | 18 | 64.7-138.0 MiB | 64.8-86.1 MiB | 12.7-96.7 MiB | 6.6-108.8 MiB | 30.6-138.0 MiB | 280.0-557.1 MiB |
+| M4 Max, macOS 26.7.2 | 16 | 63.0-79.4 MiB | 63.6-84.4 MiB | 14.9-26.7 MiB | 5.9-29.9 MiB | 32.4-46.6 MiB | 279.9-628.2 MiB |
 
 The ranges are over runs, each run's largest value. Steady growth comes from
-the runs that recorded the settled footprint (12 on the M2, 6 on the M4 Max).
+the runs that recorded the settled footprint (14 on the M2, 10 on the M4 Max).
 The earlier runs recorded the footprint when each load started, which gives
 the resident steps of the first two capacities, and the compiler's growth is
 taken from its smallest size during their prepares, which all come before the
@@ -949,14 +960,14 @@ on both hosts, rounded up to 1 MiB (`memory.measured` in `template.json`):
 | prepare: `generation_peak_bytes` (9 MiB) + 8 MiB + `compile_peak_bytes` | 86.1 MiB (M2) | 108 MiB |
 | `load_peak_bytes.cpu_and_ane` | 96.7 MiB (M2) | 121 MiB |
 | resident part per capacity: `runtime_weight_bytes` + 2 x I/O (`workspace_bytes` 0) | 108.8 MiB (M2) | 137 MiB |
-| `ane_compile_reserve_bytes` | 615.3 MiB (M4 Max) | 770 MiB |
+| `ane_compile_reserve_bytes` | 628.2 MiB (M4 Max) | 786 MiB |
 
 The first prepare and load of a process pay Core ML's start-up whichever
 capacity they are for, so every template records the same values. On
 `cpu_and_ane` the resident part holds no copy of the fp16 weights: the Neural
 Engine keeps them outside the process, so a loaded capacity costs the process
 tens of MiB, not its 191 MiB `weight.bin`. On the M4 Max a load's increment
-is released when the capacity is ready. On the M2, in 7 of 16 runs one load
+is released when the capacity is ready. On the M2, in 7 of 18 runs one load
 grew the footprint by 59-97 MiB a few seconds in, and most of that stayed.
 Because the next load starts as soon as a capacity is ready, a step also takes
 in the start of the next load, so the largest step (108.8 MiB) is an upper
@@ -964,9 +975,8 @@ bound for one capacity; the steady growth of all three stayed within
 138.0 MiB. For `prewarm = all`, fit charges 3 x 137 + 121 = 532 MiB, against
 a largest measured peak increment of 138.0 MiB. The compiler is checked on its
 growth because a shared runner's `ANECompilerService` holds whatever earlier jobs
-left it (25-514 MiB before the loads on the M4 Max); its largest growth
-(615.3 MiB) came on the M4 Max from a service holding 25 MiB, close to a clean
-host. The reserve only gates cold loads at run time (they wait for that much
+left it (11-514 MiB before the loads on the M4 Max); its largest growth
+(628.2 MiB) came on the M4 Max from a service holding 10.7 MiB, a clean start. The reserve only gates cold loads at run time (they wait for that much
 available memory); it is not part of the fit charge.
 
 On the pinned diarization set (`abcba`, `abcdba`, 250 ms collar) the

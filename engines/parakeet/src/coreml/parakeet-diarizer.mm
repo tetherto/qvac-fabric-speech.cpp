@@ -465,8 +465,10 @@ pcm::LoadResult load_diarizer(const pcm::LoadRequest & request) {
         result.error = sidecar_load_error("Core ML diarizer", error);
         PARAKEET_LOG_WARN("parakeet: failed to load Core ML diarizer at '%s' (%s); using ggml\n",
                           request.artifact_path.c_str(), result.error.message.c_str());
-        // A generated bundle the load rejected deterministically is quarantined
-        // and prepared again (generation::end_load).
+        // The framework refused a generated bundle (or it is not the expected
+        // capacity): end_load quarantines it, unless the error is a resource
+        // one, and the slot prepares it again. The error's class is unchanged.
+        result.rejected = request.tmpl != nullptr;
         pcm::generation::end_load(request, result);
         return result;
     }

@@ -15,27 +15,36 @@
 // model has several capacities, the same when it has one (construction loads
 // the only capacity either way).
 //
-// Usage: test-fit-coreml-generated-diarizers <model.gguf> <empty cache dir> [capacities]
-// `capacities` is the number of the model's diarizer templates (default 3,
-// Nemotron's; Sortformer has 1). The GGUF's directory must hold no diarizer
+// Usage: test-fit-coreml-generated-diarizers <model.gguf> <empty cache dir> [template ids]
+// `template ids` are the model's diarizer templates, comma-separated and
+// smallest capacity first (default Nemotron's three; Sortformer v2.1 has
+// sortformer-diar-f410). The GGUF's directory must hold no diarizer
 // bundle. Never skips: every check needs Core ML generation (macOS 15, the
 // generator built in).
 
 #include "parakeet/engine.h"
 #include "parakeet/fit.h"
 
+#include "nlohmann/json.hpp"
+
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <system_error>
+#include <vector>
 
 namespace {
 
 constexpr int kGpuLayers = 1;
 constexpr uint64_t kRoomy = 64ull * 1024 * 1024 * 1024;
-int g_capacities = 3;  // the model's diarizer templates (Nemotron: 358, 745 and 1125 frames)
+// The model's diarizer templates, smallest capacity first (default
+// Nemotron's 358, 745 and 1125 frames).
+std::vector<std::string> g_templates = {"nemotron-diar-f358", "nemotron-diar-f745", "nemotron-diar-f1125"};
+int g_capacities = 3;
 
 bool g_passed = true;
 
@@ -91,6 +100,40 @@ void print(const char * what, const parakeet::FitResult & r) {
                 r.coreml.validated, (unsigned long long) r.device_free_bytes);
 }
 
+// One template's charge, from its template.json as the runtime computes it
+// for cpu_and_ane: resident = runtime_weight_bytes + 2 x I/O + state +
+// workspace; transient = max(generation_peak_bytes + 8 MiB +
+// compile_peak_bytes, load_peak_bytes.cpu_and_ane); and its margin.
+struct TemplateCharge {
+    uint64_t resident = 0;
+    uint64_t transient = 0;
+    double margin = 0;
+};
+
+TemplateCharge template_charge(const char * id) {
+    std::ifstream in(std::string(PARAKEET_TEST_TEMPLATE_DIR) + "/" + id + "/template.json");
+    const nlohmann::json j = nlohmann::json::parse(in);
+    const nlohmann::json & m = j.at("memory");
+    uint64_t io = 0;
+    for (const auto & fn : j.at("functions")) {
+        for (const char * side : {"inputs", "outputs"}) {
+            for (const auto & x : fn.at(side)) {
+                uint64_t n = x.value("dtype", std::string("fp32")) == "fp16" ? 2 : 4;
+                for (const auto & d : x.at("shape")) n *= d.get<uint64_t>();
+                io += n;
+            }
+        }
+    }
+    TemplateCharge c;
+    c.resident = m.at("runtime_weight_bytes").get<uint64_t>() + 2 * io + j.value("state_bytes", uint64_t{0}) +
+                 m.value("workspace_bytes", uint64_t{0});
+    const uint64_t prepare = j.at("generation_peak_bytes").get<uint64_t>() + 8ull * 1024 * 1024 +
+                             m.at("compile_peak_bytes").get<uint64_t>();
+    c.transient = std::max(prepare, m.at("load_peak_bytes").at("cpu_and_ane").get<uint64_t>());
+    c.margin = m.at("margin").get<double>();
+    return c;
+}
+
 // The Engine's Core ML status, and its construction group in `construction`.
 std::string engine_status(const std::string & gguf, parakeet::CoremlOptions coreml,
                           std::string * construction = nullptr) {
@@ -108,12 +151,21 @@ std::string engine_status(const std::string & gguf, parakeet::CoremlOptions core
 
 int main(int argc, char ** argv) {
     if (argc != 3 && argc != 4) {
-        std::fprintf(stderr, "usage: %s <model.gguf> <empty cache dir> [capacities]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s <model.gguf> <empty cache dir> [template ids]\n", argv[0]);
         return 2;
     }
-    if (argc == 4) g_capacities = std::atoi(argv[3]);
+    if (argc == 4) {
+        g_templates.clear();
+        std::string ids = argv[3];
+        for (size_t at = 0; at <= ids.size();) {
+            const size_t comma = std::min(ids.find(',', at), ids.size());
+            if (comma > at) g_templates.push_back(ids.substr(at, comma - at));
+            at = comma + 1;
+        }
+    }
+    g_capacities = static_cast<int>(g_templates.size());
     if (g_capacities < 1) {
-        std::fprintf(stderr, "capacities must be at least 1\n");
+        std::fprintf(stderr, "at least one template id is required\n");
         return 2;
     }
     const std::string gguf = argv[1];
@@ -149,6 +201,34 @@ int main(int argc, char ** argv) {
         check(brief.coreml.bytes == all.coreml.bytes,
               "one capacity: a 5 s workload charges the capacity construction loads");
     }
+    // prewarm = all loads every capacity whatever the workload: a 5 s
+    // projection charges as much as the default one.
+    const parakeet::FitResult all_brief = project(gguf, every, 5.0f);
+    print("prewarm all, 5 s", all_brief);
+    check(all_brief.coreml.bytes == all.coreml.bytes && all_brief.coreml.bytes >= brief.coreml.bytes,
+          "prewarm all: a 5 s workload is charged every capacity");
+
+    // The exact charge, recomputed from the templates' memory sections: every
+    // capacity = the residents + one (the largest) transient; the 5 s
+    // workload = the smallest capacity alone. The constants carry the 1.25
+    // already, so the templates' envelope margin must be 1.0.
+    uint64_t residents = 0, transient = 0;
+    bool unit_margin = true;
+    for (const std::string & id : g_templates) {
+        const TemplateCharge t = template_charge(id.c_str());
+        residents += t.resident;
+        transient = std::max(transient, t.transient);
+        unit_margin = unit_margin && t.margin == 1.0;
+    }
+    check(unit_margin, "the templates' memory.margin is 1.0 (the constants carry the 1.25)");
+    const TemplateCharge smallest = template_charge(g_templates.front().c_str());
+    const uint64_t every_bytes = residents + transient;
+    const uint64_t one_bytes = smallest.resident + smallest.transient;
+    std::printf("from template.json: every capacity %llu, smallest capacity %llu\n",
+                (unsigned long long) every_bytes, (unsigned long long) one_bytes);
+    check(all.coreml.bytes == every_bytes && before.coreml.bytes == every_bytes,
+          "prewarm all and the default workload charge exactly every template's resident + one transient");
+    check(brief.coreml.bytes == one_bytes, "the 5 s workload charges exactly the smallest capacity's envelope");
 
     // Generate every capacity (wait for construction, prewarm all).
     parakeet::CoremlOptions generate = coreml_options(cache);

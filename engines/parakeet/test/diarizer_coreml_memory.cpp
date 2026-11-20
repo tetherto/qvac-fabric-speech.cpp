@@ -30,9 +30,12 @@
 // The generated schedule needs a GGUF with no adjacent diarizer bundle and
 // an empty DIR; the prebuilt schedule a GGUF beside its bundles. A fresh
 // process identity (scripts/coreml/fresh-host.sh) and fresh paths make every
-// ANE load cold. Exit status: 0 when the peak increment stays within the
-// charged envelope (always 0 with --ggml-only), 1 otherwise, 2 on usage or
-// setup errors.
+// ANE load cold. Exit status: 0 when every capacity became ready, each
+// served --passes-after-ready Core ML passes after that (counted by the
+// capacity that served them), and the peak increment stays within the charged
+// envelope (always 0 with --ggml-only); 1 otherwise; 2 on usage or setup
+// errors. The ANECompilerService size is also recorded at the start of each
+// load, so the checker can hold each load's own compile growth to the reserve.
 
 #include "mel_preprocess.h"
 #include "parakeet/fit.h"
@@ -381,12 +384,15 @@ int main(int argc, char ** argv) {
     for (size_t k = 1; k < capacities.size(); ++k) sizes.push_back(capacities[k]);
 
     int passes = 0, coreml_passes = 0, ggml_after_ready = 0;
-    std::map<int, int> coreml_by_size;
+    // Core ML passes after every stage is ready, by the capacity that served
+    // them (a larger capacity standing in for a failed one counts as itself).
+    std::map<int, int> coreml_by_capacity;
     double t_all_ready = -1;
     const auto deadline = Clock::now() + std::chrono::minutes(10);
     for (;;) {
         const int size = sizes[passes % sizes.size()];
         bool used_coreml = false;
+        if (!ggml_only) parakeet::model_coreml_reset_call_stats(model);
         if (run_pass(model, mel, mel_frames, clip, size, &used_coreml) != 0) {
             finish();
             std::fprintf(stderr, "a diarizer pass failed\n");
@@ -395,7 +401,6 @@ int main(int argc, char ** argv) {
         ++passes;
         if (used_coreml) {
             ++coreml_passes;
-            ++coreml_by_size[size];
         }
         if (ggml_only) {
             if (passes >= ggml_passes) break;
@@ -408,9 +413,10 @@ int main(int argc, char ** argv) {
                                });
         if (all_ready && t_all_ready < 0) t_all_ready = now_s();
         if (all_ready && !used_coreml) ++ggml_after_ready;
-        const bool enough = all_ready && coreml_by_size.size() == sizes.size() &&
-                            std::all_of(coreml_by_size.begin(), coreml_by_size.end(),
-                                        [&](const auto & kv) { return kv.second >= passes_after_ready; });
+        if (all_ready && used_coreml) ++coreml_by_capacity[parakeet::model_coreml_call_stats(model).capacity];
+        const bool enough = all_ready && std::all_of(capacities.begin(), capacities.end(), [&](int k) {
+            return coreml_by_capacity[k] >= passes_after_ready;
+        });
         if (enough || Clock::now() > deadline) break;
     }
     const double t_end = now_s();
@@ -519,7 +525,7 @@ int main(int argc, char ** argv) {
                   (unsigned long long) sampler_errors.load());
     json += buf;
     bool first = true;
-    uint64_t compile_inc = 0, load_inc = 0, generate_inc = 0, ane_load_peak = 0;
+    uint64_t compile_inc = 0, load_inc = 0, generate_inc = 0, ane_load_peak = 0, ane_load_growth = 0;
     for (size_t i = 0; i < segments.size(); ++i) {
         const Segment & seg = segments[i];
         const uint64_t before = at(seg.t0);
@@ -532,9 +538,20 @@ int main(int argc, char ** argv) {
         if (seg.phase == "load") {
             load_inc = std::max(load_inc, inc);
             ane_load_peak = std::max(ane_load_peak, a);
-            char extra[256];
-            std::snprintf(extra, sizeof(extra), ",\"settled_after_ready\":%llu,\"resident_increment\":%llu",
-                          (unsigned long long) level_step[i].first, (unsigned long long) level_step[i].second);
+            // The compiler's size when this load started: its growth during
+            // this load is measured from here, so a service that shrank after
+            // an earlier load cannot hide a later load's compile.
+            uint64_t ane_before = 0;
+            for (const AneSample & s : ane) {
+                if (s.t > seg.t0) break;
+                ane_before = s.rss;
+            }
+            ane_load_growth = std::max(ane_load_growth, a > ane_before ? a - ane_before : 0);
+            char extra[320];
+            std::snprintf(extra, sizeof(extra),
+                          ",\"settled_after_ready\":%llu,\"resident_increment\":%llu,\"ane_compiler_before\":%llu",
+                          (unsigned long long) level_step[i].first, (unsigned long long) level_step[i].second,
+                          (unsigned long long) ane_before);
             load_fields = extra;
         }
         std::snprintf(buf, sizeof(buf),
@@ -547,18 +564,23 @@ int main(int argc, char ** argv) {
         first = false;
     }
     const uint64_t increment = baseline > 0 && peak > baseline ? peak - baseline : 0;
+    std::string by_capacity;
+    for (const auto & [k, n] : coreml_by_capacity) {
+        by_capacity += (by_capacity.empty() ? "\"" : ",\"") + std::to_string(k) + "\":" + std::to_string(n);
+    }
     const uint64_t ane_growth = ane_load_peak > ane_before_loads ? ane_load_peak - ane_before_loads : 0;
     std::snprintf(buf, sizeof(buf),
                   "],\"max_generate_increment\":%llu,\"max_compile_increment\":%llu,\"max_load_increment\":%llu,"
                   "\"max_resident_increment\":%llu,\"steady_increment_over_baseline\":%llu,"
                   "\"ane_compiler_peak_during_load\":%llu,\"ane_compiler_before_loads\":%llu,"
                   "\"ane_compiler_baseline\":\"%s\",\"ane_compiler_growth\":%llu,"
-                  "\"peak_increment_over_baseline\":%llu,\"trace\":[",
+                  "\"ane_compiler_max_load_growth\":%llu,"
+                  "\"peak_increment_over_baseline\":%llu,\"coreml_passes_by_capacity\":{%s},\"trace\":[",
                   (unsigned long long) generate_inc, (unsigned long long) compile_inc,
                   (unsigned long long) load_inc, (unsigned long long) resident_max,
                   (unsigned long long) steady_increment, (unsigned long long) ane_load_peak,
                   (unsigned long long) ane_before_loads, ane_baseline, (unsigned long long) ane_growth,
-                  (unsigned long long) increment);
+                  (unsigned long long) ane_load_growth, (unsigned long long) increment, by_capacity.c_str());
     json += buf;
     // The footprint in kTraceSeconds buckets: [start, min, max].
     first = true;
@@ -598,9 +620,16 @@ int main(int argc, char ** argv) {
                     increment / kMiB, fr.coreml.bytes / kMiB,
                     baseline == 0 ? "no baseline" : (increment <= fr.coreml.bytes ? "WITHIN" : "OVER"));
         if (baseline > 0 && increment > fr.coreml.bytes) return 1;
-        if (coreml_by_size.size() != sizes.size()) {
-            std::printf("not every pass size ran on Core ML before the deadline\n");
+        if (t_all_ready < 0) {
+            std::printf("not every capacity became ready before the deadline\n");
             return 1;
+        }
+        for (int k : capacities) {
+            if (coreml_by_capacity[k] < passes_after_ready) {
+                std::printf("capacity %d served %d Core ML passes after readiness (%d required)\n", k,
+                            coreml_by_capacity[k], passes_after_ready);
+                return 1;
+            }
         }
     }
     return 0;

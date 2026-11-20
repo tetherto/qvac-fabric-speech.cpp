@@ -1812,17 +1812,19 @@ LoadResult glue_load(const LoadRequest & req) {
     return r;
 }
 
-// The engine rejects the first `g_glue_rejects` loads with an error of
-// class `g_glue_reject_class` (an invalid model, or a resource failure).
+// The engine rejects the first `g_glue_rejects` loads: the framework refused
+// the model (LoadResult::rejected), with an error of class
+// `g_glue_reject_class` (a framework error is transient for the engine).
 std::atomic<int> g_glue_rejects{0};
 std::atomic<int> g_glue_loads{0};
-ErrorClass g_glue_reject_class = ErrorClass::deterministic;
+ErrorClass g_glue_reject_class = ErrorClass::transient;
 
 LoadResult glue_load_rejecting(const LoadRequest & req) {
     LoadResult r;
     if (!generation::begin_load(req, r)) return r;
     if (g_glue_loads++ < g_glue_rejects) {
-        r.error = Error{g_glue_reject_class, "test", 9, "the engine rejected the model"};
+        r.error = Error{g_glue_reject_class, "com.apple.CoreML", 0, "the engine rejected the model"};
+        r.rejected = true;
     } else {
         r.model = std::make_shared<int>(1);
     }
@@ -1893,10 +1895,23 @@ void case_generated_artifact_pruned_before_load() {
     CHECK(r.artifact_gone && r.lease_fd < 0 && !r.error.ok());
 }
 
-// A cached artifact the engine rejects (it passed the inventory check) is
-// quarantined under EX and regenerated at the same key; a rejection that
-// repeats ends in failed after the scheduler's bound; a transient failure
-// keeps the artifact.
+// One load of `req` through the glue that the framework refuses with
+// (cls, domain, code): what a LoadFn does with a rejected generated artifact.
+LoadResult reject_once(const LoadRequest & req, ErrorClass cls, const std::string & domain, int64_t code) {
+    LoadResult r;
+    if (!generation::begin_load(req, r)) return r;
+    r.error = Error{cls, domain, code, "the framework refused the model"};
+    r.rejected = true;
+    generation::end_load(req, r);
+    return r;
+}
+
+// A cached artifact the framework refuses (it passed the inventory check) is
+// quarantined under EX and regenerated at the same key, once; the error class
+// the engine reported stays on the slot. The (function, units) load record
+// counts the failures: the same error in another process promotes it, and
+// begin_load then refuses to load. A resource error never quarantines and
+// never promotes.
 void case_generated_rejected_hit_quarantined() {
     Env env;
     const std::string a = env.source("a.gguf");
@@ -1905,17 +1920,18 @@ void case_generated_rejected_hit_quarantined() {
     CHECK(g_compiles == 1);
     const cache::Layout l = env.layout();
     {
+        // A framework rejection classed transient (as the engine reports it).
         g_glue_rejects = 1;
         g_glue_loads = 0;
-        g_glue_reject_class = ErrorClass::deterministic;
         auto mgr = glue_manager();
         auto s = glue_slot(mgr, env, a, &glue_load_rejecting);
         s->request(Priority::now);
         CHECK_MSG(wait_state(s, SlotState::ready), s->status().error);
         CHECK(g_compiles == 2 && g_glue_loads == 2);
         CHECK(count_files(l.quarantine) == 1);  // the rejected copy, for prune
-        CHECK(env.artifacts() == 1);
+        CHECK(env.artifacts() == 1 && s->status().route == StatusRoute::generated);
     }
+    std::string key;
     {
         g_glue_rejects = 100;
         g_glue_loads = 0;
@@ -1923,23 +1939,134 @@ void case_generated_rejected_hit_quarantined() {
         auto s = glue_slot(mgr, env, a, &glue_load_rejecting);
         s->request(Priority::now);
         CHECK(wait_state(s, SlotState::failed));
-        CHECK(g_glue_loads == 3 && g_compiles == 4);  // two regenerations, then failed
-        CHECK(s->status().error == "the engine rejected the model");
-    }
-    {
-        g_glue_rejects = 1;
-        g_glue_loads = 0;
-        g_glue_reject_class = ErrorClass::transient;
-        { CHECK(ready(env.prepare(a))); }  // the last rejection left nothing to hit
-        const int compiles = g_compiles;
-        const size_t quarantined = count_files(l.quarantine);
-        auto mgr = glue_manager();
-        auto s = glue_slot(mgr, env, a, &glue_load_rejecting);
-        s->request(Priority::now);
-        CHECK(wait_state(s, SlotState::failed));
-        CHECK(g_compiles == compiles && count_files(l.quarantine) == quarantined && g_glue_loads == 1);
+        CHECK(g_glue_loads == 2 && g_compiles == 3);  // one regeneration, then failed
+        const SlotStatus st = s->status();
+        CHECK(st.error == "the engine rejected the model" && st.error_class == ErrorClass::transient);
     }
     g_glue_rejects = 0;
+    // The load record: two failures in this process, still transient.
+    PrepareOutcome o = env.prepare(a);
+    CHECK(ready(o));
+    o.lease.release();
+    key = o.key32;
+    LoadRequest req;
+    req.tmpl = env.tpl.get();
+    req.artifact_path = o.model_path;
+    req.units = ComputeUnits::cpu_and_ane;  // the slots above loaded with cpu_only
+    CHECK(failed::read(failed::record_path(l.failed, key, req.function, "cpu_only")));
+    const std::string rec_path = failed::record_path(l.failed, key, req.function, to_string(req.units));
+    CHECK(!failed::read(rec_path));  // another (function, units) than the slots above
+    reject_once(req, ErrorClass::transient, "com.apple.CoreML", 0);
+    auto rec = failed::read(rec_path);
+    CHECK(rec && rec->cls == ErrorClass::transient && rec->attempts == 1);
+    // The same rejection in another process promotes the record.
+    { CHECK(ready(env.prepare(a))); }
+    pid_t kid = spawn([&] {
+        reject_once(req, ErrorClass::transient, "com.apple.CoreML", 0);
+        return 0;
+    });
+    CHECK(reap(kid) == 0);
+    rec = failed::read(rec_path);
+    CHECK(rec && rec->cls == ErrorClass::deterministic && rec->attempts == 2);
+    // Then nothing loads it: begin_load refuses with the record's class.
+    { CHECK(ready(env.prepare(a))); }
+    LoadResult blocked;
+    CHECK(!generation::begin_load(req, blocked) && blocked.error.cls == ErrorClass::deterministic &&
+          blocked.lease_fd < 0 && !blocked.artifact_gone);
+    // A resource error, in two processes: never quarantined, never promoted.
+    const size_t quarantined = count_files(l.quarantine);
+    req.units = ComputeUnits::cpu_and_gpu;
+    const std::string res_path = failed::record_path(l.failed, key, req.function, to_string(req.units));
+    LoadResult first = reject_once(req, ErrorClass::transient, "NSPOSIXErrorDomain", ENOMEM);
+    kid = spawn([&] {
+        reject_once(req, ErrorClass::transient, "NSPOSIXErrorDomain", ENOMEM);
+        return 0;
+    });
+    CHECK(reap(kid) == 0);
+    rec = failed::read(res_path);
+    CHECK(!first.artifact_gone && count_files(l.quarantine) == quarantined && env.artifacts() == 1);
+    CHECK(rec && rec->cls == ErrorClass::transient && rec->attempts == 2);
+}
+
+// Quarantine under contention. While another holder keeps a shared lease the
+// quarantine of a rejected artifact cannot run: the load is requeued, not
+// failed, and once the lease is gone the next rejection quarantines it. If
+// another process repaired the entry after this load released its lease, the
+// repair (a new publication) is not quarantined: the load is requeued and
+// loads it.
+std::function<void(LoadResult &, int)> g_contention;  // runs inside the load, after begin_load
+std::atomic<int> g_contention_rejects{0};
+
+LoadResult glue_load_contention(const LoadRequest & req) {
+    LoadResult r;
+    if (!generation::begin_load(req, r)) return r;
+    const int n = ++g_glue_loads;
+    if (g_contention) g_contention(r, n);
+    if (n <= g_contention_rejects) {
+        r.error = Error{ErrorClass::transient, "com.apple.CoreML", 0, "the engine rejected the model"};
+        r.rejected = true;
+    } else {
+        r.model = std::make_shared<int>(1);
+    }
+    generation::end_load(req, r);
+    return r;
+}
+
+void case_generated_rejected_quarantine_contention() {
+    {
+        Env env;
+        const std::string a = env.source("a.gguf");
+        g_sched_inputs = env.inputs(a);
+        PrepareOutcome o = env.prepare(a);
+        CHECK(ready(o));
+        const std::string key = o.key32;
+        o.lease.release();
+        const cache::Layout l = env.layout();
+        cache::KeyLock other;  // another holder's lease
+        Error le;
+        CHECK(cache::KeyLock::take(l, key, cache::KeyLock::Mode::shared, other, &le) == cache::KeyLock::Result::ok);
+        g_glue_loads = 0;
+        g_contention_rejects = 2;
+        g_contention = [&](LoadResult &, int n) {
+            if (n == 2) other.release();  // the other holder is done before the second load's end
+        };
+        auto mgr = glue_manager();
+        auto s = glue_slot(mgr, env, a, &glue_load_contention);
+        s->request(Priority::now);
+        CHECK_MSG(wait_state(s, SlotState::ready), s->status().error);
+        CHECK(g_glue_loads == 3);                // busy -> requeued, rejected -> quarantined, regenerated -> loaded
+        CHECK(count_files(l.quarantine) == 1 && g_compiles == 2);
+        g_contention = nullptr;
+    }
+    {
+        Env env;
+        const std::string a = env.source("a.gguf");
+        g_sched_inputs = env.inputs(a);
+        PrepareOutcome o = env.prepare(a);
+        CHECK(ready(o));
+        const std::string key = o.key32;
+        const std::string tid = env.tpl->id();
+        o.lease.release();
+        const cache::Layout l = env.layout();
+        g_glue_loads = 0;
+        g_contention_rejects = 1;
+        g_contention = [&](LoadResult & r, int n) {
+            if (n != 1) return;
+            // This load is done with its lease; another process repairs the
+            // entry before this one takes the exclusive lock.
+            ::close(r.lease_fd);
+            r.lease_fd = -1;
+            CHECK(cache::quarantine(l, tid, key, nullptr) == cache::KeyLock::Result::ok);
+            CHECK(ready(env.prepare(a)));
+        };
+        auto mgr = glue_manager();
+        auto s = glue_slot(mgr, env, a, &glue_load_contention);
+        s->request(Priority::now);
+        CHECK_MSG(wait_state(s, SlotState::ready), s->status().error);
+        CHECK(g_glue_loads == 2);                                // requeued, then loads the repair
+        CHECK(count_files(l.quarantine) == 1 && g_compiles == 2);  // the repair is not quarantined
+        g_contention = nullptr;
+    }
 }
 
 // An unsupported cache volume: the slot is unsupported(cache_fs), not failed.
@@ -2013,6 +2140,7 @@ int main(int argc, char ** argv) {
                          {"generated-artifact-pruned-before-load", case_generated_artifact_pruned_before_load},
                          {"generated-unsupported-cache-fs", case_generated_unsupported_cache_fs},
                          {"generated-rejected-hit-quarantined", case_generated_rejected_hit_quarantined},
+                         {"generated-rejected-quarantine-contention", case_generated_rejected_quarantine_contention},
 #endif
                      },
                      "test-coreml-cache");
