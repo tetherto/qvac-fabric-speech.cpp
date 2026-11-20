@@ -167,7 +167,9 @@ A generated Parler-TTS DAC is projected: fit adds its template's Core ML memory 
 runner, where `all` runs on the GPU, with no further margin). Phones are not affected today, since sidecars are generated
 on macOS only; see [Parler-TTS memory validation](docs/parler.md#generated-sidecar-and-background-loading).
 Generated Pocket TTS sidecars are projected the same way: both resident parts plus one transient,
-333 MiB (measured on an M2); see [Pocket TTS fit](docs/pocket-tts.md#generated-sidecars-and-background-loading).
+1135 MiB (1.25 times the largest values measured on an M2 and on the M4 Max CI runner); see
+[Pocket TTS fit](docs/pocket-tts.md#generated-sidecars-and-background-loading). `pocket-cli
+--coreml-ignore-prebuilt` measures the generated route on a bundle that ships prebuilt sidecars.
 Re-export CosyVoice3 LM sidecars with the current exporter for correct cache
 feedback on macOS 15 and 26; see [CosyVoice3 Core ML](docs/cosyvoice3.md#core-ml-sidecars).
 
