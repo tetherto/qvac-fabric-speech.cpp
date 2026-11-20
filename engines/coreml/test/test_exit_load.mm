@@ -23,6 +23,10 @@
 // read through a freed table then faults every time instead of only when
 // another destructor happened to reuse the memory.
 //
+// Every compile of a fresh path adds a bundle (~20 MB for a vocoder) to this
+// program's e5rt cache in ~/Library/Caches/<program name>; the bundles a run
+// added are deleted after it.
+//
 // A run whose load already finished before the child exited checks nothing,
 // so at least half of the runs must have exited with the load in flight;
 // fewer fails the test as vacuous rather than passing it.
@@ -43,6 +47,7 @@
 #include <cstring>
 #include <ctime>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -148,6 +153,25 @@ void remove_tree(const std::string & p) {
     [[NSFileManager defaultManager] removeItemAtPath:[NSString stringWithUTF8String:p.c_str()] error:nil];
 }
 
+// The bundle directories (<os build>/<hash>) in this program's e5rt cache.
+std::string e5rt_cache() {
+    const char * home = std::getenv("HOME");
+    return std::string(home ? home : "") + "/Library/Caches/" + getprogname() + "/com.apple.e5rt.e5bundlecache";
+}
+
+std::set<std::string> e5rt_bundles() {
+    std::set<std::string> out;
+    NSFileManager * fm = [NSFileManager defaultManager];
+    NSString * root = [NSString stringWithUTF8String:e5rt_cache().c_str()];
+    for (NSString * os in [fm contentsOfDirectoryAtPath:root error:nil]) {
+        NSString * dir = [root stringByAppendingPathComponent:os];
+        for (NSString * b in [fm contentsOfDirectoryAtPath:dir error:nil]) {
+            out.insert([dir stringByAppendingPathComponent:b].UTF8String);
+        }
+    }
+    return out;
+}
+
 RunResult run_child(const std::string & self, const std::string & model, const std::string & units, int delay_ms,
                     int finalizer_ms) {
     RunResult rr;
@@ -167,6 +191,7 @@ RunResult run_child(const std::string & self, const std::string & model, const s
         remove_tree(dir);
         return rr;
     }
+    const std::set<std::string> bundles_before = e5rt_bundles();
     const std::string delay = std::to_string(delay_ms), fin = std::to_string(finalizer_ms);
     const char * argv[] = {self.c_str(), "--child", copy.c_str(), units.c_str(), delay.c_str(), fin.c_str(), nullptr};
     posix_spawn_file_actions_t fa;
@@ -215,6 +240,9 @@ RunResult run_child(const std::string & self, const std::string & model, const s
         std::fclose(f);
     }
     remove_tree(dir);
+    for (const std::string & b : e5rt_bundles()) {
+        if (!bundles_before.count(b)) remove_tree(b);
+    }
     return rr;
 }
 
