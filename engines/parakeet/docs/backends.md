@@ -934,9 +934,12 @@ generate, compile or load phase, a compile has no generate before it, a phase
 has no footprint sample, a load has no `ANECompilerService` sample, the tool
 reports sampler errors (a footprint or `ps` read that failed), a capacity does
 not end the run ready or serves no Core ML pass after every capacity is ready
-(counted by the capacity that served it), or the compiler grew less than
-64 MiB (a warm run). The tool itself exits 1 when a capacity never became
-ready or served too few passes. The Core ML lane of `parakeet-ci.yml` runs the generated schedule and
+(counted by the capacity that served it), the compiler grew less than
+64 MiB (a warm run), or the schedule was not overlapped: the report records
+every pass's interval, and some ggml pass must have run during a prepare
+(generate or compile) and some during a load or warm (one pass spanning both
+counts for both). The tool itself exits 1 when a capacity never became ready,
+served too few passes, or no ggml pass overlapped a prepare or a load. The Core ML lane of `parakeet-ci.yml` runs the generated schedule and
 the check on its macOS runner. Increments are over a ggml-only run of the same
 passes on the same host:
 

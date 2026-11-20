@@ -30,10 +30,12 @@
 // The generated schedule needs a GGUF with no adjacent diarizer bundle and
 // an empty DIR; the prebuilt schedule a GGUF beside its bundles. A fresh
 // process identity (scripts/coreml/fresh-host.sh) and fresh paths make every
-// ANE load cold. Exit status: 0 when every capacity became ready, each
-// served --passes-after-ready Core ML passes after that (counted by the
-// capacity that served them), and the peak increment stays within the charged
-// envelope (always 0 with --ggml-only); 1 otherwise; 2 on usage or setup
+// ANE load cold. Every pass's interval is recorded, with the ggml passes that
+// overlapped a prepare and a load or warm. Exit status: 0 when every capacity
+// became ready, each served --passes-after-ready Core ML passes after that
+// (counted by the capacity that served them), a ggml pass ran during a
+// prepare and one during a load or warm, and the peak increment stays within
+// the charged envelope (always 0 with --ggml-only); 1 otherwise; 2 on usage or setup
 // errors. The ANECompilerService size is also recorded at the start of each
 // load, so the checker can hold each load's own compile growth to the reserve.
 
@@ -53,6 +55,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <initializer_list>
 #include <map>
 #include <mutex>
 #include <string>
@@ -141,6 +144,29 @@ struct Segment {
     std::string stage, phase;
     double t0 = 0, t1 = 0;
 };
+
+// One diarizer pass: [t0, t1), and whether it ran on Core ML.
+struct PassInterval {
+    double t0 = 0, t1 = 0;
+    bool coreml = false;
+};
+
+// The ggml passes that ran while a segment of one of `phases` did.
+int ggml_passes_overlapping(const std::vector<PassInterval> & passes, const std::vector<Segment> & segments,
+                            std::initializer_list<const char *> phases) {
+    int n = 0;
+    for (const PassInterval & p : passes) {
+        if (p.coreml) continue;
+        for (const Segment & seg : segments) {
+            const bool phase = std::any_of(phases.begin(), phases.end(), [&](const char * x) { return seg.phase == x; });
+            if (phase && p.t0 < seg.t1 && seg.t0 < p.t1) {
+                ++n;
+                break;
+            }
+        }
+    }
+    return n;
+}
 
 std::vector<Segment> segments_of(const std::vector<StateSample> & states, double t_end) {
     std::vector<Segment> out;
@@ -387,17 +413,20 @@ int main(int argc, char ** argv) {
     // Core ML passes after every stage is ready, by the capacity that served
     // them (a larger capacity standing in for a failed one counts as itself).
     std::map<int, int> coreml_by_capacity;
+    std::vector<PassInterval> intervals;
     double t_all_ready = -1;
     const auto deadline = Clock::now() + std::chrono::minutes(10);
     for (;;) {
         const int size = sizes[passes % sizes.size()];
         bool used_coreml = false;
         if (!ggml_only) parakeet::model_coreml_reset_call_stats(model);
+        const double pass_t0 = now_s();
         if (run_pass(model, mel, mel_frames, clip, size, &used_coreml) != 0) {
             finish();
             std::fprintf(stderr, "a diarizer pass failed\n");
             return 2;
         }
+        intervals.push_back(PassInterval{pass_t0, now_s(), used_coreml});
         ++passes;
         if (used_coreml) {
             ++coreml_passes;
@@ -569,6 +598,20 @@ int main(int argc, char ** argv) {
         by_capacity += (by_capacity.empty() ? "\"" : ",\"") + std::to_string(k) + "\":" + std::to_string(n);
     }
     const uint64_t ane_growth = ane_load_peak > ane_before_loads ? ane_load_peak - ane_before_loads : 0;
+    // The schedule is overlapped only when inference ran during the
+    // background work: a ggml pass during a prepare (generate or compile) and
+    // one during a load or warm (one pass spanning both counts for both).
+    const int overlap_prepare = ggml_passes_overlapping(intervals, segments, {"generate", "compile"});
+    const int overlap_load = ggml_passes_overlapping(intervals, segments, {"load"});
+    std::snprintf(buf, sizeof(buf), "],\"ggml_passes_during_prepare\":%d,\"ggml_passes_during_load\":%d,"
+                  "\"pass_intervals\":[", overlap_prepare, overlap_load);
+    json += buf;
+    first = true;
+    for (const PassInterval & p : intervals) {
+        std::snprintf(buf, sizeof(buf), "%s[%.4f,%.4f,%d]", first ? "" : ",", p.t0, p.t1, p.coreml ? 1 : 0);
+        json += buf;
+        first = false;
+    }
     std::snprintf(buf, sizeof(buf),
                   "],\"max_generate_increment\":%llu,\"max_compile_increment\":%llu,\"max_load_increment\":%llu,"
                   "\"max_resident_increment\":%llu,\"steady_increment_over_baseline\":%llu,"
@@ -622,6 +665,12 @@ int main(int argc, char ** argv) {
         if (baseline > 0 && increment > fr.coreml.bytes) return 1;
         if (t_all_ready < 0) {
             std::printf("not every capacity became ready before the deadline\n");
+            return 1;
+        }
+        std::printf("ggml passes overlapping a prepare: %d, a load or warm: %d\n", overlap_prepare, overlap_load);
+        if (overlap_prepare == 0 || overlap_load == 0) {
+            std::printf("no ggml pass ran during a %s: the schedule was not overlapped\n",
+                        overlap_prepare == 0 ? "prepare" : "load or warm");
             return 1;
         }
         for (int k : capacities) {

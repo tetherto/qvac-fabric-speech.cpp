@@ -41,7 +41,10 @@ by the capacity that served it. The compiler's growth is checked over the
 whole run and per load (each load from the service's size when it started, so
 a service that shrank between loads cannot hide a later compile), and a run
 whose compiler grew less than 64 MiB is not a cold run and fails. A stage seen
-more than once in a phase is checked at its largest value.
+more than once in a phase is checked at its largest value. The run must have
+overlapped inference with the background work: among its pass_intervals, a
+ggml pass ran during a prepare (generate or compile) and one during a load or
+warm (one pass spanning both counts for both).
 
 A null constant means the runtime's default: runtime weights = weight.bin;
 compile 0.5 x weight.bin; load 0.25 x weight.bin for cpu_and_ane and 1.0 x for
@@ -157,6 +160,23 @@ def prepares(segs):
     return [max(0, p["peak"] - p["before"]) for p in out]
 
 
+def overlap_failures(path, r):
+    """The schedule must overlap inference with the background work: a ggml
+    pass ([t0, t1, coreml] in pass_intervals) running during a prepare
+    (generate or compile segment) and one during a load or warm (one pass
+    spanning both counts for both)."""
+    intervals = r.get("pass_intervals")
+    if intervals is None:
+        return [f"{path}: no pass_intervals (an older tool's report)"]
+    segments = r.get("segments", [])
+    out = []
+    for label, phases in (("prepare", ("generate", "compile")), ("load or warm", ("load",))):
+        spans = [(float(s["t0"]), float(s["t1"])) for s in segments if s["phase"] in phases]
+        if not any(not int(p[2]) and any(float(p[0]) < b and a < float(p[1]) for a, b in spans) for p in intervals):
+            out.append(f"{path}: no ggml pass ran during a {label}: the schedule was not overlapped")
+    return out
+
+
 def check_run(path, r, templates):
     """Returns (row, failures) for one report."""
     failures = []
@@ -180,6 +200,7 @@ def check_run(path, r, templates):
             failures.append(f"{path}: {s['stage']} {s['phase']} segment without footprint samples")
     for stage in sorted(set(by_stage) - set(templates)):
         failures.append(f"{path}: no template for {stage}")
+    failures += overlap_failures(path, r)
 
     row = {"prepare": 0, "load": 0, "resident": 0, "prepare_lim": None, "load_lim": None, "resident_lim": None,
            "reserve_lim": None, "resident_sum": 0}
