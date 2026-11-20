@@ -8,6 +8,7 @@
 
 #include "qvac_coreml/manager.h"
 
+#include "device.h"
 #include "hints.h"
 #include "runtime.h"
 #include "sha256.h"
@@ -22,6 +23,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -33,6 +35,7 @@
 #include <vector>
 
 #include <dlfcn.h>
+#include <pthread.h>
 #include <signal.h>
 #include <spawn.h>
 #include <sys/wait.h>
@@ -2627,6 +2630,41 @@ int child_dlclose(const std::string & mode, const std::string & plugin, const st
         std::fprintf(stderr, "dlopen: %s\n", dlerror());
         return 3;
     }
+    if (mode == "slot-only") {
+        // The image's pin state, read from the plugin itself: unloading is not
+        // observable (macOS never unloads a module holding Objective-C classes,
+        // and GCC's unique symbols keep it mapped on Linux).
+        using SlotFn = int (*)(const char *, int);
+        using IntFn = int (*)();
+        using ArmFn = int (*)(int);
+        auto make = reinterpret_cast<SlotFn>(dlsym(h, "qvac_coreml_plugin_slot_only"));
+        auto pin = reinterpret_cast<IntFn>(dlsym(h, "qvac_coreml_plugin_pin_state"));
+        auto arm = reinterpret_cast<ArmFn>(dlsym(h, "qvac_coreml_plugin_arm"));
+        if (!make || !pin || !arm) return 3;
+        // arm_exit_guard() off the main thread: false, and nothing pinned.
+        if (arm(1) != 0 || pin() != static_cast<int>(detail::PinState::untried)) {
+            std::fprintf(stderr, "dlclose slot-only: a worker's arm_exit_guard() returned true or pinned the image\n");
+            return 9;
+        }
+        make(dir.c_str(), 1);
+        if (pin() != static_cast<int>(detail::PinState::untried)) {
+            std::fprintf(stderr, "dlclose slot-only: a slot made on a worker thread pinned the image\n");
+            return 6;
+        }
+        make(dir.c_str(), 0);  // the main thread: pins and arms
+        if (pin() != static_cast<int>(detail::PinState::pinned)) {
+            std::fprintf(stderr, "dlclose slot-only: a slot made on the main thread did not pin the image\n");
+            return 8;
+        }
+        // Still false on a worker after the main thread armed; true on main.
+        if (arm(1) != 0 || arm(0) != 1) {
+            std::fprintf(stderr, "dlclose slot-only: arm_exit_guard() worker %d / main %d after arming\n", arm(1),
+                         arm(0));
+            return 10;
+        }
+        dlclose(h);
+        return 0;
+    }
     using StartFn = int (*)(const char *);
     using IntFn = int (*)();
     auto start = reinterpret_cast<StartFn>(
@@ -2680,7 +2718,7 @@ void case_dlclose() {
         CHECK(!"--plugin was not given");
         return;
     }
-    for (const char * mode : {"immediate", "deferred", "in-flight"}) {
+    for (const char * mode : {"immediate", "deferred", "in-flight", "slot-only"}) {
         const std::string dir = make_temp_dir();
         const int rc = run_child({"--child", "dlclose", mode, g_plugin, dir});
         if (rc != 0) std::fprintf(stderr, "    dlclose %s: child exit %d\n", mode, rc);
@@ -2690,56 +2728,590 @@ void case_dlclose() {
     }
 }
 
-int child_exit_during_load(const std::string & dir) {
-    // The per-image manager, a load in flight that never returns and a second
-    // job queued behind it; then the process exits.
-    struct Never {
-        static LoadResult load(const LoadRequest &) {
-            for (;;) std::this_thread::sleep_for(1h);
-        }
-    };
+// Process exit. The fake jobs stand for Core ML calls, which cannot be
+// cancelled and crash if the frameworks' static state is destroyed under them;
+// the frameworks build some of it lazily during a compile, so its destructors
+// are the first ones exit() runs. A fake load builds such a function-local
+// static, and "late teardown" is an atexit handler registered after the load
+// started: both mark the process torn down, and the handler then sleeps
+// 300 ms so that a job wrongly started after exit began has time to show.
+// Each child records what happened in files under its directory; times are
+// CLOCK_MONOTONIC, comparable across processes. Child modes:
+//   waits:          main-thread engine, a 400 ms load in flight when main
+//                   returns: the load returns before any teardown, and the
+//                   queued second job (its slot alive through exit) never
+//                   starts.
+//   bounded:        a load that never returns; shutdown_for_exit(1000 ms)
+//                   then return from main: one deadline, so exit ends about
+//                   1000 ms after shutdown began, not 2000.
+//   exit-in-job:    the load itself calls shutdown_for_exit(3 s) and exit():
+//                   it does not wait for itself.
+//   other-thread:   exit() from another thread while a 2 s load runs: only the
+//                   exit flag, no wait (the guard belongs to the main thread).
+//   offmain:        the engine is made and loaded on a worker thread, main
+//                   returns: nothing armed the guard, so no wait.
+//   offmain-armed:  the same, after main called arm_exit_guard(): exit waits.
+//   drain:          the engine on a worker thread; main calls
+//                   shutdown_for_exit(5 s): it returns after the load did,
+//                   and a fresh request then fails with kExitingReason.
+//   pthread-exit:   the main thread arms the guard and ends with
+//                   pthread_exit(); on Darwin a request on a surviving thread
+//                   then fails with kExitingReason; glibc does not run the
+//                   main thread's thread_local destructors there, so it loads.
+//   pthread-exit-optout: the same after set_automatic_exit_guard(false): the
+//                   request loads.
+//   queued-shutdown, acquire-waiting: a strict slot queued behind the load
+//                   when admission closes fails with kExitingReason, and a
+//                   strict acquire throws, also one already waiting.
+//   paused-select:  shutdown_for_exit(0) while the worker is selecting a job:
+//                   the job never starts.
+//   poll-zero, huge-bound, zero-then-guard: a zero bound only polls (and
+//                   fixes no deadline), a later caller ends at its own
+//                   deadline, and a huge bound is clamped.
+//   late-host:      a host atexit callback that runs after the runtime's:
+//                   shutdown only reports, arming fails.
+//   pthread-exit-late-optout: the opt-out also works after the main thread
+//                   was armed automatically.
+//   fork:           a child of fork() made while a job runs has no worker:
+//                   shutdown_for_exit() there returns at once.
+//   release:        a resident-pool victim evicted at admission is released
+//                   by the worker outside mu; its deleter (a Core ML release)
+//                   is still running when main returns: exit waits for it.
+std::string g_exit_dir;
+std::atomic<bool> g_torn_down{false};
+std::atomic<int> g_exit_load_ms{400};
+
+int64_t mono_ns() {
+    timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return int64_t(ts.tv_sec) * 1000000000 + ts.tv_nsec;
+}
+
+void exit_mark(const std::string & name, const std::string & text = "") {
+    const std::string tmp = g_exit_dir + "/." + name;
+    if (FILE * f = std::fopen(tmp.c_str(), "w")) {
+        std::fputs(text.c_str(), f);
+        std::fclose(f);
+        std::rename(tmp.c_str(), (g_exit_dir + "/" + name).c_str());
+    }
+}
+
+void exit_mark_time(const std::string & name) { exit_mark(name, std::to_string(mono_ns())); }
+
+bool exit_marked(const std::string & name) { return fs::exists(g_exit_dir + "/" + name); }
+
+struct TearDownMarker {
+    ~TearDownMarker() { g_torn_down = true; }
+};
+
+void arm_late_teardown() {
+    std::atexit([] {
+        g_torn_down = true;
+        std::this_thread::sleep_for(300ms);
+    });
+}
+
+const char * intact() { return g_torn_down ? "torn-down" : "intact"; }
+
+LoadResult exit_slow_load(const LoadRequest & r) {
+    static TearDownMarker lazy;  // registered for destruction during the load
+    (void) lazy;
+    exit_mark("load-started");
+    std::this_thread::sleep_for(milliseconds(g_exit_load_ms.load()));
+    exit_mark("load-returned", intact());
+    LoadResult out;
+    out.model = std::make_shared<FakeModel>(r.function);
+    return out;
+}
+
+LoadResult exit_queued_load(const LoadRequest & r) {
+    exit_mark("started-queued");
+    LoadResult out;
+    out.model = std::make_shared<FakeModel>(r.function);
+    return out;
+}
+
+LoadResult exit_never_load(const LoadRequest & r) {
+    exit_mark("started-" + r.function);
+    for (;;) std::this_thread::sleep_for(1h);
+}
+
+LoadResult exit_self_load(const LoadRequest &) {
+    exit_mark_time("exit-begin");
+    // Its own job is still running: false, and it does not wait for itself.
+    exit_mark("in-job-shutdown", shutdown_for_exit(3000ms) ? "1" : "0");
+    std::exit(0);
+}
+
+LoadResult exit_fast_load(const LoadRequest & r) {
+    LoadResult out;
+    out.model = std::make_shared<FakeModel>(r.function);
+    return out;
+}
+
+// A model whose release blocks for 400 ms, as an MLModel's can.
+LoadResult exit_victim_load(const LoadRequest &) {
+    LoadResult out;
+    out.model = std::shared_ptr<void>(new int(0), [](void * p) {
+        exit_mark("deleter-started");
+        std::this_thread::sleep_for(400ms);
+        exit_mark("deleter-returned", intact());
+        delete static_cast<int *>(p);
+    });
+    return out;
+}
+
+SlotSpec exit_spec(const std::string & fn, LoadFn load) {
     SlotSpec s;
     s.engine = "child";
     s.stage = "child";
     s.units = ComputeUnits::cpu_only;
     s.route = Route::prebuilt;
-    s.artifact_path = dir + "/child.mlmodelc";
-    s.load_fn = &fake_load;
-    set_beh("in-flight", {true});
-    s.function = "in-flight";
-    auto a = Manager::instance()->make_slot(s, SlotPolicy{});
-    s.function = "queued";
-    s.load_fn = &Never::load;
-    auto b = Manager::instance()->make_slot(s, SlotPolicy{});
-    a->request(Priority::minimal);
-    b->request(Priority::minimal);
-    if (!wait_for([] { return in_progress("in-flight"); })) return 3;
-    std::exit(0);
+    s.artifact_path = g_exit_dir + "/child.mlmodelc";
+    s.function = fn;
+    s.load_fn = load;
+    return s;
+}
+
+// Made and requested by the calling thread; leaked, so it stays alive (and
+// subscribed) through exit, as an engine's slots do.
+std::shared_ptr<Slot> & exit_slot(const std::string & fn, LoadFn load, Priority p = Priority::minimal,
+                                  bool strict = false) {
+    SlotPolicy policy;
+    policy.strict = strict;
+    auto * slot = new std::shared_ptr<Slot>(Manager::instance()->make_slot(exit_spec(fn, load), policy));
+    (*slot)->request(p);
+    return *slot;
+}
+
+// A re-request and a (strict) acquire, then the state and reason they left:
+// "<state>|<reason>|<model|pending|none|threw>".
+std::string exit_slot_report(const std::shared_ptr<Slot> & s) {
+    s->request(Priority::now);
+    std::string got;
+    try {
+        Acquired a = s->acquire(Demand::now);
+        got = a.model ? "model" : (a.pending ? "pending" : "none");
+    } catch (const std::exception &) {
+        got = "threw";
+    }
+    return std::string(to_string(s->state())) + "|" + s->status().reason + "|" + got;
+}
+
+// The main thread has ended: signalled from a pthread key destructor of the
+// main thread (run at its pthread_exit() on Darwin and glibc alike), plus a
+// margin for the thread_local destructors that run around it.
+pthread_key_t g_main_end_key;
+std::atomic<bool> g_main_ended{false};
+
+void watch_main_end() {
+    pthread_key_create(&g_main_end_key, [](void *) { g_main_ended = true; });
+    pthread_setspecific(g_main_end_key, &g_main_end_key);
+}
+
+void wait_main_end() {
+    wait_for([] { return g_main_ended.load(); }, 5000);
+    std::this_thread::sleep_for(300ms);
+}
+
+void exit_fresh_request_marker() {
+    std::shared_ptr<Slot> & c = exit_slot("fresh", &exit_fast_load);
+    wait_for([&] {
+        const SlotState st = c->state();
+        return st == SlotState::ready || st == SlotState::failed;
+    }, 2000);
+    const SlotStatus st = c->status();
+    exit_mark("fresh", std::string(to_string(c->state())) + "|" + st.reason);
+}
+
+std::atomic<bool> g_pause_select{false};
+
+// The job_selected hook (runs with the runtime's mutex held): holds the worker
+// that has just selected a job, before it commits to starting it.
+void exit_pause_selected() {
+    if (!g_pause_select.load()) return;
+    exit_mark("selecting");
+    while (g_pause_select.load()) std::this_thread::sleep_for(1ms);
+}
+
+int child_exit(const std::string & mode, const std::string & dir) {
+    g_exit_dir = dir;
+    if (mode == "late-host") {
+        // Registered before the runtime's own handler, so it runs after it:
+        // a host callback during process finalization.
+        std::atexit([] {
+            const int64_t t0 = mono_ns();
+            const bool drained = shutdown_for_exit(2000ms);
+            const bool armed = arm_exit_guard();
+            exit_mark("late", std::string(drained ? "1" : "0") + "|" + (armed ? "1" : "0") + "|" +
+                                  std::to_string((mono_ns() - t0) / 1000000));
+        });
+        std::thread([] { exit_slot("in-flight", &exit_never_load); }).join();
+        if (!wait_for([] { return exit_marked("started-in-flight"); })) return 3;
+        return 0;
+    }
+    if (mode == "queued-shutdown") {
+        exit_slot("in-flight", &exit_slow_load);
+        std::shared_ptr<Slot> & b = exit_slot("queued", &exit_queued_load, Priority::minimal, true);
+        if (!wait_for([] { return exit_marked("load-started"); })) return 3;
+        exit_mark("drain", shutdown_for_exit(5000ms) ? "1" : "0");
+        exit_mark("queued", exit_slot_report(b));
+        exit_mark("alive", "1");
+        return 0;
+    }
+    if (mode == "acquire-waiting") {
+        g_exit_load_ms = 1500;
+        exit_slot("in-flight", &exit_slow_load);
+        std::shared_ptr<Slot> & b = exit_slot("queued", &exit_queued_load, Priority::minimal, true);
+        if (!wait_for([] { return exit_marked("load-started"); })) return 3;
+        std::thread waiter([&b] {
+            const int64_t t0 = mono_ns();
+            std::string what;
+            try {
+                Acquired a = b->acquire(Demand::now);  // strict: waits for the queued load
+                what = a.model ? "model" : "none";
+            } catch (const std::exception &) {
+                what = "threw";
+            }
+            exit_mark("acquire", what + "|" + std::to_string((mono_ns() - t0) / 1000000));
+        });
+        std::this_thread::sleep_for(200ms);  // the acquire is waiting
+        shutdown_for_exit(0ms);              // closes admission only
+        waiter.join();
+        shutdown_for_exit(5000ms);
+        return 0;
+    }
+    if (mode == "paused-select") {
+        detail::test_hooks().job_selected = &exit_pause_selected;
+        g_pause_select = true;
+        exit_slot("queued", &exit_queued_load);
+        if (!wait_for([] { return exit_marked("selecting"); })) return 3;
+        exit_mark("shutdown", shutdown_for_exit(0ms) ? "1" : "0");
+        g_pause_select = false;  // the worker finishes selecting the job
+        std::this_thread::sleep_for(300ms);
+        return 0;
+    }
+    if (mode == "poll-zero") {
+        exit_slot("in-flight", &exit_never_load);
+        if (!wait_for([] { return exit_marked("started-in-flight"); })) return 3;
+        std::thread([] { shutdown_for_exit(500ms); }).detach();  // waits until its 500 ms deadline
+        std::this_thread::sleep_for(50ms);
+        const int64_t t0 = mono_ns();
+        const bool drained = shutdown_for_exit(0ms);
+        exit_mark("poll", std::string(drained ? "1" : "0") + "|" + std::to_string((mono_ns() - t0) / 1000000));
+        const int64_t t1 = mono_ns();
+        const bool short_drained = shutdown_for_exit(50ms);  // its own 50 ms, not the other caller's 500
+        exit_mark("short", std::string(short_drained ? "1" : "0") + "|" + std::to_string((mono_ns() - t1) / 1000000));
+        return 0;
+    }
+    if (mode == "huge-bound") {
+        exit_slot("in-flight", &exit_slow_load);
+        if (!wait_for([] { return exit_marked("load-started"); })) return 3;
+        const int64_t t0 = mono_ns();
+        const bool drained = shutdown_for_exit(std::chrono::milliseconds(INT64_MAX));
+        exit_mark("huge", std::string(drained ? "1" : "0") + "|" + std::to_string((mono_ns() - t0) / 1000000));
+        return 0;
+    }
+    if (mode == "zero-then-guard") {
+        exit_slot("in-flight", &exit_slow_load);
+        if (!wait_for([] { return exit_marked("load-started"); })) return 3;
+        exit_mark("zero", shutdown_for_exit(0ms) ? "1" : "0");
+        arm_late_teardown();
+        return 0;  // the guard still waits: a zero bound fixed no deadline
+    }
+    if (mode == "waits") {
+        exit_slot("in-flight", &exit_slow_load);
+        exit_slot("queued", &exit_queued_load);
+        if (!wait_for([] { return exit_marked("load-started"); })) return 3;
+        arm_late_teardown();
+        exit_mark_time("exit-begin");
+        return 0;  // main returns: exit()
+    }
+    if (mode == "bounded") {
+        exit_slot("in-flight", &exit_never_load);
+        exit_slot("queued", &exit_queued_load);
+        if (!wait_for([] { return exit_marked("started-in-flight"); })) return 3;
+        exit_mark_time("exit-begin");
+        if (shutdown_for_exit(1000ms)) return 4;  // the load never returns
+        return 0;
+    }
+    if (mode == "exit-in-job") {
+        detail::test_hooks().exit_wait_ms = 3000;
+        exit_slot("in-flight", &exit_self_load);
+        for (;;) std::this_thread::sleep_for(1h);
+    }
+    if (mode == "other-thread") {
+        g_exit_load_ms = 2000;
+        exit_slot("in-flight", &exit_slow_load);
+        if (!wait_for([] { return exit_marked("load-started"); })) return 3;
+        std::thread([] {
+            exit_mark_time("exit-begin");
+            std::exit(0);
+        }).detach();
+        for (;;) std::this_thread::sleep_for(1h);
+    }
+    if (mode == "offmain" || mode == "offmain-armed" || mode == "drain") {
+        if (mode == "offmain") g_exit_load_ms = 2000;
+        if (mode == "offmain-armed" && !arm_exit_guard()) return 4;
+        std::thread([] { exit_slot("in-flight", &exit_slow_load); }).join();
+        if (!wait_for([] { return exit_marked("load-started"); })) return 3;
+        if (mode == "drain") {
+            const bool drained = shutdown_for_exit(5000ms);
+            exit_mark("drain", std::string(drained ? "1" : "0") + "|" +
+                                   (exit_marked("load-returned") ? "returned" : "running"));
+            exit_fresh_request_marker();
+            return 0;
+        }
+        if (mode == "offmain-armed") arm_late_teardown();
+        exit_mark_time("exit-begin");
+        return 0;
+    }
+    if (mode == "pthread-exit" || mode == "pthread-exit-optout" || mode == "pthread-exit-late-optout") {
+        if (mode == "pthread-exit-optout") set_automatic_exit_guard(false);
+        std::shared_ptr<Slot> & a = exit_slot("first", &exit_fast_load);
+        if (!wait_for([&] { return is_ready(a); })) return 3;
+        // After the automatic arm (the slot was made on this thread).
+        if (mode == "pthread-exit-late-optout") set_automatic_exit_guard(false);
+        // A load in flight and a strict slot queued behind it when main ends.
+        exit_slot("in-flight", &exit_slow_load);
+        std::shared_ptr<Slot> * b = &exit_slot("queued", &exit_queued_load, Priority::minimal, true);
+        if (!wait_for([] { return exit_marked("load-started"); })) return 3;
+        watch_main_end();
+        std::thread([b] {
+            wait_main_end();
+            wait_for([] { return exit_marked("load-returned"); }, 3000);
+            exit_mark("queued", exit_slot_report(*b));
+            exit_fresh_request_marker();
+            std::exit(0);
+        }).detach();
+        pthread_exit(nullptr);
+    }
+    if (mode == "fork") {
+        exit_slot("in-flight", &exit_never_load);
+        if (!wait_for([] { return exit_marked("started-in-flight"); })) return 3;
+        const pid_t pid = fork();
+        if (pid == 0) {
+            // No worker thread was copied: there is nothing to wait for.
+            const int64_t t0 = mono_ns();
+            const bool drained = shutdown_for_exit(2000ms);
+            exit_mark("fork", std::string(drained ? "1" : "0") + "|" + std::to_string((mono_ns() - t0) / 1000000));
+            _exit(0);
+        }
+        int st = 0;
+        waitpid(pid, &st, 0);
+        _exit(WIFEXITED(st) ? WEXITSTATUS(st) : 9);
+    }
+    if (mode == "release") {
+        auto pool = Manager::instance()->make_pool(1);
+        auto pooled = [&](const std::string & fn, LoadFn load) {
+            SlotSpec s = exit_spec(fn, load);
+            s.pool = pool;
+            return new std::shared_ptr<Slot>(Manager::instance()->make_slot(s, SlotPolicy{}));
+        };
+        std::shared_ptr<Slot> & victim = *pooled("victim", &exit_victim_load);
+        victim->request(Priority::minimal);
+        if (!wait_for([&] { return is_ready(victim); })) return 3;
+        (*pooled("replacement", &exit_fast_load))->request(Priority::current);
+        if (!wait_for([] { return exit_marked("deleter-started"); })) return 5;
+        arm_late_teardown();
+        exit_mark_time("exit-begin");
+        return 0;
+    }
+    return 64;
+}
+
+std::string read_file(const std::string & path) {
+    std::string out;
+    if (FILE * f = std::fopen(path.c_str(), "r")) {
+        char buf[256];
+        size_t n = 0;
+        while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) out.append(buf, n);
+        std::fclose(f);
+    }
+    return out;
+}
+
+struct ExitRun {
+    int rc = -1;
+    int64_t ms = -1;  // from the child's "exit-begin" mark to its reaping
+    std::string dir;
+    std::string file(const std::string & name) const { return read_file(dir + "/" + name); }
+    bool has(const std::string & name) const { return fs::exists(dir + "/" + name); }
+};
+
+ExitRun run_exit_child(const std::string & mode) {
+    ExitRun r;
+    r.dir = make_temp_dir();
+    r.rc = run_child({"--child", "exit", mode, r.dir}, 20000);
+    const int64_t reaped = mono_ns();
+    const std::string begin = r.file("exit-begin");
+    if (!begin.empty()) r.ms = (reaped - std::stoll(begin)) / 1000000;
+    std::printf("    %-20s rc %d, exit took %lld ms\n", mode.c_str(), r.rc, (long long) r.ms);
+    return r;
+}
+
+void exit_cleanup(const ExitRun & r) {
+    std::error_code ec;
+    fs::remove_all(r.dir, ec);
 }
 
 void case_exit_during_load() {
-    const std::string dir = make_temp_dir();
-    const char * argv[] = {g_self.c_str(), "--child", "exit-during-load", dir.c_str(), nullptr};
-    pid_t pid = 0;
-    CHECK(posix_spawn(&pid, g_self.c_str(), nullptr, nullptr, const_cast<char * const *>(argv), environ) == 0);
-    int status = 0;
-    bool exited = false;
-    const auto t0 = Clock::now();
-    while (ms_since(t0) < 10000) {
-        if (waitpid(pid, &status, WNOHANG) == pid) {
-            exited = true;
-            break;
-        }
-        std::this_thread::sleep_for(5ms);
+    const std::string refused = std::string("failed|") + kExitingReason;
+    {
+        const ExitRun r = run_exit_child("waits");
+        CHECK(r.rc == 0);
+        // Absent: exit did not wait for the load. "torn-down": it waited only
+        // after destructors registered during the load had run.
+        CHECK(r.file("load-returned") == "intact");
+        CHECK(!r.has("started-queued"));  // no job starts once exit began
+        exit_cleanup(r);
     }
-    if (!exited) {
-        kill(pid, SIGKILL);
-        waitpid(pid, &status, 0);
+    {
+        const ExitRun r = run_exit_child("bounded");
+        CHECK(r.rc == 0);
+        CHECK(r.ms >= 1000);  // waited for the job...
+        CHECK(r.ms < 1700);   // ...once: the exit guard had nothing left
+        exit_cleanup(r);
     }
-    CHECK(exited);
-    CHECK(exited && WIFEXITED(status) && WEXITSTATUS(status) == 0);
-    std::error_code ec;
-    fs::remove_all(dir, ec);
+    {
+        const ExitRun r = run_exit_child("exit-in-job");
+        CHECK(r.rc == 0);
+        CHECK(r.ms >= 0 && r.ms < 1000);  // the bound is 3 s: it did not wait for itself
+        CHECK(r.file("in-job-shutdown") == "0");  // its own job is still running
+        exit_cleanup(r);
+    }
+    {
+        const ExitRun r = run_exit_child("other-thread");
+        CHECK(r.rc == 0);
+        CHECK(r.ms >= 0 && r.ms < 1000);  // the 2 s load was not waited for
+        exit_cleanup(r);
+    }
+    {
+        const ExitRun r = run_exit_child("offmain");
+        CHECK(r.rc == 0);
+        CHECK(r.ms >= 0 && r.ms < 1000);  // no guard armed: no wait
+        exit_cleanup(r);
+    }
+    {
+        const ExitRun r = run_exit_child("offmain-armed");
+        CHECK(r.rc == 0);
+        CHECK(r.file("load-returned") == "intact");
+        exit_cleanup(r);
+    }
+    {
+        const ExitRun r = run_exit_child("drain");
+        CHECK(r.rc == 0);
+        CHECK(r.file("drain") == "1|returned");
+        CHECK(r.file("load-returned") == "intact");
+        CHECK(r.file("fresh") == refused);
+        exit_cleanup(r);
+    }
+    {
+        const ExitRun r = run_exit_child("pthread-exit");
+        CHECK(r.rc == 0);
+#if defined(__APPLE__)
+        // Darwin runs the main thread's thread_local destructors at
+        // pthread_exit(): exit has begun for the runtime. The slot queued
+        // behind the running load is not stranded: it fails, and strict
+        // throws.
+        CHECK(r.file("fresh") == refused);
+        CHECK(r.file("queued") == refused + "|threw");
+#elif defined(__GLIBC__)
+        // glibc does not run the main thread's thread_local destructors when
+        // it ends with pthread_exit() (only its pthread keys are freed), so
+        // the guard does not run and Core ML keeps working.
+        CHECK(r.file("fresh") == "ready|");
+        CHECK(r.file("queued") == "ready||model");
+#else
+        std::printf("    pthread-exit: no expectation for this C library (fresh %s)\n", r.file("fresh").c_str());
+#endif
+        exit_cleanup(r);
+    }
+    for (const char * mode : {"pthread-exit-optout", "pthread-exit-late-optout"}) {
+        const ExitRun r = run_exit_child(mode);
+        CHECK(r.rc == 0);
+        CHECK(r.file("fresh") == "ready|");
+        CHECK(r.file("queued") == "ready||model");
+        exit_cleanup(r);
+    }
+    {
+        // A strict slot queued behind the drained load is not stranded.
+        const ExitRun r = run_exit_child("queued-shutdown");
+        CHECK(r.rc == 0);
+        CHECK(r.file("drain") == "1");
+        CHECK(r.file("queued") == refused + "|threw");
+        CHECK(!r.has("started-queued"));
+        CHECK(r.file("alive") == "1");
+        exit_cleanup(r);
+    }
+    {
+        // A strict acquire already waiting when admission closes throws
+        // promptly instead of returning no model.
+        const ExitRun r = run_exit_child("acquire-waiting");
+        CHECK(r.rc == 0);
+        const std::string a = r.file("acquire");
+        CHECK(a.rfind("threw|", 0) == 0 && std::stoll(a.substr(6)) < 1000);
+        CHECK(!r.has("started-queued"));
+        exit_cleanup(r);
+    }
+    {
+        // A job selected while shutdown_for_exit(0) closed admission never
+        // starts.
+        const ExitRun r = run_exit_child("paused-select");
+        CHECK(r.rc == 0);
+        CHECK(r.file("shutdown") == "0");  // the selecting worker was counted
+        CHECK(!r.has("started-queued"));
+        exit_cleanup(r);
+    }
+    {
+        // A zero bound polls: it does not wait out another caller's deadline.
+        const ExitRun r = run_exit_child("poll-zero");
+        CHECK(r.rc == 0);
+        const std::string p = r.file("poll");
+        CHECK(p.rfind("0|", 0) == 0 && std::stoll(p.substr(2)) < 50);
+        // A later caller with a short bound ends at its own deadline.
+        const std::string sh = r.file("short");
+        CHECK(sh.rfind("0|", 0) == 0 && std::stoll(sh.substr(2)) >= 50 && std::stoll(sh.substr(2)) < 200);
+        exit_cleanup(r);
+    }
+    {
+        // A huge bound is clamped: it waits for the load and returns true.
+        const ExitRun r = run_exit_child("huge-bound");
+        CHECK(r.rc == 0);
+        const std::string h = r.file("huge");
+        CHECK(h.rfind("1|", 0) == 0 && std::stoll(h.substr(2)) < 2000);
+        exit_cleanup(r);
+    }
+    {
+        // A zero bound fixes no deadline: the exit guard still waits.
+        const ExitRun r = run_exit_child("zero-then-guard");
+        CHECK(r.rc == 0);
+        CHECK(r.file("zero") == "0");
+        CHECK(r.file("load-returned") == "intact");
+        exit_cleanup(r);
+    }
+    {
+        // During process finalization (after the runtime's atexit handler)
+        // shutdown only reports and arming fails.
+        const ExitRun r = run_exit_child("late-host");
+        CHECK(r.rc == 0);
+        const std::string l = r.file("late");
+        CHECK(l.rfind("0|0|", 0) == 0 && std::stoll(l.substr(4)) < 100);
+        exit_cleanup(r);
+    }
+    {
+        const ExitRun r = run_exit_child("fork");
+        CHECK(r.rc == 0);
+        const std::string f = r.file("fork");
+        CHECK(f.size() > 2 && f.substr(0, 2) == "1|" && std::stoll(f.substr(2)) < 500);
+        exit_cleanup(r);
+    }
+    {
+        const ExitRun r = run_exit_child("release");
+        CHECK(r.rc == 0);
+        CHECK(r.file("deleter-returned") == "intact");
+        exit_cleanup(r);
+    }
 }
 
 // ---- options, plan, fit, status -------------------------
@@ -3064,8 +3636,8 @@ int main(int argc, char ** argv) {
             g_plugin = argv[++i];
         } else if (a == "--only" && i + 1 < argc) {
             only = argv[++i];
-        } else if (a == "--child" && i + 2 < argc && std::string(argv[i + 1]) == "exit-during-load") {
-            return child_exit_during_load(argv[i + 2]);
+        } else if (a == "--child" && i + 3 < argc && std::string(argv[i + 1]) == "exit") {
+            return child_exit(argv[i + 2], argv[i + 3]);
         } else if (a == "--child" && i + 4 < argc && std::string(argv[i + 1]) == "dlclose") {
             g_case = "dlclose";
             return child_dlclose(argv[i + 2], argv[i + 3], argv[i + 4]);
