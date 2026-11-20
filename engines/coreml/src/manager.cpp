@@ -103,10 +103,11 @@ bool arm_exit_guard() {
     // The main thread's thread_local destructors are the first thing exit()
     // runs, before any static destructor or atexit handler (C++
     // [basic.start.term]; Darwin's exit() calls _tlv_exit() first, glibc's
-    // runs __call_tls_dtors first). They also run when the main thread ends
-    // with pthread_exit() and the process goes on (dispatch_main() does
-    // that): exit has then begun for this runtime, and later requests fail
-    // with kExitingReason (set_automatic_exit_guard(false) avoids this).
+    // runs __call_tls_dtors first). On Darwin they also run when the main
+    // thread ends with pthread_exit() and the process goes on
+    // (dispatch_main() does that): exit has then begun for this runtime, and
+    // later requests fail with kExitingReason (set_automatic_exit_guard(false)
+    // avoids this). glibc does not run them there.
     thread_local ExitGuard guard;
     (void) guard;
     g_guard_armed.store(true, std::memory_order_relaxed);

@@ -8,6 +8,7 @@
 
 #include "qvac_coreml/manager.h"
 
+#include "device.h"
 #include "hints.h"
 #include "runtime.h"
 #include "sha256.h"
@@ -2630,21 +2631,25 @@ int child_dlclose(const std::string & mode, const std::string & plugin, const st
         return 3;
     }
     if (mode == "slot-only") {
-        // Control: macOS never unloads an image that holds Objective-C
-        // classes (this one does), pinned or not, so there the check can
-        // only show that nothing breaks; Linux unloads it.
-        dlclose(h);
-        if (dlopen(plugin.c_str(), RTLD_NOW | RTLD_NOLOAD) != nullptr) return 7;
-        h = dlopen(plugin.c_str(), RTLD_NOW | RTLD_LOCAL);
-        if (!h) return 3;
-        using StartFn = int (*)(const char *);
-        auto make = reinterpret_cast<StartFn>(dlsym(h, "qvac_coreml_plugin_slot_only"));
-        if (!make || make(dir.c_str()) != 0) return 3;
-        dlclose(h);
-        if (dlopen(plugin.c_str(), RTLD_NOW | RTLD_NOLOAD) != nullptr) {
-            std::fprintf(stderr, "dlclose slot-only: the image was pinned with no work and no exit guard\n");
+        // The image's pin state, read from the plugin itself: unloading is not
+        // observable (macOS never unloads a module holding Objective-C classes,
+        // and GCC's unique symbols keep it mapped on Linux).
+        using SlotFn = int (*)(const char *, int);
+        using IntFn = int (*)();
+        auto make = reinterpret_cast<SlotFn>(dlsym(h, "qvac_coreml_plugin_slot_only"));
+        auto pin = reinterpret_cast<IntFn>(dlsym(h, "qvac_coreml_plugin_pin_state"));
+        if (!make || !pin) return 3;
+        make(dir.c_str(), 1);
+        if (pin() != static_cast<int>(detail::PinState::untried)) {
+            std::fprintf(stderr, "dlclose slot-only: a slot made on a worker thread pinned the image\n");
             return 6;
         }
+        make(dir.c_str(), 0);  // the main thread: pins and arms
+        if (pin() != static_cast<int>(detail::PinState::pinned)) {
+            std::fprintf(stderr, "dlclose slot-only: a slot made on the main thread did not pin the image\n");
+            return 8;
+        }
+        dlclose(h);
         return 0;
     }
     using StartFn = int (*)(const char *);
@@ -2702,13 +2707,7 @@ void case_dlclose() {
     }
     for (const char * mode : {"immediate", "deferred", "in-flight", "slot-only"}) {
         const std::string dir = make_temp_dir();
-        int rc = run_child({"--child", "dlclose", mode, g_plugin, dir});
-#if defined(__APPLE__)
-        if (rc == 7 && std::string(mode) == "slot-only") {
-            std::printf("    dlclose slot-only: this platform never unloads the module; unpinned image not observable\n");
-            rc = 0;
-        }
-#endif
+        const int rc = run_child({"--child", "dlclose", mode, g_plugin, dir});
         if (rc != 0) std::fprintf(stderr, "    dlclose %s: child exit %d\n", mode, rc);
         CHECK(rc == 0);
         std::error_code ec;
@@ -2743,8 +2742,9 @@ void case_dlclose() {
 //                   shutdown_for_exit(5 s): it returns after the load did,
 //                   and a fresh request then fails with kExitingReason.
 //   pthread-exit:   the main thread arms the guard and ends with
-//                   pthread_exit(); a request on a surviving thread fails
-//                   with kExitingReason.
+//                   pthread_exit(); on Darwin a request on a surviving thread
+//                   then fails with kExitingReason; glibc does not run the
+//                   main thread's thread_local destructors there, so it loads.
 //   pthread-exit-optout: the same after set_automatic_exit_guard(false): the
 //                   request loads.
 //   fork:           a child of fork() made while a job runs has no worker:
@@ -3048,7 +3048,16 @@ void case_exit_during_load() {
     {
         const ExitRun r = run_exit_child("pthread-exit");
         CHECK(r.rc == 0);
+#if defined(__APPLE__)
+        // Darwin runs the main thread's thread_local destructors at
+        // pthread_exit(): exit has begun for the runtime.
         CHECK(r.file("fresh") == refused);
+#else
+        // glibc does not run the main thread's thread_local destructors when
+        // it ends with pthread_exit() (only its pthread keys are freed), so
+        // the guard does not run and Core ML keeps working.
+        CHECK(r.file("fresh") == "ready|");
+#endif
         exit_cleanup(r);
     }
     {

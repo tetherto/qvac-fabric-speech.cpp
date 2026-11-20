@@ -33,8 +33,8 @@ PARAKEET_API bool coreml_shutdown_for_exit(int64_t timeout_ms);
 
 // false: the main thread is not armed automatically. For hosts whose main
 // thread may end with pthread_exit() while the process goes on
-// (dispatch_main()); after an armed main thread ends, later Core ML requests
-// fail with "the process is exiting". Such hosts call
+// (dispatch_main()): on Apple platforms, after an armed main thread ends,
+// later Core ML requests fail with "the process is exiting". Such hosts call
 // coreml_shutdown_for_exit() before they exit.
 PARAKEET_API void coreml_set_automatic_exit_guard(bool on);
 

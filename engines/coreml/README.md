@@ -81,12 +81,14 @@ without Core ML):
 - `coreml_shutdown_for_exit(timeout_ms)`: stops new work and waits, from any
   thread, before the host exits, for example from the host's exit handler
   while its main queue can still make progress.
-- `coreml_set_automatic_exit_guard(false)`: no automatic arming. A main thread
-  that ends with `pthread_exit()` while the process goes on
-  (`dispatch_main()` does this) runs the guard's destructor too, and the
-  runtime then starts no new work for the rest of the process: later requests
-  fail with the reason above. Hosts built that way turn automatic arming off
-  and call the shutdown hook before they exit.
+- `coreml_set_automatic_exit_guard(false)`: no automatic arming. On Apple
+  platforms a main thread that ends with `pthread_exit()` while the process
+  goes on (`dispatch_main()` does this) runs the guard's destructor too, and
+  the runtime then starts no new work for the rest of the process: later
+  requests fail with the reason above. Hosts built that way turn automatic
+  arming off and call the shutdown hook before they exit. (glibc does not run
+  the main thread's `thread_local` destructors at `pthread_exit()`, so there
+  the guard does not run and nothing stops.)
 
 **Cost.** Only a process that ends with a job in flight pays: it exits after
 the rest of that job, at most the longest cold load (about 1 s for the

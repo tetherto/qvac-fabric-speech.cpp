@@ -218,8 +218,10 @@ bool shutdown_for_exit(std::chrono::milliseconds bound);
 
 // With false, the main thread is no longer armed automatically. For hosts
 // whose main thread may end with pthread_exit() while the process goes on
-// (dispatch_main() does that): an armed guard would stop Core ML work for the
-// rest of the process. Such hosts call shutdown_for_exit() before exiting.
+// (dispatch_main() does that): on Apple platforms an armed guard then runs and
+// stops Core ML work for the rest of the process (glibc does not run the main
+// thread's thread_local destructors there). Such hosts call
+// shutdown_for_exit() before exiting.
 void set_automatic_exit_guard(bool on);
 
 }  // namespace QVAC_COREML_NS
