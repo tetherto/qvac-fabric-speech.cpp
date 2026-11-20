@@ -362,6 +362,7 @@ set(TTS_CPP_LIB_SOURCES
     src/parler/dac_accel.cpp
     src/parler/dac_coreml.cpp
     src/parler/dac_source.cpp
+    src/coreml_exit.cpp
     src/parler/engine.cpp
     # Audio8 engine (DualAR semantic LM + DAC-style codec with in-process cloning).
     src/audio8/unicode.cpp

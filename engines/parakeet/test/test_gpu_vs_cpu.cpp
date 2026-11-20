@@ -187,14 +187,14 @@ int main(int argc, char ** argv) {
     // ---- run encoder on both backends with the same mel ----
     std::fprintf(stderr, "[*] running CPU encoder...\n");
     EncoderOutputs out_cpu;
-    if (int rc = run_encoder(m_cpu, mel.data(), n_mel_frames, m_cpu.mel_cfg.n_mels, out_cpu); rc != 0) {
+    if (int rc = run_encoder(m_cpu, mel.data(), n_mel_frames, m_cpu.mel_cfg.n_mels, out_cpu, parakeet::EncoderRoute::ggml()); rc != 0) {
         std::fprintf(stderr, "error: CPU run_encoder rc=%d\n", rc);
         return 30;
     }
 
     std::fprintf(stderr, "[*] running GPU encoder...\n");
     EncoderOutputs out_gpu;
-    if (int rc = run_encoder(m_gpu, mel.data(), n_mel_frames, m_gpu.mel_cfg.n_mels, out_gpu); rc != 0) {
+    if (int rc = run_encoder(m_gpu, mel.data(), n_mel_frames, m_gpu.mel_cfg.n_mels, out_gpu, parakeet::EncoderRoute::ggml()); rc != 0) {
         std::fprintf(stderr, "error: GPU run_encoder rc=%d\n", rc);
         return 31;
     }

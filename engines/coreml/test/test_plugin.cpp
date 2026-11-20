@@ -8,11 +8,14 @@
 
 #include "qvac_coreml/manager.h"
 
+#include "device.h"
+
 #include <atomic>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 
 using namespace QVAC_COREML_NS;
 
@@ -72,6 +75,31 @@ QVAC_PLUGIN_EXPORT int qvac_coreml_plugin_start_deferred(const char * dir) {
     (*g_slot)->request(Priority::prewarm);
     return 0;
 }
+
+// A slot that can load, made and dropped with nothing requested: on a worker
+// thread (no exit guard can be armed there) it leaves the image unpinned; on
+// the main thread it pins the image and arms the guard.
+QVAC_PLUGIN_EXPORT int qvac_coreml_plugin_slot_only(const char * dir, int on_worker) {
+    const std::string d = dir;
+    auto make = [d] { Manager::instance()->make_slot(plugin_spec(d.c_str()), SlotPolicy{}); };
+    if (on_worker) {
+        std::thread(make).join();
+    } else {
+        make();
+    }
+    return 0;
+}
+
+// arm_exit_guard() from a worker thread (on_worker) or the calling thread.
+QVAC_PLUGIN_EXPORT int qvac_coreml_plugin_arm(int on_worker) {
+    if (!on_worker) return arm_exit_guard() ? 1 : 0;
+    int r = -1;
+    std::thread([&r] { r = arm_exit_guard() ? 1 : 0; }).join();
+    return r;
+}
+
+// This image's pin state (detail::PinState).
+QVAC_PLUGIN_EXPORT int qvac_coreml_plugin_pin_state() { return static_cast<int>(detail::pin_state()); }
 
 QVAC_PLUGIN_EXPORT void qvac_coreml_plugin_power_restored() {
     g_low_power = false;

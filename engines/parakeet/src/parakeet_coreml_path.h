@@ -64,4 +64,14 @@ struct CoremlFrameRange {
 uint64_t coreml_diarizer_resident_bytes(const std::vector<CoremlDiarizerBundle> & bundles,
                                         const std::vector<CoremlFrameRange> & ranges);
 
+// The bundles calls in `ranges` can load (the ones resident_bytes charges).
+std::vector<CoremlDiarizerBundle> coreml_diarizer_loaded_bundles(
+    const std::vector<CoremlDiarizerBundle> & bundles, const std::vector<CoremlFrameRange> & ranges);
+
+// The capacities construction loads, as a range for the bundle rule above:
+// the smallest capacity for the minimal set (prewarm minimal or predicted),
+// every capacity for prewarm all, none for prewarm none.
+enum class CoremlDiarizerPrewarm { none, minimal, all };
+std::vector<CoremlFrameRange> coreml_diarizer_construction_ranges(CoremlDiarizerPrewarm prewarm);
+
 }  // namespace parakeet

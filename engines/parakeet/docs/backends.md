@@ -572,9 +572,11 @@ Engine, since `all` is only a preference that may place them on the GPU;
 `PARAKEET_COREML_COMPUTE_UNITS=all` restores Core ML's own choice.
 
 A missing sidecar, load failure, incompatible shape, or runtime prediction
-failure falls back to the ggml encoder. A failed AOSC bypass prediction also
-quarantines that sidecar for the lifetime of the engine, so later chunks go
-directly to ggml. Set `PARAKEET_COREML_DISABLE=1` to
+failure falls back to the ggml encoder. An incompatible shape (an input longer
+than a fixed sidecar's capacity or window) affects only that call: the sidecar
+stays loaded for the next one. A failed prediction (encoder or AOSC bypass)
+retires that sidecar for the rest of the process, so later calls go directly
+to ggml. Set `PARAKEET_COREML_DISABLE=1` to
 force ggml, including for parity or benchmarking. Setting
 `EngineOptions::long_form_window_frames` below zero disables automatic
 windowing; an input larger than a fixed Core ML sidecar then falls back to the

@@ -43,6 +43,33 @@ bool parakeet_coreml_preserves_encoder_padding(const struct parakeet_coreml_cont
 struct parakeet_coreml_context * parakeet_coreml_init_with_units_env(const char * path_mlmodelc,
                                                                      const char * units_env);
 
+// Loads with resolved compute units (`all`, `cpu_and_ane`, `cpu_and_gpu`,
+// `cpu_only`; null selects the export's own default, see
+// parakeet_coreml_encoder_prefers_ane). Never reads the environment.
+struct parakeet_coreml_context * parakeet_coreml_init_with_units(const char * path_mlmodelc,
+                                                                 const char * units);
+
+// The same load, reporting why it failed in `error` (may be null).
+struct parakeet_coreml_load_error;
+struct parakeet_coreml_context * parakeet_coreml_init_with_units_error(
+    const char * path_mlmodelc, const char * units, struct parakeet_coreml_load_error * error);
+
+// True when the bundle is the fixed-window Neural Engine export (its
+// metadata declares the pad_mask / key_bias inputs), read without loading
+// it: its default compute units are cpu_and_ane, every other export's are all.
+bool parakeet_coreml_encoder_prefers_ane(const char * path_mlmodelc);
+
+// The bundle's export kind from its metadata.json, without loading it: 1 the
+// fixed-window Neural Engine export, 0 conclusively another export (its input
+// schema names inputs, without the Neural Engine ones), -1 unknown (missing,
+// unreadable or incomplete metadata; load the model to find out).
+int parakeet_coreml_encoder_export_kind(const char * path_mlmodelc);
+
+// Bytes of every fixed-shape input and output metadata.json declares (one
+// function's I/O arrays, which the wrapper allocates at their declared
+// shape), or 0 when the metadata does not declare complete fixed shapes.
+uint64_t parakeet_coreml_declared_io_bytes(const char * path_mlmodelc);
+
 // Release a context created by parakeet_coreml_init. Safe to call with nullptr.
 void parakeet_coreml_free(struct parakeet_coreml_context * ctx);
 

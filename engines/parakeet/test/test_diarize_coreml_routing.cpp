@@ -5,6 +5,7 @@
 // GGUF beside subsets of its bundles in temporary directories; exits 77 when
 // the smallest bundle is missing.
 
+#include "coreml_test_options.h"
 #include "parakeet/engine.h"
 
 #include <algorithm>
@@ -128,6 +129,7 @@ std::vector<float> tones(int seconds) {
 bool run(const fs::path & gguf, const char * staging, bool expects_sidecar,
          const std::vector<Case> & cases) {
     parakeet::EngineOptions options;
+    options.coreml = coreml_ready_options();
     options.model_gguf_path = gguf.string();
     options.n_gpu_layers = kGpuLayers;
     parakeet::Engine engine(options);

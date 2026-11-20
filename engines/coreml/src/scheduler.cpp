@@ -368,8 +368,30 @@ void Runtime::subscribe_prepare_locked(const std::shared_ptr<SlotCore> & c, Prio
     c->state = SlotState::queued;
 }
 
+bool Runtime::refuse_after_exit_locked(const std::shared_ptr<SlotCore> & c, Graveyard & gy) {
+    // After exit began no job starts, so a slot with no model fails with the
+    // reason instead of staying idle or queued for good: a fresh request, and
+    // a slot whose job never started (unsubscribed; a job left with no
+    // subscriber is cancelled). A ready slot keeps its model; a slot whose
+    // job is running keeps it, and that job still publishes.
+    if (c->spec.route == Route::none || c->model || is_terminal(c->state)) return false;
+    if (c->job && c->job->started) return false;
+    unsubscribe_locked(c, gy);
+    c->state = SlotState::failed;
+    c->error = Error::deterministic(kExitingReason);
+    c->reason = c->error.message;
+    c->queued_behind = false;
+    note_refused_request();
+    bump_locked();
+    return true;
+}
+
 void Runtime::request_locked(const std::shared_ptr<SlotCore> & c, Priority p, bool nd, Graveyard & gy) {
-    if (stopping_ || exiting()) return;
+    if (stopping_) return;
+    if (exiting()) {
+        refuse_after_exit_locked(c, gy);
+        return;
+    }
     if (c->model && c->model->retired()) {
         drop_model_locked(*c, gy);
         c->state = SlotState::retired;
@@ -423,6 +445,12 @@ void Runtime::pin_for_work() {
     // worker or publish a job: the caller still holds its reference to this
     // image, so a dlclose right after it returns cannot unmap running code.
     if (cfg.pin_image) pin_image();
+    // The guard's destructor runs at exit, so only an image that stays mapped
+    // may arm it.
+    const PinState ps = pin_state();
+    if (ps != PinState::pinned && ps != PinState::main_image) return;
+    register_fork_handler_once();
+    if (automatic_exit_guard()) arm_exit_guard();
 }
 
 void Runtime::request(const std::shared_ptr<SlotCore> & c, Priority p, bool nd) {
@@ -864,15 +892,31 @@ void Runtime::worker_main(JobKind kind) {
         // instance; moved into the job below without releasing mu.
         std::shared_ptr<SharedModel> adopt;
         bool handed_off = false;
-        if (!running_ && !exiting()) {
+        // Counted before anything is picked or screened, and released only
+        // after the job and after the models this pass dropped (pool victims,
+        // cancelled jobs' instances) are released outside mu: an exit that
+        // begins meanwhile either waits for that work or makes enter_job()
+        // refuse it, and then nothing is picked or screened.
+        bool counted = enter_job();
+        if (counted && !running_) {
             job = pick_locked(now, wake, kind == JobKind::load, adopt, gy);
+            if (job && job->kind == kind) QVAC_COREML_TEST_HOOK(job_selected);
+            // Admission is decided again where the job would commit to
+            // starting: an exit (or shutdown_for_exit) that began during the
+            // selection, while this worker was counted, leaves the job
+            // queued for good. A retained adoption is released outside mu.
+            if (job && exiting()) {
+                gy.keep(adopt);
+                adopt.reset();
+                job.reset();
+            }
             if (job && job->kind != kind) {
                 handoff_ = static_cast<int>(job->kind);
                 work_cv.notify_all();
                 job.reset();  // the other worker admits the job again
                 handed_off = true;
             }
-        } else if (running_ && !exiting()) {
+        } else if (counted) {
             // The other worker holds the gate: requests and the periodic
             // memory recheck are still screened, without selecting a job.
             screen_locked(now, wake, gy);
@@ -891,6 +935,8 @@ void Runtime::worker_main(JobKind kind) {
             lk.lock();
             if (running_ == job) running_.reset();
             bump_locked();
+            job.reset();
+            leave_job();
             continue;
         }
         if (handed_off || !gy.items.empty()) {
@@ -898,7 +944,10 @@ void Runtime::worker_main(JobKind kind) {
             if (handed_off) QVAC_COREML_TEST_HOOK(handed_off);
             gy.items.clear();
             lk.lock();
+            if (counted) leave_job();
             if (gen_ != seen) continue;
+        } else if (counted) {
+            leave_job();
         }
         work_cv.wait_until(lk, wake, [&] {
             return stopping_ || gen_ != seen || handoff_ == static_cast<int>(kind);
@@ -1299,7 +1348,14 @@ Acquired Runtime::acquire(const std::shared_ptr<SlotCore> & c, Demand d, std::op
                 return out;
             }
             out.pending = true;
-            if (d == Demand::if_ready || exiting() || stopping_) return out;
+            if (d == Demand::if_ready || stopping_) return out;
+            if (exiting()) {
+                // No job starts any more: a slot whose job never started
+                // fails now (strict throws above on the next pass); one whose
+                // job is running waits for it as before.
+                if (refuse_after_exit_locked(c, gy)) continue;
+                if (!c->job || !c->job->started) return out;
+            }
             if (cancel && cancel->load()) return out;
             if (wait == Wait::call) {
                 if (st == SlotState::deferred_memory) {
