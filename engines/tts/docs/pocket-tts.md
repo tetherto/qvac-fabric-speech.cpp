@@ -380,6 +380,31 @@ With both sidecars, generation is limited by the step, at about 5.5 ms per
 80 ms frame. On the default CPU backend, the remaining cost is ggml's text
 prefill for each chunk; more `--threads` reduce it.
 
+Generated sidecars, load time and warm speed, on an Apple M2 (macOS 27.2.1)
+with the English 2026-04 bundle (no prebuilt sidecar), `pocket-cli --gpu`
+(ggml on Metal for whatever Core ML does not run), one 156-character
+two-sentence text, seed 42. Each process runs from a re-signed copy of the
+binary under a fresh host identity (`scripts/coreml/fresh-host.sh`), after the
+Neural Engine compiler has gone quiet:
+
+| Configuration | Runs | Result |
+|---|---|---|
+| Metal (`POCKET_COREML_DISABLE=1`), first call | 10 | median 910.8 ms, MAD 18.4 |
+| Cold generate (empty cache, default options), first call | 10 | median 939.9 ms, MAD 15.3: 1.032 x Metal (band 1.05). The call runs on ggml while the step digests and Mimi queues |
+| Time to ready (`--coreml-wait construct --coreml-prewarm all`), construction | 5 | 6.53-6.80 s; both stages `ready` |
+| Cached startup (a primed cache, default options), first call | 5 | median 858.7 ms, 0.943 x Metal; construction 0.21 s |
+| Warm, generated vs the exporter's fp16 sidecars (context 1024), per-process medians of 5 runs | 3 + 3 | 692.1-694.8 vs 681.9-726.6 ms: 0.992 x (band 1.05) |
+| Warm, exporter fp16 step at context 512 vs 1024 (same decoder) | 3 + 3 | 0.829 x |
+| Peak footprint | | Metal 561-564 MB; time to ready 687-688 MB; cached 654-662 MB |
+| Disk | | Core ML cache 190.0 MB; Core ML's own compiled-model cache 169.1 MB |
+
+Every run but Metal checked that fit reports `coreml.disabled_reason = null`
+(no memory-degrade), and `--coreml-ignore-prebuilt` on the exporter's bundle
+plans the generated route. Only the context-1024 step is generated: a
+512-position step is 17 % faster warm but leaves every chunk whose voice,
+text and frames need more than 512 positions on ggml, and a second step
+template needs its own memory validation on every host.
+
 Tests:
 
 - `test/test_export_pocket_coreml.py` checks the PyTorch rebuilds on random
