@@ -124,13 +124,25 @@ bool defaults_to_neural_engine(const parakeet::ParakeetCtcModel & model) {
     return ane;
 }
 
+// PARAKEET_COREML_DIARIZER_DISABLE hides the diarizer: two loads with the
+// same options (and cache directory), the first with the variable clear and
+// a capacity serving, the second with it set and none.
 bool diarizer_env_hides_sidecars(const char * path) {
+    parakeet::CoremlOptions options = coreml_ready_options();
+    if (!g_cache_dir.empty()) options.cache_dir = g_cache_dir;
+    parakeet::ParakeetCtcModel shown;
+    const bool shown_loaded =
+        parakeet::load_from_gguf(path, shown, kThreads, kGpuLayers, false, "auto", options) == 0;
+    const int shown_capacity = shown_loaded ? largest_capacity(shown) : 0;
     set_env(kDiarizerDisableEnv, "1");
-    parakeet::ParakeetCtcModel model;
-    const bool loaded = parakeet::load_from_gguf(path, model, kThreads, kGpuLayers, false, "auto", coreml_ready_options()) == 0;
+    parakeet::ParakeetCtcModel hidden_model;
+    const bool loaded =
+        parakeet::load_from_gguf(path, hidden_model, kThreads, kGpuLayers, false, "auto", options) == 0;
     unset_env(kDiarizerDisableEnv);
-    const bool hidden = loaded && largest_capacity(model) == 0;
-    std::printf("[%s] diarizer-disable-env: coreml=%d\n", hidden ? "ok  " : "FAIL", hidden ? 0 : 1);
+    const int hidden_capacity = loaded ? largest_capacity(hidden_model) : -1;
+    const bool hidden = shown_capacity > 0 && hidden_capacity == 0;
+    std::printf("[%s] diarizer-disable-env: capacity %d with the variable clear, %d with it set\n",
+                hidden ? "ok  " : "FAIL", shown_capacity, hidden_capacity);
     return hidden;
 }
 
