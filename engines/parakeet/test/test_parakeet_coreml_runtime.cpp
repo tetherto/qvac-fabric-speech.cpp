@@ -14,6 +14,9 @@
 //   fit-layouts    --eu-gguf EU.gguf --sortformer-gguf S.gguf (v2.1): fit-layouts
 //   sortformer     --sortformer-gguf S.gguf (v2.1, with its 410-frame
 //                  `-diarizer-410.mlmodelc`) --wav W.wav: strict-too-wide
+//   pending-encoder --sub-gguf T.gguf --sub-encoder E.mlmodelc --sub-decoder
+//                  D.mlmodelc --wav W.wav (a standard TDT model, its encoder
+//                  and decoder sidecars): decoder-ready-encoder-pending
 //
 //   ggml-unchanged        a call whose sidecar is still loading runs on ggml
 //                         (coreml_pending) and its transcript equals use = off
@@ -691,6 +694,34 @@ void case_encoderless(const std::string & gguf) {
 
 // The TDT fixture's encoder is a fixed 1501-frame export (15 s). 30 s is
 // above it, so with windowing disabled the encoder cannot serve the call.
+// decoder-ready-encoder-pending: a standard TDT model whose decoder sidecar
+// loaded at construction while its encoder sidecar is still loading. The
+// call runs the sequential ggml plan (coreml_pending, no independent
+// segments, no Core ML decoder lanes) and transcribes like use = off.
+void case_pending_encoder(const std::string & gguf, const std::string & encoder, const std::string & decoder,
+                          const std::string & wav) {
+    const fs::path dir = fresh_dir("pending-encoder");
+    const fs::path model = dir / "m.gguf";
+    fs::create_symlink(fs::absolute(gguf), model);
+    fs::create_directory_symlink(fs::absolute(encoder), dir / "m-encoder.mlmodelc");
+    fs::create_directory_symlink(fs::absolute(decoder), dir / "m-decoder.mlmodelc");
+    parakeet::Engine ggml_engine(engine_options(model.string(), off()));
+    const parakeet::EngineResult reference = ggml_engine.transcribe(wav);
+    const parakeet::EngineResult first = parakeet::Engine(engine_options(model.string(), lazy(dir / "cache")))
+                                             .transcribe(wav);
+    std::printf("       pending call: backend=%s pending=%d segment_plan_ms=%.3f decoder_coreml=%d\n",
+                first.encoder_backend.c_str(), first.coreml_pending ? 1 : 0, first.segment_plan_ms,
+                first.decoder_used_coreml ? 1 : 0);
+    expect(first.encoder_backend == "ggml" && first.coreml_pending && !first.encoder_used_coreml,
+           "decoder-ready-encoder-pending: the call runs on ggml, coreml_pending");
+    expect(first.segment_plan_ms == 0.0 && !first.decoder_used_coreml,
+           "decoder-ready-encoder-pending: the sequential ggml plan, not independent segments");
+    expect(first.text == reference.text && first.token_ids == reference.token_ids,
+           "decoder-ready-encoder-pending: the transcript equals use = off");
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
 void case_capacity_miss(const std::string & gguf, const std::string & wav) {
     std::vector<float> source;
     int rate = 0;
@@ -782,6 +813,7 @@ void case_capacity_miss(const std::string & gguf, const std::string & wav) {
 
 int main(int argc, char ** argv) {
     std::string which = "transcription", gguf, wav, diar_gguf, encoderless, eu_gguf, sortformer_gguf;
+    std::string sub_gguf, sub_encoder, sub_decoder;
     for (int i = 1; i + 1 < argc; i += 2) {
         const std::string a = argv[i];
         if (a == "--case") which = argv[i + 1];
@@ -791,6 +823,9 @@ int main(int argc, char ** argv) {
         else if (a == "--encoderless-gguf") encoderless = argv[i + 1];
         else if (a == "--eu-gguf") eu_gguf = argv[i + 1];
         else if (a == "--sortformer-gguf") sortformer_gguf = argv[i + 1];
+        else if (a == "--sub-gguf") sub_gguf = argv[i + 1];
+        else if (a == "--sub-encoder") sub_encoder = argv[i + 1];
+        else if (a == "--sub-decoder") sub_decoder = argv[i + 1];
         else {
             std::fprintf(stderr, "unknown argument %s\n", a.c_str());
             return 2;
@@ -801,15 +836,19 @@ int main(int argc, char ** argv) {
                          (which == "encoderless" && !encoderless.empty()) ||
                          (which == "eu-labels" && !eu_gguf.empty() && !wav.empty()) ||
                          (which == "fit-layouts" && !eu_gguf.empty() && !sortformer_gguf.empty()) ||
-                         (which == "sortformer" && !sortformer_gguf.empty() && !wav.empty());
+                         (which == "sortformer" && !sortformer_gguf.empty() && !wav.empty()) ||
+                         (which == "pending-encoder" && !sub_gguf.empty() && !sub_encoder.empty() &&
+                          !sub_decoder.empty() && !wav.empty());
     if (!ok_args) {
         std::fprintf(stderr, "usage: %s [--case transcription] --gguf TDT.gguf --wav W.wav\n"
                              "       %s --case diarizer --diar-gguf D.gguf --wav W.wav --gguf TDT.gguf\n"
                              "       %s --case encoderless --encoderless-gguf E.gguf\n"
                              "       %s --case eu-labels --eu-gguf EU.gguf --wav W.wav\n"
                              "       %s --case fit-layouts --eu-gguf EU.gguf --sortformer-gguf S.gguf\n"
-                             "       %s --case sortformer --sortformer-gguf S.gguf --wav W.wav\n",
-                     argv[0], argv[0], argv[0], argv[0], argv[0], argv[0]);
+                             "       %s --case sortformer --sortformer-gguf S.gguf --wav W.wav\n"
+                             "       %s --case pending-encoder --sub-gguf T.gguf --sub-encoder E.mlmodelc "
+                             "--sub-decoder D.mlmodelc --wav W.wav\n",
+                     argv[0], argv[0], argv[0], argv[0], argv[0], argv[0], argv[0]);
         return 2;
     }
     try {
@@ -831,6 +870,8 @@ int main(int argc, char ** argv) {
             case_fit_layouts(eu_gguf, sortformer_gguf);
         } else if (which == "sortformer") {
             case_strict_too_wide(sortformer_gguf, wav);
+        } else if (which == "pending-encoder") {
+            case_pending_encoder(sub_gguf, sub_encoder, sub_decoder, wav);
         } else {
             case_encoderless(encoderless);
         }
