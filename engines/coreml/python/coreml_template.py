@@ -433,6 +433,64 @@ def recipe_str_metas(recipe_text):
     return keys
 
 
+def recipe_source_types(recipe_text):
+    """name -> the ggml types the recipe's `source` line accepts, in order."""
+    out = {}
+    for line in recipe_logical_lines(recipe_text):
+        m = re.match(r'source[ \t]+"([^"]+)"[ \t]+([A-Za-z0-9_,]+)[ \t]*\[', line)
+        if m:
+            out[m.group(1)] = [t.lower() for t in m.group(2).split(",")]
+    return out
+
+
+# Block sizes of the types twin Q may take (elements per block along ne[0]).
+_BLOCK = {"f32": 1, "f16": 1, "bf16": 1}
+
+
+def _block_size(t):
+    if t in _BLOCK:
+        return _BLOCK[t]
+    import gguf
+
+    return gguf.GGML_QUANT_SIZES[gguf.GGMLQuantizationType[t.upper()]][0]
+
+
+def q_twin_tensor_types(manifest, source_types, quant_types):
+    """`twin --tensor-type` entries for twin Q: each tensor the reference
+    holds in f32 whose recipe source accepts a lower precision takes the first
+    of `quant_types` the recipe accepts, else the recipe's first type below
+    f32 (so a template whose sources accept f16 has its f16 conversion
+    exercised, not only f32). Tensors below f32 in the reference keep the
+    twin writer's own rotation; f32-only sources stay f32."""
+    wanted = [t.strip().lower() for t in quant_types.split(",") if t.strip()]
+    entries = {}
+    for t in manifest.get("tensors", []):
+        name, ref = t.get("name"), str(t.get("type", "")).lower()
+        allowed = source_types.get(name)
+        if ref != "f32" or not allowed:
+            continue
+        lower = [x for x in allowed if x != "f32" and t["ne"][0] % _block_size(x) == 0]
+        pick = next((x for x in wanted if x in lower), lower[0] if lower else None)
+        if pick:
+            entries[name] = pick
+    return entries
+
+
+def verified_types(path):
+    """name -> ggml type name of every tensor the GGUF at `path` holds."""
+    import gguf
+
+    return {t.name: t.tensor_type.name.lower() for t in gguf.GGUFReader(str(path)).tensors}
+
+
+def type_summary(types):
+    """'f16 x119, f32 x8' for a name -> type map."""
+    counts = {}
+    for t in types.values():
+        counts[t] = counts.get(t, 0) + 1
+    return ", ".join(f"{t} x{n}" for t, n in sorted(counts.items()))
+
+
 def twin_sets(manifest, keys, label):
     """`twin --set` values giving each GGUF string in `keys` a twin-specific
     ASCII value of its reference value's UTF-8 byte length (a `patch str`
@@ -536,10 +594,12 @@ def run(cmd, what, capture=True, env=None):
     return p.stdout if capture else ""
 
 
-def make_twin(tool, manifest, seed, types, out, sets=()):
+def make_twin(tool, manifest, seed, types, out, sets=(), tensor_types=None):
     cmd = [tool, "twin", "--manifest", manifest, "--seed", str(seed), "--types", types, "-o", out]
     for s in sets:
         cmd += ["--set", s]
+    for name, t in sorted((tensor_types or {}).items()):
+        cmd += ["--tensor-type", f"{name}={t}"]
     run(cmd, f"twin seed {seed}")
     return out
 
@@ -875,10 +935,10 @@ def cmd_suggest(a):
     return 0
 
 
-def _export_twin(tool, tdir_manifest, exporter, seed, types, work, python, root, label, sets=()):
-    twin = make_twin(tool, tdir_manifest, seed, types, work / f"twin-{label}.gguf", sets)
+def _export_twin(tool, tdir_manifest, exporter, seed, types, work, python, root, label, sets=(), tensor_types=None):
+    twin = make_twin(tool, tdir_manifest, seed, types, work / f"twin-{label}.gguf", sets, tensor_types)
     feed = twin
-    if types != "f32":
+    if types != "f32" or tensor_types:
         feed = work / f"twin-{label}-f32.gguf"
         run([tool, "f32", twin, "-o", feed], f"f32 of twin {label}")
     pkg = run_exporter(exporter, feed, work / f"export-{label}", python, root)
@@ -1103,18 +1163,33 @@ def check_template(tool, tdir, python=None, root=None, quant_types="q8_0", work=
     # declares (as `extract` does for A and B), so a template that baked one
     # checkpoint's string into its spec instead of patching it fails B and Q.
     recipe = tdir / "recipe.txt"
-    str_keys = recipe_str_metas(recipe.read_text())
-    manifest = load_manifest(tdir / "reference-gguf.json") if str_keys else {}
+    recipe_text = recipe.read_text()
+    str_keys = recipe_str_metas(recipe_text)
+    manifest = load_manifest(tdir / "reference-gguf.json")
+    # Twin Q holds the lower precisions the recipe accepts; the exporter sees
+    # its f32 expansion.
+    q_types = q_twin_tensor_types(manifest, recipe_source_types(recipe_text), quant_types)
     owned = work is None
     work = Path(work or tempfile.mkdtemp(prefix="qvac-coreml-report-"))
     try:
         twins = {}
         for label, seed, types in cases:
             r = {"template": tj.get("id", tdir.name), "twin": label, "seed": seed, "types": types}
+            forced = q_types if label == "Q" else None
             twin, pkg = _export_twin(tool, tdir / "reference-gguf.json", exporter, seed, types, work, python, root,
-                                     label.lower(), twin_sets(manifest, str_keys, label.lower()))
+                                     label.lower(), twin_sets(manifest, str_keys, label.lower()), forced)
             twins[label] = twin
+            # The types the twin really holds, checked against the plan: a
+            # gate that claims a precision must have exercised it.
+            held = verified_types(twin)
+            r["verified_types"] = type_summary(held)
+            wrong = sorted(n for n, t in (forced or {}).items() if held.get(n) != t)
+            if label != "Q":
+                wrong += sorted(n for n, t in held.items() if t != "f32")
             r.update(compare_packages(tool, tdir, twin, pkg, work, label.lower()))
+            if wrong:
+                r["wrong_types"] = wrong
+                r["pass"] = False
             if label == "B":
                 # A tensor equal in twins A and B is one these gates cannot
                 # check (the exporter may fold it into the program).
@@ -1206,11 +1281,14 @@ def cmd_report(a):
         for r in res:
             ok &= r["pass"]
             status = "PASS" if r["pass"] else "FAIL"
-            extra = r.get("error") or (f"spec differs at {r['spec_diff'][:3]}" if r.get("spec_diff") else
+            extra = r.get("error") or (f"tensors not in their planned type: {r['wrong_types'][:5]}"
+                                       if r.get("wrong_types") else
+                                       f"spec differs at {r['spec_diff'][:3]}" if r.get("spec_diff") else
                                        f"tensors equal in twins A and B: {r['coinciding'][:5]}"
                                        if r.get("coinciding") else
                                        (r["verify"][-1] if r.get("verify") else r.get("verify_stderr", "")))
-            print(f"{status} {r['template']} twin {r['twin']} ({r.get('types', '-')}): {extra}")
+            held = f"; holds {r['verified_types']}" if r.get("verified_types") else ""
+            print(f"{status} {r['template']} twin {r['twin']} ({r.get('types', '-')}{held}): {extra}")
             if not r["pass"] and r.get("verify"):
                 for line in r["verify"]:
                     if "FAIL" in line or "error" in line.lower():

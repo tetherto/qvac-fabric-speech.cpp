@@ -499,6 +499,70 @@ class TwinTest(unittest.TestCase):
                 ctpl.check_twins_differ(a, b, "extract")
 
 
+class QTwinTypesTest(unittest.TestCase):
+    """Twin Q holds the lower precisions each recipe source accepts, even for
+    tensors the reference holds in f32, and the twin really holds them."""
+
+    RECIPE = ('mlrecipe 1\nsource "a" f32,f16 [4,32]\nsource "b" f32 [32]\n'
+              'source "c" f32,q8_0,f16 [4,32]\nsource "d" f32,q8_0,f16 [4,8]\nend\n')
+
+    def manifest(self):
+        return {"tensors": [{"name": "a", "type": "f32", "ne": [32, 4, 1, 1]},
+                            {"name": "b", "type": "f32", "ne": [32, 1, 1, 1]},
+                            {"name": "c", "type": "f32", "ne": [32, 4, 1, 1]},
+                            {"name": "d", "type": "f32", "ne": [8, 4, 1, 1]},
+                            {"name": "unread", "type": "f32", "ne": [32, 1, 1, 1]}]}
+
+    @needs(HAVE_GGUF, "gguf")
+    def test_plan(self):
+        src = ctpl.recipe_source_types(self.RECIPE)
+        self.assertEqual(src["c"], ["f32", "q8_0", "f16"])
+        plan = ctpl.q_twin_tensor_types(self.manifest(), src, "q8_0")
+        # a: only f16 below f32; b: f32-only; c: the requested q8_0; d: a row
+        # of 8 is not a q8_0 block, so f16; unread: no source, stays f32.
+        self.assertEqual(plan, {"a": "f16", "c": "q8_0", "d": "f16"})
+        self.assertEqual(ctpl.type_summary({"x": "f16", "y": "f32", "z": "f16"}), "f16 x2, f32 x1")
+
+    @needs(HAVE_GGUF, "gguf")
+    def test_repo_pocket_templates_exercise_f16(self):
+        # The Pocket templates' references are all f32; their recipes accept
+        # f16, so twin Q must convert every source tensor (the step's F16
+        # matrix tier included). Parler's recipe is f32-only: nothing lower.
+        root = HERE.parents[2] / "engines" / "tts" / "coreml-templates"
+        for tid, n in (("pocket-step-c1024", 119), ("pocket-mimi", 44), ("parler-dac-w128", 0)):
+            tdir = root / tid
+            plan = ctpl.q_twin_tensor_types(ctpl.load_manifest(tdir / "reference-gguf.json"),
+                                            ctpl.recipe_source_types((tdir / "recipe.txt").read_text()), "q8_0")
+            self.assertEqual(len(plan), n, tid)
+            self.assertTrue(all(t == "f16" for t in plan.values()), (tid, plan))
+        step = ctpl.q_twin_tensor_types(
+            ctpl.load_manifest(root / "pocket-step-c1024" / "reference-gguf.json"),
+            ctpl.recipe_source_types((root / "pocket-step-c1024" / "recipe.txt").read_text()), "q8_0")
+        self.assertEqual(step.get("transformer.layers.0.self_attn.in_proj.weight"), "f16")
+
+    @NEEDS_TOOL
+    def test_twin_holds_the_forced_types(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            out = tmp / "twin-q.gguf"
+            subprocess.run([TOOL, "twin", "--manifest", TOY_STATELESS / "reference-gguf.json", "--seed", "3",
+                            "--types", "q8_0", "--tensor-type", "toy.w1=f16", "--tensor-type", "toy.b1=q8_0",
+                            "-o", out], check=True, capture_output=True)
+            held = ctpl.verified_types(out)
+            self.assertEqual(held, {"toy.w1": "f16", "toy.b1": "q8_0", "toy.w2": "f32", "toy.b2": "f32"})
+            # Without --tensor-type an f32 reference stays f32 (the gap the
+            # forced types close).
+            subprocess.run([TOOL, "twin", "--manifest", TOY_STATELESS / "reference-gguf.json", "--seed", "3",
+                            "--types", "q8_0", "-o", out], check=True, capture_output=True)
+            self.assertEqual(set(ctpl.verified_types(out).values()), {"f32"})
+            for bad, msg in (("nope=f16", "no tensor nope"), ("toy.w1=q4_k", "row of 8"),
+                             ("toy.w1=f64", "cannot write")):
+                p = subprocess.run([TOOL, "twin", "--manifest", TOY_STATELESS / "reference-gguf.json", "--seed", "3",
+                                    "--types", "f32", "--tensor-type", bad, "-o", out], capture_output=True, text=True)
+                self.assertNotEqual(p.returncode, 0, bad)
+                self.assertIn(msg, p.stderr, bad)
+
+
 # Templates whose patch lines read GGUF tensors by name directly, with those
 # names. Other templates' patches may read metadata or resolve logical names,
 # so they are not listed here.
