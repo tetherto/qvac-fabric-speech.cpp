@@ -143,7 +143,8 @@ contracts; see the engine guides before exporting or deploying one.
 | AudioGen | ACE-Step VAE decoder | [AudioGen backends](engines/audiogen/docs/backends.md#core-ml-vae-decoder-sidecar) |
 | AudioGen | MiniMax conditioner projection, or explicit full-network Core ML (`coreml_profile_dir` + `coreml_compute_units`, macOS 15+) | [MiniMax Core ML](engines/audiogen/docs/backends.md#minimax-core-ml-conditioner) |
 
-Nemotron 3 Diarization diarizers need no exported bundle on macOS: a build with
+Nemotron 3 Diarization and Sortformer v2.1 diarizers need no exported bundle
+on macOS: a build with
 `PARAKEET_COREML=ON` (the generator, `PARAKEET_COREML_GENERATE`, is on by default
 on macOS) generates each diarizer capacity from the GGUF on the device in the
 background, compiles it and keeps it in a cache directory, and diarization runs
