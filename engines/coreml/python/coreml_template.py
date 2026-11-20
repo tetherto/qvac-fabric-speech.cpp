@@ -372,14 +372,50 @@ def str_sentinel(path, n):
     return out[:n].encode()
 
 
-def twin_string(key, label, n):
-    """The value of GGUF string `key` in twin `label`: n characters that differ per twin."""
-    out, c = "", 0
+# Every twin label a template's gates use: extract makes A and B, report A,
+# B and Q. The string table is built over all of them at once, so A's value
+# is the same in both.
+TWIN_LABELS = ("a", "b", "q")
+_TWIN_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+
+def _twin_candidate(key, label, n, counter):
+    """n characters from _TWIN_ALPHABET, derived from (key, label, counter)."""
+    out, block = [], 0
     while len(out) < n:
-        out += hashlib.sha256(b"qvac-coreml-twin-string\0" + label.encode() + b"\0" + key.encode() +
-                              struct.pack("<I", c)).hexdigest()
-        c += 1
-    return out[:n]
+        digest = hashlib.sha256(b"qvac-coreml-twin-string\0" + label.encode() + b"\0" + key.encode() +
+                                struct.pack("<II", counter, block)).digest()
+        out += [_TWIN_ALPHABET[b % len(_TWIN_ALPHABET)] for b in digest]
+        block += 1
+    return "".join(out[:n])
+
+
+def twin_string_table(refs):
+    """{label: {key: value}} for the GGUF strings `refs` ({key: reference
+    value}): for each key an ASCII value of the reference's UTF-8 byte length
+    (a `patch str` site's length is in bytes) per twin label. Deterministic,
+    and never ambiguous: a key's values differ between every two labels and
+    from the reference value (so extraction sees every declared string vary,
+    and a template that baked one twin's or the reference's value fails the
+    others), and within one label no two keys share a value (so a spec string
+    maps to one key). Raises TemplateError when the length leaves too few
+    distinct values."""
+    table = {label: {} for label in TWIN_LABELS}
+    for key in sorted(refs):
+        ref = refs[key]
+        n = len(ref.encode("utf-8"))
+        taken = {ref}
+        for label in TWIN_LABELS:
+            for counter in range(4096):
+                v = _twin_candidate(key, label, n, counter)
+                if v not in taken and v not in table[label].values():
+                    break
+            else:
+                raise TemplateError(f"twin strings: no distinct {n}-byte value left for GGUF string {key} "
+                                    f"(twin {label.upper()})")
+            taken.add(v)
+            table[label][key] = v
+    return table
 
 
 def recipe_logical_lines(recipe_text):
@@ -492,17 +528,17 @@ def type_summary(types):
 
 
 def twin_sets(manifest, keys, label):
-    """`twin --set` values giving each GGUF string in `keys` a twin-specific
-    ASCII value of its reference value's UTF-8 byte length (a `patch str`
-    site's length is in bytes)."""
+    """`twin --set` values giving each GGUF string in `keys` its value in
+    twin `label` from twin_string_table (distinct per label and per key)."""
     ref = {m.get("key"): m.get("value") for m in manifest.get("metadata", [])}
-    sets = []
+    refs = {}
     for k in keys:
         v = ref.get(k)
         if not isinstance(v, str) or not v:
             raise TemplateError(f"extract: the recipe reads GGUF string {k}, which the reference manifest lacks")
-        sets.append(f"{k}={twin_string(k, label, len(v.encode('utf-8')))}")
-    return sets
+        refs[k] = v
+    table = twin_string_table(refs)[label]
+    return [f"{k}={table[k]}" for k in keys]
 
 
 def differing_strings(spec_a, spec_b, strings=()):
@@ -518,10 +554,12 @@ def differing_strings(spec_a, spec_b, strings=()):
     for k in sorted(set(ua.keys()) & set(ub.keys())):
         if k in VOLATILE_METADATA or ua[k] == ub[k]:
             continue
-        for gguf_key, va, vb in strings:
-            if ua[k] == va and ub[k] == vb:
-                out.append((f"description.metadata.userDefined[{k!r}]", k, gguf_key))
-                break
+        keys = [gguf_key for gguf_key, va, vb in strings if ua[k] == va and ub[k] == vb]
+        if len(keys) > 1:
+            raise TemplateError(f"extract: spec string {k!r} matches GGUF strings {keys} in both twins; "
+                                "the mapping is ambiguous")
+        if keys:
+            out.append((f"description.metadata.userDefined[{k!r}]", k, keys[0]))
     return out
 
 

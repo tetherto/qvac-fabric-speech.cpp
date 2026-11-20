@@ -368,6 +368,41 @@ class StringPatchSiteTest(unittest.TestCase):
         self.assertEqual(len(value.encode("utf-8")), len("caf\u00e9\u00e9".encode("utf-8")))
         self.assertTrue(value.isascii())
 
+    def test_twin_strings_never_coincide(self):
+        # A one-byte value once gave every twin the same character (A, B and
+        # Q of this key all held "7"), so neither extraction nor report saw
+        # it vary. Each key's values now differ between labels and from the
+        # reference, and no two keys share a value within a label.
+        t = ctpl.twin_string_table({"pocket.variant145": "x"})
+        vals = [t[l]["pocket.variant145"] for l in ctpl.TWIN_LABELS]
+        self.assertEqual(len(set(vals)), len(vals), vals)
+        self.assertTrue(all(len(v) == 1 and v != "x" and v.isascii() for v in vals), vals)
+        manifest = {"metadata": [{"key": "pocket.variant145", "value": "x"}]}
+        self.assertEqual(ctpl.twin_sets(manifest, ["pocket.variant145"], "a"),
+                         [f"pocket.variant145={t['a']['pocket.variant145']}"])
+        refs = {f"k{i}": "z" for i in range(20)}
+        refs.update({"long": "y" * 64})
+        t = ctpl.twin_string_table(refs)
+        self.assertEqual(t, ctpl.twin_string_table(dict(reversed(list(refs.items())))))  # order-independent
+        for label in ctpl.TWIN_LABELS:
+            self.assertEqual(len(set(t[label].values())), len(refs), label)
+        for k in refs:
+            vs = [t[l][k] for l in ctpl.TWIN_LABELS]
+            self.assertEqual(len(set(vs)), len(vs), k)
+            self.assertNotIn(refs[k], vs)
+        # More one-byte strings than one-byte values: refused, not ambiguous.
+        with self.assertRaisesRegex(ctpl.TemplateError, "no distinct 1-byte value"):
+            ctpl.twin_string_table({f"k{i}": "z" for i in range(40)})
+
+    @needs(HAVE_CT, "coremltools")
+    def test_ambiguous_string_mapping_is_refused(self):
+        fixed = ("eps", ctpl.MIL_TYPE_FP16, "bytes", [1e-5])
+        a, b = mil_spec([fixed]), mil_spec([fixed])
+        a.description.metadata.userDefined["toy.id"] = "p"
+        b.description.metadata.userDefined["toy.id"] = "q"
+        with self.assertRaisesRegex(ctpl.TemplateError, "ambiguous"):
+            ctpl.differing_strings(a, b, [("toy.one", "p", "q"), ("toy.two", "p", "q")])
+
     def test_exporter_gguf_name(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
@@ -697,13 +732,13 @@ if mode == "spec":
     w1 = export_toy.read_weights(gguf, "stateless")["toy.w1"]
     spec.description.metadata.userDefined["qvac.toy.w1_sum"] = repr(float(w1.sum()))
     (data / "model.mlmodel").write_bytes(spec.SerializeToString(deterministic=True))
-elif mode == "hash":
-    # A spec string copied from a GGUF string (qvac_toy.source), as an
-    # exporter records a checkpoint hash.
+elif mode.startswith("hash"):
+    # A spec string copied from a GGUF string (qvac_toy.source, or the key
+    # after "hash:"), as an exporter records a checkpoint hash.
     import gguf as gguf_py
     from coremltools.proto import Model_pb2
 
-    field = gguf_py.GGUFReader(gguf).fields["qvac_toy.source"]
+    field = gguf_py.GGUFReader(gguf).fields[mode.split(":", 1)[1] if ":" in mode else "qvac_toy.source"]
     spec = Model_pb2.Model()
     spec.ParseFromString((data / "model.mlmodel").read_bytes())
     spec.description.metadata.userDefined["qvac.toy.source"] = bytes(field.parts[field.data[0]]).decode()
@@ -892,18 +927,18 @@ class ToyExtractTest(unittest.TestCase):
 
     SOURCE = "0123456789abcdef"  # the reference checkpoint's identity string
 
-    def add_source_string(self):
-        """Gives the toy's reference GGUF a string, qvac_toy.source, the template does not match on."""
+    def add_source_string(self, key="qvac_toy.source", value=None):
+        """Gives the toy's reference GGUF a string (qvac_toy.source) the template does not match on."""
         path = self.tdir / "reference-gguf.json"
         man = json.loads(path.read_text())
-        man["metadata"].append({"gguf_type": 8, "key": "qvac_toy.source", "value": self.SOURCE})
+        man["metadata"].append({"gguf_type": 8, "key": key, "value": self.SOURCE if value is None else value})
         path.write_text(json.dumps(man, indent=1) + "\n")
 
-    def declare_source(self, comment):
-        """Declares GGUF string qvac_toy.source in the toy's recipe, after its sources."""
+    def declare_source(self, comment, key="qvac_toy.source"):
+        """Declares GGUF string `key` in the toy's recipe, after its sources."""
         lines = (self.tdir / "recipe.txt").read_text().splitlines()
         at = max(i for i, l in enumerate(lines) if l.startswith("source ")) + 1
-        lines.insert(at, '  meta  "qvac_toy.source"\tstr' + ("   # the checkpoint's identity" if comment else ""))
+        lines.insert(at, f'  meta  "{key}"\tstr' + ("   # the checkpoint's identity" if comment else ""))
         (self.tdir / "recipe.txt").write_text("\n".join(lines) + "\n")
 
     def report(self):
@@ -926,6 +961,34 @@ class ToyExtractTest(unittest.TestCase):
         p, twins = self.report()
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertEqual(twins, {"twinA": "PASS", "twinB": "PASS", "twinQ": "PASS"}, p.stdout)
+
+    @NEEDS_TOY
+    def test_one_byte_string_is_never_baked(self):
+        # The counterexample: a legal one-byte string whose twin values once
+        # all came out "7", so extraction found no site, the report passed
+        # and the template wrote "7" for the real "x". The twins now vary it,
+        # so extraction sees the exporter copy it. A one-byte site has no
+        # sentinel unique in the spec, so extraction refuses and writes
+        # nothing; it never bakes a value.
+        key = "pocket.variant145"
+        self.add_source_string(key, "x")
+        self.declare_source(comment=False, key=key)
+        before = snapshot(self.tdir)
+        p = self.extract_variant("hash:" + key)
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertIn("qvac.toy.source", p.stderr)
+        self.assertEqual(snapshot(self.tdir), before)
+        # A template extracted before the string was declared bakes "x";
+        # once declared, the report gives every twin its own one-byte value
+        # and fails B and Q.
+        lines = [l for l in (self.tdir / "recipe.txt").read_text().splitlines() if key not in l]
+        (self.tdir / "recipe.txt").write_text("\n".join(lines) + "\n")
+        p = self.extract_variant("hash:" + key)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.declare_source(comment=False, key=key)
+        p, twins = self.report()
+        self.assertNotEqual(p.returncode, 0, p.stdout)
+        self.assertEqual((twins.get("twinB"), twins.get("twinQ")), ("FAIL", "FAIL"), p.stdout)
 
     @NEEDS_TOY
     def test_report_rejects_a_baked_string(self):
