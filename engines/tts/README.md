@@ -129,7 +129,10 @@ speech LM, flow and HiFT neural
 stages, the Supertonic vocoder, the Audio8 codec, the Parler-TTS DAC decoder
 (on the Neural Engine), and
 the MOSS-TTS codec decoder, MOSS-SoundEffect DiT and VAE, and MOSS-Speech
-speech tokenizer. Export, routing, fallback, and per-call status are documented in
+speech tokenizer. Chatterbox loads its sidecar functions in the background and runs
+each sentence on Metal until they are ready (`EngineOptions::coreml`,
+`tts-cli --coreml-use|wait|prewarm|compute-units|cache-dir|status-json`).
+Export, routing, fallback, and per-call status are documented in
 [Chatterbox](docs/chatterbox.md#core-ml-sidecars),
 [Pocket TTS](docs/pocket-tts.md#core-ml-sidecars),
 [CosyVoice3](docs/cosyvoice3.md#core-ml-sidecars),
