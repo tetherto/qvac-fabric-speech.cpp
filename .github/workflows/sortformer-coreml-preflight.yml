@@ -1,0 +1,126 @@
+name: Sortformer Core ML preflight
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/sortformer-coreml-preflight.yml'
+      - 'scripts/benchmarks/*'
+      - 'engines/parakeet/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sortformer-coreml-preflight-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  authorize:
+    uses: ./.github/workflows/reusable-authorize-self-hosted.yml
+    permissions: {}
+
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test scoring and preflight guards
+        run: |
+          bash scripts/benchmarks/test-run-family.sh
+          python3 scripts/benchmarks/test-sortformer-preflight.py
+
+  reproduce:
+    needs: [authorize, scripts]
+    if: >-
+      needs.authorize.outputs.allowed == 'true' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: qvac-macos26-arm64-gpu
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: eu-central-1
+      MODEL_S3_BUCKET: ${{ secrets.MODEL_S3_BUCKET }}
+      GGML_REPO: https://github.com/tetherto/qvac-ext-ggml.git
+    steps:
+      - uses: actions/checkout@v4
+      - name: Initialize isolated paths
+        run: |
+          preflight_root="$RUNNER_TEMP/sortformer-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -p "$preflight_root/assets" "$preflight_root/results"
+          echo "PREFLIGHT_ROOT=$preflight_root" >> "$GITHUB_ENV"
+          git rev-parse HEAD > "$preflight_root/results/speech-revision.txt"
+          sw_vers > "$preflight_root/results/host.txt"
+          uname -srm >> "$preflight_root/results/host.txt"
+          sysctl hw.model hw.memsize >> "$preflight_root/results/host.txt"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: false
+          python-version: '3.11'
+      - name: Prepare export environment
+        run: |
+          uv venv --python 3.11 "$PREFLIGHT_ROOT/python"
+          uv pip install --python "$PREFLIGHT_ROOT/python/bin/python" \
+            torch==2.7.0 numpy==2.2.6 gguf==0.19.0 coremltools==9.0 \
+            PyYAML==6.0.3 sentencepiece==0.2.0 awscli==1.42.30
+          uv pip freeze --python "$PREFLIGHT_ROOT/python/bin/python" > "$PREFLIGHT_ROOT/results/python-packages.txt"
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Fetch published model and legacy bundles
+        run: |
+          set -euo pipefail
+          test -n "$MODEL_S3_BUCKET"
+          aws="$PREFLIGHT_ROOT/python/bin/aws"
+          stem=diar_streaming_sortformer_4spk-v2.1
+          root="s3://$MODEL_S3_BUCKET/qvac_models_compiled/ggml/parakeet"
+          "$aws" s3 cp "$root/2026-05-20/$stem.q8_0.gguf" "$PREFLIGHT_ROOT/assets/$stem.q8_0.gguf" --no-progress
+          for suffix in encoder encoder-bypass-pre-encode; do
+            "$aws" s3 cp "$root/2026-09-28/$stem-$suffix.mlmodelc/" \
+              "$PREFLIGHT_ROOT/assets/$stem-$suffix.mlmodelc/" --recursive --no-progress
+            test -s "$PREFLIGHT_ROOT/assets/$stem-$suffix.mlmodelc/model.mil"
+            test -s "$PREFLIGHT_ROOT/assets/$stem-$suffix.mlmodelc/weights/weight.bin"
+          done
+          find "$PREFLIGHT_ROOT/assets" -type f -exec shasum -a 256 {} + > "$PREFLIGHT_ROOT/results/published-assets.sha256"
+          printf '%s\n' "$root/2026-05-20/$stem.q8_0.gguf" "$root/2026-09-28/$stem-*.mlmodelc" > "$PREFLIGHT_ROOT/results/asset-sources.txt"
+      - name: Export full diarizer from the same GGUF
+        run: |
+          set -euo pipefail
+          "$PREFLIGHT_ROOT/python/bin/python" engines/parakeet/scripts/export-sortformer-diarizer-coreml.py \
+            --gguf "$PREFLIGHT_ROOT/assets/diar_streaming_sortformer_4spk-v2.1.q8_0.gguf" \
+            --frames 410 --precision fp16 --out-dir "$PREFLIGHT_ROOT" \
+            --compile-dir "$PREFLIGHT_ROOT/assets" 2>&1 | tee "$PREFLIGHT_ROOT/results/export.log"
+      - name: Build Metal and Core ML engine
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch speech "$GGML_REPO" "$PREFLIGHT_ROOT/ggml"
+          git -C "$PREFLIGHT_ROOT/ggml" rev-parse HEAD > "$PREFLIGHT_ROOT/results/ggml-revision.txt"
+          cmake -S "$PREFLIGHT_ROOT/ggml" -B "$PREFLIGHT_ROOT/ggml-build" \
+            -DCMAKE_BUILD_TYPE=Release -DGGML_METAL=ON -DGGML_BUILD_TESTS=OFF \
+            -DGGML_BUILD_EXAMPLES=OFF -DCMAKE_INSTALL_PREFIX="$PREFLIGHT_ROOT/ggml-install"
+          cmake --build "$PREFLIGHT_ROOT/ggml-build" --target install -j4
+          cmake -S engines/parakeet -B "$PREFLIGHT_ROOT/build" \
+            -DCMAKE_BUILD_TYPE=Release -DPARAKEET_USE_SYSTEM_GGML=ON -DPARAKEET_COREML=ON \
+            -DPARAKEET_BUILD_TESTS=OFF -DPARAKEET_BUILD_EXAMPLES=OFF -DPARAKEET_BUILD_EXECUTABLES=ON \
+            -DCMAKE_PREFIX_PATH="$PREFLIGHT_ROOT/ggml-install"
+          cmake --build "$PREFLIGHT_ROOT/build" --target parakeet-cli -j4
+      - name: Compare actual routes and per-run DER
+        run: |
+          "$PREFLIGHT_ROOT/python/bin/python" scripts/benchmarks/sortformer-preflight.py \
+            --binary "$PREFLIGHT_ROOT/build/parakeet" --assets "$PREFLIGHT_ROOT/assets" \
+            --samples "$PWD/engines/parakeet/test/samples" --out "$PREFLIGHT_ROOT/results" --runs 3
+          cat "$PREFLIGHT_ROOT/results/summary.json" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sortformer-coreml-preflight-${{ github.run_attempt }}
+          path: ${{ env.PREFLIGHT_ROOT }}/results
+          if-no-files-found: error
+      - name: Remove isolated assets and build
+        if: always()
+        run: |
+          if [[ -n "${PREFLIGHT_ROOT:-}" && "$PREFLIGHT_ROOT" == "$RUNNER_TEMP"/sortformer-* ]]; then
+            rm -rf -- "$PREFLIGHT_ROOT"
+          fi
