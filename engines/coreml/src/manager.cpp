@@ -33,10 +33,15 @@ std::atomic<bool> g_exiting{false};
 std::atomic<bool> g_atexit_registered{false};
 std::atomic<int> g_jobs{0};  // jobs a worker is running (enter_job/leave_job)
 std::atomic<bool> g_guard_armed{false};
+std::atomic<bool> g_explicit_arm{false};  // arm_exit_guard() (the public hook) armed it
 std::atomic<bool> g_automatic_guard{true};
+// The atexit fallback ran: process finalization has begun, and the frameworks'
+// lazily registered destructors may already have run. Nothing waits after it.
+std::atomic<bool> g_finalizing{false};
 std::atomic<bool> g_refusal_logged{false};
 // The one exit deadline of this image (steady clock, ns); 0 until the first
-// wait sets it. Later waits get only what is left of it.
+// wait with a positive bound sets it. Every wait ends at the earlier of its
+// own deadline and this one.
 std::atomic<int64_t> g_deadline_ns{0};
 thread_local bool t_in_job = false;  // this thread is a worker running a job
 
@@ -45,18 +50,24 @@ thread_local bool t_in_job = false;  // this thread is a worker running a job
 // Parler DAC 10.6 s. A process that ends while one runs waits for the rest of
 // it rather than crash, up to this bound. iOS gives a terminating app a few
 // seconds in all, so the bound there is short.
-#if defined(__APPLE__) && TARGET_OS_IPHONE
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_MACCATALYST
 constexpr std::chrono::milliseconds kExitWait{2000};
 #else
 constexpr std::chrono::milliseconds kExitWait{15000};
 #endif
+// Larger bounds (a JS host passing Number.MAX_SAFE_INTEGER) are clamped, so
+// the nanosecond arithmetic cannot overflow.
+constexpr std::chrono::milliseconds kMaxExitWait{3600000};
 
 // Registered when the first manager is created, so it runs after every
 // destructor registered later, including those the frameworks register during
 // a compile. Waiting here was measured to do harm (an engine made off the main
 // thread: crashes on the destroyed tables, and jobs spinning on them until the
 // bound), so it only stops new work.
-void on_process_exit() { g_exiting.store(true); }
+void on_process_exit() {
+    g_finalizing.store(true);
+    g_exiting.store(true);
+}
 
 // A child of fork() has no worker thread: nothing of the parent's runs there.
 void on_fork_child() { g_jobs.store(0); }
@@ -67,7 +78,12 @@ int64_t steady_ns() {
 }
 
 struct ExitGuard {
-    ~ExitGuard() { wait_for_jobs_at_exit(exit_wait()); }
+    ~ExitGuard() {
+        // set_automatic_exit_guard(false) is honoured here too, whenever it
+        // was called; a guard the host armed itself still waits.
+        if (!g_automatic_guard.load() && !g_explicit_arm.load()) return;
+        wait_for_jobs_at_exit(exit_wait());
+    }
 };
 }  // namespace
 
@@ -89,17 +105,23 @@ void register_atexit_once() {
 
 void register_fork_handler_once() {
     // pthread_atfork() cannot be undone: only a pinned image registers it.
-    static std::atomic<bool> registered{false};
-    if (!registered.exchange(true)) pthread_atfork(nullptr, nullptr, &on_fork_child);
+    // pthread_once: a concurrent first caller returns only after it is
+    // registered, so no fork can copy a counted job without the handler.
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, [] { (void) pthread_atfork(nullptr, nullptr, &on_fork_child); });
 }
+
+bool finalizing() { return g_finalizing.load(); }
+
+void note_explicit_arm() { g_explicit_arm.store(true); }
 
 bool automatic_exit_guard() { return g_automatic_guard.load(std::memory_order_relaxed); }
 
 void set_automatic_exit_guard_flag(bool on) { g_automatic_guard.store(on, std::memory_order_relaxed); }
 
 bool arm_exit_guard() {
+    if (!on_main_thread() || g_finalizing.load()) return false;
     if (g_guard_armed.load(std::memory_order_relaxed)) return true;
-    if (!on_main_thread()) return false;
     // The main thread's thread_local destructors are the first thing exit()
     // runs, before any static destructor or atexit handler (C++
     // [basic.start.term]; Darwin's exit() calls _tlv_exit() first, glibc's
@@ -139,18 +161,25 @@ std::chrono::milliseconds exit_wait() {
 
 bool wait_for_jobs_at_exit(std::chrono::milliseconds bound) {
     g_exiting.store(true);
-    int64_t unset = 0;
-    g_deadline_ns.compare_exchange_strong(
-        unset, steady_ns() + std::chrono::duration_cast<std::chrono::nanoseconds>(bound).count());
-    const int64_t deadline = g_deadline_ns.load();
-    // Polls: no mutex or condition variable that a static destructor could
-    // already have destroyed. A job that calls this does not wait for itself.
+    // A job that calls this does not wait for itself, and is still running:
+    // the answer is then false.
     const int own = t_in_job ? 1 : 0;
+    auto done = [own] { return own == 0 && g_jobs.load() == 0; };
+    // A zero bound only closes admission. Once finalization began nothing
+    // waits: the frameworks' destructors may already have run.
+    if (bound.count() <= 0 || g_finalizing.load()) return done();
+    const int64_t mine = steady_ns() + std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                           std::min(bound, kMaxExitWait)).count();
+    int64_t unset = 0;
+    g_deadline_ns.compare_exchange_strong(unset, mine);
+    const int64_t deadline = std::min(mine, g_deadline_ns.load());
+    // Polls: no mutex or condition variable that a static destructor could
+    // already have destroyed.
     while (g_jobs.load() > own) {
         if (steady_ns() >= deadline) return false;
         ::usleep(1000);
     }
-    return true;
+    return done();
 }
 
 void note_refused_request() {
@@ -500,11 +529,15 @@ Plan plan(const PlanInput & in, const Resolved & r) {
 // ---- process exit hooks ---------------------------------------------------------
 
 bool arm_exit_guard() {
+    // Off the main thread, or once finalization began, nothing is pinned or
+    // registered.
+    if (!detail::on_main_thread() || detail::finalizing()) return false;
     detail::register_atexit_once();
     // The guard's destructor is code in this image: pin it first.
     const detail::PinState ps = detail::pin_image();
     if (ps != detail::PinState::pinned && ps != detail::PinState::main_image) return false;
     detail::register_fork_handler_once();
+    detail::note_explicit_arm();
     return detail::arm_exit_guard();
 }
 

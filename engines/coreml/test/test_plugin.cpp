@@ -90,6 +90,14 @@ QVAC_PLUGIN_EXPORT int qvac_coreml_plugin_slot_only(const char * dir, int on_wor
     return 0;
 }
 
+// arm_exit_guard() from a worker thread (on_worker) or the calling thread.
+QVAC_PLUGIN_EXPORT int qvac_coreml_plugin_arm(int on_worker) {
+    if (!on_worker) return arm_exit_guard() ? 1 : 0;
+    int r = -1;
+    std::thread([&r] { r = arm_exit_guard() ? 1 : 0; }).join();
+    return r;
+}
+
 // This image's pin state (detail::PinState).
 QVAC_PLUGIN_EXPORT int qvac_coreml_plugin_pin_state() { return static_cast<int>(detail::pin_state()); }
 

@@ -368,19 +368,28 @@ void Runtime::subscribe_prepare_locked(const std::shared_ptr<SlotCore> & c, Prio
     c->state = SlotState::queued;
 }
 
+bool Runtime::refuse_after_exit_locked(const std::shared_ptr<SlotCore> & c, Graveyard & gy) {
+    // After exit began no job starts, so a slot with no model fails with the
+    // reason instead of staying idle or queued for good: a fresh request, and
+    // a slot whose job never started (unsubscribed; a job left with no
+    // subscriber is cancelled). A ready slot keeps its model; a slot whose
+    // job is running keeps it, and that job still publishes.
+    if (c->spec.route == Route::none || c->model || is_terminal(c->state)) return false;
+    if (c->job && c->job->started) return false;
+    unsubscribe_locked(c, gy);
+    c->state = SlotState::failed;
+    c->error = Error::deterministic(kExitingReason);
+    c->reason = c->error.message;
+    c->queued_behind = false;
+    note_refused_request();
+    bump_locked();
+    return true;
+}
+
 void Runtime::request_locked(const std::shared_ptr<SlotCore> & c, Priority p, bool nd, Graveyard & gy) {
     if (stopping_) return;
     if (exiting()) {
-        // A fresh request after exit began (or after the main thread ended
-        // with an armed guard) fails with a reason instead of staying idle.
-        // A slot that is ready keeps its model; one with a job keeps it.
-        if (c->spec.route != Route::none && !c->job && !c->model && !is_terminal(c->state)) {
-            c->state = SlotState::failed;
-            c->error = Error::deterministic(kExitingReason);
-            c->reason = c->error.message;
-            note_refused_request();
-            bump_locked();
-        }
+        refuse_after_exit_locked(c, gy);
         return;
     }
     if (c->model && c->model->retired()) {
@@ -891,6 +900,16 @@ void Runtime::worker_main(JobKind kind) {
         bool counted = enter_job();
         if (counted && !running_) {
             job = pick_locked(now, wake, kind == JobKind::load, adopt, gy);
+            if (job && job->kind == kind) QVAC_COREML_TEST_HOOK(job_selected);
+            // Admission is decided again where the job would commit to
+            // starting: an exit (or shutdown_for_exit) that began during the
+            // selection, while this worker was counted, leaves the job
+            // queued for good. A retained adoption is released outside mu.
+            if (job && exiting()) {
+                gy.keep(adopt);
+                adopt.reset();
+                job.reset();
+            }
             if (job && job->kind != kind) {
                 handoff_ = static_cast<int>(job->kind);
                 work_cv.notify_all();
@@ -1329,7 +1348,14 @@ Acquired Runtime::acquire(const std::shared_ptr<SlotCore> & c, Demand d, std::op
                 return out;
             }
             out.pending = true;
-            if (d == Demand::if_ready || exiting() || stopping_) return out;
+            if (d == Demand::if_ready || stopping_) return out;
+            if (exiting()) {
+                // No job starts any more: a slot whose job never started
+                // fails now (strict throws above on the next pass); one whose
+                // job is running waits for it as before.
+                if (refuse_after_exit_locked(c, gy)) continue;
+                if (!c->job || !c->job->started) return out;
+            }
             if (cancel && cancel->load()) return out;
             if (wait == Wait::call) {
                 if (st == SlotState::deferred_memory) {

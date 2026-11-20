@@ -50,6 +50,11 @@ bool on_main_thread();
 // Arms the exit guard on the main thread; false elsewhere. The caller has
 // pinned the image (the guard's destructor is code in it).
 bool arm_exit_guard();
+// The atexit fallback ran (process finalization began).
+bool finalizing();
+// The public arm_exit_guard() armed the guard: set_automatic_exit_guard(false)
+// does not disarm it.
+void note_explicit_arm();
 // Whether the main thread is armed automatically (set_automatic_exit_guard).
 bool automatic_exit_guard();
 void set_automatic_exit_guard_flag(bool on);
@@ -62,9 +67,12 @@ bool enter_job();
 void leave_job();
 // The default bound of the exit wait (a test hook can replace it).
 std::chrono::milliseconds exit_wait();
-// Sets the exit flag and waits for the counted work, until this image's one
-// exit deadline: set by the first call to now + bound, shared by every later
-// call. Returns false when the deadline passed with work still running.
+// Sets the exit flag and waits for the counted work (other than the
+// caller's own job) until the earlier of now + bound (clamped to one hour)
+// and this image's one exit deadline, which the first call with a positive
+// bound sets. A zero or negative bound, or a call after finalization began,
+// only closes admission and reports. Returns true when no job is running,
+// which is never the case for a call from inside a job.
 bool wait_for_jobs_at_exit(std::chrono::milliseconds bound);
 // Logs kExitingReason once per image, the first time a request is refused.
 void note_refused_request();
@@ -229,6 +237,9 @@ public:
     std::mutex mu;
     std::condition_variable state_cv;
     void request_locked(const std::shared_ptr<SlotCore> & c, Priority p, bool nd, Graveyard & gy);
+    // After exit began: fails a slot that has no model and no running job
+    // with kExitingReason (unsubscribing an unstarted job). True if it did.
+    bool refuse_after_exit_locked(const std::shared_ptr<SlotCore> & c, Graveyard & gy);
     SlotStatus status_locked(SlotCore & c, Clock::time_point now) const;
     // The resident cap denies slot `c` the instance its load job brings, right
     // now: acquisitions and groups do not wait on it. Decided at the
