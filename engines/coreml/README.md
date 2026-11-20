@@ -26,6 +26,39 @@ engines share:
 No library is installed: the headers under `include/` are build-interface
 only.
 
+## Process exit
+
+The scheduler's threads are never joined and its manager is leaked on
+purpose, but a Core ML compile or load cannot be cancelled, and `exit()`
+destroys the frameworks' static state. Apple's compiler builds some of that
+state lazily, during the first compile, so its destructors are the first ones
+`exit()` runs. A process that ended while a worker was still inside such a
+call used to crash there (a SIGSEGV in `ANECompiler` after the process had
+written its output).
+
+At exit the runtime now stops new work in each engine library and waits for
+the job a worker is running (a prepare, or a load and its warm-up) to return,
+for at most 15 s. The wait runs before any destructor: the first time the main
+thread makes a slot that can load or requests work, the runtime gives the
+main thread a `thread_local` object, and the destructors of the exiting
+thread's `thread_local` objects are the first thing `exit()` runs. When exit
+starts on a thread that never got that object (another thread calls `exit()`,
+or the engine was made and loaded entirely off the main thread), the wait runs
+in an `atexit` handler instead. That handler was registered when the manager
+was created, so it runs after every destructor registered later, including
+those the frameworks register during the first compile, and such a process
+can still crash. Past the bound, exit continues and the job is abandoned as
+before.
+
+The cost is paid only by a process that ends with a job in flight: it exits
+after the rest of that job, which is at most the longest cold load (about
+1 s for the Supertonic vocoder, 6-11 s for Pocket, ACE-Step and the Parler
+DAC on an M2) and never more than 15 s; the compiled plan is then cached for
+the next process. A job still in its digest or generation phase notices the
+exit and stops within milliseconds. If the main thread ends with
+`pthread_exit()` while the process goes on (`dispatch_main()` does this), the
+runtime starts no new job afterwards, and its stages stay on ggml.
+
 ## Engine build options
 
 `qvac_coreml_add_to(<engine-lib> NAMESPACE <ns> PREFIX <P> ENABLE <bool> [TEMPLATES <dirs>])`
@@ -226,6 +259,23 @@ cmake -S engines/tts -B build-tts -DTTS_CPP_BUILD_TESTS=ON
 cmake --build build-tts --target qvac-coreml-tool test-coreml-recipe
 ctest --test-dir build-tts -L coreml-runtime
 ```
+
+`test-coreml-exit-load` (label `fixture`) checks process exit on the device
+with a real model: each run copies the model to a fresh path, so Core ML
+compiles it again, and starts a child process that exits at a different point
+of that load. Every child must exit 0. Point it at a compiled model whose cold
+load takes about a second or more and includes dilated convolutions, for
+example an exported Supertonic vocoder sidecar:
+
+```sh
+cmake -S engines/coreml -B build-coreml \
+      -DQVAC_COREML_TEST_EXIT_MODEL=/path/to/supertonic2-vocoder.mlmodelc
+cmake --build build-coreml --target test-coreml-exit-load
+ctest --test-dir build-coreml -R test-coreml-exit-load --output-on-failure
+```
+
+Without that option the test is registered DISABLED. It deletes the e5rt
+bundles its runs add to `~/Library/Caches/test-coreml-exit-load`.
 
 The tool and the generator are compiled with `-ffp-contract=off`, so no
 floating-point expression is fused into an FMA and the output does not

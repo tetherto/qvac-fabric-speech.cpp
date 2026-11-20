@@ -1,17 +1,23 @@
 // Facades over the scheduler (runtime.h): Manager, Slot, Group, ResidentPool,
 // SharedModel and Handle; route planning; the per-image instance and
-// the atexit flag.
+// the exit protocol (exit flag, exit guard, bounded wait for running jobs).
 
 #include "qvac_coreml/manager.h"
 
 #include "device.h"
 #include "hints.h"
 #include "runtime.h"
+#include "test_hooks.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 
+#include <pthread.h>
 #include <unistd.h>
+#if defined(__linux__)
+#include <sys/syscall.h>
+#endif
 
 namespace QVAC_COREML_NS {
 
@@ -21,14 +27,87 @@ namespace {
 // Trivially destructible on purpose: read by worker threads during exit().
 std::atomic<bool> g_exiting{false};
 std::atomic<bool> g_atexit_registered{false};
+std::atomic<int> g_jobs{0};  // jobs a worker is running (enter_job/leave_job)
+std::atomic<bool> g_guard_armed{false};
+thread_local bool t_in_job = false;  // this thread is a worker running a job
 
-void on_process_exit() { g_exiting.store(true); }
+// Cold loads measured on an M2 (one job; the admission gate runs one at a
+// time per image): Supertonic vocoder ~1 s, Pocket 6-8 s, ACE-Step VAE 8.7 s,
+// Parler DAC 10.6 s. A process that ends while one runs waits for the rest of
+// it rather than crash, up to this bound.
+constexpr std::chrono::milliseconds kExitWait{15000};
+
+void on_process_exit() { wait_for_jobs_at_exit(); }
+
+struct ExitGuard {
+    ~ExitGuard() { wait_for_jobs_at_exit(); }
+};
+
+bool on_main_thread() {
+#if defined(__APPLE__)
+    return pthread_main_np() == 1;
+#elif defined(__linux__)
+    return static_cast<pid_t>(syscall(SYS_gettid)) == getpid();
+#else
+    return false;
+#endif
+}
 }  // namespace
 
 bool exiting() { return g_exiting.load(std::memory_order_relaxed); }
 
 void register_atexit_once() {
     if (!g_atexit_registered.exchange(true)) std::atexit(&on_process_exit);
+}
+
+void arm_exit_guard() {
+    if (g_guard_armed.load(std::memory_order_relaxed) || !on_main_thread()) return;
+    // The main thread's thread_local destructors are the first thing exit()
+    // runs, before any static destructor or atexit handler (C++
+    // [basic.start.term]; Darwin's exit() calls _tlv_exit() first, glibc's
+    // runs __call_tls_dtors first). They also run when the main thread ends
+    // with pthread_exit() and the process goes on (dispatch_main() does
+    // that): the runtime then starts no new job, and its slots stay on ggml.
+    thread_local ExitGuard guard;
+    (void) guard;
+    g_guard_armed.store(true, std::memory_order_relaxed);
+}
+
+bool enter_job() {
+    g_jobs.fetch_add(1);
+    if (g_exiting.load()) {
+        g_jobs.fetch_sub(1);
+        return false;
+    }
+    t_in_job = true;
+    return true;
+}
+
+void leave_job() {
+    t_in_job = false;
+    g_jobs.fetch_sub(1);
+}
+
+std::chrono::milliseconds exit_wait() {
+#ifdef QVAC_COREML_TEST_HOOKS
+    const int64_t ms = test_hooks().exit_wait_ms.load();
+    if (ms >= 0) return std::chrono::milliseconds(ms);
+#endif
+    return kExitWait;
+}
+
+bool wait_for_jobs_at_exit() {
+    g_exiting.store(true);
+    // Polls: no mutex or condition variable that a static destructor could
+    // already have destroyed.
+    // A job that calls exit() itself does not wait for itself.
+    const int own = t_in_job ? 1 : 0;
+    const auto deadline = std::chrono::steady_clock::now() + exit_wait();
+    while (g_jobs.load() > own) {
+        if (std::chrono::steady_clock::now() >= deadline) return false;
+        ::usleep(1000);
+    }
+    return true;
 }
 
 }  // namespace detail
@@ -232,8 +311,9 @@ Manager::~Manager() {
 }
 
 std::shared_ptr<Manager> Manager::instance() {
-    // Leaked on purpose: in-flight Core ML calls are abandoned at exit,
-    // never joined, and the scheduler outlives static destruction.
+    // Leaked on purpose: the scheduler outlives static destruction. Its
+    // threads are never joined; at exit the runtime waits, bounded, for the
+    // jobs they are running (runtime.h, "Process exit").
     static std::shared_ptr<Manager> * inst = [] {
         detail::register_atexit_once();
         return new std::shared_ptr<Manager>(new Manager(std::make_shared<detail::Runtime>(Config{})));
@@ -265,6 +345,10 @@ std::shared_ptr<Slot> Manager::make_slot(SlotSpec spec, SlotPolicy policy) {
                                                  c->spec.function, to_string(c->spec.units), rt_->os_build);
         }
     }
+    // A slot that can load arms the exit guard (and so pins this image) when
+    // it is made on the main thread, even if its loads are requested from
+    // another thread: the main thread is the one that usually calls exit().
+    if (c->spec.route != Route::none) rt_->pin_for_work();
     rt_->add_slot(c);
     if (c->spec.pool && c->spec.pool->rt_ == rt_) {
         c->pool = c->spec.pool->core_;

@@ -18,8 +18,10 @@
 // "Process-wide" means per engine library image: each engine library compiles
 // its own copy of this runtime in its own namespace. instance() is leaked on
 // purpose; on its first job it pins its own image (dladdr + dlopen
-// RTLD_NOLOAD | RTLD_NODELETE) so code and callbacks outlive any dlclose, and an
-// atexit flag stops new work.
+// RTLD_NOLOAD | RTLD_NODELETE) so code and callbacks outlive any dlclose. At
+// process exit new work stops, and exit waits, up to a bound, for the job a
+// worker is running: Core ML calls cannot be cancelled and crash if the
+// frameworks' static state is destroyed under them (README, "Process exit").
 
 #include "qvac_coreml/options.h"
 #include "qvac_coreml/slot.h"

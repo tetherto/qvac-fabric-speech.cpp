@@ -13,6 +13,7 @@
 #include "qvac_coreml/status.h"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <memory>
@@ -33,9 +34,38 @@ struct Graveyard {
     }
 };
 
-// The atexit flag: at process exit, stops new work in this image.
+// Process exit. Core ML calls cannot be cancelled, and exit() destroys the
+// frameworks' static state, so a worker still inside a compile or load when
+// the frameworks' destructors run can crash in Apple's code. At exit the
+// runtime therefore sets the exit flag, which stops new work in this image,
+// and then waits up to exit_wait() for the jobs already running to return.
+// Past that bound exit continues and abandons the job.
+//
+// The wait must come before any framework destructor. Destructors and atexit
+// handlers run in reverse order of registration, and the frameworks register
+// theirs lazily, during the first compile or load, so an atexit handler
+// registered when the manager is created runs too late. The first thing
+// exit() runs is the destructors of the exiting thread's thread_local
+// objects, so arm_exit_guard() gives the main thread one whose destructor
+// waits. The atexit handler waits as well, for an exit from a thread without
+// the guard; it runs after the destructors registered since the manager was
+// created, so it is a fallback, not a guarantee.
 bool exiting();
 void register_atexit_once();
+// Arms the exit guard when called on the main thread; a no-op elsewhere.
+// Called after this image is pinned (the guard's destructor is code in it).
+void arm_exit_guard();
+// Brackets a job a worker runs (prepare, or load and warm-up). enter_job()
+// counts the job before it reads the exit flag, and returns false, with the
+// job not counted, once the process is exiting: either the exit wait sees the
+// job, or the worker sees the flag and starts nothing.
+bool enter_job();
+void leave_job();
+// The bound on the exit wait.
+std::chrono::milliseconds exit_wait();
+// Sets the exit flag and waits for the running jobs, up to exit_wait().
+// Returns false when the bound expired with a job still running.
+bool wait_for_jobs_at_exit();
 
 struct SlotCore;
 struct PoolCore;

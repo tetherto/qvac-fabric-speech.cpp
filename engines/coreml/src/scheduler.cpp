@@ -423,6 +423,10 @@ void Runtime::pin_for_work() {
     // worker or publish a job: the caller still holds its reference to this
     // image, so a dlclose right after it returns cannot unmap running code.
     if (cfg.pin_image) pin_image();
+    // The guard's destructor runs at exit, so only an image that stays mapped
+    // may arm it.
+    const PinState ps = pin_state();
+    if (ps == PinState::pinned || ps == PinState::main_image) arm_exit_guard();
 }
 
 void Runtime::request(const std::shared_ptr<SlotCore> & c, Priority p, bool nd) {
@@ -864,7 +868,11 @@ void Runtime::worker_main(JobKind kind) {
         // instance; moved into the job below without releasing mu.
         std::shared_ptr<SharedModel> adopt;
         bool handed_off = false;
-        if (!running_ && !exiting()) {
+        // Counted before anything is picked, released below unless a job
+        // starts: an exit that begins meanwhile either waits for this job or
+        // makes enter_job() refuse it.
+        bool counted = false;
+        if (!running_ && (counted = enter_job())) {
             job = pick_locked(now, wake, kind == JobKind::load, adopt, gy);
             if (job && job->kind != kind) {
                 handoff_ = static_cast<int>(job->kind);
@@ -891,8 +899,10 @@ void Runtime::worker_main(JobKind kind) {
             lk.lock();
             if (running_ == job) running_.reset();
             bump_locked();
+            leave_job();
             continue;
         }
+        if (counted) leave_job();
         if (handed_off || !gy.items.empty()) {
             lk.unlock();
             if (handed_off) QVAC_COREML_TEST_HOOK(handed_off);
