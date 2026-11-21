@@ -791,6 +791,7 @@ uint64_t ggml_need(const tts_cpp::FitResult & fit,
 
 void check_fit_stable(const FitOptions & workload,
                       const tts_cpp::FitResult & cold, const fs::path & cache) {
+    const int previous_failures = g_failures;
     expect(same_fit(cold, fit_params(workload)),
            "fit changed after generation");
     int hints = 0;
@@ -811,7 +812,7 @@ void check_fit_stable(const FitOptions & workload,
     expect(same_fit(cold, fit_params(workload)),
            "fit changed with a stale hint");
     std::printf("test-audio8-fit-stable: %s, %d stale hint(s) tested\n",
-                g_failures == 0 ? "PASS" : "FAIL", hints);
+                g_failures == previous_failures ? "PASS" : "FAIL", hints);
 }
 
 struct memory_trace {

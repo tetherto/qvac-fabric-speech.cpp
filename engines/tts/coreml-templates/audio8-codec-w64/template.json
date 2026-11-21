@@ -29,6 +29,9 @@
     "main": 0
   },
   "memory": {
+    "load_peak_bytes": {
+      "all": 536870912
+    },
     "margin": 1.25,
     "validated_for": []
   },
