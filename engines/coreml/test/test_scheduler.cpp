@@ -30,6 +30,7 @@
 #include <memory>
 #include <mutex>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -2570,6 +2571,23 @@ void case_destroy_during_jobs() {
     CHECK(wait_for([&] { return is_ready(after); }));
 }
 
+void case_throwing_warmup() {
+    Env e;
+    const int base = g_live_models.load();
+    SlotSpec spec = e.spec("throwing-warm");
+    spec.warm_fn = [](void *, const LoadRequest &) -> Error {
+        throw std::runtime_error("injected warm-up exception");
+    };
+    auto slot = e.m->make_slot(spec, e.policy());
+    slot->request(Priority::minimal);
+    CHECK(wait_for([&] { return slot->state() == SlotState::failed; }));
+    CHECK(slot->status().error == "warm-up threw");
+    CHECK(g_live_models.load() == base);
+    auto after = e.slot("after-warm-exception");
+    after->request(Priority::minimal);
+    CHECK(wait_for([&] { return is_ready(after); }));
+}
+
 void case_reload_during_load() {
     Env e;
     set_beh("rl", {true});
@@ -2956,9 +2974,14 @@ int child_exit(const std::string & mode, const std::string & dir) {
         return 0;
     }
     if (mode == "queued-shutdown") {
-        exit_slot("in-flight", &exit_slow_load);
+        g_exit_load_ms = 1500;
+        std::shared_ptr<Slot> & a = exit_slot("in-flight", &exit_slow_load);
         std::shared_ptr<Slot> & b = exit_slot("queued", &exit_queued_load, Priority::minimal, true);
         if (!wait_for([] { return exit_marked("load-started"); })) return 3;
+        shutdown_for_exit(0ms);
+        exit_mark("active", to_string(a->state()));
+        const auto passive = b->state();
+        exit_mark("passive", std::string(to_string(passive)) + "|" + b->status().reason);
         exit_mark("drain", shutdown_for_exit(5000ms) ? "1" : "0");
         exit_mark("queued", exit_slot_report(b));
         exit_mark("alive", "1");
@@ -3244,6 +3267,8 @@ void case_exit_during_load() {
         const ExitRun r = run_exit_child("queued-shutdown");
         CHECK(r.rc == 0);
         CHECK(r.file("drain") == "1");
+        CHECK(r.file("active") == "loading");
+        CHECK(r.file("passive") == refused);
         CHECK(r.file("queued") == refused + "|threw");
         CHECK(!r.has("started-queued"));
         CHECK(r.file("alive") == "1");
@@ -3575,6 +3600,7 @@ struct Case {
 };
 
 const Case kCases[] = {
+    {"throwing-warmup", case_throwing_warmup},
     {"priority-order", case_priority_order},
     {"dedup-two-owners", case_dedup_two_owners},
     {"dedup-geometry", case_dedup_geometry},

@@ -1093,7 +1093,12 @@ void Runtime::run_load(const std::shared_ptr<Job> & j) {
     const Clock::time_point t1 = Clock::now();
     if (j->warm_fn) {
         set_phase(j, SlotState::warming);
-        Error e = j->warm_fn(r.model.get(), j->load);
+        Error e;
+        try {
+            e = j->warm_fn(r.model.get(), j->load);
+        } catch (...) {
+            e = Error::transient("warm-up threw");
+        }
         if (!e.ok()) {
             if (r.lease_fd >= 0) ::close(r.lease_fd);
             r.model.reset();
@@ -1517,7 +1522,10 @@ void Runtime::on_model_released(const SharedModel & released) {
 }
 
 SlotState Runtime::state(const std::shared_ptr<SlotCore> & c) {
+    Graveyard gy;
     std::lock_guard<std::mutex> lk(mu);
+    if (c->state == SlotState::queued && exiting())
+        refuse_after_exit_locked(c, gy);
     if (c->model && c->model->retired()) return SlotState::retired;
     return c->state;
 }
