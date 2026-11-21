@@ -218,6 +218,10 @@ if (AUDIOGEN_BUILD_LIBRARY)
     # it yet.
     include(${CMAKE_CURRENT_SOURCE_DIR}/../coreml/qvac_coreml.cmake)
     qvac_coreml_add_to(audiogen-cpp NAMESPACE audiogen_coreml PREFIX AUDIOGEN ENABLE ${AUDIOGEN_COREML})
+    # The Core ML exit hooks call that runtime, whose namespace is defined on
+    # audiogen-cpp only: compiled here, not in the object library (the in-tree
+    # tools link the objects without the runtime).
+    target_sources(audiogen-cpp PRIVATE src/coreml_exit.cpp)
 
     set_target_properties(audiogen-cpp PROPERTIES
         POSITION_INDEPENDENT_CODE ON
@@ -236,6 +240,7 @@ if (AUDIOGEN_BUILD_LIBRARY)
         # statically pull in.
         target_compile_definitions(audiogen-cpp-objects PRIVATE AUDIOGEN_SHARED AUDIOGEN_BUILD)
         target_compile_definitions(audiogen-cpp PUBLIC AUDIOGEN_SHARED)
+        target_compile_definitions(audiogen-cpp PRIVATE AUDIOGEN_BUILD)  # src/coreml_exit.cpp
     endif()
 
     if (CMAKE_BUILD_TYPE STREQUAL "Release" OR NOT CMAKE_BUILD_TYPE)
