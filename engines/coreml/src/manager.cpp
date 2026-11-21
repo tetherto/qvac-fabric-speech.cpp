@@ -211,6 +211,10 @@ PrewarmResult Group::result() const {
 }
 
 PrewarmResult Group::wait(std::optional<Clock::duration> timeout, const std::atomic<bool> * cancel) {
+    return wait(timeout, [cancel] { return cancel && cancel->load(); });
+}
+
+PrewarmResult Group::wait(std::optional<Clock::duration> timeout, const std::function<bool()> & cancelled) {
     const Clock::time_point deadline = timeout ? Clock::now() + *timeout : Clock::time_point::max();
     for (;;) {
         detail::Graveyard gy;  // released each round, after the lock
@@ -218,7 +222,7 @@ PrewarmResult Group::wait(std::optional<Clock::duration> timeout, const std::ato
         bool fin = false;
         PrewarmResult r = collect(fin, gy);
         if (fin || detail::exiting()) return r;
-        if (cancel && cancel->load()) return r;
+        if (cancelled && cancelled()) return r;
         const Clock::time_point now = Clock::now();
         if (now >= deadline) return r;
         rt_->state_cv.wait_until(lk, std::min(deadline, now + rt_->cfg.wait_poll));
@@ -285,6 +289,10 @@ std::shared_ptr<Group> Manager::issue_group(GroupKind kind, const std::vector<Gr
     g->kind_ = kind;
     g->rt_ = rt_;
     g->skipped_ = std::move(skipped_route_none);
+    if (std::none_of(requests.begin(), requests.end(),
+                     [](const GroupRequest & req) { return bool(req.slot); })) {
+        return g;
+    }
     rt_->pin_for_work();
     detail::Graveyard gy;
     std::lock_guard<std::mutex> lk(rt_->mu);

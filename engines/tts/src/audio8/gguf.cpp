@@ -1167,7 +1167,7 @@ bool peek_codec_header(const std::string & path, codec_header & header,
 static bool load_codec_impl(const std::string & path, int n_gpu_layers,
                             const std::string & backend, codec_model & model,
                             std::string * error, fit_load_measure * measure,
-                            const CoremlOptions & coreml, bool memory_degrade,
+                            const CoremlOptions & coreml, codec_budget budget,
                             const std::function<void()> * upload_observer) {
     gguf_file file(path, !measure);
     if (!file.ok()) {
@@ -1251,11 +1251,11 @@ static bool load_codec_impl(const std::string & path, int n_gpu_layers,
 #ifdef TTS_CPP_USE_COREML
     if (model.has_decoder && !measure) {
         model.coreml =
-            codec_coreml::create(model, path, source, coreml, memory_degrade);
+            codec_coreml::create(model, path, source, coreml, budget);
     }
 #else
     (void)coreml;
-    (void)memory_degrade;
+    (void)budget;
 #endif
     return true;
 }
@@ -1263,11 +1263,11 @@ static bool load_codec_impl(const std::string & path, int n_gpu_layers,
 bool load_codec(const std::string & path, int n_gpu_layers,
                 const std::string & backend, codec_model & model,
                 std::string * error, const CoremlOptions & coreml,
-                bool memory_degrade,
+                codec_budget budget,
                 const std::function<void()> & upload_observer) {
     validate_codec_coreml_options(coreml);
     return load_codec_impl(path, n_gpu_layers, backend, model, error, nullptr,
-                           coreml, memory_degrade, &upload_observer);
+                           coreml, budget, &upload_observer);
 }
 
 bool load_codec_metadata_only(const std::string & path, int n_gpu_layers,
@@ -1275,7 +1275,7 @@ bool load_codec_metadata_only(const std::string & path, int n_gpu_layers,
                               fit_load_measure & measure, std::string * error) {
     measure = fit_load_measure{};
     return load_codec_impl(path, n_gpu_layers, backend, model, error, &measure,
-                           {}, false, nullptr);
+                           {}, codec_budget::unprojected, nullptr);
 }
 
 void free_codec(codec_model & model) {

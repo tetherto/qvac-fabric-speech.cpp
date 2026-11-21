@@ -182,7 +182,7 @@ public:
     // Shared status JSON (schema 1), or "{}" without Core ML support.
     std::string coreml_status() const;
     // Shared request-group JSON for the construction request or a new prewarm.
-    // Passing wait=true reports the completed prewarm group.
+    // Passing wait=true waits for the group or cancellation from another thread.
     std::string coreml_construction_json() const;
     std::string coreml_prewarm(CoremlOptions::Prewarm scope, bool wait);
     // Poll with zero, or wait for ready, a terminal/idle/deferred state, the

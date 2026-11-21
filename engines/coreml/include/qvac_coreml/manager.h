@@ -28,6 +28,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -115,6 +116,8 @@ public:
     // Blocks until finished, `timeout` or `cancel` (polled every 50 ms).
     PrewarmResult wait(std::optional<Clock::duration> timeout = std::nullopt,
                        const std::atomic<bool> * cancel = nullptr);
+    PrewarmResult wait(std::optional<Clock::duration> timeout,
+                       const std::function<bool()> & cancelled);
     PrewarmResult result() const;
 
 private:

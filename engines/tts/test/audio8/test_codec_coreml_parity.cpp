@@ -594,6 +594,27 @@ void check_delayed_synthesis(const std::string & lm, const std::string & gguf) {
     strict.coreml.use = CoremlOptions::Use::require;
     strict.coreml.prewarm = CoremlOptions::Prewarm::none;
     strict.coreml.strict_wait_ms = 5000;
+    Engine prewarming(strict);
+    auto prewarm = std::async(std::launch::async, [&] {
+        return json::parse(
+            prewarming.coreml_prewarm(CoremlOptions::Prewarm::all, true));
+    });
+    expect(poll_until([&] {
+               return stage(prewarming.coreml_status()).at("state") == "queued";
+           }),
+           "public prewarm did not wait behind the gate");
+    expect(prewarm.wait_for(0ms) == std::future_status::timeout,
+           "public prewarm returned before cancellation");
+    prewarming.cancel();
+    if (prewarm.wait_for(2s) != std::future_status::ready) {
+        fail("Engine::cancel did not interrupt the public prewarm wait");
+        gate_released = true;
+        return;
+    }
+    const auto prewarm_result = prewarm.get();
+    expect(prewarm_result.at("success") == false &&
+               prewarm_result.at("nothing_to_prepare") == false,
+           "cancelled public prewarm returned an unexpected group result");
     Engine required(strict);
     auto result = std::async(std::launch::async, [&] {
         try {
@@ -719,7 +740,7 @@ void check_source_changes(const std::string & gguf, const fs::path & work,
         };
         const bool loaded =
             load_codec(local.string(), 0, "cpu", codec.model, &error, options,
-                       false, change_during_upload);
+                       codec_budget::unprojected, change_during_upload);
         expect(loaded && observations == 1,
                "source-change fixture load: " + error);
         if (!loaded)
@@ -1079,6 +1100,31 @@ void check_generated(const std::string & gguf, const fs::path & cache) {
         expect(status.at("state") == "disabled" &&
                    !degraded_engine.codec_on_coreml(),
                "construction did not apply the same near-budget decision");
+    }
+
+    {
+        const auto dir = fs::path(lm).parent_path() / "budget-route-change";
+        fs::create_directories(dir);
+        const auto local = dir / "codec.gguf";
+        fs::create_symlink(fs::absolute(gguf), local);
+        const auto prebuilt = coreml_codec_sidecar_path(local.string());
+        fs::create_directory(prebuilt);
+        expect(!codec_needs_budget_projection(local.string(), near.coreml),
+               "initial prebuilt unexpectedly needed a generation projection");
+        owned_codec changed_route;
+        std::string load_error;
+        const bool loaded = load_codec(
+            local.string(), 0, "cpu", changed_route.model, &load_error,
+            near.coreml, codec_budget::unprojected, [&] {
+                if (!fs::remove(prebuilt))
+                    throw std::runtime_error("could not remove prebuilt fixture");
+            });
+        expect(loaded, "could not load changed-route fixture: " + load_error);
+        if (loaded) {
+            const auto status = stage(changed_route.model.coreml->status());
+            expect(status.at("state") == "unsupported(unprojected_budget)",
+                   "a budgeted route changed to generation without a projection");
+        }
     }
 
     owned_codec generated;

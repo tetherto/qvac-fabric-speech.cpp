@@ -348,6 +348,18 @@ bool run_block(codec_model & model, const std::vector<float> & post, const block
 
 enum class coreml_status { done, unavailable, cancelled };
 
+bool predict_coreml(const codec_coreml_model & model, const float * post,
+                    float * pcm) {
+    try {
+        if (model.synthesize(post, pcm))
+            return true;
+    } catch (...) {
+        // A thrown prediction has the same recovery as a failed one.
+    }
+    model.retire("prediction failed");
+    return false;
+}
+
 bool run_coreml_window(const codec_hparams & hp,
                        const codec_coreml_model & model,
                        const std::vector<float> & post,
@@ -359,7 +371,7 @@ bool run_coreml_window(const codec_hparams & hp,
     std::copy(post.begin() + static_cast<size_t>(span.begin) * latent,
               post.begin() + static_cast<size_t>(span.begin + span.filled) * latent,
               in.begin());
-    if (!model.synthesize(in.data(), out.data()))
+    if (!predict_coreml(model, in.data(), out.data()))
         return false;
     const size_t skip = static_cast<size_t>(span.core_begin - span.begin) * frame;
     const size_t keep = static_cast<size_t>(span.core_end - span.core_begin) * frame;
@@ -395,7 +407,6 @@ coreml_status run_synthesis_coreml(const codec_model & codec,
         }
         if (!run_coreml_window(hp, model, post, span, in, out, pcm_out)) {
             pcm_out.clear();
-            model.retire("prediction failed");
             return coreml_status::unavailable;
         }
         completed = span.core_end;
@@ -697,16 +708,8 @@ window_stream_hooks stream_hooks(codec_model & model,
     };
     hooks.synthesize = [sidecar = call.model, &model, n_threads,
                         shape](const float * post, float * pcm) {
-        if (sidecar) {
-            try {
-                if (sidecar->synthesize(post, pcm))
-                    return true;
-            } catch (...) {
-                // A thrown prediction has the same recovery as a failed one.
-            }
-            sidecar->retire("prediction failed");
-            return false;
-        }
+        if (sidecar)
+            return predict_coreml(*sidecar, post, pcm);
         const std::vector<float> input(post, post + static_cast<size_t>(shape.window) * shape.latent_dim);
         std::vector<float> output;
         std::string error;

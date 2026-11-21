@@ -132,12 +132,16 @@ static void compare_pcm(const std::vector<float> & got, const std::vector<float>
 // after PCM with the production decoder and the real stream worker.
 class failing_sidecar final : public codec::codec_coreml_model {
   public:
-    explicit failing_sidecar(int fail_on) : fail_on_(fail_on) {}
+    explicit failing_sidecar(int fail_on, bool throw_on_failure = false)
+        : fail_on_(fail_on), throw_on_failure_(throw_on_failure) {}
     int window() const override { return 16; }
     const char * label() const override { return "coreml-test"; }
     bool synthesize(const float *, float * pcm) const override {
-        if (++calls_ == fail_on_)
+        if (++calls_ == fail_on_) {
+            if (throw_on_failure_)
+                throw std::runtime_error("injected prediction exception");
             return false;
+        }
         std::fill_n(pcm, window() * 4, 0.5f);
         return true;
     }
@@ -146,8 +150,36 @@ class failing_sidecar final : public codec::codec_coreml_model {
 
   private:
     int fail_on_;
+    bool throw_on_failure_;
     mutable int calls_ = 0;
 };
+
+static void check_batch_prediction_exception(
+    codec::codec_model & model, const std::vector<int32_t> & rows,
+    int count, const std::vector<float> & expected) {
+    for (bool strict : {false, true}) {
+        auto sidecar = std::make_shared<failing_sidecar>(1, true);
+        auto retired = sidecar->retired.get_future();
+        const codec::codec_coreml_call call{sidecar, false, strict};
+        std::vector<float> pcm;
+        std::string error;
+        codec::decode_timing timing;
+        const bool ok = codec::decode_codes(model, rows.data(), count, 1, {},
+                                            pcm, &error, nullptr, &timing,
+                                            &call);
+        require(retired.wait_for(std::chrono::seconds(0)) ==
+                    std::future_status::ready,
+                "throwing sidecar was not retired");
+        if (strict) {
+            require(!ok && pcm.empty() &&
+                        error == "audio8: required Core ML synthesis unavailable",
+                    "strict batch did not report its prediction failure");
+        } else {
+            require(ok && timing.synthesis_backend == "ggml" && pcm == expected,
+                    "throwing batch prediction did not replay on ggml");
+        }
+    }
+}
 
 static void check_stream_failure(codec::codec_model & model,
                                  const std::vector<int32_t> & frames,
@@ -248,6 +280,7 @@ static void check_streaming_decoder(const fs::path & root) {
     check_stream_failure(loaded.model, frames, rows, expected, 1);
     check_stream_failure(loaded.model, frames, rows, expected, 2);
     check_stream_failure_before_finish(loaded.model, frames, rows);
+    check_batch_prediction_exception(loaded.model, rows, frames_count, expected);
 
     loaded.model.synthesis_block_frames = 4;
     int calls = 0;

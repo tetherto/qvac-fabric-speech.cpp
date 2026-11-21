@@ -231,19 +231,29 @@ struct codec_coreml::Impl {
 std::shared_ptr<codec_coreml>
 codec_coreml::create(const codec_model & codec, const std::string & path,
                      const codec_source & source, const CoremlOptions & options,
-                     bool memory_degrade) {
+                     codec_budget budget) {
     auto impl = std::make_unique<Impl>();
     impl->options = resolve(options);
     for (const auto & warning : impl->options.warnings) {
         std::fprintf(stderr, "[audio8] %s\n", warning.c_str());
     }
-    if (memory_degrade && impl->options.enabled()) {
-        impl->options.use = pcm::Use::off;
-        impl->options.disabled_reason = "memory";
-    }
     impl->manager = pcm::Manager::instance();
-    const auto codec_plan =
+    auto codec_plan =
         plan_codec(path, impl->options, *impl->manager, source.stat.changed);
+    if (codec_plan.plan.route == pcm::Route::generate &&
+        impl->options.memory_budget_bytes) {
+        if (budget == codec_budget::degrade) {
+            impl->options.use = pcm::Use::off;
+            impl->options.disabled_reason = "memory";
+            codec_plan.plan = {pcm::Route::none, pcm::SlotState::disabled,
+                               "memory"};
+        } else if (budget == codec_budget::unprojected) {
+            // The final route can change while the ggml models are uploaded.
+            // A prebuilt or unavailable route has no generated envelope.
+            codec_plan.plan = {pcm::Route::none, pcm::SlotState::unsupported,
+                               "unprojected_budget"};
+        }
+    }
     if (codec_plan.plan.route == pcm::Route::none) {
         impl->unavailable.stage = STAGE;
         impl->unavailable.function = "main";
@@ -357,10 +367,16 @@ std::string codec_coreml::construction_json() const {
 }
 
 std::string codec_coreml::prewarm(CoremlOptions::Prewarm scope,
-                                  bool wait) const {
+                                  bool wait,
+                                  const std::atomic<uint64_t> & cancels) const {
+    const auto since = cancels.load(std::memory_order_relaxed);
     const auto group = impl_->group(pcm::GroupKind::prewarm,
                                     static_cast<pcm::Prewarm>(scope), wait);
-    return pcm::to_json(wait ? group->wait() : group->result());
+    if (!wait)
+        return pcm::to_json(group->result());
+    return pcm::to_json(group->wait(std::nullopt, [&] {
+        return cancels.load(std::memory_order_relaxed) != since;
+    }));
 }
 
 bool codec_coreml::wait(int64_t timeout_ms,
@@ -447,7 +463,8 @@ codec_coreml_call codec_coreml::acquire(const std::atomic<bool> *) const {
 }
 std::string codec_coreml::status() const { return "{}"; }
 std::string codec_coreml::construction_json() const { return "{}"; }
-std::string codec_coreml::prewarm(CoremlOptions::Prewarm, bool) const {
+std::string codec_coreml::prewarm(CoremlOptions::Prewarm, bool,
+                                  const std::atomic<uint64_t> &) const {
     return "{}";
 }
 bool codec_coreml::wait(int64_t, const std::atomic<uint64_t> *) const {

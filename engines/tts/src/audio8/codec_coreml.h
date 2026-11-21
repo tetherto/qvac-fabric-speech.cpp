@@ -39,19 +39,22 @@ struct codec_coreml_call {
     bool strict = false;
 };
 
+enum class codec_budget { unprojected, projected, degrade };
+
 class codec_coreml {
   public:
     static std::shared_ptr<codec_coreml> create(const codec_model & codec,
                                                 const std::string & path,
                                                 const codec_source & source,
                                                 const CoremlOptions & options,
-                                                bool memory_degrade);
+                                                codec_budget budget);
     ~codec_coreml();
 
     codec_coreml_call acquire(const std::atomic<bool> * cancel) const;
     std::string status() const;
     std::string construction_json() const;
-    std::string prewarm(CoremlOptions::Prewarm scope, bool wait) const;
+    std::string prewarm(CoremlOptions::Prewarm scope, bool wait,
+                        const std::atomic<uint64_t> & cancels) const;
     bool wait(int64_t timeout_ms,
               const std::atomic<uint64_t> * cancels = nullptr) const;
 

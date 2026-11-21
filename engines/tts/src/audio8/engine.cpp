@@ -496,7 +496,7 @@ Engine::Engine(const EngineOptions & opts) : pimpl_(new Impl()) {
         check_halves(encoder.hp, decoder.hp);
     }
 
-    bool memory_degrade = false;
+    auto budget = codec_budget::unprojected;
 #ifdef TTS_CPP_USE_COREML
     if (codec_needs_budget_projection(opts.codec_decoder_gguf_path,
                                       opts.coreml)) {
@@ -518,7 +518,11 @@ Engine::Engine(const EngineOptions & opts) : pimpl_(new Impl()) {
                 "audio8: could not assess Core ML memory budget (" +
                 projection.reason + ")");
         }
-        memory_degrade = projection.coreml.disabled_reason == "memory";
+        if (projection.coreml.route == "generate" && projection.coreml.validated) {
+            budget = projection.coreml.disabled_reason == "memory"
+                         ? codec_budget::degrade
+                         : codec_budget::projected;
+        }
     }
 #endif
 
@@ -543,7 +547,7 @@ Engine::Engine(const EngineOptions & opts) : pimpl_(new Impl()) {
     // uploads.
     if (!load_codec(opts.codec_decoder_gguf_path, opts.n_gpu_layers,
                     opts.backend, pimpl_->decoder, &error, opts.coreml,
-                    memory_degrade)) {
+                    budget)) {
         throw std::runtime_error(error);
     }
 
@@ -612,7 +616,7 @@ std::string Engine::coreml_construction_json() const {
 std::string Engine::coreml_prewarm(CoremlOptions::Prewarm scope, bool wait) {
     const auto & codec = pimpl_->decoder.coreml;
     return codec
-               ? codec->prewarm(scope, wait)
+               ? codec->prewarm(scope, wait, pimpl_->coreml_cancels)
                : R"({"group":"prewarm","success":true,"nothing_to_prepare":true,"slots":[],"skipped_route_none":[]})";
 }
 

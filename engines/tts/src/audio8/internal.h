@@ -404,7 +404,7 @@ bool peek_codec_header(const std::string & path, codec_header & header,
 bool load_codec(const std::string & path, int n_gpu_layers,
                 const std::string & backend, codec_model & model,
                 std::string * error, const CoremlOptions & coreml = {},
-                bool memory_degrade = false,
+                codec_budget budget = codec_budget::unprojected,
                 const std::function<void()> & upload_observer = {});
 void free_codec(codec_model & model);
 
