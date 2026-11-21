@@ -426,7 +426,8 @@ script).
    python engines/coreml/python/coreml_template.py --tool build/qvac-coreml-tool report --template-dir <dir>
    ```
 
-   For twins A and B (f32) and Q (`--quant-types`, default `q8_0`; the
+   For twins A and B (f32) and Q (`--quant-types` overrides the template's
+   `report_quant_types` or the `q8_0` default, and the
    exporter gets `qvac-coreml-tool f32` of it), `report` generates the
    package with the C++ generator (`qvac-coreml-tool generate`), compares its
    `weight.bin` blob by blob with the exporter's (`qvac-coreml-tool verify`)
@@ -450,6 +451,7 @@ permute take concat`, `let` bindings, and:
 | Op | Semantics |
 |---|---|
 | `slice(x, axis, begin, end[, step])` | half-open, `0 <= begin < end <= dim`, `step >= 1` |
+| `tile(x, axis, count)` | concatenates whole copies along an axis (for example `[a,b,c,a,b,c]` for a three-element vector tiled twice) |
 | `neg(x)` | IEEE negation (`neg(0)` is `-0`) |
 | `zeros([d...])`, `ones([d...])` | f32 constants |
 | `lit("id")` | a `template.json` `literals` entry `{id, dtype, shape, offset}`: bytes of `literals.bin` (fp16 or fp32, numpy order), as f32 |

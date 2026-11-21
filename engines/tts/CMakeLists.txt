@@ -371,6 +371,7 @@ set(TTS_CPP_LIB_SOURCES
     src/audio8/lm.cpp
     src/audio8/codec_ops.cpp
     src/audio8/codec_decode.cpp
+    src/audio8/codec_coreml.cpp
     src/audio8/codec_encode.cpp
     src/audio8/window_stream.cpp
     src/audio8/coreml_path.cpp
@@ -506,12 +507,13 @@ if (TTS_CPP_BUILD_LIBRARY)
         message(STATUS "tts-cpp: Core ML sidecars enabled (TTS_CPP_USE_COREML): Audio8 codec, Supertonic encoder/vector/vocoder, Chatterbox S3Gen stages, Pocket FlowLM step and Mimi decoder, CosyVoice3 stages, Parler DAC/optional decoder, MOSS stages, LavaSR denoiser/enhancer")
     endif()
     # Shared Core ML runtime (engines/coreml): compiled into libtts-cpp under its
-    # own namespace when TTS_CPP_COREML is on. Parler's DAC loads through it and,
-    # with TTS_CPP_COREML_GENERATE (macOS default), is generated from the GGUF
-    # with the embedded template below.
+    # own namespace when TTS_CPP_COREML is on. Parler's DAC and the Audio8
+    # codec use the shared loader and their embedded GGUF templates when
+    # TTS_CPP_COREML_GENERATE is enabled.
     include(${CMAKE_CURRENT_SOURCE_DIR}/../coreml/qvac_coreml.cmake)
     qvac_coreml_add_to(tts-cpp NAMESPACE tts_cpp_coreml PREFIX TTS_CPP ENABLE ${TTS_CPP_COREML}
-        TEMPLATES "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/parler-dac-w128")
+        TEMPLATES "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/parler-dac-w128"
+                  "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/audio8-codec-w64")
     target_link_libraries(tts-cpp PUBLIC ggml)
     find_package(Threads REQUIRED)
     target_link_libraries(tts-cpp PRIVATE Threads::Threads)
@@ -2170,6 +2172,7 @@ if (TTS_CPP_BUILD_TESTS)
     # ---- Audio8 tests (fixtures from scripts/dump-audio8-*-reference.py) ----
     set(_tcb_audio8_core_srcs
         src/audio8/gguf.cpp
+        src/audio8/codec_coreml.cpp
         src/audio8/graph.cpp
         src/backend_selection.cpp
         src/sched_dispatch.cpp
@@ -2558,8 +2561,15 @@ if (TTS_CPP_BUILD_TESTS)
     target_link_libraries(test-audio8-codec-coreml-parity PRIVATE tts-cpp ggml)
     target_include_directories(test-audio8-codec-coreml-parity PRIVATE include src test)
     if (TTS_CPP_COREML)
-        target_compile_definitions(test-audio8-codec-coreml-parity PRIVATE TTS_CPP_USE_COREML)
+        get_target_property(_tcb_coreml_ns tts-cpp QVAC_COREML_NS)
+        target_compile_definitions(test-audio8-codec-coreml-parity PRIVATE TTS_CPP_USE_COREML
+            QVAC_COREML_NS=${_tcb_coreml_ns})
+        target_include_directories(test-audio8-codec-coreml-parity PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/../coreml/include")
     endif()
+    target_include_directories(test-audio8-codec-coreml-parity PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/../coreml/test"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../coreml/third_party")
     tts_cpp_apply_ccache(test-audio8-codec-coreml-parity)
     tts_cpp_register_test(test-audio8-codec-coreml-parity LABEL "fixture")
     set_property(TEST test-audio8-codec-coreml-parity PROPERTY SKIP_RETURN_CODE 77)

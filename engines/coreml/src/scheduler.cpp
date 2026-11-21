@@ -386,6 +386,11 @@ bool Runtime::refuse_after_exit_locked(const std::shared_ptr<SlotCore> & c, Grav
     return true;
 }
 
+void Runtime::refuse_queued_after_exit_locked(const std::shared_ptr<SlotCore> & c, Graveyard & gy) {
+    if (c->state == SlotState::queued && exiting())
+        refuse_after_exit_locked(c, gy);
+}
+
 void Runtime::request_locked(const std::shared_ptr<SlotCore> & c, Priority p, bool nd, Graveyard & gy) {
     if (stopping_) return;
     if (exiting()) {
@@ -1093,7 +1098,12 @@ void Runtime::run_load(const std::shared_ptr<Job> & j) {
     const Clock::time_point t1 = Clock::now();
     if (j->warm_fn) {
         set_phase(j, SlotState::warming);
-        Error e = j->warm_fn(r.model.get(), j->load);
+        Error e;
+        try {
+            e = j->warm_fn(r.model.get(), j->load);
+        } catch (...) {
+            e = Error::transient("warm-up threw");
+        }
         if (!e.ok()) {
             if (r.lease_fd >= 0) ::close(r.lease_fd);
             r.model.reset();
@@ -1517,7 +1527,9 @@ void Runtime::on_model_released(const SharedModel & released) {
 }
 
 SlotState Runtime::state(const std::shared_ptr<SlotCore> & c) {
+    Graveyard gy;
     std::lock_guard<std::mutex> lk(mu);
+    refuse_queued_after_exit_locked(c, gy);
     if (c->model && c->model->retired()) return SlotState::retired;
     return c->state;
 }
@@ -1554,7 +1566,9 @@ SlotStatus Runtime::status(const std::shared_ptr<SlotCore> & c) {
     SlotStatus s;
     std::string path;
     {
+        Graveyard gy;
         std::lock_guard<std::mutex> lk(mu);
+        refuse_queued_after_exit_locked(c, gy);
         s = status_locked(*c, Clock::now());
         path = c->hint_path;
     }

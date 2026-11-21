@@ -1,7 +1,7 @@
 #pragma once
 
 // Core ML options for tts-cpp engines that load sidecars through the shared
-// Core ML runtime (today: the Parler DAC decoder).
+// Core ML runtime, including the Parler DAC decoder and Audio8 codec.
 //
 // Every field is unset by default. An engine resolves them once, at
 // construction, in this order per field: the explicit field, then the model
@@ -15,8 +15,8 @@
 // hints), the stage's own compute units, strict waits unbounded, no memory
 // budget.
 //
-// Builds without TTS_CPP_COREML accept these options; an explicit invalid
-// compute_units still throws there, and everything else is ignored.
+// Builds without TTS_CPP_COREML still validate options such as compute_units.
+// Audio8 fit honours memory_budget_bytes in those builds.
 
 #include <cstdint>
 #include <optional>

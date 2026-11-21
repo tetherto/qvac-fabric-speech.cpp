@@ -61,4 +61,6 @@ loads, using a weight-free template embedded in the library, compiles it on
 the device and keeps it in the cache; the stage runs on ggml until the sidecar
 is ready. A prebuilt sidecar next to the GGUF still takes precedence. Today
 the [Parler-TTS DAC decoder](parler.md#generated-sidecar-and-background-loading)
-is generated; the other families load only prebuilt sidecars.
+can generate under its validated policy. The [Audio8 codec](audio8.md#generated-sidecar-and-background-loading)
+also ships its generation template, with the generated route gated on
+memory validation. Both use the shared background loader for adjacent prebuilts.

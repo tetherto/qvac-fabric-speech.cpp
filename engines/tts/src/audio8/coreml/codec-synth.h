@@ -14,9 +14,9 @@ extern "C" {
 
 struct audio8_coreml_codec_context;
 
-struct audio8_coreml_codec_context * audio8_coreml_codec_init(const char * path_mlmodelc,
-                                                              int64_t      latent_dim,
-                                                              int64_t      frame_size);
+struct audio8_coreml_codec_context *
+audio8_coreml_codec_init(const char * path_mlmodelc, int64_t latent_dim,
+                         int64_t frame_size, const char * compute_units);
 
 void audio8_coreml_codec_free(struct audio8_coreml_codec_context * ctx);
 
@@ -26,9 +26,6 @@ int64_t audio8_coreml_codec_window_frames(const struct audio8_coreml_codec_conte
 int audio8_coreml_codec_synthesize(struct audio8_coreml_codec_context * ctx,
                                    const float * post,
                                    float       * pcm);
-
-// e.g. "coreml-all"; the requested placement, not a per-op guarantee.
-const char * audio8_coreml_codec_backend_label(const struct audio8_coreml_codec_context * ctx);
 
 #if defined(__cplusplus)
 }

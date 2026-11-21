@@ -90,15 +90,12 @@ bool source_stat(const std::string & path, SourceStat & out);
 // swapped and restored between them.
 bool source_stat_fd(int fd, const std::string & path, SourceStat & out);
 
-// The identity of the file an engine loaded its weights from, from path
-// samples, for an engine that cannot read through one descriptor. `before`
-// and `after` are source_stat of the path the engine loaded, taken before its
-// first open of it and after its last read; `path` is the path it asks to
-// generate from. When the two stats differ (the file was replaced during the
-// load), either is missing (`ok_*` false) or `path` resolves to another file,
-// the result is marked `changed`, so prepare fails with source_changed rather
-// than generating from weights the engine did not load. A file replaced after
-// the first sample and restored before the last one passes unseen.
+// Check the source identity before the engine's first read and after its last
+// read. Prefer source_stat_fd on the retained descriptor. Engines that reopen
+// the file can use source_stat before the first open and after the last read,
+// but cannot detect a pathname swap that was undone between the two samples.
+// If either sample fails, the identity changes, or the resolved path changes,
+// prepare fails with source_changed.
 SourceStat loaded_source(const SourceStat & before, bool ok_before, const SourceStat & after, bool ok_after,
                          const std::string & path);
 

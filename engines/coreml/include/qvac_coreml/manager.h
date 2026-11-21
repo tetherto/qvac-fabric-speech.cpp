@@ -117,6 +117,10 @@ public:
     // Blocks until finished, `timeout` or `cancel` (polled every 50 ms).
     PrewarmResult wait(std::optional<Clock::duration> timeout = std::nullopt,
                        const std::atomic<bool> * cancel = nullptr);
+    // Cancels if the caller's counter changes from the value at request time.
+    PrewarmResult wait(std::optional<Clock::duration> timeout,
+                       const std::atomic<uint64_t> & cancel_epoch,
+                       uint64_t observed_epoch);
     PrewarmResult result() const;
 
 private:
@@ -129,6 +133,10 @@ private:
     };
     // Under the runtime mutex; strong references go to the caller's graveyard.
     PrewarmResult collect(bool & finished, detail::Graveyard & gy) const;
+    PrewarmResult wait_impl(std::optional<Clock::duration> timeout,
+                            const std::atomic<bool> * cancel,
+                            const std::atomic<uint64_t> * cancel_epoch,
+                            uint64_t observed_epoch);
 
     GroupKind kind_ = GroupKind::construction;
     std::shared_ptr<detail::Runtime> rt_;
