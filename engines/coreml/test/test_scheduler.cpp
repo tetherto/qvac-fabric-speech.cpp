@@ -2640,7 +2640,12 @@ int child_dlclose(const std::string & mode, const std::string & plugin, const st
         auto make = reinterpret_cast<SlotFn>(dlsym(h, "qvac_coreml_plugin_slot_only"));
         auto pin = reinterpret_cast<IntFn>(dlsym(h, "qvac_coreml_plugin_pin_state"));
         auto arm = reinterpret_cast<ArmFn>(dlsym(h, "qvac_coreml_plugin_arm"));
-        if (!make || !pin || !arm) return 3;
+        auto empty_group = reinterpret_cast<IntFn>(dlsym(h, "qvac_coreml_plugin_empty_group"));
+        if (!make || !pin || !arm || !empty_group) return 3;
+        if (!empty_group() || pin() != static_cast<int>(detail::PinState::untried)) {
+            std::fprintf(stderr, "dlclose slot-only: an empty group pinned the image or failed\n");
+            return 11;
+        }
         // arm_exit_guard() off the main thread: false, and nothing pinned.
         if (arm(1) != 0 || pin() != static_cast<int>(detail::PinState::untried)) {
             std::fprintf(stderr, "dlclose slot-only: a worker's arm_exit_guard() returned true or pinned the image\n");

@@ -721,7 +721,8 @@ the request to first use and `wait = construct` waits for the construction
 request. `wait = call` waits at synthesis entry. With the default macOS wait
 policy, pending stages use ggml and a warm load can get a brief bounded wait.
 `use = require` makes an unavailable sidecar or a prediction failure an
-error. `Engine::cancel()` interrupts a synthesis waiting for a sidecar.
+error. `Engine::cancel()` interrupts a synthesis or prewarm waiting for a
+sidecar.
 Generation checks the decoder GGUF's identity across the weight upload and
 again when the preparation job reopens it. If the source changes, the
 automatic route uses ggml and the required route reports the failure.
@@ -746,7 +747,9 @@ including the synthesis arena. For an eligible generated route it also
 charges the template's resident memory, one preparation or load transient
 and the window-stream buffers. Fit does not read the artifact cache or warm
 hints. An explicit budget that fits only ggml resolves Core ML off for that
-instance. Pass the assessed budget in `EngineOptions::coreml.memory_budget_bytes`
+instance. If a prebuilt disappears during construction and generation has no
+fit projection, the new route reports `unsupported(unprojected_budget)`.
+Pass the assessed budget in `EngineOptions::coreml.memory_budget_bytes`
 and carry over its prompt token count, reference duration and margin through
 the engine's fit fields. Prebuilt sidecars keep the existing ggml fit estimate.
 Cold ANE loads use a separate runtime compiler reserve. For a prebuilt
