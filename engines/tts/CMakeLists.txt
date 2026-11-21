@@ -2560,7 +2560,11 @@ if (TTS_CPP_BUILD_TESTS)
     target_link_libraries(test-audio8-codec-coreml-parity PRIVATE tts-cpp ggml)
     target_include_directories(test-audio8-codec-coreml-parity PRIVATE include src test)
     if (TTS_CPP_COREML)
-        target_compile_definitions(test-audio8-codec-coreml-parity PRIVATE TTS_CPP_USE_COREML)
+        get_target_property(_tcb_coreml_ns tts-cpp QVAC_COREML_NS)
+        target_compile_definitions(test-audio8-codec-coreml-parity PRIVATE TTS_CPP_USE_COREML
+            QVAC_COREML_NS=${_tcb_coreml_ns})
+        target_include_directories(test-audio8-codec-coreml-parity PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/../coreml/include")
     endif()
     target_include_directories(test-audio8-codec-coreml-parity PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/../coreml/test"

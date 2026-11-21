@@ -473,16 +473,22 @@ bool decode_codes(codec_model & model, const int32_t * codes, int n_frames,
                   int n_threads, const cancel_hook & cancel,
                   std::vector<float> & pcm_out, std::string * error,
                   decode_taps * taps, decode_timing * timing,
-                  const codec_coreml_call * call) {
+                  const codec_coreml_call * call,
+                  const std::atomic<bool> * acquisition_cancel) {
     pcm_out.clear();
     if (!check_decodable(model, n_frames, error)) return false;
     if (n_frames <= 0) return true;
 
-    if (cancelled(cancel, error))
-        return false;
     codec_coreml_call acquired;
-    if (!taps && !call && model.coreml)
-        acquired = model.coreml->acquire(nullptr);
+    if (!taps && !call && model.coreml) {
+        acquired = model.coreml->acquire(acquisition_cancel);
+        if (acquisition_cancel &&
+            acquisition_cancel->load(std::memory_order_relaxed)) {
+            if (error)
+                *error = CANCELLED;
+            return false;
+        }
+    }
     const codec_coreml_call & selected = !taps && call ? *call : acquired;
 
     decode_timing discarded;
@@ -691,8 +697,16 @@ window_stream_hooks stream_hooks(codec_model & model,
     };
     hooks.synthesize = [sidecar = call.model, &model, n_threads,
                         shape](const float * post, float * pcm) {
-        if (sidecar)
-            return sidecar->synthesize(post, pcm);
+        if (sidecar) {
+            try {
+                if (sidecar->synthesize(post, pcm))
+                    return true;
+            } catch (...) {
+                // A thrown prediction has the same recovery as a failed one.
+            }
+            sidecar->retire("prediction failed");
+            return false;
+        }
         const std::vector<float> input(post, post + static_cast<size_t>(shape.window) * shape.latent_dim);
         std::vector<float> output;
         std::string error;
@@ -758,9 +772,9 @@ bool finish_synthesis_stream(codec_model & model,
         case window_stream_status::unavailable:
             break;
     }
+    if (cancelled(cancel, error))
+        return false;
     // A failed stream can replay only before the callback received PCM.
-    if (call.model)
-        call.model->retire("prediction failed");
     if (stream.emitted()) {
         if (error) *error = "audio8: codec failed after PCM delivery began";
         return false;

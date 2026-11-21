@@ -404,7 +404,8 @@ bool peek_codec_header(const std::string & path, codec_header & header,
 bool load_codec(const std::string & path, int n_gpu_layers,
                 const std::string & backend, codec_model & model,
                 std::string * error, const CoremlOptions & coreml = {},
-                bool memory_degrade = false);
+                bool memory_degrade = false,
+                const std::function<void()> & upload_observer = {});
 void free_codec(codec_model & model);
 
 // Prompt frames, laid out the way the model reads them: row 0 is the semantic
@@ -532,13 +533,15 @@ int synthesis_context_frames(const codec_model & model);
 size_t synthesis_scratch_budget(size_t configured, size_t free_bytes, size_t total_bytes);
 
 // codes: [num_codebooks, n_frames] row-major. Writes n_frames * frame_size
-// samples at the codec sample rate.
+// samples at the codec sample rate. An unlatched route may wait for Core ML.
+// Use acquisition_cancel to interrupt that wait without polling the block hook.
 bool decode_codes(codec_model & model, const int32_t * codes, int n_frames,
                   int n_threads, const cancel_hook & cancel,
                   std::vector<float> & pcm_out, std::string * error,
                   decode_taps * taps = nullptr,
                   decode_timing * timing = nullptr,
-                  const codec_coreml_call * call = nullptr);
+                  const codec_coreml_call * call = nullptr,
+                  const std::atomic<bool> * acquisition_cancel = nullptr);
 
 // The post transformer a chunk at a time: each call computes frames [done,
 // end) from their codes and the keys and values the previous chunk left for its

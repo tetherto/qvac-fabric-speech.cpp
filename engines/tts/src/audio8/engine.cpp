@@ -498,7 +498,8 @@ Engine::Engine(const EngineOptions & opts) : pimpl_(new Impl()) {
 
     bool memory_degrade = false;
 #ifdef TTS_CPP_USE_COREML
-    if (opts.coreml.memory_budget_bytes) {
+    if (codec_needs_budget_projection(opts.codec_decoder_gguf_path,
+                                      opts.coreml)) {
         FitOptions fit;
         fit.lm_gguf_path = opts.lm_gguf_path;
         fit.codec_decoder_gguf_path = opts.codec_decoder_gguf_path;

@@ -721,7 +721,10 @@ the request to first use and `wait = construct` waits for the construction
 request. `wait = call` waits at synthesis entry. With the default macOS wait
 policy, pending stages use ggml and a warm load can get a brief bounded wait.
 `use = require` makes an unavailable sidecar or a prediction failure an
-error.
+error. `Engine::cancel()` interrupts a synthesis waiting for a sidecar.
+Generation checks the decoder GGUF's identity across the weight upload and
+again when the preparation job reopens it. If the source changes, the
+automatic route uses ggml and the required route reports the failure.
 
 `AUDIO8_COREML_DISABLE=1` forces ggml. `AUDIO8_COREML_STRICT=1` and
 `AUDIO8_COREML_COMPUTE_UNITS=cpu_only|cpu_and_gpu|cpu_and_ane|all` supply
@@ -746,12 +749,18 @@ hints. An explicit budget that fits only ggml resolves Core ML off for that
 instance. Pass the assessed budget in `EngineOptions::coreml.memory_budget_bytes`
 and carry over its prompt token count, reference duration and margin through
 the engine's fit fields. Prebuilt sidecars keep the existing ggml fit estimate.
+Cold ANE loads use a separate runtime compiler reserve. For a prebuilt
+bundle whose weight size is unavailable the runtime reserves 512 MiB.
 
 `test-audio8-codec-coreml-parity` checks the prebuilt and generated paths on
 the pinned decoder, with cosine floors of 0.999 against ggml and 0.99999 for
 streamed versus after-generation synthesis. The generated fixture also
 checks pending and ready routes, cache and hint fit stability, near-budget
-degradation and overlapped memory sampling. `bench-audio8-codec-coreml` prints
+degradation and overlapped memory sampling. Both overlap tests record the
+Metal device, compiler baseline, peak and reserve comparison. Run the two
+overlap modes with `AUDIO8_REQUIRE_CLEAN_MEMORY=1` on an isolated host to
+require measurable growth from a clean compiler baseline and a peak that
+fits its reserve with 25% margin. `bench-audio8-codec-coreml` prints
 the existing warm prebuilt comparison against ggml GPU synthesis using
 deterministic 10 s and 24 s code sequences, with a parity assertion for
 each row.

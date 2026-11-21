@@ -404,6 +404,7 @@ void case_op_tile() {
     MemSource data({TT{"bias", T_F32, {2, 3}, {1, -2, 3, 4, -5, 6}}}, {});
     auto out = run(recipe_text("t", zeros64(), source,
                                {blob("fp32", 18, "f32(tile(t(\"bias\"), 1, 3))")}), data);
+    CHECK(out.size() == 1);
     if (out.size() != 1) return;
     CHECK(f32s(out[0]) == std::vector<float>({1, -2, 3, 1, -2, 3, 1, -2, 3,
                                             4, -5, 6, 4, -5, 6, 4, -5, 6}));

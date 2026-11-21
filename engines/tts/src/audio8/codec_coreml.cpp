@@ -53,6 +53,7 @@ constexpr const char * ENGINE = "audio8";
 constexpr const char * STAGE = "codec_synthesis";
 constexpr int GENERATED_WINDOW = 64;
 constexpr double PREBUILT_ANE_RESERVE_FACTOR = 1.6;
+constexpr uint64_t PREBUILT_UNKNOWN_WEIGHT_RESERVE = 512ULL << 20;
 
 pcm::Resolved resolve(const CoremlOptions & options) {
     static_assert(static_cast<int>(CoremlOptions::Use::require) ==
@@ -84,7 +85,8 @@ struct planned_codec {
 
 planned_codec plan_codec(const std::string & path,
                          const pcm::Resolved & options,
-                         const pcm::Manager & manager) {
+                         const pcm::Manager & manager,
+                         bool source_changed = false) {
     planned_codec codec;
     codec.prebuilt = coreml_codec_sidecar_path(path);
     pcm::PlanInput input;
@@ -95,14 +97,17 @@ planned_codec plan_codec(const std::string & path,
     input.prebuilt_present =
         ::tts_cpp::detail::coreml_sidecar_exists(codec.prebuilt);
     if (options.enabled() && input.generation_built &&
-        !input.prebuilt_present) {
+        options.generate != pcm::Generate::never && !input.prebuilt_present) {
         auto candidates = pcm::generation::probe({TEMPLATE_ID}, path, options);
         if (!candidates.empty())
             codec.candidate = std::move(candidates.front());
     }
     const auto & candidate = codec.candidate;
     input.template_available = candidate && candidate->available;
-    input.template_matched = input.template_available && candidate->matched;
+    // A changed source fails in prepare even if its new header would not
+    // match. Keep the policy gates so unavailable units still stay disabled.
+    input.template_matched =
+        input.template_available && (candidate->matched || source_changed);
     if (input.template_available)
         input.validated_units = candidate->memory.validated_units;
     codec.units = options.units_or(
@@ -186,16 +191,19 @@ class acquired_codec final : public codec_coreml_model {
     pcm::Handle model_;
 };
 
-uint64_t prebuilt_reserve(const std::string & path, pcm::ComputeUnits units) {
+} // namespace
+
+uint64_t prebuilt_codec_ane_reserve(const std::string & path) {
     struct stat weights{};
-    if (!pcm::units_include_ane(units) ||
-        stat((path + "/weights/weight.bin").c_str(), &weights) != 0)
-        return 0;
+    if (stat((path + "/weights/weight.bin").c_str(), &weights) != 0 ||
+        !S_ISREG(weights.st_mode) || weights.st_size <= 0) {
+        // Compiled bundle layouts can change. Keep cold ANE admission in
+        // effect when there is no usable weight size.
+        return PREBUILT_UNKNOWN_WEIGHT_RESERVE;
+    }
     return fitutil::sat_u64_from_double(PREBUILT_ANE_RESERVE_FACTOR *
                                         weights.st_size);
 }
-
-} // namespace
 
 struct codec_coreml::Impl {
     pcm::Resolved options;
@@ -222,7 +230,7 @@ struct codec_coreml::Impl {
 
 std::shared_ptr<codec_coreml>
 codec_coreml::create(const codec_model & codec, const std::string & path,
-                     int fd, const CoremlOptions & options,
+                     const codec_source & source, const CoremlOptions & options,
                      bool memory_degrade) {
     auto impl = std::make_unique<Impl>();
     impl->options = resolve(options);
@@ -234,7 +242,8 @@ codec_coreml::create(const codec_model & codec, const std::string & path,
         impl->options.disabled_reason = "memory";
     }
     impl->manager = pcm::Manager::instance();
-    const auto codec_plan = plan_codec(path, impl->options, *impl->manager);
+    const auto codec_plan =
+        plan_codec(path, impl->options, *impl->manager, source.stat.changed);
     if (codec_plan.plan.route == pcm::Route::none) {
         impl->unavailable.stage = STAGE;
         impl->unavailable.function = "main";
@@ -254,15 +263,14 @@ codec_coreml::create(const codec_model & codec, const std::string & path,
                          synthesis_context_frames(codec)};
         if (spec.route == pcm::Route::prebuilt) {
             spec.artifact_path = codec_plan.prebuilt;
-            spec.ane_compile_reserve_bytes =
-                prebuilt_reserve(spec.artifact_path, spec.units);
+            if (pcm::units_include_ane(spec.units))
+                spec.ane_compile_reserve_bytes =
+                    prebuilt_codec_ane_reserve(spec.artifact_path);
         } else {
             const auto & candidate = *codec_plan.candidate;
-            pcm::SourceStat source;
-            source.changed = !pcm::generation::source_stat_fd(fd, path, source);
             spec.tmpl = candidate.tmpl;
-            spec.prepare = pcm::generation::prepare_request(candidate, source,
-                                                            impl->options);
+            spec.prepare = pcm::generation::prepare_request(
+                candidate, source.stat, impl->options);
             spec.prepare_fn = pcm::generation::prepare;
             spec.ane_compile_reserve_bytes =
                 pcm::generation::ane_compile_reserve_bytes(candidate.memory,
@@ -296,6 +304,8 @@ codec_coreml_call
 codec_coreml::acquire(const std::atomic<bool> * cancel) const {
     codec_coreml_call call;
     call.strict = impl_->options.strict();
+    if (cancel && cancel->load(std::memory_order_relaxed))
+        return call;
     if (!impl_->slot) {
         if (call.strict) {
             throw std::runtime_error(
@@ -306,8 +316,6 @@ codec_coreml::acquire(const std::atomic<bool> * cancel) const {
         }
         return call;
     }
-    if (cancel && cancel->load(std::memory_order_relaxed))
-        return call;
     // A cold load never blocks the default acquisition. A warm hint may wait
     // within this short deadline; explicit call / require use the slot policy.
     constexpr auto WARM_WAIT_BUDGET = std::chrono::milliseconds(20);
@@ -377,6 +385,13 @@ bool codec_coreml::wait(int64_t timeout_ms,
     }
 }
 
+bool codec_needs_budget_projection(const std::string & path,
+                                   const CoremlOptions & options) {
+    return options.memory_budget_bytes &&
+           plan_codec(path, resolve(options), *pcm::Manager::instance())
+                   .plan.route == pcm::Route::generate;
+}
+
 FitCoreml fit_codec_coreml(const std::string & path,
                            const CoremlOptions & options, uint64_t ggml_bytes,
                            uint64_t free_bytes, int frames,
@@ -426,13 +441,6 @@ FitCoreml fit_codec_coreml(const std::string & path,
 #else
 
 struct codec_coreml::Impl {};
-
-std::shared_ptr<codec_coreml> codec_coreml::create(const codec_model &,
-                                                   const std::string &, int,
-                                                   const CoremlOptions &,
-                                                   bool) {
-    return nullptr;
-}
 
 codec_coreml_call codec_coreml::acquire(const std::atomic<bool> *) const {
     return {};

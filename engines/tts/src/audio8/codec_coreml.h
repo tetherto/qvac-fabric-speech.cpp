@@ -6,12 +6,24 @@
 #include <atomic>
 #include <memory>
 
+#ifdef QVAC_COREML_NS
+#include "qvac_coreml/slot.h"
+#endif
+
 namespace tts_cpp::audio8::detail {
 
 struct codec_model;
+struct codec_source;
+
+#ifdef QVAC_COREML_NS
+struct codec_source {
+    QVAC_COREML_NS::SourceStat stat;
+};
+#endif
 
 // A single acquired model, held by the caller and its stream worker until
-// the call finishes. The worker never consults the slot or runs ggml.
+// the call finishes. The worker uses the handle to predict and retire a
+// failed model. The caller owns acquisition and replay.
 class codec_coreml_model {
   public:
     virtual ~codec_coreml_model() = default;
@@ -29,9 +41,11 @@ struct codec_coreml_call {
 
 class codec_coreml {
   public:
-    static std::shared_ptr<codec_coreml>
-    create(const codec_model & codec, const std::string & path, int fd,
-           const CoremlOptions & options, bool memory_degrade);
+    static std::shared_ptr<codec_coreml> create(const codec_model & codec,
+                                                const std::string & path,
+                                                const codec_source & source,
+                                                const CoremlOptions & options,
+                                                bool memory_degrade);
     ~codec_coreml();
 
     codec_coreml_call acquire(const std::atomic<bool> * cancel) const;
@@ -48,6 +62,12 @@ class codec_coreml {
 };
 
 void validate_codec_coreml_options(const CoremlOptions & options);
+
+#ifdef TTS_CPP_USE_COREML
+bool codec_needs_budget_projection(const std::string & path,
+                                   const CoremlOptions & options);
+uint64_t prebuilt_codec_ane_reserve(const std::string & path);
+#endif
 
 // Fit plans only from a template match and adjacent sidecar presence. No
 // model load, generation, cache or hint lookup takes place here.

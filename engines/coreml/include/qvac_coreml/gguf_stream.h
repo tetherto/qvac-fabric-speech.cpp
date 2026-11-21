@@ -57,7 +57,7 @@ public:
     // freshly-opened handle, so a swapped file shows up as a short read
     // or a size mismatch rather than silent corruption).
     gguf_stream_reader(const gguf_context * g, const std::string & path)
-        : g_(g), f_(std::fopen(path.c_str(), "rb")) {
+        : g_(g), f_(ggml_fopen(path.c_str(), "rb")) {
         if (!f_) {
             std::fprintf(stderr, "gguf_stream_reader: failed to reopen '%s' for tensor data\n",
                          path.c_str());

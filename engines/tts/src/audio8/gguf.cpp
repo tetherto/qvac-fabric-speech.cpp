@@ -9,6 +9,10 @@
 #include "gguf.h"
 #include "gguf_stream.h"
 
+#ifdef TTS_CPP_USE_COREML
+#include "qvac_coreml/generation.h"
+#endif
+
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -28,10 +32,18 @@ namespace {
 // until a gguf_stream_reader pulls it into the backend buffer.
 class gguf_file {
 public:
-    explicit gguf_file(const std::string & path)
-        : path_(path), file_(std::fopen(path.c_str(), "rb"), std::fclose) {
+    explicit gguf_file(const std::string & path, bool track_source = false)
+        : path_(path), file_(ggml_fopen(path.c_str(), "rb"), std::fclose) {
+        if (!file_) return;
+#ifdef TTS_CPP_USE_COREML
+        if (track_source)
+            source_ok_ = QVAC_COREML_NS::generation::source_stat_fd(
+                fd(), path_, source_before_);
+#else
+        (void)track_source;
+#endif
         gguf_init_params params = {/*no_alloc=*/true, &meta_};
-        if (file_) ctx_ = gguf_init_from_file_ptr(file_.get(), params);
+        ctx_ = gguf_init_from_file_ptr(file_.get(), params);
     }
     ~gguf_file() {
         if (ctx_) gguf_free(ctx_);
@@ -47,12 +59,34 @@ public:
 #ifndef _WIN32
     int fd() const { return fileno(file_.get()); }
 #endif
+#ifdef TTS_CPP_USE_COREML
+    codec_source loaded_source() const {
+        namespace generation = QVAC_COREML_NS::generation;
+        QVAC_COREML_NS::SourceStat after;
+        const bool after_ok = generation::source_stat_fd(fd(), path_, after);
+        auto source = generation::loaded_source(source_before_, source_ok_,
+                                                after, after_ok, path_);
+        if (!source.changed) {
+            // The retained file may still be intact after a rename. Check
+            // the path the template probe and prepare job will reopen, too.
+            QVAC_COREML_NS::SourceStat at_path;
+            const bool path_ok = generation::source_stat(path_, at_path);
+            source.changed = generation::loaded_source(
+                after, after_ok, at_path, path_ok, path_).changed;
+        }
+        return {std::move(source)};
+    }
+#endif
 
   private:
     std::string path_;
     std::unique_ptr<std::FILE, decltype(&std::fclose)> file_;
     gguf_context * ctx_ = nullptr;
     ggml_context * meta_ = nullptr;
+#ifdef TTS_CPP_USE_COREML
+    QVAC_COREML_NS::SourceStat source_before_;
+    bool source_ok_ = false;
+#endif
 };
 
 // Collects the first failure so a whole block of reads can be written as a
@@ -306,11 +340,17 @@ bool stream_fused(::tts_cpp::detail::gguf_stream_reader & reader, const gguf_fil
     return true;
 }
 
-bool stream_plain(::tts_cpp::detail::gguf_stream_reader & reader, ggml_context * ctx,
-                  const std::unordered_set<std::string> & fused_names) {
+bool stream_plain(::tts_cpp::detail::gguf_stream_reader & reader,
+                  ggml_context * ctx,
+                  const std::unordered_set<std::string> & fused_names,
+                  const std::function<void()> * upload_observer) {
     for (ggml_tensor * t = ggml_get_first_tensor(ctx); t; t = ggml_get_next_tensor(ctx, t)) {
         if (fused_names.count(ggml_get_name(t))) continue;
         if (!reader.to_backend(ggml_get_name(t), t)) return false;
+        if (upload_observer && *upload_observer) {
+            (*upload_observer)();
+            upload_observer = nullptr;
+        }
     }
     return true;
 }
@@ -330,14 +370,16 @@ std::unordered_set<std::string> fused_names(const fusion_plan & plan) {
     return names;
 }
 
-bool stream_weights(const gguf_file & file, ggml_context * ctx, const fusion_plan & plan) {
+bool stream_weights(const gguf_file & file, ggml_context * ctx,
+                    const fusion_plan & plan,
+                    const std::function<void()> * upload_observer) {
 #ifdef _WIN32
     ::tts_cpp::detail::gguf_stream_reader reader(file.ctx(), file.path());
 #else
     ::tts_cpp::detail::gguf_stream_reader reader(file.ctx(), file.fd());
 #endif
     if (!reader.ok()) return false;
-    return stream_plain(reader, ctx, fused_names(plan)) &&
+    return stream_plain(reader, ctx, fused_names(plan), upload_observer) &&
            stream_all_fused(reader, file, plan, ctx);
 }
 
@@ -382,10 +424,12 @@ ggml_backend_buffer_type_t hexagon_projection_buffer_type(ggml_backend_t backend
 // buffer the real path allocates is SIZED instead (the size-only twin of
 // ggml_backend_alloc_ctx_tensors runs the same buffer-type sizing sweep) and
 // no tensor data leaves the disk.
-bool load_weights(const gguf_file & file, ggml_backend_t backend, ggml_context ** ctx,
-                  ggml_backend_buffer_t * buffer, std::string * error,
-                  size_t * measure_bytes = nullptr, const fusion_plan & plan = {},
-                  std::vector<ggml_backend_buffer_t> * projection_buffers = nullptr) {
+bool load_weights(
+    const gguf_file & file, ggml_backend_t backend, ggml_context ** ctx,
+    ggml_backend_buffer_t * buffer, std::string * error,
+    size_t * measure_bytes = nullptr, const fusion_plan & plan = {},
+    std::vector<ggml_backend_buffer_t> * projection_buffers = nullptr,
+    const std::function<void()> * upload_observer = nullptr) {
     *ctx = new_weight_context(gguf_get_n_tensors(file.ctx()) +
                               static_cast<int64_t>(plan.size()));
     if (!*ctx) {
@@ -414,7 +458,7 @@ bool load_weights(const gguf_file & file, ggml_backend_t backend, ggml_context *
         if (error) *error = "audio8: failed to allocate the weight buffer";
         return false;
     }
-    if (!stream_weights(file, *ctx, plan)) {
+    if (!stream_weights(file, *ctx, plan, upload_observer)) {
         if (error) *error = "audio8: failed to read tensor data from " + file.path();
         return false;
     }
@@ -1123,8 +1167,9 @@ bool peek_codec_header(const std::string & path, codec_header & header,
 static bool load_codec_impl(const std::string & path, int n_gpu_layers,
                             const std::string & backend, codec_model & model,
                             std::string * error, fit_load_measure * measure,
-                            const CoremlOptions & coreml, bool memory_degrade) {
-    gguf_file file(path);
+                            const CoremlOptions & coreml, bool memory_degrade,
+                            const std::function<void()> * upload_observer) {
+    gguf_file file(path, !measure);
     if (!file.ok()) {
         if (error) *error = "audio8: failed to open " + path;
         return false;
@@ -1174,9 +1219,15 @@ static bool load_codec_impl(const std::string & path, int n_gpu_layers,
                      model.synthesis_convs.tiled ? "requested" : "unavailable; using separate taps");
     }
     if (!load_weights(file, model.backend, &model.ctx_w, &model.buffer_w, error,
-                      measure ? &measure->weights_bytes : nullptr)) {
+                      measure ? &measure->weights_bytes : nullptr, {}, nullptr,
+                      upload_observer)) {
         return false;
     }
+#ifdef TTS_CPP_USE_COREML
+    codec_source source;
+    if (model.has_decoder && !measure)
+        source = file.loaded_source();
+#endif
 
     tensor_map map(model.ctx_w);
     if (model.has_decoder) {
@@ -1199,8 +1250,8 @@ static bool load_codec_impl(const std::string & path, int n_gpu_layers,
     }
 #ifdef TTS_CPP_USE_COREML
     if (model.has_decoder && !measure) {
-        model.coreml = codec_coreml::create(model, path, file.fd(), coreml,
-                                            memory_degrade);
+        model.coreml =
+            codec_coreml::create(model, path, source, coreml, memory_degrade);
     }
 #else
     (void)coreml;
@@ -1212,10 +1263,11 @@ static bool load_codec_impl(const std::string & path, int n_gpu_layers,
 bool load_codec(const std::string & path, int n_gpu_layers,
                 const std::string & backend, codec_model & model,
                 std::string * error, const CoremlOptions & coreml,
-                bool memory_degrade) {
+                bool memory_degrade,
+                const std::function<void()> & upload_observer) {
     validate_codec_coreml_options(coreml);
     return load_codec_impl(path, n_gpu_layers, backend, model, error, nullptr,
-                           coreml, memory_degrade);
+                           coreml, memory_degrade, &upload_observer);
 }
 
 bool load_codec_metadata_only(const std::string & path, int n_gpu_layers,
@@ -1223,7 +1275,7 @@ bool load_codec_metadata_only(const std::string & path, int n_gpu_layers,
                               fit_load_measure & measure, std::string * error) {
     measure = fit_load_measure{};
     return load_codec_impl(path, n_gpu_layers, backend, model, error, &measure,
-                           {}, false);
+                           {}, false, nullptr);
 }
 
 void free_codec(codec_model & model) {
