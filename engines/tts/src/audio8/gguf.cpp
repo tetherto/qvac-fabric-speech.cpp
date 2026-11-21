@@ -28,17 +28,14 @@ namespace {
 // until a gguf_stream_reader pulls it into the backend buffer.
 class gguf_file {
 public:
-    explicit gguf_file(const std::string & path) : path_(path) {
+    explicit gguf_file(const std::string & path)
+        : path_(path), file_(std::fopen(path.c_str(), "rb"), std::fclose) {
         gguf_init_params params = {/*no_alloc=*/true, &meta_};
-        file_ = std::fopen(path.c_str(), "rb");
-        if (file_)
-            ctx_ = gguf_init_from_file_ptr(file_, params);
+        if (file_) ctx_ = gguf_init_from_file_ptr(file_.get(), params);
     }
     ~gguf_file() {
         if (ctx_) gguf_free(ctx_);
         if (meta_) ggml_free(meta_);
-        if (file_)
-            std::fclose(file_);
     }
     gguf_file(const gguf_file &) = delete;
     gguf_file & operator=(const gguf_file &) = delete;
@@ -48,12 +45,12 @@ public:
     const ggml_context * meta() const { return meta_; }
     const std::string & path() const { return path_; }
 #ifndef _WIN32
-    int fd() const { return fileno(file_); }
+    int fd() const { return fileno(file_.get()); }
 #endif
 
   private:
     std::string path_;
-    FILE * file_ = nullptr;
+    std::unique_ptr<std::FILE, decltype(&std::fclose)> file_;
     gguf_context * ctx_ = nullptr;
     ggml_context * meta_ = nullptr;
 };
