@@ -1084,6 +1084,20 @@ void check_generated(const std::string & gguf, const fs::path & cache) {
     if (!cold.coreml.bytes)
         return;
 
+    // This fixture uses 64-frame windows and a 25% template margin. A
+    // shorter workload drops one queued input and one retained PCM window.
+    constexpr uint64_t window = 64;
+    const int step = static_cast<int>(window) -
+                     synthesis_context_frames(ggml.model);
+    const uint64_t window_bytes =
+        window * sizeof(float) * (ggml.model.hp.latent_dim +
+                                   ggml.model.hp.frame_size);
+    const auto shorter = fit_codec_coreml(
+        gguf, options, 0, UINT64_MAX, LONG_FRAMES - step, ggml.model);
+    expect(shorter.route == "generate" &&
+               cold.coreml.bytes == shorter.bytes + window_bytes * 5 / 4,
+           "generated stream buffers did not receive the template margin");
+
     auto near = workload;
     near.coreml.memory_budget_bytes =
         ggml_need(cold, workload) + cold.coreml.bytes / 2;
@@ -1258,6 +1272,17 @@ void check_unvalidated(const std::string & gguf, const std::string & cache) {
                fit.coreml.bytes == 0 && fit.fits == fit.coreml.ggml_only_fits,
            "unvalidated route changed the ggml fit");
     fs::remove(lm);
+
+    options.use = CoremlOptions::Use::automatic;
+    options.generate = CoremlOptions::Generate::never;
+    owned_codec disabled;
+    if (!load(gguf, disabled, options))
+        return;
+    const auto disabled_status = stage(disabled.model.coreml->status());
+    expect(disabled_status.at("state") == "disabled" &&
+               disabled_status.at("route") == "none",
+           "generate=never should disable a matching template: " +
+               disabled_status.dump());
 }
 
 }  // namespace

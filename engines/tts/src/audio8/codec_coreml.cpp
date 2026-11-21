@@ -96,8 +96,7 @@ planned_codec plan_codec(const std::string & path,
     input.os = manager.os_version();
     input.prebuilt_present =
         ::tts_cpp::detail::coreml_sidecar_exists(codec.prebuilt);
-    if (options.enabled() && input.generation_built &&
-        options.generate != pcm::Generate::never && !input.prebuilt_present) {
+    if (options.enabled() && input.generation_built && !input.prebuilt_present) {
         auto candidates = pcm::generation::probe({TEMPLATE_ID}, path, options);
         if (!candidates.empty())
             codec.candidate = std::move(candidates.front());
@@ -421,8 +420,7 @@ FitCoreml fit_codec_coreml(const std::string & path,
     if (resolved.use == pcm::Use::off)
         result.disabled_reason = resolved.disabled_reason;
     if (codec.plan.route == pcm::Route::generate) {
-        const auto & memory = codec.candidate->memory;
-        result.bytes = pcm::generation::envelope_bytes(memory, codec.units);
+        auto memory = codec.candidate->memory;
         result.validated = true;
         // Bound queued float32 input, worker I/O and retained PCM cores. The
         // ggml projection already includes one waveform and the base post slab.
@@ -435,9 +433,10 @@ FitCoreml fit_codec_coreml(const std::string & path,
             sat_mul(GENERATED_WINDOW * sizeof(float), model.hp.latent_dim);
         const uint64_t output =
             sat_mul(GENERATED_WINDOW * sizeof(float), model.hp.frame_size);
-        result.bytes =
-            sat_add(result.bytes, sat_add(sat_mul(windows + 2, input),
-                                          sat_mul(windows + 1, output)));
+        const uint64_t stream_buffers =
+            sat_add(sat_mul(windows + 2, input), sat_mul(windows + 1, output));
+        memory.workspace_bytes = sat_add(memory.workspace_bytes, stream_buffers);
+        result.bytes = pcm::generation::envelope_bytes(memory, codec.units);
     }
     const uint64_t inclusive = sat_add(ggml_bytes, result.bytes);
     result.ggml_only_fits = ggml_bytes <= free_bytes;
