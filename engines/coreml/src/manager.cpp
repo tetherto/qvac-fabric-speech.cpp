@@ -366,10 +366,17 @@ PrewarmResult Group::result() const {
 }
 
 PrewarmResult Group::wait(std::optional<Clock::duration> timeout, const std::atomic<bool> * cancel) {
-    return wait(timeout, [cancel] { return cancel && cancel->load(); });
+    return wait_impl(timeout, cancel, nullptr, 0);
 }
 
-PrewarmResult Group::wait(std::optional<Clock::duration> timeout, const std::function<bool()> & cancelled) {
+PrewarmResult Group::wait(std::optional<Clock::duration> timeout,
+                          const std::atomic<uint64_t> & cancel_epoch, uint64_t observed_epoch) {
+    return wait_impl(timeout, nullptr, &cancel_epoch, observed_epoch);
+}
+
+PrewarmResult Group::wait_impl(std::optional<Clock::duration> timeout,
+                               const std::atomic<bool> * cancel,
+                               const std::atomic<uint64_t> * cancel_epoch, uint64_t observed_epoch) {
     const Clock::time_point deadline = timeout ? Clock::now() + *timeout : Clock::time_point::max();
     for (;;) {
         detail::Graveyard gy;  // released each round, after the lock
@@ -377,7 +384,8 @@ PrewarmResult Group::wait(std::optional<Clock::duration> timeout, const std::fun
         bool fin = false;
         PrewarmResult r = collect(fin, gy);
         if (fin || detail::exiting()) return r;
-        if (cancelled && cancelled()) return r;
+        if ((cancel && cancel->load()) ||
+            (cancel_epoch && cancel_epoch->load(std::memory_order_relaxed) != observed_epoch)) return r;
         const Clock::time_point now = Clock::now();
         if (now >= deadline) return r;
         rt_->state_cv.wait_until(lk, std::min(deadline, now + rt_->cfg.wait_poll));

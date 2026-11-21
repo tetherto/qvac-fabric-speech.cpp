@@ -373,9 +373,7 @@ std::string codec_coreml::prewarm(CoremlOptions::Prewarm scope,
                                     static_cast<pcm::Prewarm>(scope), wait);
     if (!wait)
         return pcm::to_json(group->result());
-    return pcm::to_json(group->wait(std::nullopt, [&] {
-        return cancels.load(std::memory_order_relaxed) != since;
-    }));
+    return pcm::to_json(group->wait(std::nullopt, cancels, since));
 }
 
 bool codec_coreml::wait(int64_t timeout_ms,
