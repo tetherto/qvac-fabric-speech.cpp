@@ -708,6 +708,21 @@ private:
             }
             return o;
         }
+        if (op == "tile") {
+            V x = eval(*e.args[0]);
+            const size_t axis = static_cast<size_t>(e.args[1]->number);
+            const size_t count = static_cast<size_t>(e.args[2]->number);
+            const size_t outer = count_of(x->shape, 0, axis);
+            const size_t block = count_of(x->shape, axis);
+            return relayout(x, e.shape, [&](const auto * in, auto * out) {
+                for (size_t i = 0; i < outer; ++i) {
+                    for (size_t copy = 0; copy < count; ++copy) {
+                        std::copy_n(in + i * block, block, out);
+                        out += block;
+                    }
+                }
+            });
+        }
         if (op == "slice") {
             V x = eval(*e.args[0]);
             const size_t axis = static_cast<size_t>(e.args[1]->number);

@@ -1,4 +1,5 @@
 #include "tts-cpp/audio8/engine.h"
+#include "tts-cpp/audio8/fit.h"
 
 #include "audio8/internal.h"
 #include "audio8/sampling.h"
@@ -144,6 +145,7 @@ struct Engine::Impl {
     std::unique_ptr<Tokenizer> tokenizer;
     sampling_params sampling;
     std::atomic<bool> cancel_requested{false};
+    std::atomic<uint64_t> coreml_cancels{0};
     StageTimings timings;
 
     std::vector<int32_t> cached_codes;
@@ -309,27 +311,33 @@ struct Engine::Impl {
         }
     }
 
-    bool decode_frames(window_stream * stream, const std::vector<int32_t> & frames,
-                       int n_frames, int n_threads, std::vector<float> & pcm,
+    bool decode_frames(const codec_coreml_call & call, window_stream * stream,
+                       const std::vector<int32_t> & frames, int n_frames,
+                       int n_threads, std::vector<float> & pcm,
                        decode_timing & timing, std::string & error) {
         const std::vector<int32_t> rows =
             codebook_rows(frames, lm.hp.num_codebooks, 0, n_frames);
         if (stream) {
-            return finish_synthesis_stream(decoder, *stream, rows.data(), n_frames, n_threads,
-                                           cancel_probe(), pcm, &error, &timing);
+            return finish_synthesis_stream(decoder, call, *stream, rows.data(),
+                                           n_frames, n_threads, cancel_probe(),
+                                           pcm, &error, &timing);
         }
-        return decode_codes(decoder, rows.data(), n_frames, n_threads, cancel_probe(), pcm,
-                            &error, nullptr, &timing);
+        return decode_codes(decoder, rows.data(), n_frames, n_threads,
+                            cancel_probe(), pcm, &error, nullptr, &timing,
+                            &call);
     }
 
-    void run_codec(window_stream * stream, const std::vector<int32_t> & frames, int n_frames,
+    void run_codec(const codec_coreml_call & call, window_stream * stream,
+                   const std::vector<int32_t> & frames, int n_frames,
                    int n_threads, SynthesisResult & result) {
         decode_timing timing;
         std::string error;
-        if (!decode_frames(stream, frames, n_frames, n_threads, result.pcm, timing, error)) {
+        if (!decode_frames(call, stream, frames, n_frames, n_threads,
+                           result.pcm, timing, error)) {
             throw std::runtime_error(error);
         }
         result.codec_synthesis_backend = timing.synthesis_backend;
+        result.coreml_pending = call.pending;
         timings.codec_latent_ms = timing.latent_ms;
         timings.codec_synth_ms = timing.synthesis_ms;
         if (opts.verbose) {
@@ -379,6 +387,10 @@ struct Engine::Impl {
                              const AudioCallback & callback) {
         require(!text.empty(), "the text to speak must not be empty");
         cancel_requested.store(false, std::memory_order_relaxed);
+        const codec_coreml_call call =
+            decoder.coreml ? decoder.coreml->acquire(&cancel_requested)
+                           : codec_coreml_call{};
+        check_cancel();
         const int n_threads = resolve_threads(opts.n_threads);
 
         const prompt_frames prompt = prompt_for(text, voice, n_threads);
@@ -403,8 +415,8 @@ struct Engine::Impl {
                 deliver(resample_chunk(resampler, pcm));
             };
         }
-        const std::unique_ptr<window_stream> stream =
-            open_synthesis_stream(decoder, frames, n_threads, cancel_probe(), emit);
+        const std::unique_ptr<window_stream> stream = open_synthesis_stream(
+            decoder, call, frames, n_threads, cancel_probe(), emit);
         generate_codes(prompt, n_threads, stream.get(), frames, n_frames);
         require(n_frames > 0, "the model emitted no audio frames");
         check_cancel();
@@ -412,7 +424,7 @@ struct Engine::Impl {
         SynthesisResult result;
         result.frames = n_frames;
         result.codes.assign(frames.begin(), frames.end());
-        run_codec(stream.get(), frames, n_frames, n_threads, result);
+        run_codec(call, stream.get(), frames, n_frames, n_threads, result);
 
         const int native = decoder.hp.sample_rate;
         if (callback) {
@@ -458,6 +470,7 @@ struct Engine::Impl {
 Engine::Engine(const EngineOptions & opts) : pimpl_(new Impl()) {
     pimpl_->opts = opts;
     validate_output_sample_rate(opts.output_sample_rate, "audio8");
+    validate_codec_coreml_options(opts.coreml);
     if (!opts.backends_dir.empty()) {
         ::tts_cpp::detail::set_backends_directory(opts.backends_dir);
     }
@@ -483,6 +496,31 @@ Engine::Engine(const EngineOptions & opts) : pimpl_(new Impl()) {
         check_halves(encoder.hp, decoder.hp);
     }
 
+    bool memory_degrade = false;
+#ifdef TTS_CPP_USE_COREML
+    if (opts.coreml.memory_budget_bytes) {
+        FitOptions fit;
+        fit.lm_gguf_path = opts.lm_gguf_path;
+        fit.codec_decoder_gguf_path = opts.codec_decoder_gguf_path;
+        fit.codec_encoder_gguf_path = opts.codec_encoder_gguf_path;
+        fit.n_gpu_layers = opts.n_gpu_layers;
+        fit.backend = opts.backend;
+        fit.backends_dir = opts.backends_dir;
+        fit.prompt_tokens = opts.fit_prompt_tokens;
+        fit.max_frames = opts.max_frames;
+        fit.reference_seconds = opts.fit_reference_seconds;
+        fit.margin_bytes = opts.fit_margin_bytes;
+        fit.coreml = opts.coreml;
+        const auto projection = fit_params(fit);
+        if (projection.status == FitStatus::Error) {
+            throw std::runtime_error(
+                "audio8: could not assess Core ML memory budget (" +
+                projection.reason + ")");
+        }
+        memory_degrade = projection.coreml.disabled_reason == "memory";
+    }
+#endif
+
     std::string error;
     if (!load_lm(opts.lm_gguf_path, opts.n_gpu_layers, opts.backend, pimpl_->lm, &error)) {
         throw std::runtime_error(error);
@@ -491,15 +529,6 @@ Engine::Engine(const EngineOptions & opts) : pimpl_(new Impl()) {
     check_against_lm(lm, decoder.hp, "the codec decoder");
     if (cloning) check_against_lm(lm, encoder.hp, "the codec encoder");
 
-    if (!load_codec(opts.codec_decoder_gguf_path, opts.n_gpu_layers, opts.backend,
-                    pimpl_->decoder, &error)) {
-        throw std::runtime_error(error);
-    }
-    if (opts.verbose) {
-        std::fprintf(stderr, "[audio8] codec synthesis on %s\n",
-                     pimpl_->decoder.synthesis_on_coreml ? "the Core ML sidecar"
-                                                         : ggml_backend_name(pimpl_->decoder.backend));
-    }
     if (cloning) {
         if (!load_codec(opts.codec_encoder_gguf_path, opts.n_gpu_layers, opts.backend,
                         pimpl_->encoder,
@@ -507,6 +536,14 @@ Engine::Engine(const EngineOptions & opts) : pimpl_(new Impl()) {
             throw std::runtime_error(error);
         }
         pimpl_->has_encoder = true;
+    }
+
+    // Decoder attachment may start background Core ML preparation after all
+    // uploads.
+    if (!load_codec(opts.codec_decoder_gguf_path, opts.n_gpu_layers,
+                    opts.backend, pimpl_->decoder, &error, opts.coreml,
+                    memory_degrade)) {
+        throw std::runtime_error(error);
     }
 
     pimpl_->tokenizer.reset(new Tokenizer(pimpl_->lm.tokenizer));
@@ -537,6 +574,7 @@ SynthesisResult Engine::synthesize_stream(const std::string & text, const VoiceP
 
 void Engine::cancel() {
     pimpl_->cancel_requested.store(true, std::memory_order_relaxed);
+    pimpl_->coreml_cancels.fetch_add(1, std::memory_order_relaxed);
 }
 
 const EngineOptions & Engine::options() const { return pimpl_->opts; }
@@ -556,8 +594,30 @@ BackendDevice Engine::backend_device() const {
                                                                  : BackendDevice::GPU;
 }
 
-bool Engine::codec_on_coreml() const {
-    return pimpl_->decoder.synthesis_on_coreml;
+bool Engine::codec_on_coreml() const { return coreml_wait(0); }
+
+std::string Engine::coreml_status() const {
+    const auto & codec = pimpl_->decoder.coreml;
+    return codec ? codec->status() : "{}";
+}
+
+std::string Engine::coreml_construction_json() const {
+    const auto & codec = pimpl_->decoder.coreml;
+    return codec
+               ? codec->construction_json()
+               : R"({"group":"construction","success":true,"nothing_to_prepare":true,"slots":[],"skipped_route_none":[]})";
+}
+
+std::string Engine::coreml_prewarm(CoremlOptions::Prewarm scope, bool wait) {
+    const auto & codec = pimpl_->decoder.coreml;
+    return codec
+               ? codec->prewarm(scope, wait)
+               : R"({"group":"prewarm","success":true,"nothing_to_prepare":true,"slots":[],"skipped_route_none":[]})";
+}
+
+bool Engine::coreml_wait(int64_t timeout_ms) const {
+    const auto & codec = pimpl_->decoder.coreml;
+    return codec && codec->wait(timeout_ms, &pimpl_->coreml_cancels);
 }
 
 VoicePrompt load_voice_prompt(const std::string & wav_path,

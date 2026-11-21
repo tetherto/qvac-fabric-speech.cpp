@@ -151,6 +151,11 @@ the same sidecar under `cpu_and_ane` to 54 dB. The M2's 54 dB gate under
 `all` is checked by the device run, not by CI. See
 [Parler-TTS generated sidecar](docs/parler.md#generated-sidecar-and-background-loading).
 
+Audio8 uses the same background loader and holds the selected codec backend
+for the entire synthesis or stream. Its embedded 64-frame generation template
+requires a validated compute-unit policy. See the
+[Audio8 codec options and status](docs/audio8.md#generated-sidecar-and-background-loading).
+
 CosyVoice3 HiFT sidecars use FP32 for waveform parity. With enabled Chatterbox,
 Pocket TTS, CosyVoice3 or prebuilt Parler-TTS sidecars present, `fit_params` returns `Error` with
 `coreml-memory-estimate-unavailable`; it cannot project Core ML resident memory.

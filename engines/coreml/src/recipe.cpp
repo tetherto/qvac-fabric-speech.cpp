@@ -341,9 +341,9 @@ ExprP parse_expr(Cursor & c, int depth = 0) {
 
 // Ops of this generator version. Later generator versions add more.
 const std::set<std::string> kOps = {"t",    "f32",   "f64",  "f16",  "add",   "mul", "div",   "recip", "clip",
-                                    "reshape", "permute", "take", "concat", "slice", "neg", "zeros", "ones", "lit"};
+                                    "reshape", "permute", "take", "concat", "slice", "neg", "zeros", "ones", "lit", "tile"};
 // Ops that exist in the language but belong to a later generator version.
-const std::set<std::string> kLaterOps = {"sub", "sqrt", "full",   "tile",   "exp",
+const std::set<std::string> kLaterOps = {"sub", "sqrt", "full",   "exp",
                                          "sin", "cos",  "l2norm", "matmul", "meta_f", "meta_s", "provided"};
 
 std::string shape_str(const std::vector<int64_t> & s) {
@@ -626,6 +626,24 @@ private:
             }
             e.dtype = dt;
             e.shape = shape;
+            return;
+        }
+        if (op == "tile") {
+            arity(e, 3);
+            array(*e.args[0], "tile");
+            const auto & shape = e.args[0]->shape;
+            const int64_t axis = integer(*e.args[1], "tile axis");
+            const int64_t count = integer(*e.args[2], "tile count");
+            if (axis < 0 || axis >= static_cast<int64_t>(shape.size())) {
+                throw RecipeError(e.line, "tile() axis out of range");
+            }
+            if (count < 1) throw RecipeError(e.line, "tile() count must be positive");
+            const auto length = detail::mul_elements(shape[axis], count);
+            if (!length) throw RecipeError(e.line, "tile() axis length overflows");
+            e.shape = shape;
+            e.shape[axis] = static_cast<int64_t>(*length);
+            e.dtype = e.args[0]->dtype;
+            e.ulp = e.args[0]->ulp;
             return;
         }
         if (op == "slice") {

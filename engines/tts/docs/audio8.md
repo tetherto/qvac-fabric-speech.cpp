@@ -551,9 +551,8 @@ the export is the same whichever file it was taken from. The exporter
 rebuilds the stack in PyTorch from the GGUF tensors, so it needs neither the
 checkpoint nor its remote code; `--parity-dir artifacts/audio8-ref` checks
 that rebuild against the reference dumps first (measured: waveform cosine
-1.0000000, max error 1e-6). With the sidecar present `audio8-cli --verbose`
-reports `codec synthesis on the Core ML sidecar` at load and the compute
-label (`coreml-all`) in the timing breakdown.
+1.0000000, max error 1e-6). `audio8-cli --verbose` reports the codec's per-call compute label
+(for example, `coreml-all` or `ggml`) in the timing breakdown.
 
 The export is fixed-shape, `--window` post frames (default 64, 2.97 s,
 131072 samples) in and the matching samples out. The engine walks an
@@ -694,46 +693,68 @@ of a fresh export pays a one-time on-device compilation (tens of seconds),
 which the OS caches for later loads.
 
 Those are steady-state numbers for the synthesis stage alone, measured before
-the sidecar overlapped generation. A one-shot `audio8-cli` run also pays the
-sidecar's first-prediction warm-up, which now lands on the worker during
-generation for anything longer than one window. The engine keeps the sidecar
-resident across `synthesize()` calls, so a host that speaks more than once
-pays the load and the warm-up once.
+the sidecar overlapped generation. The shared runtime now loads and warms the
+sidecar in the background by default on macOS. A synthesis takes its codec
+route at entry. When the sidecar becomes ready during a call, the next call
+can use it. A Core ML stream uses the codec worker and a ggml stream uses
+synchronous windows of causal context plus 16 frames. A prediction failure
+before PCM delivery can replay the entire call on ggml. After delivery starts,
+it fails the call. A failed sidecar is retired.
 
-Set `AUDIO8_COREML_DISABLE=1` to force the ggml synthesis, including for
-parity or benchmarking. `AUDIO8_COREML_STRICT=1` turns the silent ggml
-fallback into a synthesis failure, so a test cannot measure ggml and attribute
-it to Core ML -- the parity test and benchmark set it for their Core ML legs.
-`AUDIO8_COREML_COMPUTE_UNITS=cpu_only|cpu_and_gpu|cpu_and_ane` overrides the
-default all-units placement for comparisons, and `AUDIO8_COREML_STREAM_DISABLE=1`
-moves the synthesis back after generation. `bench-audio8-codec-coreml`
-times the ggml GPU synthesis against the sidecar on deterministic 10 s and
-24 s code sequences (median of 3 after a warm-up that absorbs the one-time
-on-device compilation of a fresh export) and prints a markdown table; it
-fails below the parity gate, so its numbers are correctness-checked, and the
-TTS CI macOS lane appends its table to the job summary.
+#### Generated sidecar and background loading
 
-Two reports tell a host where the codec ran. `Engine::codec_on_coreml()` is
-the attachment status: true while a sidecar next to the decoder GGUF is
-attached (the language model and the post transformer still run on
-`backend_name()`).
-`SynthesisResult::codec_synthesis_backend` is per call: `"ggml"`, or the
-sidecar's compute label (`coreml-all`, `coreml-gpu`, ...) when the synthesis
-stack actually ran there. The two differ on the call in which a loaded
-sidecar fails -- a window that cannot carry the causal context, or a Core ML
-prediction failure: the engine falls back to the ggml blocks for that call and
-retires the sidecar, so every later call goes straight to ggml and
-`codec_on_coreml()` turns false, instead of paying a failed Core ML attempt
-ahead of each full ggml pass. Because that fallback stays possible, the memory-fit projection (`audio8-fit-params`)
-prices the ggml synthesis arena whether or not a sidecar is present; with a
-working sidecar it over-reports by that arena rather than under-reporting the
-fallback. `test-audio8-codec-coreml-parity` covers all of it: an absent
-sidecar under `AUDIO8_COREML_STRICT`, a sidecar directory that is not a model
-(load status false, ggml synthesis), and a sidecar exported at a window that
-cannot carry the context (`--window 8`; loaded, fails under
-`AUDIO8_COREML_STRICT`, falls back bit-exactly to the ggml decode and is
-retired, so the next call reports ggml with no sidecar attached), each also
-through the public `Engine` with a synthetic language model.
+`TTS_CPP_COREML_GENERATE=ON` embeds the 64-frame Audio8 codec template on
+macOS. Generation needs macOS 15 or later, a matching decoder GGUF, a supported
+cache filesystem, a cache directory and a validated compute-unit policy. An
+adjacent compiled sidecar takes precedence. The embedded Audio8 template's
+production allowlist is currently empty while its memory envelope is being
+qualified. Prebuilt sidecars continue to load with their existing OS support.
+CI exercises cold generation with a development template copy on the pinned
+decoder checkpoint and checks the generated program and weights against the
+exporter.
+
+Set `EngineOptions::coreml.cache_dir` or `QVAC_COREML_CACHE_DIR` to select the
+cache. `EngineOptions::coreml` supports the shared `use`, `generate`,
+`wait`, `prewarm`, `compute_units` and `strict_wait_ms` options.
+`generate = never` permits adjacent prebuilts, `prewarm = none` defers
+the request to first use and `wait = construct` waits for the construction
+request. `wait = call` waits at synthesis entry. With the default macOS wait
+policy, pending stages use ggml and a warm load can get a brief bounded wait.
+`use = require` makes an unavailable sidecar or a prediction failure an
+error.
+
+`AUDIO8_COREML_DISABLE=1` forces ggml. `AUDIO8_COREML_STRICT=1` and
+`AUDIO8_COREML_COMPUTE_UNITS=cpu_only|cpu_and_gpu|cpu_and_ane|all` supply
+defaults when their fields are unset. `AUDIO8_COREML_STREAM_DISABLE=1` moves
+the internal Core ML overlap to after generation for calls without a PCM
+callback.
+
+`Engine::coreml_status()` returns the shared status JSON, including the codec
+slot's state, route, compute units and artifact details. `codec_on_coreml()`
+polls readiness and `coreml_wait()` lets callers wait for an existing request.
+`coreml_construction_json()` returns the construction group result.
+`coreml_prewarm(scope, wait)` issues a new group and returns its status.
+`SynthesisResult::codec_synthesis_backend` records the actual backend and
+`coreml_pending` is true when the call used ggml while the sidecar was pending.
+A host combining calls can report `mixed` if their labels differ.
+
+`FitOptions::coreml` uses the same policy. Fit retains the ggml allocation
+including the synthesis arena. For an eligible generated route it also
+charges the template's resident memory, one preparation or load transient
+and the window-stream buffers. Fit does not read the artifact cache or warm
+hints. An explicit budget that fits only ggml resolves Core ML off for that
+instance. Pass the assessed budget in `EngineOptions::coreml.memory_budget_bytes`
+and carry over its prompt token count, reference duration and margin through
+the engine's fit fields. Prebuilt sidecars keep the existing ggml fit estimate.
+
+`test-audio8-codec-coreml-parity` checks the prebuilt and generated paths on
+the pinned decoder, with cosine floors of 0.999 against ggml and 0.99999 for
+streamed versus after-generation synthesis. The generated fixture also
+checks pending and ready routes, cache and hint fit stability, near-budget
+degradation and overlapped memory sampling. `bench-audio8-codec-coreml` prints
+the existing warm prebuilt comparison against ggml GPU synthesis using
+deterministic 10 s and 24 s code sequences, with a parity assertion for
+each row.
 
 ### Engine notes
 

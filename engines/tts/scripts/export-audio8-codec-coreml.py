@@ -428,6 +428,7 @@ def convert_coreml(model, hp, window, out_path, compile_dir, compute_units, pale
         compute_precision=ct.precision.FLOAT16,
         compute_units=getattr(ct.ComputeUnit, compute_units),
         convert_to='mlprogram',
+        skip_model_load=not palettize_nbits,
     )
     if palettize_nbits:
         mlmodel = palettize(mlmodel, palettize_nbits)

@@ -1,7 +1,7 @@
 #pragma once
 
 // Core ML options for tts-cpp engines that load sidecars through the shared
-// Core ML runtime (today: the Parler DAC decoder).
+// Core ML runtime, including the Parler DAC decoder and Audio8 codec.
 //
 // Every field is unset by default. An engine resolves them once, at
 // construction, in this order per field: the explicit field, then the model

@@ -27,21 +27,27 @@ int main() {
 
 #else
 
-#include "audio8/coreml/codec-synth.h"
 #include "audio8/coreml_path.h"
 #include "audio8/coreml_windows.h"
 #include "audio8/internal.h"
 #include "audio8/window_stream.h"
 #include "test_env_portable.h"
 #include "tiny_lm.h"
+#include "memory_probe.h"
+#include "nlohmann/json.hpp"
 #include "tts-cpp/audio8/engine.h"
+#include "tts-cpp/audio8/fit.h"
 
+#include <chrono>
 #include <filesystem>
+#include <future>
 #include <fstream>
 #include <memory>
+#include <thread>
 
 using namespace tts_cpp::audio8::detail;
 namespace fs = std::filesystem;
+using tts_cpp::CoremlOptions;
 
 namespace {
 
@@ -116,18 +122,22 @@ struct owned_codec {
     ~owned_codec() { free_codec(model); }
 };
 
-bool load(const std::string & gguf, owned_codec & codec) {
+bool load(const std::string & gguf, owned_codec & codec,
+          CoremlOptions options = {}) {
+    options.wait = CoremlOptions::Wait::construct;
     std::string error;
-    codec.loaded = load_codec(gguf, /*n_gpu_layers=*/0, /*backend=*/"", codec.model, &error);
+    codec.loaded = load_codec(gguf, /*n_gpu_layers=*/0, /*backend=*/"",
+                              codec.model, &error, options);
     if (!codec.loaded) fail("load_codec(" + gguf + "): " + error);
     return codec.loaded;
 }
 
-bool decode(codec_model & model, const std::vector<int32_t> & codes, int n_frames,
-            const cancel_hook & cancel, std::vector<float> & pcm, decode_timing & timing,
-            std::string & error) {
-    return decode_codes(model, codes.data(), n_frames, N_THREADS, cancel, pcm, &error, nullptr,
-                        &timing);
+bool decode(codec_model & model, const std::vector<int32_t> & codes,
+            int n_frames, const cancel_hook & cancel, std::vector<float> & pcm,
+            decode_timing & timing, std::string & error,
+            const codec_coreml_call * call = nullptr) {
+    return decode_codes(model, codes.data(), n_frames, N_THREADS, cancel, pcm,
+                        &error, nullptr, &timing, call);
 }
 
 bool check_parity(const char * tag, codec_model & ggml, codec_model & coreml, int n_frames) {
@@ -168,31 +178,50 @@ bool check_parity(const char * tag, codec_model & ggml, codec_model & coreml, in
     return cos >= MIN_COSINE;
 }
 
-void check_strict_refusal(const std::string & gguf) {
-    scoped_env disabled("AUDIO8_COREML_DISABLE", "1");
-    scoped_env strict("AUDIO8_COREML_STRICT", "1");
-    owned_codec codec;
-    if (!load(gguf, codec)) return;
-    expect(!codec.model.synthesis_on_coreml, "a disabled sidecar was still attached");
-    const std::vector<int32_t> codes = make_codes(codec.model.hp, SHORT_FRAMES, 7u);
-    std::vector<float> pcm;
-    decode_timing timing;
-    std::string error;
-    expect(!decode(codec.model, codes, SHORT_FRAMES, nullptr, pcm, timing, error),
-           "strict decode without a sidecar returned audio");
+void check_route_policy(const std::string & gguf) {
+    CoremlOptions options;
+    options.use = CoremlOptions::Use::require;
+    owned_codec disabled_codec;
+    {
+        scoped_env disabled("AUDIO8_COREML_DISABLE", "1");
+        if (!load(gguf, disabled_codec, options))
+            return;
+    }
+    expect(!disabled_codec.model.coreml->wait(0),
+           "disable must override require");
+    const auto call = disabled_codec.model.coreml->acquire(nullptr);
+    expect(!call.model && !call.pending && !call.strict,
+           "disable must latch ggml");
+    expect(disabled_codec.model.coreml->status().find(
+               "\"state\":\"disabled\"") != std::string::npos,
+           "disabled status was not published");
+
+    options.use = CoremlOptions::Use::automatic;
+    options.generate = CoremlOptions::Generate::never;
+    options.compute_units = "cpu_and_ane";
+    options.prewarm = CoremlOptions::Prewarm::none;
+    owned_codec idle;
+    if (!load(gguf, idle, options))
+        return;
+    const auto status = idle.model.coreml->status();
+    expect(!idle.model.coreml->wait(0) &&
+               status.find("idle") != std::string::npos,
+           "prewarm none must leave the slot idle");
+    expect(status.find("cpu_and_ane") != std::string::npos,
+           "the explicit compute units were not reflected in status");
 }
 
 void check_cancellation(codec_model & coreml) {
     const std::vector<int32_t> codes = make_codes(coreml.hp, LONG_FRAMES, 99u);
     int asked = 0;
-    const cancel_hook after_one = [&asked] { return asked++ >= 1; };
+    const cancel_hook after_one = [&asked] { return asked++ >= 2; };
     std::vector<float> pcm;
     decode_timing timing;
     std::string error;
     scoped_env strict("AUDIO8_COREML_STRICT", "1");
     const bool ran = decode(coreml, codes, LONG_FRAMES, after_one, pcm, timing, error);
     expect(!ran && error == CANCELLED, "cancel " + std::string(ran ? "was ignored" : "stopped with '" + error + "'"));
-    const int window = static_cast<int>(audio8_coreml_codec_window_frames(coreml.coreml));
+    const int window = coreml.coreml->acquire(nullptr).model->window();
     const size_t one_window = static_cast<size_t>(std::min(window, LONG_FRAMES)) * coreml.hp.frame_size;
     expect(pcm.size() == one_window, "cancel kept " + std::to_string(pcm.size()) +
                                          " samples, expected one window of " + std::to_string(one_window));
@@ -222,7 +251,7 @@ bool stream_frames(window_stream & stream, int n_frames, std::string & error) {
 }
 
 int leading_windows(codec_model & model, int n_frames) {
-    const int window = static_cast<int>(audio8_coreml_codec_window_frames(model.coreml));
+    const int window = model.coreml->acquire(nullptr).model->window();
     return static_cast<int>(
                plan_coreml_windows(n_frames, window, synthesis_context_frames(model)).size()) -
            1;
@@ -239,15 +268,17 @@ void check_streamed(codec_model & coreml, int n_frames) {
     std::string error;
     expect(decode(coreml, rows, n_frames, nullptr, batch, t_batch, error),
            "batch decode failed: " + error);
+    const auto call = coreml.coreml->acquire(nullptr);
     const std::unique_ptr<window_stream> stream =
-        open_synthesis_stream(coreml, frames, N_THREADS, nullptr);
+        open_synthesis_stream(coreml, call, frames, N_THREADS, nullptr);
     if (!stream) {
         fail("no synthesis stream opened although a sidecar is attached");
         return;
     }
     expect(stream_frames(*stream, n_frames, error), "streamed advance failed: " + error);
-    expect(finish_synthesis_stream(coreml, *stream, rows.data(), n_frames, N_THREADS, nullptr,
-                                   streamed, &error, &t_stream),
+    expect(finish_synthesis_stream(coreml, call, *stream, rows.data(), n_frames,
+                                   N_THREADS, nullptr, streamed, &error,
+                                   &t_stream),
            "streamed finish failed: " + error);
     expect(t_stream.streamed_windows == leading_windows(coreml, n_frames),
            "streamed " + std::to_string(t_stream.streamed_windows) + " windows, expected " +
@@ -267,8 +298,9 @@ void check_streamed(codec_model & coreml, int n_frames) {
 void check_streamed_cancel(codec_model & coreml) {
     const std::vector<int32_t> rows = make_codes(coreml.hp, LONG_FRAMES, 11u);
     const std::vector<int32_t> frames = frame_major(rows, coreml.hp.num_codebooks, LONG_FRAMES);
-    const std::unique_ptr<window_stream> stream =
-        open_synthesis_stream(coreml, frames, N_THREADS, [] { return true; });
+    const auto call = coreml.coreml->acquire(nullptr);
+    const std::unique_ptr<window_stream> stream = open_synthesis_stream(
+        coreml, call, frames, N_THREADS, [] { return true; });
     if (!stream) {
         fail("no synthesis stream opened for the cancel check");
         return;
@@ -276,8 +308,9 @@ void check_streamed_cancel(codec_model & coreml) {
     std::vector<float> pcm;
     std::string error;
     stream_frames(*stream, LONG_FRAMES, error);
-    const bool ran = finish_synthesis_stream(coreml, *stream, rows.data(), LONG_FRAMES,
-                                             N_THREADS, nullptr, pcm, &error, nullptr);
+    const bool ran =
+        finish_synthesis_stream(coreml, call, *stream, rows.data(), LONG_FRAMES,
+                                N_THREADS, nullptr, pcm, &error, nullptr);
     expect(!ran && error == CANCELLED,
            "streamed cancel " + std::string(ran ? "was ignored" : "stopped with '" + error + "'"));
 }
@@ -288,6 +321,11 @@ std::string write_matching_tiny_lm(const codec_hparams & hp) {
     audio8_test::tiny_lm p;
     p.num_codebooks = hp.num_codebooks;
     p.codebook_size = hp.semantic_codebook_size;
+    p.max_seq_len = 384;
+    p.ascii_tokenizer = true;
+    p.semantic_end = p.semantic_begin + p.codebook_size - 1;
+    p.eos = p.semantic_end + 1;
+    p.vocab = p.eos + 1;
     return audio8_test::write_tiny_lm_gguf(
         p, test_tmpdir() + "/test-audio8-coreml-tiny-lm-" + test_process_tag() + ".gguf");
 }
@@ -299,6 +337,7 @@ tts_cpp::audio8::EngineOptions engine_options(const std::string & lm, const std:
     opts.n_threads               = N_THREADS;
     opts.greedy                  = true;
     opts.max_frames              = SHORT_FRAMES;
+    opts.coreml.wait = CoremlOptions::Wait::construct;
     return opts;
 }
 
@@ -355,8 +394,7 @@ void check_invalid_sidecar(const std::string & gguf, const std::string & lm) {
     const std::string staged = stage_invalid_sidecar(gguf);
     owned_codec codec;
     if (!load(staged, codec)) return;
-    expect(codec.model.coreml == nullptr && !codec.model.synthesis_on_coreml,
-           "an invalid sidecar was attached");
+    expect(!codec.model.coreml->wait(0), "an invalid sidecar was attached");
     const std::vector<int32_t> codes = make_codes(codec.model.hp, SHORT_FRAMES, 3u);
     std::vector<float> pcm;
     decode_timing timing;
@@ -379,36 +417,37 @@ void check_unservable_sidecar(const std::string & dir, const std::string & lm) {
     }
     owned_codec codec;
     if (!load(gguf, codec)) return;
-    expect(codec.model.coreml != nullptr && codec.model.synthesis_on_coreml,
+    expect(codec.model.coreml->wait(0),
            "the fallback fixture's sidecar did not load");
-    const int window = static_cast<int>(audio8_coreml_codec_window_frames(codec.model.coreml));
+    auto strict_call = codec.model.coreml->acquire(nullptr);
+    if (!strict_call.model)
+        return;
+    const int window = strict_call.model->window();
     const int context = synthesis_context_frames(codec.model);
     expect(window <= context, "the fallback fixture's window (" + std::to_string(window) +
                                   ") carries the context (" + std::to_string(context) + "); it would serve");
 
     const std::vector<int32_t> codes = make_codes(codec.model.hp, SHORT_FRAMES, 5u);
     const std::vector<int32_t> no_frames;
-    expect(!open_synthesis_stream(codec.model, no_frames, N_THREADS, nullptr),
+    expect(!open_synthesis_stream(codec.model, strict_call, no_frames,
+                                  N_THREADS, nullptr),
            "a sidecar that cannot carry the context opened a synthesis stream");
     std::string error;
-    {
-        owned_codec strict_codec;
-        if (!load(gguf, strict_codec)) return;
-        scoped_env strict("AUDIO8_COREML_STRICT", "1");
-        std::vector<float> pcm;
-        decode_timing timing;
-        expect(!decode(strict_codec.model, codes, SHORT_FRAMES, nullptr, pcm, timing, error),
-               "strict decode with an unservable sidecar returned audio");
-        expect(error.find("unavailable") != std::string::npos,
-               "strict failure did not name the unavailable sidecar: " + error);
-    }
+    check_public_load_status(lm, gguf, /*want_loaded=*/true,
+                             "unservable sidecar");
     std::vector<float> pcm_fallback, pcm_ggml, pcm_retired;
     decode_timing t_fallback, t_ggml, t_retired;
     expect(decode(codec.model, codes, SHORT_FRAMES, nullptr, pcm_fallback, t_fallback, error),
            "fallback decode failed: " + error);
     expect(t_fallback.synthesis_backend == "ggml",
            "fallback synthesis ran on " + t_fallback.synthesis_backend);
-    expect(codec.model.coreml == nullptr && !codec.model.synthesis_on_coreml,
+    strict_call.strict = true;
+    expect(!decode(codec.model, codes, SHORT_FRAMES, nullptr, pcm_retired,
+                   t_retired, error, &strict_call) &&
+               error.find("unavailable") != std::string::npos,
+           "strict acquired sidecar failure did not report unavailable: " +
+               error);
+    expect(!codec.model.coreml->wait(0),
            "the failed sidecar was not retired after the fallback");
     expect(decode(codec.model, codes, SHORT_FRAMES, nullptr, pcm_retired, t_retired, error) &&
                t_retired.synthesis_backend == "ggml",
@@ -420,18 +459,412 @@ void check_unservable_sidecar(const std::string & dir, const std::string & lm) {
     }
     expect(pcm_fallback == pcm_ggml && pcm_retired == pcm_ggml,
            "fallback outputs are not bit-identical to the ggml decode");
-    check_public_load_status(lm, gguf, /*want_loaded=*/true, "unservable sidecar");
-    if (const char * real_lm = std::getenv("AUDIO8_COREML_TEST_LM_GGUF"); real_lm && *real_lm) {
-        check_public_synthesis_backend(real_lm, gguf, "ggml", /*want_attached_after=*/false,
-                                       "unservable sidecar, public synthesis");
-    }
     std::fprintf(stderr, "[coreml-parity] unservable sidecar (window %d <= context %d): loaded, fell back to ggml, retired\n",
                  window, context);
 }
 
+using json = nlohmann::json;
+
+unsigned long long trace_cast(uint64_t value) {
+    return static_cast<unsigned long long>(value);
+}
+using tts_cpp::audio8::Engine;
+using tts_cpp::audio8::fit_params;
+using tts_cpp::audio8::FitOptions;
+
+json stage(const std::string & status) {
+    return json::parse(status).at("stages").at(0);
+}
+
+FitOptions fit_options(const std::string & lm, const std::string & gguf,
+                       const CoremlOptions & options) {
+    FitOptions fit;
+    fit.lm_gguf_path = lm;
+    fit.codec_decoder_gguf_path = gguf;
+    fit.max_frames = LONG_FRAMES;
+    fit.coreml = options;
+    return fit;
+}
+
+bool same_fit(const tts_cpp::FitResult & lhs, const tts_cpp::FitResult & rhs) {
+    return lhs.status == rhs.status && lhs.coreml.route == rhs.coreml.route &&
+           lhs.coreml.validated == rhs.coreml.validated &&
+           lhs.coreml.bytes == rhs.coreml.bytes &&
+           lhs.coreml.disabled_reason == rhs.coreml.disabled_reason &&
+           lhs.coreml.ggml_only_fits == rhs.coreml.ggml_only_fits &&
+           lhs.coreml.fits == rhs.coreml.fits;
+}
+
+uint64_t ggml_need(const tts_cpp::FitResult & fit,
+                   const FitOptions & workload) {
+    return fit.device.total_bytes + workload.margin_bytes +
+           (fit.device_shares_host_memory ? fit.host_bytes : 0);
+}
+
+void check_fit_stable(const FitOptions & workload,
+                      const tts_cpp::FitResult & cold, const fs::path & cache) {
+    expect(same_fit(cold, fit_params(workload)),
+           "fit changed after generation");
+    int hints = 0;
+    for (const auto & file :
+         fs::directory_iterator(cache / "qvac-coreml-v1" / "hints")) {
+        if (file.path().extension() != ".json")
+            continue;
+        json record;
+        std::ifstream(file.path()) >> record;
+        // The runtime has already written a fresh hint. Change only its expiry.
+        expect(record.at("stale_until").is_null(),
+               "warm-load hint was already stale");
+        record["stale_until"] = "2099-01-01T00:00:00Z";
+        std::ofstream(file.path()) << record;
+        ++hints;
+    }
+    expect(hints > 0, "generated route wrote no warm-load hint");
+    expect(same_fit(cold, fit_params(workload)),
+           "fit changed with a stale hint");
+    std::printf("test-audio8-fit-stable: %s, %d stale hint(s) tested\n",
+                g_failures == 0 ? "PASS" : "FAIL", hints);
+}
+
+struct memory_trace {
+    uint64_t whole = 0;
+    uint64_t prepare = 0;
+    uint64_t load = 0;
+    uint64_t ready = 0;
+    int prepare_overlap = 0;
+    int load_overlap = 0;
+    int missing = 0;
+    std::vector<qvac_coreml_memory::AneSample> compiler;
+};
+
+// Two concurrent things only: the existing codec call on the producer and
+// the shared runtime's prepare/load job. The sampler never executes a model.
+bool check_overlap(owned_codec & codec, bool generated, uint64_t budget) {
+    using namespace std::chrono;
+    const auto rows = make_codes(codec.model.hp, LONG_FRAMES, 0x49a2u);
+    const codec_coreml_call ggml;
+    std::vector<float> pcm;
+    decode_timing timing;
+    std::string error;
+    for (int i = 0; i < 2; ++i) {
+        if (!decode(codec.model, rows, LONG_FRAMES, nullptr, pcm, timing, error,
+                    &ggml)) {
+            fail("could not warm the ggml baseline: " + error);
+            return false;
+        }
+    }
+    const uint64_t base = qvac_coreml_memory::phys_footprint();
+    if (base == 0) {
+        fail("could not read the process footprint baseline");
+        return false;
+    }
+    std::atomic<bool> stop{false}, inference{false};
+    const auto stage_state = [&] {
+        return stage(codec.model.coreml->status())
+            .at("state")
+            .get<std::string>();
+    };
+    const auto loading = [](const std::string & state) {
+        return state == "loading" || state == "warming";
+    };
+    std::promise<void> baseline_sampled;
+    auto baseline_ready = baseline_sampled.get_future();
+    auto sampler = std::async(std::launch::async, [&] {
+        memory_trace trace;
+        uint64_t rss = 0;
+        const bool initial = qvac_coreml_memory::ane_compiler_rss(rss);
+        trace.compiler.push_back({rss, false, initial});
+        baseline_sampled.set_value();
+        unsigned tick = 0;
+        while (!stop.load()) {
+            const auto state = stage_state();
+            const uint64_t total = qvac_coreml_memory::phys_footprint();
+            if (total == 0)
+                ++trace.missing;
+            const uint64_t delta = total > base ? total - base : 0;
+            trace.whole = std::max(trace.whole, delta);
+            if (state == "digesting" || state == "generating" ||
+                state == "compiling") {
+                trace.prepare = std::max(trace.prepare, delta);
+                if (inference.load())
+                    ++trace.prepare_overlap;
+            } else if (loading(state)) {
+                trace.load = std::max(trace.load, delta);
+                if (inference.load())
+                    ++trace.load_overlap;
+            } else if (state == "ready") {
+                trace.ready = std::max(trace.ready, delta);
+            }
+            if (++tick % 4 == 0 && state != "ready") {
+                const bool before = loading(state);
+                const bool sampled = qvac_coreml_memory::ane_compiler_rss(rss);
+                if (before == loading(stage_state()))
+                    trace.compiler.push_back({rss, before, sampled});
+            }
+            std::this_thread::sleep_for(milliseconds(4));
+        }
+        return trace;
+    });
+    baseline_ready.wait();
+
+    int pending_calls = 0, ready_calls = 0;
+    const auto deadline = steady_clock::now() + minutes(3);
+    try {
+        while (steady_clock::now() < deadline && ready_calls < 2) {
+            const auto call = codec.model.coreml->acquire(nullptr);
+            if (!(call.model || call.pending)) {
+                fail("generation ended before the slot became ready: " +
+                     codec.model.coreml->status());
+                break;
+            }
+            inference.store(true);
+            const bool ok = decode(codec.model, rows, LONG_FRAMES, nullptr, pcm,
+                                   timing, error, &call);
+            inference.store(false);
+            if (!ok || timing.synthesis_backend !=
+                           (call.model ? call.model->label() : "ggml")) {
+                fail("a synthesis switched routes or failed during overlap: " +
+                     error);
+                break;
+            }
+            if (call.pending)
+                ++pending_calls;
+            if (call.model)
+                ++ready_calls;
+        }
+    } catch (const std::exception & e) {
+        fail(e.what());
+    }
+    stop.store(true);
+    const auto trace = sampler.get();
+    const auto compiler =
+        qvac_coreml_memory::ane_compiler_growth(trace.compiler);
+    const bool ready = pending_calls > 0 && ready_calls == 2;
+    expect(ready, "cold generation did not produce both pending ggml and ready "
+                  "Core ML calls");
+    expect(trace.missing == 0 && (!generated || trace.prepare_overlap > 0) &&
+               trace.load_overlap > 0 && trace.ready > 0,
+           "memory trace missed preparation or load overlapped with inference");
+    expect(compiler.has_before &&
+               qvac_coreml_memory::ane_compiler_measured(compiler) &&
+               compiler.failed_samples == 0,
+           "memory trace missed ANECompilerService during load");
+    if (generated)
+        expect(trace.whole <= budget,
+               "overlapped footprint exceeded the fit envelope");
+    std::printf(
+        "audio8 memory bytes: baseline=%llu prepare=%llu load=%llu ready=%llu "
+        "peak=%llu "
+        "budget=%llu compiler_before=%llu compiler_peak=%llu "
+        "compiler_samples=%zu "
+        "prepare_overlap=%d load_overlap=%d pending_calls=%d ready_calls=%d\n",
+        trace_cast(base), trace_cast(trace.prepare), trace_cast(trace.load),
+        trace_cast(trace.ready), trace_cast(trace.whole), trace_cast(budget),
+        trace_cast(compiler.before), trace_cast(compiler.peak),
+        compiler.loading_samples, trace.prepare_overlap, trace.load_overlap,
+        pending_calls, ready_calls);
+    return ready;
+}
+
+void check_generated(const std::string & gguf, const fs::path & cache) {
+    expect(!fs::exists(coreml_codec_sidecar_path(gguf)),
+           "generated fixture must have no adjacent sidecar");
+    expect(!fs::exists(cache) || fs::is_empty(cache),
+           "generated fixture needs an empty cache");
+    if (g_failures)
+        return;
+    fs::create_directories(cache);
+
+    CoremlOptions options;
+    options.cache_dir = cache.string();
+    options.compute_units = "all";
+    options.prewarm = CoremlOptions::Prewarm::none;
+    options.wait = CoremlOptions::Wait::none;
+
+    owned_codec ggml;
+    CoremlOptions disabled;
+    disabled.use = CoremlOptions::Use::off;
+    if (!load(gguf, ggml, disabled))
+        return;
+    const std::string lm = write_matching_tiny_lm(ggml.model.hp);
+    const auto workload = fit_options(lm, gguf, options);
+    const auto cold = fit_params(workload);
+    expect(cold.fits && cold.coreml.route == "generate" &&
+               cold.coreml.validated && cold.coreml.bytes > 0 &&
+               cold.coreml.disabled_reason.empty(),
+           "fit could not price the matched generated route: " + cold.report);
+    if (!cold.coreml.bytes)
+        return;
+
+    auto near = workload;
+    near.coreml.memory_budget_bytes =
+        ggml_need(cold, workload) + cold.coreml.bytes / 2;
+    const auto degraded = fit_params(near);
+    expect(degraded.fits && degraded.coreml.ggml_only_fits &&
+               degraded.coreml.disabled_reason == "memory",
+           "near-budget fit did not degrade to ggml");
+
+    auto opts = engine_options(lm, gguf);
+    opts.max_frames = LONG_FRAMES;
+    opts.coreml = near.coreml;
+    {
+        Engine degraded_engine(opts);
+        const auto status = stage(degraded_engine.coreml_status());
+        expect(status.at("state") == "disabled" &&
+                   !degraded_engine.codec_on_coreml(),
+               "construction did not apply the same near-budget decision");
+    }
+
+    owned_codec generated;
+    std::string error;
+    // Retain a Metal fallback during generation and the load. Parity uses a
+    // separate CPU load after this schedule.
+    if (!load_codec(gguf, 99, "auto", generated.model, &error, options)) {
+        fail("load generated fixture: " + error);
+        return;
+    }
+    expect(!generated.model.coreml->wait(0),
+           "prewarm none started work before demand");
+    if (!check_overlap(generated, true, cold.coreml.bytes))
+        return;
+    const auto ready = stage(generated.model.coreml->status());
+    expect(ready.at("route") == "generated" && ready.at("state") == "ready",
+           "the empty cache did not produce a ready generated sidecar");
+
+    owned_codec cpu;
+    options.use = CoremlOptions::Use::require;
+    if (!load(gguf, cpu, options))
+        return;
+    (void)cpu.model.coreml->acquire(nullptr);
+    expect(stage(cpu.model.coreml->status()).at("route") == "cached",
+           "second slot did not adopt the existing artifact");
+    check_parity("generated short", ggml.model, cpu.model, SHORT_FRAMES);
+    check_parity("generated long", ggml.model, cpu.model, LONG_FRAMES);
+    check_streamed(cpu.model, LONG_FRAMES);
+
+    opts.coreml = options;
+    opts.max_frames = 70;
+    {
+        Engine engine(opts);
+        const auto construction =
+            json::parse(engine.coreml_construction_json());
+        expect(construction.at("success") == true &&
+                   construction.at("nothing_to_prepare") == true,
+               "prewarm none did not report an empty construction group");
+        const auto prewarm = json::parse(
+            engine.coreml_prewarm(CoremlOptions::Prewarm::all, true));
+        expect(prewarm.at("success") == true &&
+                   prewarm.at("nothing_to_prepare") == false &&
+                   engine.codec_on_coreml(),
+               "explicit prewarm did not reach ready");
+        const auto result = [&] {
+            scoped_env batch("AUDIO8_COREML_STREAM_DISABLE", "1");
+            return engine.synthesize("ab");
+        }();
+        std::vector<float> delivered;
+        const auto streamed = engine.synthesize_stream(
+            "ab", [&](const float * pcm, size_t n, int) {
+                delivered.insert(delivered.end(), pcm, pcm + n);
+                return true;
+            });
+        expect(!result.coreml_pending && !streamed.coreml_pending &&
+                   result.codec_synthesis_backend == "coreml-all" &&
+                   streamed.codec_synthesis_backend == "coreml-all",
+               "public generated synthesis and stream must both use the ready "
+               "Core ML codec");
+        const double cos = result.pcm.size() == streamed.pcm.size()
+                               ? cosine(result.pcm, streamed.pcm)
+                               : -1;
+        expect(
+            result.frames > 64 && result.codes == streamed.codes &&
+                delivered == streamed.pcm && cos >= STREAM_MIN_COSINE,
+            "public streamed audio differed from after-generation synthesis");
+        std::printf(
+            "public stream vs after generation: frames=%d cosine=%.7f\n",
+            result.frames, cos);
+    }
+    check_fit_stable(workload, cold, cache);
+    fs::remove(lm);
+}
+
+void check_prebuilt_overlap(const std::string & gguf) {
+    CoremlOptions options;
+    options.compute_units = "all";
+    options.generate = CoremlOptions::Generate::never;
+    options.prewarm = CoremlOptions::Prewarm::none;
+    options.wait = CoremlOptions::Wait::none;
+    owned_codec codec;
+    std::string error;
+    if (!load_codec(gguf, 99, "auto", codec.model, &error, options)) {
+        fail("prebuilt fixture load failed: " + error);
+        return;
+    }
+    if (check_overlap(codec, false, 0)) {
+        expect(stage(codec.model.coreml->status()).at("route") == "prebuilt",
+               "background prebuilt load used a different route");
+    }
+}
+
+void check_unvalidated(const std::string & gguf, const std::string & cache) {
+    CoremlOptions options;
+    options.cache_dir = cache;
+    options.compute_units = "cpu_only";
+    owned_codec codec;
+    if (!load(gguf, codec, options))
+        return;
+    const auto status = stage(codec.model.coreml->status());
+    expect(status.at("state") == "unsupported(unvalidated_units)",
+           "unvalidated generation should be suppressed: " + status.dump());
+    const auto call = codec.model.coreml->acquire(nullptr);
+    expect(!call.model && !call.pending && !call.strict,
+           "suppressed route should latch ggml immediately");
+
+    options.use = CoremlOptions::Use::require;
+    owned_codec strict;
+    if (!load(gguf, strict, options))
+        return;
+    try {
+        (void)strict.model.coreml->acquire(nullptr);
+        fail("require unexpectedly accepted an unsupported generated route");
+    } catch (const std::runtime_error & e) {
+        expect(std::string(e.what()).find("unvalidated_units") !=
+                   std::string::npos,
+               "strict failure did not name the unavailable route");
+    }
+    const auto lm = write_matching_tiny_lm(codec.model.hp);
+    const auto fit = fit_params(fit_options(lm, gguf, options));
+    expect(fit.coreml.route == "none" && !fit.coreml.validated &&
+               fit.coreml.bytes == 0 && fit.fits == fit.coreml.ggml_only_fits,
+           "unvalidated route changed the ggml fit");
+    fs::remove(lm);
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char ** argv) {
+    if (argc == 3 && std::string(argv[1]) == "--prebuilt-overlap") {
+        check_prebuilt_overlap(argv[2]);
+        std::printf("%s\n", g_failures == 0 ? "PASS" : "FAIL");
+        return g_failures == 0 ? 0 : 1;
+    }
+    if (argc == 4) {
+        try {
+            const std::string mode = argv[1];
+            if (mode == "--generated")
+                check_generated(argv[2], argv[3]);
+            else if (mode == "--unvalidated")
+                check_unvalidated(argv[2], argv[3]);
+            else
+                fail("unknown test mode: " + mode);
+        } catch (const std::exception & e) {
+            fail(e.what());
+        }
+        std::printf("%s\n", g_failures == 0 ? "PASS" : "FAIL");
+        return g_failures == 0 ? 0 : 1;
+    }
+    if (argc != 1)
+        return 2;
+
     const char * models_dir = std::getenv("AUDIO8_COREML_TEST_MODELS_DIR");
     if (models_dir == nullptr || *models_dir == '\0') {
         std::fprintf(stderr, "[coreml-parity] AUDIO8_COREML_TEST_MODELS_DIR not set; skipping\n");
@@ -448,7 +881,7 @@ int main() {
         return SKIP_EXIT_CODE;
     }
 
-    check_strict_refusal(gguf);
+    check_route_policy(gguf);
 
     owned_codec ggml;
     {
@@ -460,11 +893,11 @@ int main() {
         scoped_env strict("AUDIO8_COREML_STRICT", "1");
         if (!load(gguf, coreml)) return 1;
     }
-    if (!coreml.model.synthesis_on_coreml || !coreml.model.coreml) {
+    if (!coreml.model.coreml || !coreml.model.coreml->wait(0)) {
         fail("sidecar at " + sidecar + " did not initialise");
         return 1;
     }
-    const int window = static_cast<int>(audio8_coreml_codec_window_frames(coreml.model.coreml));
+    const int window = coreml.model.coreml->acquire(nullptr).model->window();
     const int context = synthesis_context_frames(coreml.model);
     std::fprintf(stderr, "[coreml-parity] sidecar %s: window %d frames, causal context %d frames\n",
                  sidecar.c_str(), window, context);

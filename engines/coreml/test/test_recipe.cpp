@@ -145,9 +145,10 @@ void case_grammar_errors() {
     expect_error(hdr(192, 1) + kSrcA + "bogus 1\n" + blob + "end\n", "unknown line");
     // Unknown and not-yet-available ops.
     expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(frob(t(\"a\")))\nend\n", "unknown op frob");
-    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(tile(t(\"a\"), 0, 1))\nend\n", "not in generator version 1 (a later version adds it)");
     expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(provided(\"k\", [t(\"a\")]))\nend\n", "a later version adds it");
     expect_error(hdr(192, 1) + kSrcA + "patch 10 str 4 \"abcd\"\n" + blob + "end\n", "patch str lines are not");
+    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(tile(t(\"a\"), 2, 1))\nend\n", "axis out of range");
+    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(tile(t(\"a\"), 0, 0))\nend\n", "positive");
     // Bindings.
     expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(x)\nlet x = t(\"a\")\nend\n", "used before its let", 7);
     expect_error(hdr(192, 1) + kSrcA + "let x = t(\"a\")\nlet x = t(\"a\")\n" + blob + "end\n", "already defined");
@@ -396,6 +397,16 @@ void case_op_layout() {
         for (int k = 0; k < 4; ++k) t1.push_back(0.0f);
     }
     CHECK(f32s(out[4]) == t1);
+}
+
+void case_op_tile() {
+    const std::string source = "source \"bias\" f32 [2,3]\n";
+    MemSource data({TT{"bias", T_F32, {2, 3}, {1, -2, 3, 4, -5, 6}}}, {});
+    auto out = run(recipe_text("t", zeros64(), source,
+                               {blob("fp32", 18, "f32(tile(t(\"bias\"), 1, 3))")}), data);
+    if (out.size() != 1) return;
+    CHECK(f32s(out[0]) == std::vector<float>({1, -2, 3, 1, -2, 3, 1, -2, 3,
+                                            4, -5, 6, 4, -5, 6, 4, -5, 6}));
 }
 
 void case_parler_examples() {
@@ -1260,6 +1271,7 @@ int main(int argc, char ** argv) {
                          {"dtype-promotion", case_dtype_promotion},
                          {"op-recip-clip", case_op_recip_clip},
                          {"op-layout", case_op_layout},
+                         {"op-tile", case_op_tile},
                          {"op-slice-neg-consts", case_op_slice_neg_consts},
                          {"op-lit", case_op_lit},
                          {"patches", case_patches},

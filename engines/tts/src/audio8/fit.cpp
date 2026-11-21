@@ -27,6 +27,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -101,6 +102,13 @@ FitResult fit_params(const FitOptions & opts) {
     if (opts.lm_gguf_path.empty() || opts.codec_decoder_gguf_path.empty() ||
         opts.prompt_tokens <= 0 || opts.max_frames < 0 ||
         (cloning && !(opts.reference_seconds > 0.0f))) {
+        r.reason = "invalid-arguments";
+        return r;
+    }
+
+    try {
+        detail::validate_codec_coreml_options(opts.coreml);
+    } catch (const std::invalid_argument &) {
         r.reason = "invalid-arguments";
         return r;
     }
@@ -387,6 +395,12 @@ FitResult fit_params(const FitOptions & opts) {
     if (r.device_shares_host_memory) {
         required = sat_add(required, r.host_bytes);
     }
+    r.coreml = detail::fit_codec_coreml(
+        opts.codec_decoder_gguf_path, opts.coreml, required,
+        r.device_free_bytes, codec_frames, m.decoder);
+    if (r.coreml.disabled_reason != "memory") {
+        required = sat_add(required, r.coreml.bytes);
+    }
     r.fits   = required <= r.device_free_bytes;
     r.status = r.fits ? FitStatus::Success : FitStatus::Failure;
     r.reason = r.fits ? "fits" : "does-not-fit";
@@ -435,6 +449,14 @@ FitResult fit_params(const FitOptions & opts) {
         std::snprintf(line, sizeof(line), "margin:          %14s\n",
                       fmt_mib(opts.margin_bytes).c_str());
         s += line;
+        if (r.coreml.route != "none" || !r.coreml.disabled_reason.empty()) {
+            s += "Core ML:         " + r.coreml.route + ", " +
+                 fmt_mib(r.coreml.bytes);
+            if (!r.coreml.disabled_reason.empty()) {
+                s += ", disabled (" + r.coreml.disabled_reason + ")";
+            }
+            s += "\n";
+        }
         if (r.fits) {
             std::snprintf(line, sizeof(line), "verdict: FITS (headroom %s)\n",
                           fmt_mib(r.device_free_bytes - required).c_str());

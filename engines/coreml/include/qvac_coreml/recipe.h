@@ -10,7 +10,7 @@
 // evaluate_patches() the spec patches. The op vocabulary grows with its
 // consumers; this generator version knows:
 //   t f32 f64 f16 add mul div recip clip reshape permute take concat (+ let)
-//   slice neg zeros ones lit
+//   slice neg zeros ones lit tile
 // and `patch` lines of dtype fp16 and fp32, which rewrite inline constants of
 // the spec (model.mlmodel) in place. `patch ... str`, provided() and
 // meta_f/meta_s belong to later generator versions; the parser rejects them.

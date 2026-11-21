@@ -50,7 +50,7 @@ struct FitBreakdown {
 };
 
 // The Core ML part of a projection, for engines whose stages run on the
-// shared Core ML runtime (Parler's DAC today). The route is decided from the
+// shared Core ML runtime. The route is decided from the
 // options, OS, build, template match and prebuilt presence, never from the
 // cache, so a projection is the same before and after the first generation.
 struct FitCoreml {

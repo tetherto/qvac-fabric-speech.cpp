@@ -4,6 +4,7 @@
 #include "audio8/window_stream.h"
 #include "gguf.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -122,6 +123,60 @@ static void compare_pcm(const std::vector<float> & got, const std::vector<float>
     }
 }
 
+// Fail a chosen prediction to exercise replay before PCM and fatal failure
+// after PCM with the production decoder and the real stream worker.
+class failing_sidecar final : public codec::codec_coreml_model {
+  public:
+    explicit failing_sidecar(int fail_on) : fail_on_(fail_on) {}
+    int window() const override { return 16; }
+    const char * label() const override { return "coreml-test"; }
+    bool synthesize(const float *, float * pcm) const override {
+        if (++calls_ == fail_on_)
+            return false;
+        std::fill_n(pcm, window() * 4, 0.5f);
+        return true;
+    }
+    void retire(const char *) const override { retired = true; }
+
+    mutable bool retired = false;
+
+  private:
+    int fail_on_;
+    mutable int calls_ = 0;
+};
+
+static void check_stream_failure(codec::codec_model & model,
+                                 const std::vector<int32_t> & frames,
+                                 const std::vector<int32_t> & rows,
+                                 const std::vector<float> & expected,
+                                 int fail_on) {
+    auto sidecar = std::make_shared<failing_sidecar>(fail_on);
+    const codec::codec_coreml_call call{sidecar};
+    int delivered = 0;
+    auto stream = codec::open_synthesis_stream(
+        model, call, frames, 1, {},
+        [&](const std::vector<float> &) { ++delivered; });
+    require(stream && stream->asynchronous(),
+            "selected Core ML stream unavailable");
+    const int count = static_cast<int>(frames.size()) / model.hp.num_codebooks;
+    feed_stream(*stream, count);
+    std::vector<float> pcm;
+    std::string error;
+    codec::decode_timing timing;
+    const bool ok = codec::finish_synthesis_stream(
+        model, call, *stream, rows.data(), count, 1, {}, pcm, &error, &timing);
+    require(sidecar->retired, "failed sidecar was not retired");
+    if (fail_on == 1) {
+        require(ok && delivered == 0 && timing.synthesis_backend == "ggml" &&
+                    pcm == expected,
+                "failed first prediction did not replay wholly on ggml");
+    } else {
+        require(!ok && delivered == 1 &&
+                    error == "audio8: codec failed after PCM delivery began",
+                "stream did not fail after delivering PCM");
+    }
+}
+
 static void check_streaming_decoder(const fs::path & root) {
     constexpr int frames_count = 51;
     const auto path = root / "stream-decoder.gguf";
@@ -134,16 +189,22 @@ static void check_streaming_decoder(const fs::path & root) {
     std::vector<float> expected;
     require(codec::decode_codes(loaded.model, rows.data(), frames_count, 1, {}, expected, &error), error);
     std::vector<float> delivered;
-    auto stream = codec::open_synthesis_stream(loaded.model, frames, 1, {},
-        [&](const std::vector<float> & chunk) { delivered.insert(delivered.end(), chunk.begin(), chunk.end()); });
+    auto stream = codec::open_synthesis_stream(
+        loaded.model, {}, frames, 1, {}, [&](const std::vector<float> & chunk) {
+            delivered.insert(delivered.end(), chunk.begin(), chunk.end());
+        });
     require(static_cast<bool>(stream), "ggml stream unavailable");
     feed_stream(*stream, frames_count);
     require(!delivered.empty(), "ggml PCM delayed until finish");
     std::vector<float> result;
-    require(codec::finish_synthesis_stream(loaded.model, *stream, rows.data(), frames_count,
-                                          1, {}, result, &error, nullptr), error);
+    require(codec::finish_synthesis_stream(loaded.model, {}, *stream,
+                                           rows.data(), frames_count, 1, {},
+                                           result, &error, nullptr),
+            error);
     require(delivered == result, "callback PCM differs from returned PCM");
     compare_pcm(delivered, expected);
+    check_stream_failure(loaded.model, frames, rows, expected, 1);
+    check_stream_failure(loaded.model, frames, rows, expected, 2);
     fs::remove(path);
 }
 
