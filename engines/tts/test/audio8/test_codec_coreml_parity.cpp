@@ -1117,6 +1117,24 @@ void check_generated(const std::string & gguf, const fs::path & cache) {
                "construction did not apply the same near-budget decision");
     }
 
+    auto small = workload;
+    small.coreml.memory_budget_bytes = ggml_need(cold, workload) - 1;
+    const auto refusal = fit_params(small);
+    expect(refusal.status == tts_cpp::FitStatus::Failure && !refusal.fits &&
+               !refusal.coreml.ggml_only_fits && !refusal.coreml.fits &&
+               refusal.coreml.disabled_reason.empty(),
+           "a budget below the ggml estimate incorrectly reported a fit");
+    auto small_engine_options = opts;
+    small_engine_options.coreml = small.coreml;
+    try {
+        Engine refused(small_engine_options);
+        fail("construction admitted generation when neither route fit");
+    } catch (const std::runtime_error & e) {
+        expect(std::string(e.what()).find("supplied memory budget") !=
+                   std::string::npos,
+               std::string("construction failed for another reason: ") + e.what());
+    }
+
     {
         const auto dir = fs::path(lm).parent_path() / "budget-route-change";
         fs::create_directories(dir);

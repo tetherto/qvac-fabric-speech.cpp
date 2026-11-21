@@ -519,6 +519,10 @@ Engine::Engine(const EngineOptions & opts) : pimpl_(new Impl()) {
                 projection.reason + ")");
         }
         if (projection.coreml.route == "generate" && projection.coreml.validated) {
+            if (!projection.fits) {
+                throw std::runtime_error(
+                    "audio8: model does not fit under the supplied memory budget");
+            }
             budget = projection.coreml.disabled_reason == "memory"
                          ? codec_budget::degrade
                          : codec_budget::projected;

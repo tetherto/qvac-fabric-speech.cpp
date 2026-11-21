@@ -714,7 +714,9 @@ decoder checkpoint and checks the generated program and weights against the
 exporter.
 
 Set `EngineOptions::coreml.cache_dir` or `QVAC_COREML_CACHE_DIR` to select the
-cache. `EngineOptions::coreml` supports the shared `use`, `generate`,
+cache. On macOS, `audio8-cli` defaults to
+`~/Library/Application Support/qvac-speech/coreml`.
+`EngineOptions::coreml` supports the shared `use`, `generate`,
 `wait`, `prewarm`, `compute_units` and `strict_wait_ms` options.
 `generate = never` permits adjacent prebuilts, `prewarm = none` defers
 the request to first use and `wait = construct` waits for the construction

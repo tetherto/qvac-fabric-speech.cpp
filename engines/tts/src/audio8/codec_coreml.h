@@ -65,6 +65,7 @@ class codec_coreml {
 };
 
 void validate_codec_coreml_options(const CoremlOptions & options);
+uint64_t codec_fit_capacity(const CoremlOptions & options, uint64_t free_bytes);
 
 #ifdef TTS_CPP_USE_COREML
 bool codec_needs_budget_projection(const std::string & path,

@@ -19,6 +19,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -110,6 +111,14 @@ tts_cpp::audio8::EngineOptions to_engine_options(const options & opts) {
     engine.verbose = opts.verbose;
     engine.backends_dir = opts.backends_dir;
     if (!opts.backend.empty()) engine.backend = opts.backend;
+#if defined(__APPLE__)
+    const char * shared_cache = std::getenv("QVAC_COREML_CACHE_DIR");
+    const char * home = std::getenv("HOME");
+    if ((!shared_cache || !*shared_cache) && home && *home) {
+        engine.coreml.cache_dir =
+            std::string(home) + "/Library/Application Support/qvac-speech/coreml";
+    }
+#endif
     return engine;
 }
 

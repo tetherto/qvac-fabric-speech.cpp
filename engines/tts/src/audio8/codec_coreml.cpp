@@ -13,12 +13,12 @@
 
 #include <sys/stat.h>
 
-#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <thread>
 #endif
 
+#include <algorithm>
 #include <stdexcept>
 #include <utility>
 
@@ -41,6 +41,13 @@ void validate_codec_coreml_options(const CoremlOptions & options) {
         throw std::invalid_argument(
             "audio8: Core ML memory_budget_bytes must be nonnegative");
     }
+}
+
+uint64_t codec_fit_capacity(const CoremlOptions & options, uint64_t free_bytes) {
+    if (!options.memory_budget_bytes)
+        return free_bytes;
+    return std::min(free_bytes,
+                    static_cast<uint64_t>(*options.memory_budget_bytes));
 }
 
 #ifdef TTS_CPP_USE_COREML
@@ -437,12 +444,11 @@ FitCoreml fit_codec_coreml(const std::string & path,
         result.bytes = pcm::generation::envelope_bytes(memory, codec.units);
     }
     const uint64_t inclusive = sat_add(ggml_bytes, result.bytes);
-    result.ggml_only_fits = ggml_bytes <= free_bytes;
-    result.fits = inclusive <= free_bytes;
+    const auto capacity = codec_fit_capacity(options, free_bytes);
+    result.ggml_only_fits = ggml_bytes <= capacity;
+    result.fits = inclusive <= capacity;
     if (resolved.memory_budget_bytes && result.validated) {
-        const auto cap = std::min(
-            free_bytes, static_cast<uint64_t>(*resolved.memory_budget_bytes));
-        const pcm::FitVerdict verdict{ggml_bytes <= cap, inclusive <= cap,
+        const pcm::FitVerdict verdict{result.ggml_only_fits, result.fits,
                                       result.bytes, result.validated};
         if (pcm::apply_memory_degrade(resolved, verdict)) {
             result.disabled_reason = resolved.disabled_reason;
@@ -468,11 +474,12 @@ bool codec_coreml::wait(int64_t, const std::atomic<uint64_t> *) const {
     return false;
 }
 
-FitCoreml fit_codec_coreml(const std::string &, const CoremlOptions &,
+FitCoreml fit_codec_coreml(const std::string &, const CoremlOptions & options,
                            uint64_t ggml_bytes, uint64_t free_bytes, int,
                            const codec_model &) {
     FitCoreml result;
-    result.ggml_only_fits = result.fits = ggml_bytes <= free_bytes;
+    result.ggml_only_fits = result.fits =
+        ggml_bytes <= codec_fit_capacity(options, free_bytes);
     return result;
 }
 

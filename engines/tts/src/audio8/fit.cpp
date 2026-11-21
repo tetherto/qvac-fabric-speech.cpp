@@ -401,7 +401,8 @@ FitResult fit_params(const FitOptions & opts) {
     if (r.coreml.disabled_reason != "memory") {
         required = sat_add(required, r.coreml.bytes);
     }
-    r.fits   = required <= r.device_free_bytes;
+    const auto capacity = detail::codec_fit_capacity(opts.coreml, r.device_free_bytes);
+    r.fits   = required <= capacity;
     r.status = r.fits ? FitStatus::Success : FitStatus::Failure;
     r.reason = r.fits ? "fits" : "does-not-fit";
 
@@ -459,10 +460,10 @@ FitResult fit_params(const FitOptions & opts) {
         }
         if (r.fits) {
             std::snprintf(line, sizeof(line), "verdict: FITS (headroom %s)\n",
-                          fmt_mib(r.device_free_bytes - required).c_str());
+                          fmt_mib(capacity - required).c_str());
         } else {
             std::snprintf(line, sizeof(line), "verdict: DOES NOT FIT (short by %s)\n",
-                          fmt_mib(required - r.device_free_bytes).c_str());
+                          fmt_mib(required - capacity).c_str());
         }
         s += line;
         r.report = std::move(s);
