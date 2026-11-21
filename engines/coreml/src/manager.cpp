@@ -337,6 +337,7 @@ PrewarmResult Group::collect(bool & finished, detail::Graveyard & gy) const {
         if (!e.reached_ready) {
             all_ready = false;
             if (c) {
+                rt_->refuse_queued_after_exit_locked(c, gy);
                 e.last = rt_->status_locked(*c, now);
                 const SlotState st = e.last.state;
                 const bool done = is_terminal(st) || st == SlotState::deferred_memory || st == SlotState::idle ||

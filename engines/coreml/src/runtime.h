@@ -240,6 +240,7 @@ public:
     // After exit began: fails a slot that has no model and no running job
     // with kExitingReason (unsubscribing an unstarted job). True if it did.
     bool refuse_after_exit_locked(const std::shared_ptr<SlotCore> & c, Graveyard & gy);
+    void refuse_queued_after_exit_locked(const std::shared_ptr<SlotCore> & c, Graveyard & gy);
     SlotStatus status_locked(SlotCore & c, Clock::time_point now) const;
     // The resident cap denies slot `c` the instance its load job brings, right
     // now: acquisitions and groups do not wait on it. Decided at the
