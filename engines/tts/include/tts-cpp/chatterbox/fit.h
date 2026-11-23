@@ -38,6 +38,7 @@
 //
 // See tts-cpp/fit.h for the status contract and result layout.
 
+#include "tts-cpp/coreml_options.h"
 #include "tts-cpp/export.h"
 #include "tts-cpp/fit.h"
 
@@ -77,6 +78,11 @@ struct FitOptions {
     // Same semantics as EngineOptions::backend; appended last so existing
     // positional initializers stay valid.
     std::string backend;
+
+    // Same semantics as EngineOptions::coreml. The verdict depends only on
+    // whether a Core ML sidecar route applies (Core ML built, not off, a
+    // sidecar next to the S3Gen GGUF), never on what is loaded or cached.
+    CoremlOptions coreml;
 };
 
 // Project the model pair + workload in `opts` against the device memory

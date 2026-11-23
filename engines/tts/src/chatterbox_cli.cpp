@@ -46,6 +46,7 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <filesystem>
 #include <string>
 #include <thread>
 #include <vector>
@@ -252,6 +253,15 @@ struct cli_params {
     // mixed-precision kernel.  Opt-in mobile latency knob.  See PROGRESS.md
     // "OpenCL / Adreno bring-up".
     bool    cfm_f16_kv_attn = false;
+
+    // Chatterbox S3Gen Core ML sidecars (--coreml-*): the options, where to
+    // write the status JSON on exit, and testing-only controls: a delay of
+    // every sidecar function load (a slow, cold load) and one failing
+    // prediction of a stage.
+    tts_cpp::CoremlOptions coreml;
+    std::string coreml_status_json;
+    int32_t     coreml_slow_load_ms = 0;
+    int32_t     coreml_fail_stage = -1;
 
     // Multilingual-only knobs. Python ChatterboxMultilingualTTS.generate()
     // defaults: cfg_weight=0.5, temperature=0.8, repetition_penalty=2.0,
@@ -559,6 +569,25 @@ static void print_usage(const char * argv0) {
     fprintf(stderr, "  --cfm-f16-kv-attn       Experimental: CFM flash-attn uses F32 Q + F16 K/V so\n");
     fprintf(stderr, "                          OpenCL/Adreno can dispatch flash_attn_f32_f16.\n");
     fprintf(stderr, "\n");
+    fprintf(stderr, "  Chatterbox S3Gen Core ML sidecars (TTS_CPP_COREML builds; docs/chatterbox.md):\n");
+    fprintf(stderr, "  --coreml-use MODE       auto (default: each sentence runs a stage on Core ML\n");
+    fprintf(stderr, "                          once its function is loaded, on ggml until then), off,\n");
+    fprintf(stderr, "                          or require (wait, and fail instead of falling back)\n");
+    fprintf(stderr, "  --coreml-wait MODE      none (default: never block), construct (load every\n");
+    fprintf(stderr, "                          requested function before synthesis) or call (each\n");
+    fprintf(stderr, "                          sentence waits for its functions)\n");
+    fprintf(stderr, "  --coreml-prewarm SCOPE  none, minimal (HiFT + the widths this host loaded\n");
+    fprintf(stderr, "                          last), predicted (default: minimal, then the widths\n");
+    fprintf(stderr, "                          the text needs) or all (every function)\n");
+    fprintf(stderr, "  --coreml-compute-units U  all, cpu_and_ane (default), cpu_and_gpu or cpu_only\n");
+    fprintf(stderr, "  --coreml-cache-dir DIR  warm-load hints (default ~/Library/Application\n");
+    fprintf(stderr, "                          Support/qvac-speech/coreml, or QVAC_COREML_CACHE_DIR)\n");
+    fprintf(stderr, "  --coreml-status-json PATH  write the sidecar status (JSON) to PATH on exit;\n");
+    fprintf(stderr, "                          '-' writes to stdout (not with --out -)\n");
+    fprintf(stderr, "  --coreml-slow-load-ms N Testing: delay every sidecar function load by N ms\n");
+    fprintf(stderr, "  --coreml-fail-stage S   Testing: the first Core ML prediction of stage S\n");
+    fprintf(stderr, "                          (encoder, cfm or hift) fails once\n");
+    fprintf(stderr, "\n");
     fprintf(stderr, "  --input-file PATH       Stream text from PATH as another process writes to it.\n");
     fprintf(stderr, "                          tail -f semantics: each complete sentence (ending in\n");
     fprintf(stderr, "                          . ! ? or newline) is tokenised and synthesised the\n");
@@ -754,6 +783,58 @@ static bool parse_args(int argc, char ** argv, cli_params & params) {
             params.has_supertonic_options = true;
         }
         else if (arg == "--cfm-f16-kv-attn") { params.cfm_f16_kv_attn = true; }
+        else if (arg == "--coreml-use") {
+            auto v = next("--coreml-use"); if (!v) return false;
+            const std::string m = v;
+            using U = tts_cpp::CoremlOptions::Use;
+            if      (m == "auto")    params.coreml.use = U::automatic;
+            else if (m == "off")     params.coreml.use = U::off;
+            else if (m == "require") params.coreml.use = U::require;
+            else { fprintf(stderr, "error: --coreml-use must be auto, off or require (got '%s')\n", v); return false; }
+        }
+        else if (arg == "--coreml-wait") {
+            auto v = next("--coreml-wait"); if (!v) return false;
+            const std::string m = v;
+            using W = tts_cpp::CoremlOptions::Wait;
+            if      (m == "none")      params.coreml.wait = W::none;
+            else if (m == "construct") params.coreml.wait = W::construct;
+            else if (m == "call")      params.coreml.wait = W::call;
+            else { fprintf(stderr, "error: --coreml-wait must be none, construct or call (got '%s')\n", v); return false; }
+        }
+        else if (arg == "--coreml-prewarm") {
+            auto v = next("--coreml-prewarm"); if (!v) return false;
+            const std::string m = v;
+            using P = tts_cpp::CoremlOptions::Prewarm;
+            if      (m == "none")      params.coreml.prewarm = P::none;
+            else if (m == "minimal")   params.coreml.prewarm = P::minimal;
+            else if (m == "predicted") params.coreml.prewarm = P::predicted;
+            else if (m == "all")       params.coreml.prewarm = P::all;
+            else {
+                fprintf(stderr, "error: --coreml-prewarm must be none, minimal, predicted or all (got '%s')\n", v);
+                return false;
+            }
+        }
+        else if (arg == "--coreml-compute-units") {
+            auto v = next("--coreml-compute-units"); if (!v) return false;
+            if (!tts_cpp::chatterbox::detail::coreml_valid_units(v)) {
+                fprintf(stderr, "error: --coreml-compute-units must be all, cpu_and_ane, cpu_and_gpu or cpu_only "
+                                "(got '%s')\n", v);
+                return false;
+            }
+            params.coreml.compute_units = std::string(v);
+        }
+        else if (arg == "--coreml-cache-dir")    { auto v = next("--coreml-cache-dir");    if (!v) return false; params.coreml.cache_dir = std::string(v); }
+        else if (arg == "--coreml-status-json")  { auto v = next("--coreml-status-json");  if (!v) return false; params.coreml_status_json = v; }
+        else if (arg == "--coreml-slow-load-ms") { if (!parse_int("--coreml-slow-load-ms", params.coreml_slow_load_ms)) return false; }
+        else if (arg == "--coreml-fail-stage") {
+            auto v = next("--coreml-fail-stage"); if (!v) return false;
+            const std::string m = v;
+            using S = tts_cpp::chatterbox::detail::s3gen_stage;
+            if      (m == "encoder") params.coreml_fail_stage = (int32_t) S::encoder;
+            else if (m == "cfm")     params.coreml_fail_stage = (int32_t) S::cfm;
+            else if (m == "hift")    params.coreml_fail_stage = (int32_t) S::hift;
+            else { fprintf(stderr, "error: --coreml-fail-stage must be encoder, cfm or hift (got '%s')\n", v); return false; }
+        }
         else if (arg == "--max-sentence-chars") { if (!parse_int("--max-sentence-chars", params.max_sentence_chars)) return false; }
         else if (arg == "--no-auto-split")  { params.max_sentence_chars = 0; }
         else if (arg == "--crossfade-ms")   { if (!parse_int("--crossfade-ms",   params.crossfade_ms))   return false; }
@@ -848,6 +929,25 @@ static bool parse_args(int argc, char ** argv, cli_params & params) {
     }
     if (params.debug && params.ref_dir.empty()) {
         fprintf(stderr, "error: --debug requires --ref-dir\n"); return false;
+    }
+    if (params.out_wav == "-" && params.coreml_status_json == "-") {
+        fprintf(stderr, "error: --coreml-status-json - and --out - both write to stdout; "
+                        "give the status JSON a file path\n");
+        return false;
+    }
+    if (!params.out_wav.empty() && params.out_wav != "-" && !params.coreml_status_json.empty() &&
+        params.coreml_status_json != "-") {
+        // The status is written on exit and would replace the audio.
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        const fs::path out = fs::weakly_canonical(fs::absolute(params.out_wav, ec), ec);
+        const fs::path status = fs::weakly_canonical(fs::absolute(params.coreml_status_json, ec), ec);
+        const bool same = out == status || (fs::exists(out, ec) && fs::exists(status, ec) && fs::equivalent(out, status, ec));
+        if (same) {
+            fprintf(stderr, "error: --coreml-status-json and --out name the same file ('%s')\n",
+                    params.out_wav.c_str());
+            return false;
+        }
     }
     return true;
 }
@@ -1093,6 +1193,53 @@ static void cli_free_t3(tts_cpp::chatterbox::detail::chatterbox_model & model) {
     model.ctx_override = nullptr;
 }
 
+// The CLI keeps warm hints under Application Support (Library/Caches can be
+// purged, and a purge means a new path and a cold Neural Engine compile).
+static void apply_cli_coreml_defaults(tts_cpp::CoremlOptions & coreml) {
+#if defined(__APPLE__)
+    const char * shared = std::getenv("QVAC_COREML_CACHE_DIR");
+    const char * home = std::getenv("HOME");
+    if (!coreml.cache_dir && (shared == nullptr || *shared == '\0') && home != nullptr && *home != '\0') {
+        coreml.cache_dir = std::string(home) + "/Library/Application Support/qvac-speech/coreml";
+    }
+#else
+    (void) coreml;
+#endif
+}
+
+// Writes the Core ML sidecar status (--coreml-status-json) on every exit
+// path once the slots exist. Never over the audio: argument validation
+// refuses a path that names --out, and a spelling only the filesystem
+// equates (a case-insensitive volume, a symlink) is caught here, once the WAV
+// exists.
+struct coreml_status_on_exit {
+    std::shared_ptr<tts_cpp::chatterbox::detail::s3gen_sidecars> sidecars;
+    std::string path;
+    std::string out_wav;
+    ~coreml_status_on_exit() {
+        if (path.empty()) return;
+        const std::string json = sidecars ? sidecars->status_json()
+                                          : tts_cpp::chatterbox::detail::coreml_status_without_sidecars();
+        if (path == "-") {
+            std::printf("%s\n", json.c_str());
+            return;
+        }
+        std::error_code ec;
+        if (!out_wav.empty() && out_wav != "-" && std::filesystem::equivalent(path, out_wav, ec)) {
+            fprintf(stderr, "error: --coreml-status-json '%s' is the --out file; not writing the status over it\n",
+                    path.c_str());
+            return;
+        }
+        if (FILE * fp = std::fopen(path.c_str(), "wb")) {
+            std::fwrite(json.data(), 1, json.size(), fp);
+            std::fputc('\n', fp);
+            std::fclose(fp);
+        } else {
+            fprintf(stderr, "error: cannot write --coreml-status-json '%s'\n", path.c_str());
+        }
+    }
+};
+
 int tts_cpp_cli_main(int argc, char ** argv) {
     ggml_time_init();
     cli_params params;
@@ -1143,6 +1290,20 @@ int tts_cpp_cli_main(int argc, char ** argv) {
                     "       but --model was not detected as a Supertonic GGUF.\n");
             return 1;
         }
+
+        // Chatterbox S3Gen Core ML sidecars: the slots and their construction
+        // group (HiFT plus the widths this host loaded most recently, by
+        // default), loading in the background from here on. Every S3Gen call
+        // below resolves the same options to the same slots.
+        apply_cli_coreml_defaults(params.coreml);
+        tts_cpp::chatterbox::detail::coreml_test().load_delay_ms = params.coreml_slow_load_ms;
+        tts_cpp::chatterbox::detail::coreml_test().fail_stage = params.coreml_fail_stage;
+        std::shared_ptr<tts_cpp::chatterbox::detail::s3gen_sidecars> coreml_sidecars;
+        if (!params.s3gen_gguf.empty()) {
+            coreml_sidecars = tts_cpp::chatterbox::detail::s3gen_sidecars::get(params.s3gen_gguf, params.coreml);
+            if (coreml_sidecars) coreml_sidecars->start_construction();
+        }
+        const coreml_status_on_exit coreml_status_guard{coreml_sidecars, params.coreml_status_json, params.out_wav};
 
         // Early preflight: if the user supplied --reference-audio, make sure
         // it's long enough for real voice cloning.  Bail out now with a clear
@@ -1264,6 +1425,7 @@ int tts_cpp_cli_main(int argc, char ** argv) {
             opts.cfg_rate        = params.cfg_rate;
             opts.dump_mel_path   = params.dump_mel_path;
             opts.cfm_f16_kv_attn = params.cfm_f16_kv_attn;
+            opts.coreml          = params.coreml;
             if (!params.reference_audio.empty()) {
                 if (!compute_prompt_feat_native(params.reference_audio, params.s3gen_gguf,
                                                 opts.prompt_feat_override,
@@ -1329,16 +1491,6 @@ int tts_cpp_cli_main(int argc, char ** argv) {
                 s3gen_preload(path, ngpu, backend);
             });
         }
-        // Core ML sidecar functions load in the background while T3 decodes
-        // (started once the sentences are known, below); stopped between
-        // loads and joined before the S3Gen cache goes.
-        std::atomic<bool> coreml_warm_stop{false};
-        std::thread coreml_warm_thread;
-        struct warm_guard {
-            std::thread & t;
-            std::atomic<bool> & stop;
-            ~warm_guard() { stop = true; if (t.joinable()) t.join(); }
-        } coreml_warm_guard{coreml_warm_thread, coreml_warm_stop};
 
         // Voice-profile override on the T3 side.  We resolve two tensors
         // independently:
@@ -1553,6 +1705,7 @@ int tts_cpp_cli_main(int argc, char ** argv) {
             opts.cfg_rate        = params.cfg_rate;
             opts.dump_mel_path   = params.dump_mel_path;
             opts.cfm_f16_kv_attn = params.cfm_f16_kv_attn;
+            opts.coreml          = params.coreml;
             if (!params.reference_audio.empty()) {
                 if (!compute_prompt_feat_native(params.reference_audio, params.s3gen_gguf,
                                                 opts.prompt_feat_override,
@@ -2140,30 +2293,38 @@ int tts_cpp_cli_main(int argc, char ** argv) {
                     seg_text_tokens.size(), params.max_sentence_chars);
         }
 
-        if (!params.s3gen_gguf.empty() && !text_segments.empty()) {
-            const auto coreml_policy = tts_cpp::chatterbox::detail::resolve_coreml_policy();
-            if (tts_cpp::chatterbox::detail::coreml_sidecars_enabled(params.s3gen_gguf, coreml_policy)) {
-                // The S3Gen calls each sentence makes: one, or its streamed chunk windows.
-                std::vector<int> calls;
-                for (size_t si = 0; si < text_segments.size(); ++si) {
-                    const int speech =
-                        tts_cpp::chatterbox::detail::coreml_expected_speech_tokens(text_segments[si].size());
-                    if (params.stream_chunk_tokens <= 0) {
-                        calls.push_back(speech);
-                        continue;
-                    }
-                    for (int window : tts_cpp::chatterbox::detail::coreml_stream_windows(
-                             speech, si == 0 ? params.stream_first_chunk_tokens : 0, params.stream_chunk_tokens,
-                             params.stream_left_context_tokens)) {
-                        calls.push_back(window);
-                    }
+        // The predictions below hold for this invocation only: they are
+        // cleared on every exit path, so a later call in the same process
+        // (tts-cli embedded, or a direct S3Gen call) never finds this text's
+        // widths protected from the resident cap.
+        struct coreml_call_guard {
+            std::shared_ptr<tts_cpp::chatterbox::detail::s3gen_sidecars> sidecars;
+            ~coreml_call_guard() { if (sidecars) sidecars->end_call(); }
+        } coreml_call;
+        if (coreml_sidecars && !text_segments.empty()) {
+            // The S3Gen calls each sentence is expected to make (one, or its
+            // streamed chunk windows), from the text length: their widths
+            // load at `current` priority while T3 decodes, ahead of unstarted
+            // construction loads, and the resident cap keeps them.
+            namespace cb = tts_cpp::chatterbox::detail;
+            const cb::s3gen_gguf_facts & facts = coreml_sidecars->facts();
+            std::vector<cb::s3gen_call_shape> calls;
+            for (size_t si = 0; si < text_segments.size(); ++si) {
+                const int speech = cb::coreml_expected_speech_tokens(text_segments[si].size());
+                if (params.stream_chunk_tokens <= 0) {
+                    calls.push_back(cb::s3gen_shape(facts.builtin_prompt_tokens, speech, facts.token_mel_ratio,
+                                                    true, true));
+                    continue;
                 }
-                coreml_warm_thread = std::thread([path = params.s3gen_gguf, coreml_policy,
-                                                  calls = std::move(calls), &coreml_warm_stop]() {
-                    tts_cpp::chatterbox::detail::s3gen_coreml_warm(path, coreml_policy, calls, -1,
-                                                                   &coreml_warm_stop);
-                });
+                for (int window : cb::coreml_stream_windows(speech, si == 0 ? params.stream_first_chunk_tokens : 0,
+                                                            params.stream_chunk_tokens,
+                                                            params.stream_left_context_tokens)) {
+                    calls.push_back(cb::s3gen_shape(facts.builtin_prompt_tokens, window, facts.token_mel_ratio,
+                                                    false, true));
+                }
             }
+            coreml_call.sidecars = coreml_sidecars;  // armed first: predict() may throw
+            coreml_sidecars->predict(calls);
         }
 
         // ----------- T3 autoregressive decode (per segment) ------------
@@ -2464,6 +2625,7 @@ int tts_cpp_cli_main(int argc, char ** argv) {
             opts.cfg_rate        = params.cfg_rate;
             opts.dump_mel_path   = params.dump_mel_path;
             opts.cfm_f16_kv_attn = params.cfm_f16_kv_attn;
+            opts.coreml          = params.coreml;
             if (!params.reference_audio.empty()) {
                 if (!compute_prompt_feat_native(params.reference_audio, params.s3gen_gguf,
                                                 opts.prompt_feat_override,
@@ -2537,21 +2699,45 @@ int tts_cpp_cli_main(int argc, char ** argv) {
                 const int sr = opts.sr ? opts.sr : 24000;
                 std::vector<float> full_pcm;
                 const int64_t _seg_t0 = ggml_time_us();
-                // When Core ML sidecars take S3Gen's CFM and HiFT off the GPU,
-                // T3 of the next sentence decodes on it while this one is
-                // vocoded (on a shared GPU the two only contend; see above).
-                const bool overlap_t3 = tts_cpp::chatterbox::detail::coreml_offloads_s3gen(
-                    params.s3gen_gguf, tts_cpp::chatterbox::detail::resolve_coreml_policy());
                 for (size_t si = 0; si < N_SEG; ++si) {
                     ensure_t3(si);
-                    if (overlap_t3) prefetch_t3(si + 1);
                     s3gen_synthesize_opts copts = opts;
                     std::vector<float> seg_pcm;
                     copts.out_wav_path = "";
                     copts.pcm_out      = &seg_pcm;
+                    // This sentence's S3Gen models, acquired once after its T3.
+                    // When they take CFM and HiFT off the GPU, T3 of the next
+                    // sentence decodes on it while this one is vocoded; on a
+                    // shared GPU the two only contend, so it waits.
+                    const auto budget = std::chrono::duration<double, std::milli>(
+                        s3gen_estimate_metal_ms(copts, seg_generated[si]));
+                    copts.coreml_plan = s3gen_acquire_coreml_plan(
+                        copts, seg_generated[si],
+                        std::chrono::steady_clock::now() +
+                            std::chrono::duration_cast<std::chrono::steady_clock::duration>(budget));
+                    const bool overlap = si + 1 < N_SEG && copts.coreml_plan &&
+                                         s3gen_coreml_plan_offloads(*copts.coreml_plan);
+                    if (overlap) {
+                        // While T3 may hold the GPU, a Core ML failure never
+                        // starts ggml: the call hands the sentence back.
+                        tts_cpp::chatterbox::detail::defer_coreml_failures(*copts.coreml_plan);
+                        prefetch_t3(si + 1);
+                    }
                     fprintf(stderr, "\n--- segment %zu/%zu: %zu speech tokens ---\n",
                             si + 1, N_SEG, seg_generated[si].size());
                     int rc = s3gen_synthesize_to_wav(seg_generated[si], copts);
+                    if (rc == tts_cpp::chatterbox::detail::S3GEN_RC_COREML_REDO) {
+                        // Let the next sentence's T3 finish (its tokens are
+                        // kept for the next iteration), then render this
+                        // sentence again on its own plan, the failed stage
+                        // on ggml.
+                        ensure_t3(si + 1);
+                        fprintf(stderr, "--- segment %zu/%zu: rendering again after T3 of segment %zu ---\n",
+                                si + 1, N_SEG, si + 2);
+                        seg_pcm.clear();
+                        copts.coreml_plan = tts_cpp::chatterbox::detail::replay_plan(std::move(copts.coreml_plan));
+                        rc = s3gen_synthesize_to_wav(seg_generated[si], copts);
+                    }
                     if (rc != 0) return rc;
                     append_pcm_crossfade(full_pcm, seg_pcm, sr, params.crossfade_ms);
                 }
