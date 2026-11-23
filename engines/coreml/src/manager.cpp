@@ -337,6 +337,7 @@ PrewarmResult Group::collect(bool & finished, detail::Graveyard & gy) const {
         if (!e.reached_ready) {
             all_ready = false;
             if (c) {
+                rt_->refuse_queued_after_exit_locked(c, gy);
                 e.last = rt_->status_locked(*c, now);
                 const SlotState st = e.last.state;
                 const bool done = is_terminal(st) || st == SlotState::deferred_memory || st == SlotState::idle ||
@@ -541,7 +542,12 @@ bool arm_exit_guard() {
     return detail::arm_exit_guard();
 }
 
-bool shutdown_for_exit(std::chrono::milliseconds bound) { return detail::wait_for_jobs_at_exit(bound); }
+bool shutdown_for_exit(std::chrono::milliseconds bound) {
+    // Even an unused image must retain its closed admission state if the
+    // host unloads and reopens it. During finalization only report drainage.
+    if (!detail::finalizing()) detail::pin_image();
+    return detail::wait_for_jobs_at_exit(bound);
+}
 
 void set_automatic_exit_guard(bool on) { detail::set_automatic_exit_guard_flag(on); }
 

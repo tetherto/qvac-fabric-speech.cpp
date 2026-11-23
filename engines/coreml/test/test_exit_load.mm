@@ -20,8 +20,8 @@
 // longer than 20 s to exit (a hang: the exit wait's bound is 15 s), or ends
 // in any state but ready, loading or warming. Where the exit wait applies
 // (engine on the main thread, or armed, or drained), a run that exited with
-// the load in flight must also show that the native load returned before any
-// destructor registered during it had run. Before the sweep, one control
+// the load in flight must also show that Core ML returned a model before
+// any destructor registered during the load had run. Before the sweep, one control
 // child must load the model to ready; and at least half of the runs must exit
 // with the load in flight, since a run whose load already finished checks
 // nothing.
@@ -136,7 +136,11 @@ LoadResult load_mlmodel(const LoadRequest & r) {
     (void) lazy;
     LoadResult out;
     struct Report {
-        ~Report() { report_line(std::string("load=") + (g_torn_down ? "torn-down" : "intact")); }
+        bool native_ok = false;
+        ~Report() {
+            report_line(std::string("load=") + (g_torn_down ? "torn-down" : "intact") +
+                        " native_load=" + (native_ok ? "ok" : "failed"));
+        }
     } report;
     @autoreleasepool {
         MLModelConfiguration * cfg = [MLModelConfiguration new];
@@ -149,6 +153,7 @@ LoadResult load_mlmodel(const LoadRequest & r) {
             return out;
         }
         out.model = std::shared_ptr<void>((__bridge_retained void *) m, [](void * p) { CFRelease(p); });
+        report.native_ok = true;
     }
     return out;
 }
@@ -210,6 +215,7 @@ struct RunResult {
     int status = 0;
     std::string state;
     std::string load;  // "intact", "torn-down" or "" (the load never returned)
+    std::string native_load;  // "ok", "failed" or "" (the load never returned)
     double exit_ms = -1;  // from the child's report (just before main returns) to its reaping
 };
 
@@ -306,12 +312,14 @@ RunResult run_once(const ExitTestOptions & o, const std::string & self, int dela
         char line[512] = {0};
         while (std::fgets(line, sizeof line, f)) {
             char st[64] = {0};
+            char native[64] = {0};
             long long ns = 0;
             if (std::sscanf(line, "state=%63s exit_ns=%lld", st, &ns) == 2) {
                 rr.state = st;
                 if (reaped_ns > 0) rr.exit_ms = double(reaped_ns - ns) / 1e6;
-            } else if (std::sscanf(line, "load=%63s", st) == 1) {
+            } else if (std::sscanf(line, "load=%63s native_load=%63s", st, native) == 2) {
                 rr.load = st;
+                rr.native_load = native;
             }
         }
         std::fclose(f);
@@ -401,12 +409,14 @@ int main(int argc, char ** argv) {
                 o.exit_wait_ms >= 0 ? (std::to_string(o.exit_wait_ms) + " ms").c_str() : "default");
     // Control: the model must load to ready at all on this host.
     const RunResult ctl = run_once(o, argv[0], -1);
-    const bool control_ok = ctl.exited && WIFEXITED(ctl.status) && WEXITSTATUS(ctl.status) == 0 && ctl.state == "ready";
+    const bool control_ok = ctl.exited && WIFEXITED(ctl.status) && WEXITSTATUS(ctl.status) == 0 &&
+                            ctl.state == "ready" && ctl.native_load == "ok";
     std::printf("%s control load: state %s, %s\n", control_ok ? "ok  " : "FAIL",
                 ctl.state.empty() ? "?" : ctl.state.c_str(), describe(ctl).c_str());
-    // Where the exit wait applies, an in-flight run's load must return intact.
+    // Where the exit wait applies, require native success and intact teardown order.
     const bool expect_wait = (!o.worker || o.arm || o.drain_ms > 0) && o.exit_wait_ms != 0;
     int failures = control_ok ? 0 : 1, signals = 0, hangs = 0, in_flight = 0, torn = 0;
+    int native_failures = 0;
     double max_exit_ms = 0;
     for (int i = 0; i < o.runs; ++i) {
         const int d = o.runs == 1 ? 0 : o.max_delay * i / (o.runs - 1);
@@ -415,16 +425,20 @@ int main(int argc, char ** argv) {
         const bool hung = !r.exited || r.exit_ms > kHangMs;
         const bool loading = r.state == "loading" || r.state == "warming";
         const bool not_waited = expect_wait && loading && r.load != "intact";
+        const bool native_failed = ((expect_wait && loading) || r.state == "ready") && r.native_load != "ok";
         const bool clean = r.exited && WIFEXITED(r.status) && WEXITSTATUS(r.status) == 0 && !hung &&
-                           (loading || r.state == "ready") && !not_waited;
+                           (loading || r.state == "ready") && !not_waited && !native_failed;
+        native_failures += native_failed ? 1 : 0;
         if (loading) ++in_flight;
         torn += not_waited ? 1 : 0;
         if (r.exit_ms > max_exit_ms) max_exit_ms = r.exit_ms;
         signals += signalled ? 1 : 0;
         hangs += hung ? 1 : 0;
-        std::printf("%s run %d delay %d ms: state %s, %s, exit took %.1f ms, load %s%s\n", clean ? "ok  " : "FAIL", i,
+        std::printf("%s run %d delay %d ms: state %s, %s, exit took %.1f ms, load %s, native load %s%s\n",
+                    clean ? "ok  " : "FAIL", i,
                     d, r.state.empty() ? "?" : r.state.c_str(), describe(r).c_str(), r.exit_ms,
-                    r.load.empty() ? "not returned" : r.load.c_str(), hung ? " (hang)" : "");
+                    r.load.empty() ? "not returned" : r.load.c_str(),
+                    r.native_load.empty() ? "not returned" : r.native_load.c_str(), hung ? " (hang)" : "");
         std::fflush(stdout);
         if (!clean) ++failures;
     }
@@ -435,8 +449,8 @@ int main(int argc, char ** argv) {
     }
     const bool pass = failures == 0 && !vacuous;
     std::printf("%s: %d runs, %d exited with the load in flight, %d failures (%d signals, %d hangs over %d ms, "
-                "%d in-flight loads not waited for), slowest exit %.1f ms\n",
+                "%d in-flight loads not waited for, %d missing or failed native loads), slowest exit %.1f ms\n",
                 o.report_only ? "REPORT" : (pass ? "PASS" : "FAIL"), o.runs, in_flight, failures, signals, hangs,
-                kHangMs, torn, max_exit_ms);
+                kHangMs, torn, native_failures, max_exit_ms);
     return o.report_only || pass ? 0 : 1;
 }

@@ -93,12 +93,15 @@ without Core ML):
   a load runs is not covered.
 - `coreml_shutdown_for_exit(timeout_ms)`: closes admission and waits, from
   any thread. It is terminal, for every user of that library for the rest of
-  the process (the image stays pinned, so reloading an addon does not reopen
-  it): call it right before the process exits, while the host's main queue
+  the process. It pins the image even before the first request, so reloading
+  an addon does not reopen admission. Slot status and prewarm results report
+  queued work that cannot start as failed. Call it right before the process
+  exits, while the host's main queue
   can still make progress, never on an addon unload in a process that goes on.
   It must also run before process finalization: from an `atexit` handler or a
   static destructor it is too late (the frameworks' lazily registered
-  destructors may already have run; it then only reports). The timeout is
+  destructors may already have run; it then only reports). An acquisition
+  during finalization does not wait for a running slot. The timeout is
   clamped to one hour; 0 or less only closes admission and fixes no deadline.
   It returns true when no job is running, false on timeout and always from
   inside a job.

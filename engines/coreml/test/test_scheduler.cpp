@@ -2703,6 +2703,21 @@ int child_dlclose(const std::string & mode, const std::string & plugin, const st
         std::fprintf(stderr, "dlopen: %s\n", dlerror());
         return 3;
     }
+    if (mode == "shutdown-unused") {
+        using IntFn = int (*)();
+        using CheckFn = int (*)(const char *);
+        auto pin = reinterpret_cast<IntFn>(dlsym(h, "qvac_coreml_plugin_pin_state"));
+        auto shutdown = reinterpret_cast<IntFn>(dlsym(h, "qvac_coreml_plugin_shutdown_unused"));
+        if (!pin || !shutdown || pin() != static_cast<int>(detail::PinState::untried)) return 3;
+        if (shutdown() != 1 || pin() != static_cast<int>(detail::PinState::pinned)) return 6;
+        dlclose(h);
+        void * again = dlopen(plugin.c_str(), RTLD_NOW | RTLD_LOCAL);
+        if (!again) return 7;
+        auto refuses = reinterpret_cast<CheckFn>(dlsym(again, "qvac_coreml_plugin_refuses_work"));
+        const bool refused = refuses && refuses(dir.c_str()) == 1;
+        dlclose(again);
+        return refused ? 0 : 8;
+    }
     if (mode == "slot-only") {
         // The image's pin state, read from the plugin itself: unloading is not
         // observable (macOS never unloads a module holding Objective-C classes,
@@ -2791,7 +2806,7 @@ void case_dlclose() {
         CHECK(!"--plugin was not given");
         return;
     }
-    for (const char * mode : {"immediate", "deferred", "in-flight", "slot-only"}) {
+    for (const char * mode : {"immediate", "deferred", "in-flight", "slot-only", "shutdown-unused"}) {
         const std::string dir = make_temp_dir();
         const int rc = run_child({"--child", "dlclose", mode, g_plugin, dir});
         if (rc != 0) std::fprintf(stderr, "    dlclose %s: child exit %d\n", mode, rc);
@@ -2842,7 +2857,7 @@ void case_dlclose() {
 //                   fixes no deadline), a later caller ends at its own
 //                   deadline, and a huge bound is clamped.
 //   late-host:      a host atexit callback that runs after the runtime's:
-//                   shutdown only reports, arming fails.
+//                   shutdown only reports, arming fails, and a running slot does not wait.
 //   pthread-exit-late-optout: the opt-out also works after the main thread
 //                   was armed automatically.
 //   fork:           a child of fork() made while a job runs has no worker:
@@ -3010,16 +3025,21 @@ void exit_pause_selected() {
 int child_exit(const std::string & mode, const std::string & dir) {
     g_exit_dir = dir;
     if (mode == "late-host") {
+        static std::shared_ptr<Slot> * in_flight = nullptr;
         // Registered before the runtime's own handler, so it runs after it:
         // a host callback during process finalization.
         std::atexit([] {
             const int64_t t0 = mono_ns();
             const bool drained = shutdown_for_exit(2000ms);
             const bool armed = arm_exit_guard();
+            const Acquired a = (*in_flight)->acquire(Demand::now);  // strict wait with no timeout
+            exit_mark("late-acquire", !a.model && a.pending && a.state == SlotState::loading ? "pending" : "unexpected");
             exit_mark("late", std::string(drained ? "1" : "0") + "|" + (armed ? "1" : "0") + "|" +
                                   std::to_string((mono_ns() - t0) / 1000000));
         });
-        std::thread([] { exit_slot("in-flight", &exit_never_load); }).join();
+        std::thread([] {
+            in_flight = &exit_slot("in-flight", &exit_never_load, Priority::minimal, true);
+        }).join();
         if (!wait_for([] { return exit_marked("started-in-flight"); })) return 3;
         return 0;
     }
@@ -3027,7 +3047,15 @@ int child_exit(const std::string & mode, const std::string & dir) {
         exit_slot("in-flight", &exit_slow_load);
         std::shared_ptr<Slot> & b = exit_slot("queued", &exit_queued_load, Priority::minimal, true);
         if (!wait_for([] { return exit_marked("load-started"); })) return 3;
+        auto group = Manager::instance()->issue_group(GroupKind::prewarm, {{b, Priority::prewarm}}, false);
+        if (group->finished()) return 4;
         exit_mark("drain", shutdown_for_exit(5000ms) ? "1" : "0");
+        exit_mark("group-finished", group->finished() ? "1" : "0");
+        const PrewarmResult result = group->result();
+        if (result.success || result.slots.size() != 1) return 5;
+        const SlotStatus & status = result.slots.front();
+        if (status.error_class != ErrorClass::deterministic || status.error != kExitingReason) return 6;
+        exit_mark("group-slot", std::string(to_string(status.state)) + "|" + status.reason);
         exit_mark("queued", exit_slot_report(b));
         exit_mark("alive", "1");
         return 0;
@@ -3312,6 +3340,8 @@ void case_exit_during_load() {
         const ExitRun r = run_exit_child("queued-shutdown");
         CHECK(r.rc == 0);
         CHECK(r.file("drain") == "1");
+        CHECK(r.file("group-finished") == "1");
+        CHECK(r.file("group-slot") == refused);
         CHECK(r.file("queued") == refused + "|threw");
         CHECK(!r.has("started-queued"));
         CHECK(r.file("alive") == "1");
@@ -3370,6 +3400,7 @@ void case_exit_during_load() {
         CHECK(r.rc == 0);
         const std::string l = r.file("late");
         CHECK(l.rfind("0|0|", 0) == 0 && std::stoll(l.substr(4)) < 100);
+        CHECK(r.file("late-acquire") == "pending");
         exit_cleanup(r);
     }
     {

@@ -389,6 +389,10 @@ bool Runtime::refuse_after_exit_locked(const std::shared_ptr<SlotCore> & c, Grav
     return true;
 }
 
+void Runtime::refuse_queued_after_exit_locked(const std::shared_ptr<SlotCore> & c, Graveyard & gy) {
+    if (c->job && exiting()) refuse_after_exit_locked(c, gy);
+}
+
 void Runtime::request_locked(const std::shared_ptr<SlotCore> & c, Priority p, bool nd, Graveyard & gy) {
     if (stopping_) return;
     if (exiting()) {
@@ -1355,7 +1359,7 @@ Acquired Runtime::acquire(const std::shared_ptr<SlotCore> & c, Demand d, std::op
                           const std::atomic<bool> * cancel) {
     Acquired out;
     std::string stale_path, stale_artifact;
-    if (d == Demand::now) pin_for_work();
+    if (d == Demand::now && !finalizing()) pin_for_work();
     {
         Graveyard gy;
         std::unique_lock<std::mutex> lk(mu);
@@ -1401,14 +1405,15 @@ Acquired Runtime::acquire(const std::shared_ptr<SlotCore> & c, Demand d, std::op
                 return out;
             }
             out.pending = true;
-            if (d == Demand::if_ready || stopping_) return out;
+            if (stopping_) return out;
             if (exiting()) {
-                // No job starts any more: a slot whose job never started
-                // fails now (strict throws above on the next pass); one whose
-                // job is running waits for it as before.
-                if (refuse_after_exit_locked(c, gy)) continue;
+                // Fail a slot whose job cannot start. A running job can
+                // still publish, but a late host callback must not wait
+                // after framework teardown has begun.
+                if ((d == Demand::now || c->job) && refuse_after_exit_locked(c, gy)) continue;
                 if (!c->job || !c->job->started) return out;
             }
+            if (d == Demand::if_ready || finalizing()) return out;
             if (cancel && cancel->load()) return out;
             if (wait == Wait::call) {
                 if (st == SlotState::deferred_memory) {
@@ -1570,7 +1575,9 @@ void Runtime::on_model_released(const SharedModel & released) {
 }
 
 SlotState Runtime::state(const std::shared_ptr<SlotCore> & c) {
+    Graveyard gy;
     std::lock_guard<std::mutex> lk(mu);
+    refuse_queued_after_exit_locked(c, gy);
     if (c->model && c->model->retired()) return SlotState::retired;
     return c->state;
 }
@@ -1607,7 +1614,9 @@ SlotStatus Runtime::status(const std::shared_ptr<SlotCore> & c) {
     SlotStatus s;
     std::string path;
     {
+        Graveyard gy;
         std::lock_guard<std::mutex> lk(mu);
+        refuse_queued_after_exit_locked(c, gy);
         s = status_locked(*c, Clock::now());
         path = c->hint_path;
     }

@@ -98,6 +98,19 @@ QVAC_PLUGIN_EXPORT int qvac_coreml_plugin_arm(int on_worker) {
     return r;
 }
 
+// Close admission without making a manager, requesting a model, or arming.
+QVAC_PLUGIN_EXPORT int qvac_coreml_plugin_shutdown_unused() {
+    return shutdown_for_exit(std::chrono::milliseconds(0)) ? 1 : 0;
+}
+
+// Reopening the module must still see admission closed.
+QVAC_PLUGIN_EXPORT int qvac_coreml_plugin_refuses_work(const char * dir) {
+    auto slot = Manager::instance()->make_slot(plugin_spec(dir), SlotPolicy{});
+    slot->request(Priority::minimal);
+    const SlotStatus status = slot->status();
+    return status.state == SlotState::failed && status.reason == kExitingReason && g_started.load() == 0;
+}
+
 // This image's pin state (detail::PinState).
 QVAC_PLUGIN_EXPORT int qvac_coreml_plugin_pin_state() { return static_cast<int>(detail::pin_state()); }
 
