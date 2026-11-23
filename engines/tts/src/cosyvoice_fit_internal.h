@@ -14,6 +14,7 @@
 #include "cosyvoice_pipeline.h"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 
 // Sizes of the buffers one cosyvoice_load_gguf allocates, filled by
@@ -88,3 +89,18 @@ bool cosyvoice_fit_flow_parity_probe(model_ctx & m, int T_tok, int TM, int SPK,
 bool cosyvoice_fit_hift_parity_probe(model_ctx & m, int T_mel,
                                      uint64_t & f0_bytes, uint64_t & stft_bytes,
                                      uint64_t & decode_bytes, std::string * error);
+
+// ---- Core ML verdict ---------------------------------------------------------
+// The two verdicts of a projection with generated Core ML stages: ggml alone
+// (`required`), and with the stages' envelope. With a budget, memory-degrade
+// keeps the ggml verdict when only it fits min(device_free, budget).
+struct cosyvoice_coreml_fit_verdict {
+    bool ggml_only_fits = false;
+    bool coreml_fits    = false;
+    bool degraded       = false;  // memory-degrade: use = off, reason "memory"
+    bool fits           = false;  // the verdict for what the engine will run
+    uint64_t charged    = 0;      // what `fits` compares with device_free
+};
+cosyvoice_coreml_fit_verdict cosyvoice_decide_coreml_fit(uint64_t required, uint64_t coreml_bytes, bool generate,
+                                                         uint64_t device_free,
+                                                         const std::optional<int64_t> & budget);

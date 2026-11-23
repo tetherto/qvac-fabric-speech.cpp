@@ -25,6 +25,7 @@
 
 #include "tts-cpp/cosyvoice/engine.h"
 #include "tts-cpp/voice_controls.h"
+#include "cosyvoice_coreml_cli.h"
 #include "voice_controls_cli.h"
 
 #include <algorithm>
@@ -76,8 +77,15 @@ int main(int argc, char ** argv) {
     int seed = 42, n_gpu_layers = 0, n_threads = 0, vulkan_device = 0;
     bool greedy = false;
     bool flow_cut_prompt = false;
+    cosyvoice_cli::coreml_args coreml;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
+        try {
+            if (cosyvoice_cli::parse_coreml_arg(i, argc, argv, coreml)) continue;
+        } catch (const std::invalid_argument & e) {
+            fprintf(stderr, "cosyvoice-cli: %s\n", e.what());
+            return 1;
+        }
         if (a == "--model-dir" && i + 1 < argc) model_dir = argv[++i];
         else if (a == "--text" && i + 1 < argc) text = argv[++i];
         else if (a == "--out" && i + 1 < argc) out = argv[++i];
@@ -118,6 +126,11 @@ int main(int argc, char ** argv) {
                 "          [--backend auto|cpu|opencl|webgpu|hexagon|DEVICE] (explicit device;\n"
                 "                      overrides --n-gpu-layers, no fallback)\n"
                 "          [--vulkan-device N] [--backends-dir DIR] [--opencl-cache-dir DIR]\n"
+                "%s"
+                "\n"
+                "Core ML (TTS_CPP_COREML builds): the flow front-end, F0 and HiFT sidecars load in the\n"
+                "background (prebuilt next to the GGUFs, or generated into the cache directory; default\n"
+                "QVAC_COREML_CACHE_DIR, else ~/Library/Application Support/qvac-speech/coreml).\n"
                 "\n"
                 "Voice cloning: --reference-audio with --prompt-text (the reference's verbatim\n"
                 "transcript) = zero-shot; without --prompt-text = cross-lingual (timbre only).\n"
@@ -125,7 +138,7 @@ int main(int argc, char ** argv) {
                 "\n"
                 "CosyVoice3 is trained on one instruction per synthesis: set at most one of\n"
                 "--emotion / --pace / --instruct (pace=moderate counts as unset).\n"
-                "--list-emotions prints the values this engine supports.\n", argv[0]);
+                "--list-emotions prints the values this engine supports.\n", argv[0], cosyvoice_cli::COREML_USAGE);
             return 1;
         }
     }
@@ -148,6 +161,7 @@ int main(int argc, char ** argv) {
     if (!voice_gguf.empty()) opts.voice_gguf_path = voice_gguf;
     if (!backends_dir.empty()) opts.backends_dir = backends_dir;
     if (!opencl_cache_dir.empty()) opts.opencl_cache_dir = opencl_cache_dir;
+    cosyvoice_cli::apply_coreml_args(coreml, opts);
 
     try {
         fprintf(stderr, "loading model from %s ...\n", model_dir.c_str());
@@ -157,6 +171,8 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "  %zu samples  %.2fs  %d Hz (backend %s%s)\n",
                 res.pcm.size(), res.duration_s, res.sample_rate, engine.backend_name().c_str(),
                 engine.gpu_unsupported() ? ", GPU present but declined" : "");
+        fprintf(stderr, "  core ml stages: frontend %s, f0 %s, hift %s%s\n", res.frontend_backend.c_str(),
+                res.f0_backend.c_str(), res.hift_backend.c_str(), res.coreml_pending ? " (pending)" : "");
         const auto & t = res.timings;
         fprintf(stderr,
                 "  timings ms: lm_prefill %.0f lm_decode %.0f flow_frontend %.0f "
@@ -166,6 +182,10 @@ int main(int argc, char ** argv) {
                 t.hift_f0_ms, t.hift_source_ms, t.hift_stft_ms, t.hift_decode_ms,
                 t.total_ms, t.n_decode_steps, t.n_speech_tokens);
         write_wav(out, res.pcm, res.sample_rate);
+        if (!cosyvoice_cli::write_coreml_status(coreml, engine)) {
+            fprintf(stderr, "cosyvoice-cli: cannot write %s\n", coreml.status_json.c_str());
+            return 1;
+        }
     } catch (const std::exception & e) {
         fprintf(stderr, "cosyvoice-cli: error: %s\n", e.what());
         return 1;

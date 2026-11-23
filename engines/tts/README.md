@@ -191,9 +191,17 @@ the sidecar from an embedded template, compiles it for the GPU
 until it is ready. SoundEffect `fit_params` adds the VAE's measured Core ML
 envelope and drops Core ML near a memory budget.
 
+CosyVoice3's flow front-end, F0 predictor and HiFT decoder can be generated
+on the device the same way (`EngineOptions::coreml`, macOS 15 or later); each
+stage runs on ggml until its sidecar is ready, and a stage whose prediction
+fails is retired and redone on ggml. See
+[CosyVoice3 generated sidecars](docs/cosyvoice3.md#generated-sidecars-and-background-loading).
+
 CosyVoice3 HiFT sidecars use FP32 for waveform parity. With enabled Chatterbox,
-CosyVoice3 or prebuilt Parler-TTS or Pocket TTS sidecars present, `fit_params` returns `Error` with
+Pocket TTS, prebuilt CosyVoice3 or prebuilt Parler-TTS sidecars present, `fit_params` returns `Error` with
 `coreml-memory-estimate-unavailable`; it cannot project Core ML resident memory.
+Generated CosyVoice3 stages are projected: fit adds their templates' Core ML
+envelope (see the CosyVoice3 guide).
 A generated Parler-TTS DAC is projected: fit adds its template's Core ML memory envelope,
 966 MiB under `all` (1.25 times the largest values measured on an M2 and on the M4 Max CI
 runner, where `all` runs on the GPU, with no further margin). Phones are not affected today, since sidecars are generated

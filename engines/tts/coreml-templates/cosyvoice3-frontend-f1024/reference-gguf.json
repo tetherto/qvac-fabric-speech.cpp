@@ -1,0 +1,232 @@
+{
+ "gguf_version": 3,
+ "metadata": [
+  {
+   "gguf_type": 8,
+   "key": "general.architecture",
+   "value": "cosyvoice3-flow"
+  },
+  {
+   "gguf_type": 6,
+   "key": "cosyvoice3.flow.inference_cfg_rate",
+   "value": 0.699999988079071
+  },
+  {
+   "gguf_type": 6,
+   "key": "cosyvoice3.flow.sigma_min",
+   "value": 9.999999974752427e-07
+  },
+  {
+   "gguf_type": 8,
+   "key": "cosyvoice3.flow.t_scheduler",
+   "value": "cosine"
+  },
+  {
+   "gguf_type": 8,
+   "key": "cosyvoice3.flow.solver",
+   "value": "euler"
+  },
+  {
+   "gguf_type": 4,
+   "key": "cosyvoice3.flow.depth",
+   "value": 22
+  },
+  {
+   "gguf_type": 4,
+   "key": "cosyvoice3.flow.dim",
+   "value": 1024
+  },
+  {
+   "gguf_type": 4,
+   "key": "cosyvoice3.flow.dim_head",
+   "value": 64
+  },
+  {
+   "gguf_type": 4,
+   "key": "cosyvoice3.flow.heads",
+   "value": 16
+  },
+  {
+   "gguf_type": 4,
+   "key": "cosyvoice3.flow.ff_inner",
+   "value": 2048
+  },
+  {
+   "gguf_type": 4,
+   "key": "cosyvoice3.flow.proj_in",
+   "value": 320
+  },
+  {
+   "gguf_type": 4,
+   "key": "cosyvoice3.flow.vocab_size",
+   "value": 6561
+  },
+  {
+   "gguf_type": 4,
+   "key": "cosyvoice3.flow.in_size",
+   "value": 80
+  },
+  {
+   "gguf_type": 4,
+   "key": "cosyvoice3.flow.spk_embed_dim",
+   "value": 192
+  },
+  {
+   "gguf_type": 4,
+   "key": "cosyvoice3.flow.mel_dim",
+   "value": 80
+  },
+  {
+   "gguf_type": 4,
+   "key": "cosyvoice3.flow.token_mel_ratio",
+   "value": 2
+  },
+  {
+   "gguf_type": 4,
+   "key": "cosyvoice3.flow.pre_lookahead_len",
+   "value": 3
+  },
+  {
+   "gguf_type": 4,
+   "key": "cosyvoice3.flow.n_timesteps",
+   "value": 10
+  },
+  {
+   "gguf_type": 4,
+   "key": "cosyvoice3.flow.conv_pos_kernel",
+   "value": 31
+  },
+  {
+   "gguf_type": 4,
+   "key": "cosyvoice3.flow.conv_pos_groups",
+   "value": 16
+  },
+  {
+   "gguf_type": 8,
+   "key": "cosyvoice3.flow.config_yaml",
+   "value": "# set random seed, so that you may reproduce your result.\n__set_seed1: !apply:random.seed [1986]\n__set_seed2: !apply:numpy.random.seed [1986]\n__set_seed3: !apply:torch.manual_seed [1986]\n__set_seed4: !apply:torch.cuda.manual_seed_all [1986]\n\n# fixed params\nsample_rate: 24000\nllm_input_size: 896\nllm_output_size: 896\nspk_embed_dim: 192\nqwen_pretrain_path: ''\ntoken_frame_rate: 25\ntoken_mel_ratio: 2\n\n# stream related params\nchunk_size: 25 # streaming inference chunk size, in token\nnum_decoding_left_chunks: -1 # streaming inference flow decoder left chunk size, <0 means use all left chunks\n\n# model params\n# for all class/function included in this repo, we use !<name> or !<new> for intialization, so that user may find all corresponding class/function according to one single yaml.\n# for system/third_party class/function, we do not require this.\nllm: !new:cosyvoice.llm.llm.CosyVoice3LM\n    llm_input_size: !ref <llm_input_size>\n    llm_output_size: !ref <llm_output_size>\n    speech_token_size: 6561\n    length_normalized_loss: True\n    lsm_weight: 0\n    mix_ratio: [5, 15]\n    llm: !new:cosyvoice.llm.llm.Qwen2Encoder\n        pretrain_path: !ref <qwen_pretrain_path>\n    sampling: !name:cosyvoice.utils.common.ras_sampling\n        top_p: 0.8\n        top_k: 25\n        win_size: 10\n        tau_r: 0.1\n\nflow: !new:cosyvoice.flow.flow.CausalMaskedDiffWithDiT\n    input_size: 80\n    output_size: 80\n    spk_embed_dim: !ref <spk_embed_dim>\n    output_type: 'mel'\n    vocab_size: 6561\n    input_frame_rate: !ref <token_frame_rate>\n    only_mask_loss: True\n    token_mel_ratio: !ref <token_mel_ratio>\n    pre_lookahead_len: 3\n    pre_lookahead_layer: !new:cosyvoice.transformer.upsample_encoder.PreLookaheadLayer\n        in_channels: 80\n        channels: 1024\n        pre_lookahead_len: 3\n    decoder: !new:cosyvoice.flow.flow_matching.CausalConditionalCFM\n        in_channels: 240\n        n_spks: 1\n        spk_emb_dim: 80\n        cfm_params: !new:omegaconf.DictConfig\n            content:\n                sigma_min: 1e-06\n                solver: 'euler'\n                t_scheduler: 'cosine'\n                training_cfg_rate: 0.2\n                inference_cfg_rate: 0.7\n                reg_loss_type: 'l1'\n        estimator: !new:cosyvoice.flow.DiT.dit.DiT\n            dim: 1024\n            depth: 22\n            heads: 16\n            dim_head: 64\n            ff_mult: 2\n            mel_dim: 80\n            mu_dim: 80\n            spk_dim: 80\n            out_channels: 80\n            static_chunk_size: !ref <chunk_size> * <token_mel_ratio>\n            num_decoding_left_chunks: !ref <num_decoding_left_chunks>\n\nhift: !new:cosyvoice.hifigan.generator.CausalHiFTGenerator\n    in_channels: 80\n    base_channels: 512\n    nb_harmonics: 8\n    sampling_rate: !ref <sample_rate>\n    nsf_alpha: 0.1\n    nsf_sigma: 0.003\n    nsf_voiced_threshold: 10\n    upsample_rates: [8, 5, 3]\n    upsample_kernel_sizes: [16, 11, 7]\n    istft_params:\n        n_fft: 16\n        hop_len: 4\n    resblock_kernel_sizes: [3, 7, 11]\n    resblock_dilation_sizes: [[1, 3, 5], [1, 3, 5], [1, 3, 5]]\n    source_resblock_kernel_sizes: [7, 7, 11]\n    source_resblock_dilation_sizes: [[1, 3, 5], [1, 3, 5], [1, 3, 5]]\n    lrelu_slope: 0.1\n    audio_limit: 0.99\n    conv_pre_look_right: 4\n    f0_predictor: !new:cosyvoice.hifigan.f0_predictor.CausalConvRNNF0Predictor\n        num_class: 1\n        in_channels: 80\n        cond_channels: 512\n\n# gan related module\nmel_spec_transform1: !name:matcha.utils.audio.mel_spectrogram\n    n_fft: 1920\n    num_mels: 80\n    sampling_rate: !ref <sample_rate>\n    hop_size: 480\n    win_size: 1920\n    fmin: 0\n    fmax: null\n    center: False\nhifigan: !new:cosyvoice.hifigan.hifigan.HiFiGan\n    generator: !ref <hift>\n    discriminator: !new:cosyvoice.hifigan.discriminator.MultipleDiscriminator\n        mpd: !new:matcha.hifigan.models.MultiPeriodDiscriminator\n        mrd: !new:cosyvoice.hifigan.discriminator.MultiResSpecDiscriminator\n    mel_spec_transform: [\n        !ref <mel_spec_transform1>\n    ]\n\n# processor functions\nparquet_opener: !name:cosyvoice.dataset.processor.parquet_opener\nget_tokenizer: !name:cosyvoice.tokenizer.tokenizer.get_qwen_tokenizer\n    token_path: !ref <qwen_pretrain_path>\n    skip_special_tokens: True\n    version: cosyvoice3\nallowed_special: 'all'\ntokenize: !name:cosyvoice.dataset.processor.tokenize\n    get_tokenizer: !ref <get_tokenizer>\n    allowed_special: !ref <allowed_special>\nfilter: !name:cosyvoice.dataset.processor.filter\n    max_length: 40960\n    min_length: 100\n    token_max_length: 200\n    token_min_length: 1\nresample: !name:cosyvoice.dataset.processor.resample\n    resample_rate: !ref <sample_rate>\ntruncate: !name:cosyvoice.dataset.processor.truncate\n    truncate_length: 24480 # must be a multiplier of hop_size\nfeat_extractor: !name:matcha.utils.audio.mel_spectrogram\n    n_fft: 1920\n    num_mels: 80\n    sampling_rate: !ref <sample_rate>\n    hop_size: 480\n    win_size: 1920\n    fmin: 0\n    fmax: null\n    center: False\ncompute_fbank: !name:cosyvoice.dataset.processor.compute_fbank\n    feat_extractor: !ref <feat_extractor>\ncompute_f0: !name:cosyvoice.dataset.processor.compute_f0\n    sample_rate: !ref <sample_rate>\n    hop_size: 480\nparse_embedding: !name:cosyvoice.dataset.processor.parse_embedding\n    normalize: True\nshuffle: !name:cosyvoice.dataset.processor.shuffle\n    shuffle_size: 1000\nsort: !name:cosyvoice.dataset.processor.sort\n    sort_size: 500  # sort_size should be less than shuffle_size\nbatch: !name:cosyvoice.dataset.processor.batch\n    batch_type: 'dynamic'\n    max_frames_in_batch: 2000\npadding: !name:cosyvoice.dataset.processor.padding\n    use_spk_embedding: False # change to True during sft\n\n\n# dataset processor pipeline\ndata_pipeline: [\n    !ref <parquet_opener>,\n    !ref <tokenize>,\n    !ref <filter>,\n    !ref <resample>,\n    !ref <compute_fbank>,\n    !ref <parse_embedding>,\n    !ref <shuffle>,\n    !ref <sort>,\n    !ref <batch>,\n    !ref <padding>,\n]\ndata_pipeline_gan: [\n    !ref <parquet_opener>,\n    !ref <tokenize>,\n    !ref <filter>,\n    !ref <resample>,\n    !ref <truncate>,\n    !ref <compute_fbank>,\n    !ref <compute_f0>,\n    !ref <parse_embedding>,\n    !ref <shuffle>,\n    !ref <sort>,\n    !ref <batch>,\n    !ref <padding>,\n]\n\n# llm flow train conf\ntrain_conf:\n    optim: adam\n    optim_conf:\n        lr: 1e-5 # change to 1e-5 during sft\n    scheduler: constantlr # change to constantlr during sft\n    scheduler_conf:\n        warmup_steps: 2500\n    max_epoch: 200\n    grad_clip: 5\n    accum_grad: 2\n    log_interval: 100\n    save_per_step: -1\n\n# gan train conf\ntrain_conf_gan:\n    optim: adam\n    optim_conf:\n        lr: 0.0002 # use small lr for gan training\n    scheduler: constantlr\n    optim_d: adam\n    optim_conf_d:\n        lr: 0.0002 # use small lr for gan training\n    scheduler_d: constantlr\n    max_epoch: 200\n    grad_clip: 5\n    accum_grad: 1 # in gan training, accum_grad must be 1\n    log_interval: 100\n    save_per_step: -1\n"
+  }
+ ],
+ "schema": 1,
+ "tensors": [
+  {
+   "n_dims": 2,
+   "name": "flow/input_embedding/weight",
+   "ne": [
+    80,
+    6561,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 2.2228050231933594,
+    "mean": -0.0015825027463554253,
+    "min": -2.3500592708587646,
+    "std": 0.4892659263568728
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "flow/pre_lookahead_layer/conv1/bias",
+   "ne": [
+    1024,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.9517679810523987,
+    "mean": -0.4260174989098573,
+    "min": -1.2431236505508423,
+    "std": 0.2816780229497594
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "flow/pre_lookahead_layer/conv1/weight",
+   "ne": [
+    4,
+    80,
+    1024,
+    1
+   ],
+   "stats": {
+    "max": 0.6337556838989258,
+    "mean": -0.0002800695720160702,
+    "min": -0.6445702314376831,
+    "std": 0.05730399144518339
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "flow/pre_lookahead_layer/conv2/bias",
+   "ne": [
+    80,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.1605919748544693,
+    "mean": 5.018629708501976e-05,
+    "min": -0.31686094403266907,
+    "std": 0.08519223402058847
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "flow/pre_lookahead_layer/conv2/weight",
+   "ne": [
+    3,
+    1024,
+    80,
+    1
+   ],
+   "stats": {
+    "max": 0.521041750907898,
+    "mean": -0.0004586978550563369,
+    "min": -0.5603179335594177,
+    "std": 0.0496556342912533
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "flow/spk_embed_affine_layer/bias",
+   "ne": [
+    80,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.13985450565814972,
+    "mean": -0.000679885980571271,
+    "min": -0.13743820786476135,
+    "std": 0.05154670641055206
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "flow/spk_embed_affine_layer/weight",
+   "ne": [
+    192,
+    80,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.646830141544342,
+    "mean": 0.0018206107809889478,
+    "min": -0.6540789008140564,
+    "std": 0.16856845360916897
+   },
+   "type": "f32"
+  }
+ ]
+}

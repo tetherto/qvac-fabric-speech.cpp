@@ -12,7 +12,7 @@
 #include "backend_selection.h"
 #include "backend_util.h"
 #include "cosyvoice_fit_internal.h"
-#include "cosyvoice_coreml.h"
+#include "cosyvoice_coreml_stages.h"
 #include "fit_util.h"
 
 #include "ggml-backend.h"
@@ -21,7 +21,24 @@
 #include <algorithm>
 #include <cstdio>
 #include <limits>
+#include <optional>
+#include <stdexcept>
 #include <string>
+
+cosyvoice_coreml_fit_verdict cosyvoice_decide_coreml_fit(uint64_t required, uint64_t coreml_bytes, bool generate,
+                                                         uint64_t device_free, const std::optional<int64_t> & budget) {
+    cosyvoice_coreml_fit_verdict v;
+    const uint64_t with_coreml = tts_cpp::fitutil::sat_add(required, generate ? coreml_bytes : 0);
+    v.ggml_only_fits = required <= device_free;
+    v.coreml_fits    = with_coreml <= device_free;
+    if (generate && budget.has_value()) {
+        const uint64_t cap = std::min(device_free, (uint64_t) std::max<int64_t>(*budget, 0));
+        v.degraded = with_coreml > cap && required <= cap;
+    }
+    v.charged = generate && !v.degraded ? with_coreml : required;
+    v.fits = v.charged <= device_free;
+    return v;
+}
 
 namespace tts_cpp {
 namespace cosyvoice {
@@ -71,11 +88,24 @@ FitResult fit_params(const FitOptions & opts) {
         return r;
     }
 
-    if (cosyvoice_coreml::has_sidecar(opts.llm_gguf_path) ||
-        cosyvoice_coreml::has_sidecar(opts.flow_gguf_path) ||
-        cosyvoice_coreml::has_sidecar(opts.flow_gguf_path, "-frontend") ||
-        cosyvoice_coreml::has_sidecar(opts.hift_gguf_path) ||
-        cosyvoice_coreml::has_sidecar(opts.hift_gguf_path, "-f0")) {
+    // The front-end, F0 and HiFT routes, decided without reading the cache.
+    // Prebuilt sidecars run outside ggml and their resident models and
+    // prediction buffers are not projected, as for the LM and flow-DiT
+    // sidecars; generated ones are charged their templates' envelope below.
+    cosyvoice_coreml_plan coreml_plan;
+    bool legacy_coreml = false;
+    try {
+        coreml_plan = cosyvoice_plan_coreml(opts.flow_gguf_path, opts.hift_gguf_path, opts.coreml,
+                                            opts.coreml_ignore_prebuilt);
+        legacy_coreml = cosyvoice_coreml_enabled(opts.coreml);
+    } catch (const std::invalid_argument &) {
+        r.reason = "invalid-arguments";
+        return r;
+    }
+    r.coreml.route = coreml_plan.any_generate ? "generate" : coreml_plan.any_prebuilt ? "prebuilt" : "none";
+    if ((legacy_coreml && (cosyvoice_coreml::has_sidecar(opts.llm_gguf_path) ||
+                           cosyvoice_coreml::has_sidecar(opts.flow_gguf_path))) ||
+        coreml_plan.any_prebuilt) {
         r.reason = "coreml-memory-estimate-unavailable";
         r.report = "Core ML resident models and prediction buffers cannot be projected.\n";
         return r;
@@ -298,7 +328,21 @@ FitResult fit_params(const FitOptions & opts) {
     if (r.device_shares_host_memory) {
         required = sat_add(required, r.host_bytes);
     }
-    r.fits   = required <= r.device_free_bytes;
+    // Core ML-inclusive verdict for generated stages: the ggml projection
+    // keeps its residency (ggml serves each stage until its sidecar is ready)
+    // plus the envelope, charged in every phase because the sidecars stay
+    // loaded across them.
+    if (coreml_plan.any_generate) {
+        r.coreml.bytes = coreml_plan.envelope_bytes;
+        r.coreml.validated = coreml_plan.validated;
+    }
+    const cosyvoice_coreml_fit_verdict v = cosyvoice_decide_coreml_fit(
+        required, r.coreml.bytes, coreml_plan.any_generate, r.device_free_bytes, opts.coreml.memory_budget_bytes);
+    r.coreml.ggml_only_fits = v.ggml_only_fits;
+    r.coreml.fits = v.coreml_fits;
+    if (v.degraded) r.coreml.disabled_reason = "memory";
+    required = v.charged;
+    r.fits   = v.fits;
     r.status = r.fits ? FitStatus::Success : FitStatus::Failure;
     r.reason = r.fits ? "fits" : "does-not-fit";
 
@@ -352,6 +396,12 @@ FitResult fit_params(const FitOptions & opts) {
         std::snprintf(line, sizeof(line), "margin:          %14s\n",
                       fmt_mib(opts.margin_bytes).c_str());
         s += line;
+        if (coreml_plan.any_generate) {
+            std::snprintf(line, sizeof(line), "core ml:         %14s (generated front-end/F0/HiFT envelope%s)%s\n",
+                          fmt_mib(r.coreml.bytes).c_str(), r.coreml.validated ? ", validated" : "",
+                          v.degraded ? ": memory-degrade, ggml only" : "");
+            s += line;
+        }
         if (r.fits) {
             std::snprintf(line, sizeof(line), "verdict: FITS (headroom %s)\n",
                           fmt_mib(r.device_free_bytes - required).c_str());

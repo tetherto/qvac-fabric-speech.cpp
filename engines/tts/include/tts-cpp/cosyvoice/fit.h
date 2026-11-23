@@ -35,9 +35,18 @@
 // buffers) plus the persistent baked-voice vectors.
 //
 // Scope / exclusions (documented, strict where approximate):
-//   * Enabled Core ML sidecars return Error with reason
-//     "coreml-memory-estimate-unavailable" because resident Core ML models
-//     and prediction buffers cannot be projected by the native fitter.
+//   * Enabled prebuilt Core ML sidecars (LM, flow DiT, or a prebuilt
+//     front-end, F0 or HiFT sidecar) return Error with reason
+//     "coreml-memory-estimate-unavailable" because their resident models and
+//     prediction buffers cannot be projected by the native fitter.
+//   * Generated front-end, F0 and HiFT sidecars (coreml.cache_dir set, no
+//     prebuilt sidecar, macOS 15) are projected (FitResult::coreml): the
+//     verdict adds their templates' Core ML envelope (each generated stage's
+//     resident part plus the largest stage's load or generation transient)
+//     to the peak phase, since the sidecars stay loaded across phases. With
+//     coreml.memory_budget_bytes, a budget only the ggml projection fits
+//     reports coreml.disabled_reason "memory" and the ggml verdict (the
+//     Engine given the same budget then runs those stages on ggml).
 //   * The resident Qwen tokenizer (vocab.json + merges.txt live OUTSIDE the
 //     GGUF set and are parsed into hash maps, typically tens of MB of host
 //     RAM) is NOT projected -- the fitter never sees those files.
@@ -53,6 +62,7 @@
 //
 // See tts-cpp/fit.h for the status contract and result layout.
 
+#include "tts-cpp/coreml_options.h"
 #include "tts-cpp/export.h"
 #include "tts-cpp/fit.h"
 
@@ -91,6 +101,11 @@ struct FitOptions {
     // Free-memory headroom that must remain on the device for the projection
     // to count as fitting.
     uint64_t margin_bytes = 256ull * 1024 * 1024;
+
+    // Mirror EngineOptions::coreml and coreml_ignore_prebuilt: the front-end,
+    // F0 and HiFT routes and their Core ML envelope.
+    CoremlOptions coreml;
+    bool coreml_ignore_prebuilt = false;
 };
 
 // Project the model set + workload in `opts` against the device memory

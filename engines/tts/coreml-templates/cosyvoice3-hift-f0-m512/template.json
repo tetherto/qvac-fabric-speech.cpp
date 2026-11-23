@@ -1,0 +1,116 @@
+{
+  "schema": 1,
+  "id": "cosyvoice3-hift-f0-m512",
+  "family": "cosyvoice3",
+  "stage": "f0",
+  "export_kind": "cosyvoice3-hift-f0-v1",
+  "exporter": {
+    "path": "engines/tts/scripts/export-cosyvoice3-coreml.py",
+    "sha256": "497ccd80463f7b2e3fc62f56bbff774f49f27e3ce4c531122ed5c702053234d0",
+    "args": [
+      "--stage",
+      "hift-f0",
+      "--gguf",
+      "{gguf}",
+      "--frames",
+      "512",
+      "--output",
+      "{out}"
+    ],
+    "gguf_name": "cosyvoice3-hift-f32.gguf"
+  },
+  "min_os": {
+    "macos": "15.0"
+  },
+  "multifunction_ane": false,
+  "default_compute_units": "cpu_and_ane",
+  "shareable": true,
+  "pad_safe": false,
+  "state_bytes": 0,
+  "expected_warm_load_ms": {
+    "main": 0
+  },
+  "memory": {
+    "runtime_weight_bytes": 6955776,
+    "workspace_bytes": 0,
+    "compile_peak_bytes": 0,
+    "ane_compile_reserve_bytes": 717225984,
+    "load_peak_bytes": {
+      "cpu_and_ane": 9437184,
+      "all": null,
+      "cpu_and_gpu": null,
+      "cpu_only": null
+    },
+    "margin": 1.0,
+    "coreml_bound": "measured",
+    "validated_for": [
+      {
+        "units": "cpu_and_ane",
+        "os": "27.2.1",
+        "chip": "M2"
+      },
+      {
+        "units": "cpu_and_ane",
+        "os": "26.7.2",
+        "chip": "M4 Max"
+      }
+    ],
+    "measured": {
+      "margin": 1.25,
+      "runs": 13,
+      "resident_bytes": 7287552,
+      "basis": "Each constant is 1.25 x the largest value measured over every overlapped generated-schedule run of the three CosyVoice3 stages on the validated_for hosts (13 run reports: 7 on M2, 6 on the CI runner’s M4 Max), rounded up to 1 MiB, so the envelope's own margin is 1.0: the prepare charge (generation_peak_bytes + 8 MiB + compile_peak_bytes) covers this stage's prepare, from the start of its generation to the end of its compile (7.8 MiB); load_peak_bytes.cpu_and_ane its load and warm-up (6.8 MiB); ane_compile_reserve_bytes ANECompilerService's largest absolute size while it loads (546.5 MiB, M4 Max). The three stages' resident parts (runtime_weight_bytes + 2 x I/O + workspace_bytes, the workspace held by the HiFT stage) cover the steady state with every stage ready over the warm ggml baseline (203.8 MiB), which includes what Core ML keeps after the first generation in a process"
+    }
+  },
+  "patches": [
+    {
+      "spec_offset": 632,
+      "len": 4,
+      "sentinel_hex": "fc184556"
+    }
+  ],
+  "prefer_ggml_on": [],
+  "match": {
+    "architecture": "cosyvoice3-hift",
+    "metadata": {
+      "cosyvoice3.hift.num_mels": 80,
+      "cosyvoice3.hift.base_channels": 512
+    }
+  },
+  "literals": [],
+  "provided": [],
+  "toolchain": {
+    "coremltools": "9.0",
+    "torch": "2.7.0",
+    "numpy": "1.26.4"
+  },
+  "functions": [
+    {
+      "name": "main",
+      "inputs": [
+        {
+          "name": "mel",
+          "dtype": "fp32",
+          "shape": [
+            1,
+            80,
+            512
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "f0",
+          "dtype": "fp32",
+          "shape": [
+            1,
+            512
+          ]
+        }
+      ]
+    }
+  ],
+  "stateful": false,
+  "weight_bin_size": 6955776,
+  "generation_peak_bytes": 4718592
+}
