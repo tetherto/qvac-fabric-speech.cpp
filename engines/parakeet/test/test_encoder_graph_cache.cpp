@@ -55,7 +55,7 @@ size_t current_cache_limit(ParakeetCtcModel & model) {
 
 int encode_frames(ParakeetCtcModel & model, const std::vector<float> & mel, int n_frames) {
     EncoderOutputs out;
-    return run_encoder(model, mel.data(), n_frames, model.mel_cfg.n_mels, out,
+    return run_encoder(model, mel.data(), n_frames, model.mel_cfg.n_mels, out, parakeet::EncoderRoute::ggml(),
                        /*max_layers=*/-1, /*capture_intermediates=*/false);
 }
 
@@ -98,7 +98,7 @@ void check_windowed_pass(ParakeetCtcModel & model, const std::vector<float> & me
     EngineOptions opts;
     opts.long_form_window_frames  = kWindowFrames;
     opts.long_form_context_frames = kContextFrames;
-    const LongFormPlan plan = resolve_long_form_plan(model, opts, n_tiled);
+    const LongFormPlan plan = resolve_long_form_plan(model, opts, n_tiled, EncoderRoute::ggml());
     expect(plan.enabled, "the tiled clip must need long-form windows");
 
     fill_cache_with_shapes(model, mel, n_frames);
@@ -108,7 +108,7 @@ void check_windowed_pass(ParakeetCtcModel & model, const std::vector<float> & me
     EncoderOutputs out;
     WindowedEncoderStats stats;
     expect(run_encoder_windowed(model, tiled.data(), n_tiled, model.mel_cfg.n_mels, plan,
-                                cancel, out, stats) == 0,
+                                EncoderRoute::ggml(), cancel, out, stats) == 0,
            "windowed pass failed");
     expect(out.n_enc_frames > 0, "windowed pass produced no frames");
     expect(encoder_graph_cache_size(model) == 1,
@@ -121,7 +121,7 @@ void check_windowed_pass(ParakeetCtcModel & model, const std::vector<float> & me
     EncoderOutputs none;
     WindowedEncoderStats none_stats;
     expect(run_encoder_windowed(model, tiled.data(), n_tiled, model.mel_cfg.n_mels, plan,
-                                cancelled, none, none_stats) == 0,
+                                EncoderRoute::ggml(), cancelled, none, none_stats) == 0,
            "a cancelled windowed pass must still return success");
     expect(none.n_enc_frames == 0, "a cancelled windowed pass commits no frames");
     expect(current_cache_limit(model) == kDefaultCacheLimit,

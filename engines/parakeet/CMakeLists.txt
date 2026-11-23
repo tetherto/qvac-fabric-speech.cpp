@@ -42,6 +42,11 @@ set(PARAKEET_COREML_OBJC_SOURCES
     src/coreml/parakeet-encoder.mm
     src/coreml/parakeet-decoder.mm
     src/coreml/parakeet-diarizer.mm)
+# Parakeet's adoption of the shared Core ML runtime (engines/coreml): C++
+# compiled with the runtime's namespace (QVAC_COREML_NS=parakeet_coreml).
+set(PARAKEET_COREML_RUNTIME_GLUE_SOURCES
+    src/coreml/parakeet_coreml_sidecars.cpp)
+set(PARAKEET_COREML_RUNTIME_NS parakeet_coreml)
 
 # ccache shaves ~30 % off iterative rebuild time on developer machines.
 # Opt-out via -DPARAKEET_CCACHE=OFF for clean reproducibility runs.
@@ -434,8 +439,13 @@ if (PARAKEET_BUILD_LIBRARY)
         parakeet_apply_ccache(parakeet.coreml)
         target_include_directories(parakeet.coreml PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
             ${CMAKE_CURRENT_SOURCE_DIR}/ggml/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/include
         )
+        # The diarizer wrapper registers its capacities as runtime slots.
+        target_compile_definitions(parakeet.coreml PRIVATE
+            QVAC_COREML_NS=${PARAKEET_COREML_RUNTIME_NS})
         # The diarizer wrapper logs through parakeet_log.h, which includes
         # ggml.h; a system ggml (the vcpkg superbuild) has no ggml/ subtree.
         target_link_libraries(parakeet.coreml PRIVATE ggml)
@@ -445,7 +455,8 @@ if (PARAKEET_BUILD_LIBRARY)
             XCODE_ATTRIBUTE_CLANG_ENABLE_OBJC_ARC YES
         )
 
-        target_sources(qvac-parakeet PRIVATE $<TARGET_OBJECTS:parakeet.coreml>)
+        target_sources(qvac-parakeet PRIVATE $<TARGET_OBJECTS:parakeet.coreml>
+                                             ${PARAKEET_COREML_RUNTIME_GLUE_SOURCES})
         target_compile_definitions(qvac-parakeet PRIVATE PARAKEET_USE_COREML)
         target_link_libraries(qvac-parakeet PUBLIC
             ${PARAKEET_FOUNDATION_FRAMEWORK}
@@ -454,10 +465,18 @@ if (PARAKEET_BUILD_LIBRARY)
         message(STATUS "parakeet: Core ML encoder and TDT decoder sidecars enabled (PARAKEET_USE_COREML)")
     endif()
     # Shared Core ML runtime (engines/coreml): compiled into libqvac-parakeet
-    # under its own namespace when PARAKEET_COREML is on. No engine source uses
-    # it yet.
+    # under its own namespace when PARAKEET_COREML is on. The encoder, bypass
+    # encoder and diarizer sidecars load through its slots.
+    # With PARAKEET_COREML_GENERATE (default ON on macOS) the generator and
+    # these templates are compiled in: a stage with no adjacent sidecar whose
+    # template matches the GGUF is generated into the Core ML cache directory.
     include(${CMAKE_CURRENT_SOURCE_DIR}/../coreml/qvac_coreml.cmake)
-    qvac_coreml_add_to(qvac-parakeet NAMESPACE parakeet_coreml PREFIX PARAKEET ENABLE ${PARAKEET_COREML})
+    set(PARAKEET_COREML_TEMPLATE_DIRS
+        ${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/nemotron-diar-f358
+        ${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/nemotron-diar-f745
+        ${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/nemotron-diar-f1125)
+    qvac_coreml_add_to(qvac-parakeet NAMESPACE ${PARAKEET_COREML_RUNTIME_NS} PREFIX PARAKEET ENABLE ${PARAKEET_COREML}
+                       TEMPLATES ${PARAKEET_COREML_TEMPLATE_DIRS})
 
     set_target_properties(qvac-parakeet PROPERTIES
         POSITION_INDEPENDENT_CODE ON
@@ -574,6 +593,68 @@ if (PARAKEET_BUILD_TESTS)
     include(${CMAKE_CURRENT_SOURCE_DIR}/../coreml/qvac_coreml.cmake)
     qvac_coreml_add_tests(REQUIRE_GGML)
 
+    # Test harnesses that compile the engine sources themselves with
+    # PARAKEET_USE_COREML (instead of linking libqvac-parakeet) need their own
+    # copy of the runtime, in the library's namespace, plus the routing glue.
+    # With PARAKEET_COREML_GENERATE that copy also has the generator and the
+    # library's templates, so these harnesses generate as the library does.
+    function(parakeet_test_use_coreml_runtime target)
+        set(_ptcr_generate OFF)
+        if (PARAKEET_COREML_GENERATE AND TARGET ggml)
+            set(_ptcr_generate ON)
+        endif()
+        if (NOT TARGET parakeet-test-coreml-runtime)
+            _qvac_coreml_runtime_sources(_ptcr_srcs ON)
+            if (_ptcr_generate)
+                _qvac_coreml_generator_sources(_ptcr_gen)
+                _qvac_coreml_embed_templates(parakeet-test-coreml-runtime ${PARAKEET_COREML_RUNTIME_NS}
+                    "${CMAKE_CURRENT_BINARY_DIR}/qvac-coreml-parakeet-test" _ptcr_tpl ${PARAKEET_COREML_TEMPLATE_DIRS})
+                list(APPEND _ptcr_srcs ${_ptcr_gen} ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/src/gguf_source.cpp
+                     ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/src/apple/compile.mm ${_ptcr_tpl})
+            endif()
+            add_library(parakeet-test-coreml-runtime OBJECT ${_ptcr_srcs})
+            _qvac_coreml_configure_runtime(parakeet-test-coreml-runtime ${PARAKEET_COREML_RUNTIME_NS} ON)
+            if (_ptcr_generate)
+                target_compile_options(parakeet-test-coreml-runtime PRIVATE -ffp-contract=off)
+                target_link_libraries(parakeet-test-coreml-runtime PRIVATE ggml)
+                target_compile_definitions(parakeet-test-coreml-runtime PRIVATE
+                    QVAC_COREML_GENERATE=1 QVAC_COREML_APPLE_COMPILE=1 QVAC_COREML_DEV=1)
+            endif()
+            parakeet_apply_ccache(parakeet-test-coreml-runtime)
+        endif()
+        _qvac_coreml_apple_frameworks(_ptcr_fws ${_ptcr_generate})
+        target_sources(${target} PRIVATE
+            $<TARGET_OBJECTS:parakeet-test-coreml-runtime>
+            ${PARAKEET_COREML_RUNTIME_GLUE_SOURCES})
+        target_compile_definitions(${target} PRIVATE QVAC_COREML_NS=${PARAKEET_COREML_RUNTIME_NS})
+        target_include_directories(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/include)
+        target_link_libraries(${target} PRIVATE ${_ptcr_fws})
+    endfunction()
+
+    # Parakeet's Core ML routing, hermetic, Linux and
+    # macOS: the long-form plan with a null route is the ggml plan; a failure at
+    # window k retires the sidecar and the call reports "mixed"; the next call
+    # acquires a null route and reverts; the fit route never reads the cache.
+    # Built against the runtime's own test copy (fake loaders, no Core ML).
+    if (TARGET qvac-coreml-test-runtime)
+        add_executable(test-parakeet-coreml-route
+            test/test_coreml_route.cpp
+            src/parakeet_coreml_path.cpp
+            ${PARAKEET_COREML_RUNTIME_GLUE_SOURCES})
+        target_compile_definitions(test-parakeet-coreml-route PRIVATE QVAC_COREML_NS=qvac_coreml_test
+            QVAC_COREML_TOY_TEMPLATES="${CMAKE_CURRENT_SOURCE_DIR}/../coreml/test/toy-templates")
+        target_include_directories(test-parakeet-coreml-route PRIVATE
+            src include ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/include)
+        target_compile_features(test-parakeet-coreml-route PRIVATE cxx_std_17)
+        target_link_libraries(test-parakeet-coreml-route PRIVATE qvac-coreml-test-runtime)
+        parakeet_apply_ccache(test-parakeet-coreml-route)
+        add_test(NAME test-parakeet-coreml-route COMMAND test-parakeet-coreml-route)
+        # Runs in the dedicated Core ML runtime step of every parakeet lane;
+        # it has no skip path (any non-zero exit fails).
+        set_tests_properties(test-parakeet-coreml-route PROPERTIES
+            LABELS "unit;coreml-runtime" TIMEOUT 120)
+    endif()
+
     # Helper: register a built test target with CTest. Same shape as
     # the standard llama-style `llama_test()` macro: every harness
     # ends up surfaced via `ctest` against the build dir, with labels
@@ -623,6 +704,13 @@ if (PARAKEET_BUILD_TESTS)
             message(STATUS "parakeet: test ${target} disabled (missing fixture(s):\n        ${_qprt_missing_pretty})")
         endif()
     endfunction()
+
+    # The host log sink is drained before parakeet_log_set returns.
+    add_executable(test-log-unregister test/test_log_unregister.cpp src/parakeet_log.cpp)
+    target_link_libraries(test-log-unregister PRIVATE ggml)
+    target_include_directories(test-log-unregister PRIVATE ggml/include src include)
+    parakeet_apply_ccache(test-log-unregister)
+    parakeet_register_test(test-log-unregister LABEL "unit")
 
     add_executable(test-parity test/test_parity.cpp)
     parakeet_register_test(test-parity LABEL "unit")
@@ -816,6 +904,23 @@ if (PARAKEET_BUILD_TESTS)
         LABEL    "fixture"
         ARGS     "${_qvp_tdt_f16_gguf}" "${_qvp_jfk_wav}"
         REQUIRES "${_qvp_tdt_f16_gguf}" "${_qvp_jfk_wav}")
+
+    add_executable(test-tdt-padding
+        test/test_tdt_padding.cpp
+        src/parakeet_ctc.cpp
+        src/parakeet_log.cpp
+        src/mel_preprocess.cpp
+        src/sentencepiece_bpe.cpp)
+    target_link_libraries(test-tdt-padding PRIVATE ggml parakeet-backend-defs)
+    target_include_directories(test-tdt-padding PRIVATE src include ggml/include)
+    if (PARAKEET_F16_ACTIVATIONS)
+        target_compile_definitions(test-tdt-padding PRIVATE PARAKEET_F16_ACTIVATIONS=1)
+    endif()
+    parakeet_apply_backend_defs(test-tdt-padding)
+    parakeet_register_test(test-tdt-padding
+        LABEL    "fixture"
+        ARGS     "${_qvp_tdt_q8_gguf}"
+        REQUIRES "${_qvp_tdt_q8_gguf}")
 
     add_executable(test-parakeet-streaming test/test_streaming.cpp)
     target_link_libraries(test-parakeet-streaming PRIVATE qvac-parakeet)
@@ -1525,6 +1630,8 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_eou.cpp
         src/parakeet_sortformer.cpp
         src/parakeet_diarization_v3.cpp
+        # Core ML memory-degrade in the engine projects fit.
+        src/parakeet_fit.cpp
         src/mel_preprocess.cpp
         src/sentencepiece_bpe.cpp
         src/energy_vad.cpp)
@@ -1598,6 +1705,7 @@ if (PARAKEET_BUILD_TESTS)
         target_sources(test-moss-transcribe-coreml-parity PRIVATE ${PARAKEET_COREML_OBJC_SOURCES})
         set_source_files_properties(${PARAKEET_COREML_OBJC_SOURCES} PROPERTIES COMPILE_FLAGS "-fobjc-arc")
         target_compile_definitions(test-moss-transcribe-coreml-parity PRIVATE PARAKEET_USE_COREML)
+        parakeet_test_use_coreml_runtime(test-moss-transcribe-coreml-parity)
         target_link_libraries(test-moss-transcribe-coreml-parity PRIVATE
             ${PARAKEET_FOUNDATION_FRAMEWORK} ${PARAKEET_COREML_FRAMEWORK})
     endif()
@@ -1617,6 +1725,7 @@ if (PARAKEET_BUILD_TESTS)
     if (PARAKEET_COREML)
         target_sources(bench-moss-transcribe-coreml PRIVATE ${PARAKEET_COREML_OBJC_SOURCES})
         target_compile_definitions(bench-moss-transcribe-coreml PRIVATE PARAKEET_USE_COREML)
+        parakeet_test_use_coreml_runtime(bench-moss-transcribe-coreml)
         target_link_libraries(bench-moss-transcribe-coreml PRIVATE
             ${PARAKEET_FOUNDATION_FRAMEWORK} ${PARAKEET_COREML_FRAMEWORK})
     endif()
@@ -1753,6 +1862,7 @@ if (PARAKEET_BUILD_TESTS)
         set_source_files_properties(${PARAKEET_COREML_OBJC_SOURCES}
             PROPERTIES COMPILE_FLAGS "-fobjc-arc")
         target_compile_definitions(test-encoder-coreml-parity PRIVATE PARAKEET_USE_COREML)
+        parakeet_test_use_coreml_runtime(test-encoder-coreml-parity)
         target_link_libraries(test-encoder-coreml-parity PRIVATE
             ${PARAKEET_FOUNDATION_FRAMEWORK} ${PARAKEET_COREML_FRAMEWORK})
     endif()
@@ -1796,6 +1906,7 @@ if (PARAKEET_BUILD_TESTS)
         set_source_files_properties(${PARAKEET_COREML_OBJC_SOURCES}
             PROPERTIES COMPILE_FLAGS "-fobjc-arc")
         target_compile_definitions(test-encoder-coreml-bypass-parity PRIVATE PARAKEET_USE_COREML)
+        parakeet_test_use_coreml_runtime(test-encoder-coreml-bypass-parity)
         target_link_libraries(test-encoder-coreml-bypass-parity PRIVATE
             ${PARAKEET_FOUNDATION_FRAMEWORK} ${PARAKEET_COREML_FRAMEWORK})
     endif()
@@ -1822,6 +1933,7 @@ if (PARAKEET_BUILD_TESTS)
         set_source_files_properties(${PARAKEET_COREML_OBJC_SOURCES}
             PROPERTIES COMPILE_FLAGS "-fobjc-arc")
         target_compile_definitions(test-nemotron-diarization-coreml-parity PRIVATE PARAKEET_USE_COREML)
+        parakeet_test_use_coreml_runtime(test-nemotron-diarization-coreml-parity)
         target_link_libraries(test-nemotron-diarization-coreml-parity PRIVATE
             ${PARAKEET_FOUNDATION_FRAMEWORK} ${PARAKEET_COREML_FRAMEWORK})
     endif()
@@ -1831,6 +1943,111 @@ if (PARAKEET_BUILD_TESTS)
                  "${CMAKE_CURRENT_SOURCE_DIR}/test/samples/diarization-sample-16k.wav"
         REQUIRES "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}")
     set_property(TEST test-nemotron-diarization-coreml-parity PROPERTY SKIP_RETURN_CODE 77)
+    # The same gate on diarizers generated from the GGUF alone: the fixture
+    # directory holds only the GGUF, the cache starts empty, and the test fails
+    # (never skips) unless every capacity was generated.
+    set(PARAKEET_TEST_NEMOTRON_GENERATED_GGUF "" CACHE FILEPATH
+        "Nemotron 3 Diarization q8_0 GGUF in a directory with no diarizer bundle (generated Core ML diarizers)")
+    if (PARAKEET_COREML AND PARAKEET_TEST_NEMOTRON_GENERATED_GGUF)
+        set(_qvp_gen_cache "${CMAKE_CURRENT_BINARY_DIR}/coreml-generated-cache")
+        add_test(NAME test-nemotron-diarization-coreml-generated-parity
+            COMMAND /bin/sh -c "rm -rf '${_qvp_gen_cache}' && exec \"$0\" \"$@\""
+                    $<TARGET_FILE:test-nemotron-diarization-coreml-parity>
+                    "${PARAKEET_TEST_NEMOTRON_GENERATED_GGUF}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/test/samples/diarization-sample-16k.wav"
+                    --cache-dir "${_qvp_gen_cache}")
+        set_tests_properties(test-nemotron-diarization-coreml-generated-parity PROPERTIES
+            LABELS "fixture;coreml;coreml-generated" TIMEOUT 1800)
+        # The DER gate: the generated diarizers against the exporter's bundles on
+        # the pinned clips, both on the Neural Engine, at most 0.2 pp apart.
+        # Registered only where every input it uses exists: the exporter's
+        # three bundles beside PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF (a
+        # default path that may name no file), the pinned clips and the DER
+        # script. The CI Core ML lane stages only the GGUF, so it has no such
+        # test (a disabled one would fail its no-skip check).
+        get_filename_component(_qvp_der_dir "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}" DIRECTORY)
+        set(_qvp_der_inputs
+            "${PARAKEET_TEST_NEMOTRON_GENERATED_GGUF}" "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}"
+            "${_qvp_der_dir}/Nemotron-3-Diarization-diarizer-358.mlmodelc"
+            "${_qvp_der_dir}/Nemotron-3-Diarization-diarizer-745.mlmodelc"
+            "${_qvp_der_dir}/Nemotron-3-Diarization-diarizer-1125.mlmodelc"
+            "${CMAKE_CURRENT_SOURCE_DIR}/test/samples/abcba.wav" "${CMAKE_CURRENT_SOURCE_DIR}/test/samples/abcba.rttm"
+            "${CMAKE_CURRENT_SOURCE_DIR}/test/samples/abcdba.wav" "${CMAKE_CURRENT_SOURCE_DIR}/test/samples/abcdba.rttm"
+            "${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/benchmarks/compute-der.py")
+        set(_qvp_der_ready ${Python3_EXECUTABLE})
+        foreach (_qvp_der_input IN LISTS _qvp_der_inputs)
+            if (NOT EXISTS "${_qvp_der_input}")
+                set(_qvp_der_ready FALSE)
+            endif()
+        endforeach()
+        if (_qvp_der_ready)
+            add_test(NAME test-nemotron-diarization-coreml-generated-der
+                COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check-generated-diarizer-der.py
+                        --cli $<TARGET_FILE:parakeet-cli>
+                        --generated-gguf "${PARAKEET_TEST_NEMOTRON_GENERATED_GGUF}"
+                        --prebuilt-gguf "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}"
+                        --samples ${CMAKE_CURRENT_SOURCE_DIR}/test/samples
+                        --der-script ${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/benchmarks/compute-der.py
+                        --work "${CMAKE_CURRENT_BINARY_DIR}/coreml-generated-der")
+            set_tests_properties(test-nemotron-diarization-coreml-generated-der PROPERTIES
+                LABELS "fixture;coreml;coreml-generated" TIMEOUT 1800)
+        else()
+            message(STATUS "parakeet: test test-nemotron-diarization-coreml-generated-der not registered "
+                           "(it needs the exporter's diarizer bundles beside PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF)")
+        endif()
+        # A generated diarizer comes only from the file whose weights the model
+        # loaded: the path names another file only while the GGUF is opened.
+        add_executable(test-nemotron-diarization-coreml-source
+            test/test_nemotron_diarization_coreml_source.cpp
+            src/parakeet_ctc.cpp
+            src/parakeet_diarization_v3.cpp
+            src/parakeet_coreml_path.cpp
+            src/coreml/parakeet_coreml_shape.cpp
+            src/parakeet_log.cpp
+            src/mel_preprocess.cpp
+            src/sentencepiece_bpe.cpp
+            ${PARAKEET_COREML_OBJC_SOURCES})
+        target_link_libraries(test-nemotron-diarization-coreml-source PRIVATE ggml parakeet-backend-defs
+            ${PARAKEET_FOUNDATION_FRAMEWORK} ${PARAKEET_COREML_FRAMEWORK})
+        target_include_directories(test-nemotron-diarization-coreml-source PRIVATE include src ggml/include)
+        target_compile_definitions(test-nemotron-diarization-coreml-source PRIVATE PARAKEET_USE_COREML)
+        parakeet_apply_backend_defs(test-nemotron-diarization-coreml-source)
+        parakeet_apply_ccache(test-nemotron-diarization-coreml-source)
+        parakeet_test_use_coreml_runtime(test-nemotron-diarization-coreml-source)
+        add_test(NAME test-nemotron-diarization-coreml-source
+            COMMAND test-nemotron-diarization-coreml-source "${PARAKEET_TEST_NEMOTRON_GENERATED_GGUF}"
+                    "${CMAKE_CURRENT_BINARY_DIR}/coreml-source-swap")
+        set_tests_properties(test-nemotron-diarization-coreml-source PROPERTIES
+            LABELS "fixture;coreml;coreml-generated" TIMEOUT 1800)
+        # fit_params charges the generated capacities the same with an empty
+        # and a full cache; a budget between the ggml-only and Core ML-inclusive
+        # totals turns Core ML off for memory; compute units the templates were
+        # not validated for report every capacity unsupported. Never skips.
+        add_executable(test-fit-coreml-generated-diarizers test/test_fit_coreml_generated_diarizers.cpp)
+        target_link_libraries(test-fit-coreml-generated-diarizers PRIVATE qvac-parakeet)
+        target_include_directories(test-fit-coreml-generated-diarizers PRIVATE include
+            ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/third_party)
+        # The expected charge is recomputed from the embedded templates' memory sections.
+        target_compile_definitions(test-fit-coreml-generated-diarizers PRIVATE
+            PARAKEET_TEST_TEMPLATE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates")
+        parakeet_apply_ccache(test-fit-coreml-generated-diarizers)
+        add_test(NAME test-fit-coreml-generated-diarizers
+            COMMAND test-fit-coreml-generated-diarizers "${PARAKEET_TEST_NEMOTRON_GENERATED_GGUF}"
+                    "${CMAKE_CURRENT_BINARY_DIR}/coreml-generated-fit-cache")
+        set_tests_properties(test-fit-coreml-generated-diarizers PROPERTIES
+            LABELS "fixture;coreml;coreml-generated" TIMEOUT 1800)
+    endif()
+    if (PARAKEET_COREML)
+        # The memory validation behind the Nemotron templates'
+        # memory.validated_for (docs/backends.md, generated diarizers): diarizer
+        # passes overlapped with background prepares and loads, footprint and
+        # ANECompilerService sampled. A measurement tool, not a ctest: it needs
+        # a cold ANE and minutes per run.
+        add_executable(nemotron-diarization-coreml-memory test/nemotron_diarization_coreml_memory.cpp)
+        target_link_libraries(nemotron-diarization-coreml-memory PRIVATE qvac-parakeet)
+        target_include_directories(nemotron-diarization-coreml-memory PRIVATE include src ggml/include)
+        parakeet_apply_ccache(nemotron-diarization-coreml-memory)
+    endif()
 
     add_executable(test-sortformer-diarizer-coreml-parity
         test/test_sortformer_diarizer_coreml_parity.cpp
@@ -1850,6 +2067,7 @@ if (PARAKEET_BUILD_TESTS)
         set_source_files_properties(${PARAKEET_COREML_OBJC_SOURCES}
             PROPERTIES COMPILE_FLAGS "-fobjc-arc")
         target_compile_definitions(test-sortformer-diarizer-coreml-parity PRIVATE PARAKEET_USE_COREML)
+        parakeet_test_use_coreml_runtime(test-sortformer-diarizer-coreml-parity)
         target_link_libraries(test-sortformer-diarizer-coreml-parity PRIVATE
             ${PARAKEET_FOUNDATION_FRAMEWORK} ${PARAKEET_COREML_FRAMEWORK})
     endif()
@@ -1861,8 +2079,9 @@ if (PARAKEET_BUILD_TESTS)
     set_property(TEST test-sortformer-diarizer-coreml-parity PROPERTY SKIP_RETURN_CODE 77)
 
     # Diarizer failure handling: a bundle that fails to load or to run is
-    # quarantined, its calls run on the next capacity or on ggml, and calls
-    # that leave a model input unsupplied are refused. Skips (77) unless both
+    # quarantined, its calls run on the next capacity or on ggml (under
+    # use = require they throw instead), and calls that leave a model input
+    # unsupplied are refused. Skips (77) unless both
     # models' bundles are staged.
     if (PARAKEET_COREML)
         add_executable(test-coreml-diarizer-fallback
@@ -1878,6 +2097,7 @@ if (PARAKEET_BUILD_TESTS)
         set_source_files_properties(${PARAKEET_COREML_OBJC_SOURCES}
             PROPERTIES COMPILE_FLAGS "-fobjc-arc")
         target_compile_definitions(test-coreml-diarizer-fallback PRIVATE PARAKEET_USE_COREML)
+        parakeet_test_use_coreml_runtime(test-coreml-diarizer-fallback)
         target_link_libraries(test-coreml-diarizer-fallback PRIVATE ggml parakeet-backend-defs
             ${PARAKEET_FOUNDATION_FRAMEWORK} ${PARAKEET_COREML_FRAMEWORK})
         target_include_directories(test-coreml-diarizer-fallback PRIVATE include src ggml/include)
@@ -2183,6 +2403,7 @@ if (PARAKEET_BUILD_TESTS)
             set_source_files_properties(${PARAKEET_COREML_OBJC_SOURCES}
                 PROPERTIES COMPILE_FLAGS "-fobjc-arc")
             target_compile_definitions(test-fit-coreml-diarizers PRIVATE PARAKEET_USE_COREML)
+            parakeet_test_use_coreml_runtime(test-fit-coreml-diarizers)
             target_link_libraries(test-fit-coreml-diarizers PRIVATE ggml parakeet-backend-defs
                 ${PARAKEET_FOUNDATION_FRAMEWORK} ${PARAKEET_COREML_FRAMEWORK})
             target_include_directories(test-fit-coreml-diarizers PRIVATE include src ggml/include)
@@ -2217,6 +2438,8 @@ if (PARAKEET_BUILD_TESTS)
 
     # CLI-level Core ML gate: --require-coreml must prove every measured encoder
     # invocation used the expected ASR sidecar while the decoder remains on ggml.
+    # The TDT registration also checks that --coreml-use require without an
+    # adjacent sidecar exits with an error status and message, not a crash.
     if (PARAKEET_COREML AND Python3_Interpreter_FOUND AND TARGET parakeet-cli)
         add_test(
             NAME test-cli-coreml-bench
@@ -2224,7 +2447,8 @@ if (PARAKEET_BUILD_TESTS)
                     "${CMAKE_CURRENT_SOURCE_DIR}/test/test_cli_coreml_bench.py"
                     "--binary" "$<TARGET_FILE:parakeet-cli>"
                     "--model" "${_qvp_tdt_q8_gguf}"
-                    "--wav" "${_qvp_jfk_wav}")
+                    "--wav" "${_qvp_jfk_wav}"
+                    "--check-require-without-sidecar")
         set_property(TEST test-cli-coreml-bench PROPERTY LABELS "fixture;coreml")
         if (NOT EXISTS "${_qvp_tdt_q8_gguf}" OR
             NOT EXISTS "${_qvp_jfk_wav}" OR
@@ -2449,7 +2673,7 @@ if (PARAKEET_BUILD_TESTS)
     # Load-time [w_ih | w_hh] row stacking, independent of any GGUF fixture.
     add_executable(test-lstm-input-concat test/test_lstm_input_concat.cpp)
     target_link_libraries(test-lstm-input-concat PRIVATE ggml)
-    target_include_directories(test-lstm-input-concat PRIVATE src ggml/include)
+    target_include_directories(test-lstm-input-concat PRIVATE src include ggml/include)
     parakeet_apply_ccache(test-lstm-input-concat)
     parakeet_register_test(test-lstm-input-concat LABEL "unit")
 
@@ -2651,6 +2875,7 @@ if (PARAKEET_BUILD_TESTS)
     # registered once per model family fixture present.
     add_executable(test-fit-params
         test/test_fit_params.cpp
+        src/parakeet_coreml_path.cpp
         src/parakeet_ctc.cpp
         src/parakeet_fit.cpp
         src/parakeet_log.cpp
@@ -2717,6 +2942,7 @@ if (PARAKEET_BUILD_TESTS)
     add_executable(test-fit-cli
         test/test_fit_cli.cpp
         src/fit_main.cpp
+        src/parakeet_coreml_path.cpp
         src/parakeet_ctc.cpp
         src/parakeet_fit.cpp
         src/parakeet_log.cpp
@@ -2993,6 +3219,7 @@ if (PARAKEET_BUILD_TESTS)
         set_source_files_properties(${PARAKEET_COREML_OBJC_SOURCES}
             PROPERTIES COMPILE_FLAGS "-fobjc-arc")
         target_compile_definitions(test-coreml-encoder-owner PRIVATE PARAKEET_USE_COREML)
+        parakeet_test_use_coreml_runtime(test-coreml-encoder-owner)
         target_link_libraries(test-coreml-encoder-owner PRIVATE
             ${PARAKEET_FOUNDATION_FRAMEWORK} ${PARAKEET_COREML_FRAMEWORK})
     endif()
@@ -3012,6 +3239,82 @@ if (PARAKEET_BUILD_TESTS)
         EXE      test-coreml-encoder-owner
         ARGS     "--standard-tdt" "${_qvp_tdt_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
         REQUIRES "${_qvp_tdt_q8_gguf}" "${_qvp_tdt_coreml}" "${_qvp_jfk_wav}")
+    # Hermetic (a stub GGUF and stub bundle written by the test): a TDT
+    # sidecar whose metadata rules out encoder ownership is not loaded
+    # before weight allocation. Runs in the Core ML runtime step.
+    if (PARAKEET_COREML)
+        parakeet_register_test(test-coreml-encoder-owner-stub-tdt
+            LABEL    "unit"
+            EXE      test-coreml-encoder-owner
+            ARGS     "--stub-tdt-skip-load")
+        # parakeet_register_test keeps one label; this test has two.
+        set_tests_properties(test-coreml-encoder-owner-stub-tdt PROPERTIES
+            LABELS "unit;coreml-runtime")
+    endif()
+
+    # Background Core ML sidecars on the device: a call whose
+    # encoder is still loading runs on ggml with the use = off transcript; the
+    # prebuilt encoder slot loads and the next call runs on Core ML; diarizer
+    # capacities that are not ready fall back to ggml; PARAKEET_COREML_ONLY
+    # with a full GGUF keeps the ggml encoder; an encoder-less GGUF with
+    # use = off fails as today. No skip path.
+    if (PARAKEET_COREML AND TARGET qvac-parakeet)
+        add_executable(test-parakeet-coreml-runtime test/test_parakeet_coreml_runtime.cpp)
+        # Public API only: it must link against a shared qvac-parakeet.
+        target_link_libraries(test-parakeet-coreml-runtime PRIVATE qvac-parakeet)
+        target_include_directories(test-parakeet-coreml-runtime PRIVATE include test)
+        parakeet_apply_ccache(test-parakeet-coreml-runtime)
+        set(_qvp_nd_q8_gguf "${PARAKEET_TEST_MODEL_DIR}/Nemotron-3-Diarization.q8_0.gguf")
+        set(_qvp_nd_diarizer "${PARAKEET_TEST_MODEL_DIR}/Nemotron-3-Diarization-diarizer-1125.mlmodelc")
+        # One test per fixture set: a missing fixture disables that test
+        # (reported as not run, which the device CI step rejects), never
+        # passes it.
+        parakeet_register_test(test-parakeet-coreml-runtime
+            LABEL    "fixture;coreml"
+            ARGS     "--case" "transcription" "--gguf" "${_qvp_tdt_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
+            REQUIRES "${_qvp_tdt_q8_gguf}" "${_qvp_tdt_coreml}" "${_qvp_jfk_wav}")
+        parakeet_register_test(test-parakeet-coreml-runtime-diarizer
+            LABEL    "fixture;coreml"
+            EXE      test-parakeet-coreml-runtime
+            ARGS     "--case" "diarizer" "--diar-gguf" "${_qvp_nd_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
+                     "--gguf" "${_qvp_tdt_q8_gguf}"
+            REQUIRES "${_qvp_nd_q8_gguf}" "${_qvp_nd_diarizer}" "${_qvp_jfk_wav}" "${_qvp_tdt_q8_gguf}")
+        parakeet_register_test(test-parakeet-coreml-runtime-eu-labels
+            LABEL    "fixture;coreml"
+            EXE      test-parakeet-coreml-runtime
+            ARGS     "--case" "eu-labels" "--eu-gguf" "${_qvp_transcribepsy_eu_gguf}" "--wav" "${_qvp_jfk_wav}"
+            REQUIRES "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-flexible.mlmodelc")
+        parakeet_register_test(test-parakeet-coreml-runtime-fit-layouts
+            LABEL    "fixture;coreml"
+            EXE      test-parakeet-coreml-runtime
+            ARGS     "--case" "fit-layouts" "--eu-gguf" "${_qvp_transcribepsy_eu_gguf}"
+                     "--sortformer-gguf" "${_qvp_sfsv21_q8_gguf}"
+            REQUIRES "${_qvp_transcribepsy_eu_gguf}" "${_qvp_sfsv21_q8_gguf}")
+        parakeet_register_test(test-parakeet-coreml-runtime-sortformer
+            LABEL    "fixture;coreml"
+            EXE      test-parakeet-coreml-runtime
+            ARGS     "--case" "sortformer" "--sortformer-gguf" "${_qvp_sfsv21_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
+            REQUIRES "${_qvp_sfsv21_q8_gguf}" "${_qvp_jfk_wav}"
+                     "${PARAKEET_TEST_MODEL_DIR}/diar_streaming_sortformer_4spk-v2.1-diarizer-410.mlmodelc")
+        # A standard TDT model with its decoder sidecar ready and its encoder
+        # sidecar still loading keeps the sequential ggml plan.
+        parakeet_register_test(test-parakeet-coreml-runtime-pending-encoder
+            LABEL    "fixture;coreml"
+            EXE      test-parakeet-coreml-runtime
+            ARGS     "--case" "pending-encoder" "--sub-gguf" "${_qvp_transcribepsy_gguf}"
+                     "--sub-encoder" "${_qvp_transcribepsy_coreml_encoder}"
+                     "--sub-decoder" "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-sub-coreml-decoder.mlmodelc"
+                     "--wav" "${_qvp_jfk_wav}"
+            REQUIRES "${_qvp_transcribepsy_gguf}" "${_qvp_transcribepsy_coreml_encoder}"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-sub-coreml-decoder.mlmodelc" "${_qvp_jfk_wav}")
+        parakeet_register_test(test-parakeet-coreml-runtime-encoderless
+            LABEL    "fixture;coreml"
+            EXE      test-parakeet-coreml-runtime
+            ARGS     "--case" "encoderless" "--encoderless-gguf" "${_qvp_transcribepsy_coreml_gguf}"
+            REQUIRES "${_qvp_transcribepsy_coreml_gguf}")
+    endif()
 
     # TranscribePsy on the engine API: expected transcript, precomputed-mel
     # parity (also from a worker thread), the 60 s / 25 % long-form windows

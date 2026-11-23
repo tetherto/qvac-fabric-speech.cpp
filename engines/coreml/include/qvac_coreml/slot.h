@@ -76,6 +76,19 @@ struct LoadResult {
     Error error;
     bool would_block = false;  // a key lock was busy: re-queue with backoff
     int lease_fd = -1;         // shared lease from adoption; closed with the model
+    // A generated artifact was gone or incomplete when the load took its lease
+    // (e.g. pruned after its preparation published it): the slot returns to
+    // preparation, which regenerates it, instead of failing.
+    bool artifact_gone = false;
+    // Set by the LoadFn: the framework refused this generated artifact (it
+    // did not load, or loaded with the wrong interface). The error keeps the
+    // class the engine reports; end_load quarantines the artifact unless the
+    // error is a resource one, and the slot regenerates it once.
+    bool rejected = false;
+    // The publication begin_load adopted (its directory's dev and inode),
+    // taken under the shared lease: end_load quarantines only that one.
+    uint64_t artifact_dev = 0;
+    uint64_t artifact_ino = 0;
 };
 
 using LoadFn = LoadResult (*)(const LoadRequest & req);
@@ -120,6 +133,9 @@ struct PrepareResult {
     bool cache_hit = false;     // status route: cached vs generated
     Error error;
     bool would_block = false;   // a key lock was busy: re-queue with backoff
+    // Non-empty: generation cannot run here, for this status reason (e.g.
+    // "cache_fs"). The slot reports unsupported(<reason>), not failed.
+    std::string unsupported;
 };
 
 using PrepareFn = PrepareResult (*)(const PrepareRequest & req, PrepareContext & ctx);

@@ -252,28 +252,24 @@ bool decoder_geometry_ok(const std::vector<int64_t> & embed_d, const std::vector
 
 }  // namespace
 
-struct parakeet_coreml_decoder * parakeet_coreml_decoder_init(const char * path_mlmodelc) {
-    return parakeet_coreml_decoder_init_with_cpu_default(path_mlmodelc, false);
-}
-
-struct parakeet_coreml_decoder * parakeet_coreml_decoder_init_with_cpu_default(
-        const char * path_mlmodelc, bool prefer_cpu) {
+struct parakeet_coreml_decoder * parakeet_coreml_decoder_init_with_units(const char * path_mlmodelc,
+                                                                         const char * units,
+                                                                         bool prefer_cpu) {
     if (path_mlmodelc == nullptr) return nullptr;
 
     @autoreleasepool {
         NSString * path = [[NSString alloc] initWithUTF8String:path_mlmodelc];
         if (path == nil) return nullptr;
 
-        // Generic models prefer CPU/ANE. Full EU requests the measured desktop
-        // CPU default; explicit stage or global policies keep their precedence.
+        // The graph is exported for the Neural Engine, so it is pinned to CPU
+        // and Neural Engine unless the engine's resolved units say otherwise;
+        // MLComputeUnitsAll is only a preference and may land it on the GPU.
+        // With no units set, the full TranscribePsy EU decoder (`prefer_cpu`)
+        // keeps its measured CPU default on macOS.
         MLModelConfiguration * config = [[MLModelConfiguration alloc] init];
         std::string label;
-        config.computeUnits = parakeet_coreml_requested_units(
-            std::getenv("PARAKEET_COREML_DECODER_COMPUTE_UNITS")
-                ? "PARAKEET_COREML_DECODER_COMPUTE_UNITS" : "PARAKEET_COREML_COMPUTE_UNITS",
-            /*prefer_neural_engine=*/true, &label);
-        if (prefer_cpu && !TARGET_OS_IPHONE && !std::getenv("PARAKEET_COREML_COMPUTE_UNITS") &&
-            !std::getenv("PARAKEET_COREML_DECODER_COMPUTE_UNITS")) {
+        config.computeUnits = parakeet_coreml_units_for(units, /*prefer_neural_engine=*/true, &label);
+        if (prefer_cpu && !TARGET_OS_IPHONE && units == nullptr) {
             config.computeUnits = MLComputeUnitsCPUOnly;
             label = "coreml-cpu";
         }

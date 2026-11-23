@@ -176,7 +176,7 @@ int check_stage_parity(
             mel.data(),
             mel_frames,
             model.mel_cfg.n_mels,
-            encoded,
+            encoded, parakeet::EncoderRoute::ggml(),
             -1,
             false); rc != 0) {
         return rc;

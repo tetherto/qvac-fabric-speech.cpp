@@ -88,6 +88,11 @@ void check_api_routes(parakeet::Engine & engine, const std::vector<float> & pcm,
                        bool automatic) {
     const auto batch = engine.transcribe_samples(pcm.data(), (int) pcm.size(), kRate);
     require(batch.encoder_used_coreml && !batch.text.empty(), "batch encoder or gate fell back");
+    // The result names the program that ran (the model picks one per
+    // dispatch), the same one Engine::encoder_backend() reports.
+    require(batch.encoder_backend.rfind("coreml", 0) == 0 &&
+                batch.encoder_backend == engine.encoder_backend(),
+            "batch encoder_backend does not name the Core ML program that ran");
     const char * batch_override = std::getenv("PARAKEET_ANE_BATCH_DECODE");
     const bool forced = batch_override && std::string(batch_override) == "1" &&
         !std::getenv("PARAKEET_ANE_DECODE_HOST");
@@ -104,6 +109,8 @@ void check_api_routes(parakeet::Engine & engine, const std::vector<float> & pcm,
         });
     require(callbacks.encoder_used_coreml && !callbacks.text.empty(),
             "callback encoder or gate fell back");
+    require(callbacks.encoder_backend.rfind("coreml", 0) == 0,
+            "callback encoder_backend does not name a Core ML program");
     require(engine.encoder_backend() == "coreml-cpu" || engine.encoder_backend() == "coreml-cpu-gpu",
             "stateful callback did not use an FP32 Core ML backend");
     const auto fragmented = push(engine, pcm, 127, automatic);
@@ -294,9 +301,11 @@ void compare_padding_boundary(parakeet::ParakeetCtcModel & native,
     std::fill(mel.end() - kMelBins, mel.end(), 0.0f);
     parakeet::EncoderOutputs expected, actual;
     require(parakeet::run_encoder(native, mel.data(), frames, kMelBins, expected,
-                -1, true, true, {}, frames - 1, true) == 0, "native padding reference failed");
+                parakeet::EncoderRoute::ggml(), -1, true, true, {}, frames - 1, true) == 0,
+            "native padding reference failed");
     require(parakeet::run_encoder(coreml, mel.data(), frames, kMelBins, actual,
-                -1, false, true, {}, frames - 1, true) == 0 && actual.used_coreml,
+                parakeet::acquire_encoder_route(coreml), -1, false, true, {}, frames - 1, true) == 0 &&
+                actual.used_coreml,
             "precise padding boundary did not execute Core ML");
     require(actual.n_enc_frames == expected.n_enc_frames,
             "Core ML changed the native frontend encoder frame grid");
@@ -372,10 +381,11 @@ void check_context_plan(const char * path) {
         require(parakeet::load_from_gguf(path, model, kThreads, 0, false, "cpu") == 0,
                 "native context reference failed to load");
     }
-    const auto automatic = parakeet::resolve_long_form_plan(model, options, kLongMelFrames);
+    const parakeet::EncoderRoute route = parakeet::acquire_encoder_route(model);
+    const auto automatic = parakeet::resolve_long_form_plan(model, options, kLongMelFrames, route);
     options.long_form_window_frames = 750;
     options.long_form_context_frames = 94;
-    const auto explicit_default = parakeet::resolve_long_form_plan(model, options, kLongMelFrames);
+    const auto explicit_default = parakeet::resolve_long_form_plan(model, options, kLongMelFrames, route);
     std::printf("NATIVE_PLAN automatic_window_frames=%d automatic_context_frames=%d explicit_window_frames=%d explicit_context_frames=%d\n",
         automatic.window_frames, automatic.context_frames,
         explicit_default.window_frames, explicit_default.context_frames);

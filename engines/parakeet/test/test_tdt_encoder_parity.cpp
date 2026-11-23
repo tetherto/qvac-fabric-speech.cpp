@@ -167,7 +167,7 @@ int tdt_encoder_parity_main(int argc, char ** argv) {
     // (CTC) shape so both tests measure the encoder operator alone, decoupled
     // from the trailing-frame padding diff in the C++ mel pipeline.
     EncoderOutputs enc_out;
-    if (int rc = run_encoder(model, mel_ref_tf.data(), n_frames_ref, n_mels_ref, enc_out); rc != 0) {
+    if (int rc = run_encoder(model, mel_ref_tf.data(), n_frames_ref, n_mels_ref, enc_out, parakeet::EncoderRoute::ggml()); rc != 0) {
         std::fprintf(stderr, "  run_encoder failed rc=%d\n", rc);
         return 6;
     }
