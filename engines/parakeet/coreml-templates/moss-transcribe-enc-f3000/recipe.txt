@@ -1,0 +1,753 @@
+mlrecipe 1
+template moss-transcribe-enc-f3000
+spec_sha256 16b325149d2afb351ee94091344c92b82a6dd8155405015f6963242833333e90
+weight_bin_size 624952768
+blobs 374
+source "enc.conv1.weight" f32,f16,bf16 [1024,80,3]
+source "enc.conv1.bias" f32 [1024,1]
+source "enc.conv2.weight" f32,f16,bf16 [1024,1024,3]
+source "enc.conv2.bias" f32 [1024,1]
+source "enc.pos_embd" f32,f16,bf16 [1500,1024]
+source "enc.blk.0.attn_norm.weight" f32 [1024]
+source "enc.blk.0.attn_norm.bias" f32 [1024]
+source "enc.blk.0.attn_q.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.0.attn_q.bias" f32 [1024]
+source "enc.blk.0.attn_k.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.0.attn_v.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.0.attn_v.bias" f32 [1024]
+source "enc.blk.0.attn_output.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.0.attn_output.bias" f32 [1024]
+source "enc.blk.0.ffn_norm.weight" f32 [1024]
+source "enc.blk.0.ffn_norm.bias" f32 [1024]
+source "enc.blk.0.ffn_up.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [4096,1024]
+source "enc.blk.0.ffn_up.bias" f32 [4096]
+source "enc.blk.0.ffn_down.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,4096]
+source "enc.blk.0.ffn_down.bias" f32 [1024]
+source "enc.blk.1.attn_norm.weight" f32 [1024]
+source "enc.blk.1.attn_norm.bias" f32 [1024]
+source "enc.blk.1.attn_q.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.1.attn_q.bias" f32 [1024]
+source "enc.blk.1.attn_k.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.1.attn_v.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.1.attn_v.bias" f32 [1024]
+source "enc.blk.1.attn_output.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.1.attn_output.bias" f32 [1024]
+source "enc.blk.1.ffn_norm.weight" f32 [1024]
+source "enc.blk.1.ffn_norm.bias" f32 [1024]
+source "enc.blk.1.ffn_up.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [4096,1024]
+source "enc.blk.1.ffn_up.bias" f32 [4096]
+source "enc.blk.1.ffn_down.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,4096]
+source "enc.blk.1.ffn_down.bias" f32 [1024]
+source "enc.blk.2.attn_norm.weight" f32 [1024]
+source "enc.blk.2.attn_norm.bias" f32 [1024]
+source "enc.blk.2.attn_q.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.2.attn_q.bias" f32 [1024]
+source "enc.blk.2.attn_k.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.2.attn_v.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.2.attn_v.bias" f32 [1024]
+source "enc.blk.2.attn_output.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.2.attn_output.bias" f32 [1024]
+source "enc.blk.2.ffn_norm.weight" f32 [1024]
+source "enc.blk.2.ffn_norm.bias" f32 [1024]
+source "enc.blk.2.ffn_up.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [4096,1024]
+source "enc.blk.2.ffn_up.bias" f32 [4096]
+source "enc.blk.2.ffn_down.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,4096]
+source "enc.blk.2.ffn_down.bias" f32 [1024]
+source "enc.blk.3.attn_norm.weight" f32 [1024]
+source "enc.blk.3.attn_norm.bias" f32 [1024]
+source "enc.blk.3.attn_q.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.3.attn_q.bias" f32 [1024]
+source "enc.blk.3.attn_k.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.3.attn_v.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.3.attn_v.bias" f32 [1024]
+source "enc.blk.3.attn_output.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.3.attn_output.bias" f32 [1024]
+source "enc.blk.3.ffn_norm.weight" f32 [1024]
+source "enc.blk.3.ffn_norm.bias" f32 [1024]
+source "enc.blk.3.ffn_up.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [4096,1024]
+source "enc.blk.3.ffn_up.bias" f32 [4096]
+source "enc.blk.3.ffn_down.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,4096]
+source "enc.blk.3.ffn_down.bias" f32 [1024]
+source "enc.blk.4.attn_norm.weight" f32 [1024]
+source "enc.blk.4.attn_norm.bias" f32 [1024]
+source "enc.blk.4.attn_q.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.4.attn_q.bias" f32 [1024]
+source "enc.blk.4.attn_k.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.4.attn_v.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.4.attn_v.bias" f32 [1024]
+source "enc.blk.4.attn_output.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.4.attn_output.bias" f32 [1024]
+source "enc.blk.4.ffn_norm.weight" f32 [1024]
+source "enc.blk.4.ffn_norm.bias" f32 [1024]
+source "enc.blk.4.ffn_up.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [4096,1024]
+source "enc.blk.4.ffn_up.bias" f32 [4096]
+source "enc.blk.4.ffn_down.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,4096]
+source "enc.blk.4.ffn_down.bias" f32 [1024]
+source "enc.blk.5.attn_norm.weight" f32 [1024]
+source "enc.blk.5.attn_norm.bias" f32 [1024]
+source "enc.blk.5.attn_q.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.5.attn_q.bias" f32 [1024]
+source "enc.blk.5.attn_k.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.5.attn_v.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.5.attn_v.bias" f32 [1024]
+source "enc.blk.5.attn_output.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.5.attn_output.bias" f32 [1024]
+source "enc.blk.5.ffn_norm.weight" f32 [1024]
+source "enc.blk.5.ffn_norm.bias" f32 [1024]
+source "enc.blk.5.ffn_up.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [4096,1024]
+source "enc.blk.5.ffn_up.bias" f32 [4096]
+source "enc.blk.5.ffn_down.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,4096]
+source "enc.blk.5.ffn_down.bias" f32 [1024]
+source "enc.blk.6.attn_norm.weight" f32 [1024]
+source "enc.blk.6.attn_norm.bias" f32 [1024]
+source "enc.blk.6.attn_q.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.6.attn_q.bias" f32 [1024]
+source "enc.blk.6.attn_k.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.6.attn_v.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.6.attn_v.bias" f32 [1024]
+source "enc.blk.6.attn_output.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.6.attn_output.bias" f32 [1024]
+source "enc.blk.6.ffn_norm.weight" f32 [1024]
+source "enc.blk.6.ffn_norm.bias" f32 [1024]
+source "enc.blk.6.ffn_up.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [4096,1024]
+source "enc.blk.6.ffn_up.bias" f32 [4096]
+source "enc.blk.6.ffn_down.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,4096]
+source "enc.blk.6.ffn_down.bias" f32 [1024]
+source "enc.blk.7.attn_norm.weight" f32 [1024]
+source "enc.blk.7.attn_norm.bias" f32 [1024]
+source "enc.blk.7.attn_q.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.7.attn_q.bias" f32 [1024]
+source "enc.blk.7.attn_k.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.7.attn_v.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.7.attn_v.bias" f32 [1024]
+source "enc.blk.7.attn_output.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.7.attn_output.bias" f32 [1024]
+source "enc.blk.7.ffn_norm.weight" f32 [1024]
+source "enc.blk.7.ffn_norm.bias" f32 [1024]
+source "enc.blk.7.ffn_up.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [4096,1024]
+source "enc.blk.7.ffn_up.bias" f32 [4096]
+source "enc.blk.7.ffn_down.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,4096]
+source "enc.blk.7.ffn_down.bias" f32 [1024]
+source "enc.blk.8.attn_norm.weight" f32 [1024]
+source "enc.blk.8.attn_norm.bias" f32 [1024]
+source "enc.blk.8.attn_q.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.8.attn_q.bias" f32 [1024]
+source "enc.blk.8.attn_k.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.8.attn_v.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.8.attn_v.bias" f32 [1024]
+source "enc.blk.8.attn_output.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.8.attn_output.bias" f32 [1024]
+source "enc.blk.8.ffn_norm.weight" f32 [1024]
+source "enc.blk.8.ffn_norm.bias" f32 [1024]
+source "enc.blk.8.ffn_up.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [4096,1024]
+source "enc.blk.8.ffn_up.bias" f32 [4096]
+source "enc.blk.8.ffn_down.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,4096]
+source "enc.blk.8.ffn_down.bias" f32 [1024]
+source "enc.blk.9.attn_norm.weight" f32 [1024]
+source "enc.blk.9.attn_norm.bias" f32 [1024]
+source "enc.blk.9.attn_q.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.9.attn_q.bias" f32 [1024]
+source "enc.blk.9.attn_k.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.9.attn_v.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.9.attn_v.bias" f32 [1024]
+source "enc.blk.9.attn_output.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.9.attn_output.bias" f32 [1024]
+source "enc.blk.9.ffn_norm.weight" f32 [1024]
+source "enc.blk.9.ffn_norm.bias" f32 [1024]
+source "enc.blk.9.ffn_up.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [4096,1024]
+source "enc.blk.9.ffn_up.bias" f32 [4096]
+source "enc.blk.9.ffn_down.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,4096]
+source "enc.blk.9.ffn_down.bias" f32 [1024]
+source "enc.blk.10.attn_norm.weight" f32 [1024]
+source "enc.blk.10.attn_norm.bias" f32 [1024]
+source "enc.blk.10.attn_q.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.10.attn_q.bias" f32 [1024]
+source "enc.blk.10.attn_k.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.10.attn_v.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.10.attn_v.bias" f32 [1024]
+source "enc.blk.10.attn_output.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.10.attn_output.bias" f32 [1024]
+source "enc.blk.10.ffn_norm.weight" f32 [1024]
+source "enc.blk.10.ffn_norm.bias" f32 [1024]
+source "enc.blk.10.ffn_up.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [4096,1024]
+source "enc.blk.10.ffn_up.bias" f32 [4096]
+source "enc.blk.10.ffn_down.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,4096]
+source "enc.blk.10.ffn_down.bias" f32 [1024]
+source "enc.blk.11.attn_norm.weight" f32 [1024]
+source "enc.blk.11.attn_norm.bias" f32 [1024]
+source "enc.blk.11.attn_q.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.11.attn_q.bias" f32 [1024]
+source "enc.blk.11.attn_k.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.11.attn_v.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.11.attn_v.bias" f32 [1024]
+source "enc.blk.11.attn_output.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.11.attn_output.bias" f32 [1024]
+source "enc.blk.11.ffn_norm.weight" f32 [1024]
+source "enc.blk.11.ffn_norm.bias" f32 [1024]
+source "enc.blk.11.ffn_up.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [4096,1024]
+source "enc.blk.11.ffn_up.bias" f32 [4096]
+source "enc.blk.11.ffn_down.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,4096]
+source "enc.blk.11.ffn_down.bias" f32 [1024]
+source "enc.blk.12.attn_norm.weight" f32 [1024]
+source "enc.blk.12.attn_norm.bias" f32 [1024]
+source "enc.blk.12.attn_q.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.12.attn_q.bias" f32 [1024]
+source "enc.blk.12.attn_k.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.12.attn_v.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.12.attn_v.bias" f32 [1024]
+source "enc.blk.12.attn_output.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.12.attn_output.bias" f32 [1024]
+source "enc.blk.12.ffn_norm.weight" f32 [1024]
+source "enc.blk.12.ffn_norm.bias" f32 [1024]
+source "enc.blk.12.ffn_up.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [4096,1024]
+source "enc.blk.12.ffn_up.bias" f32 [4096]
+source "enc.blk.12.ffn_down.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,4096]
+source "enc.blk.12.ffn_down.bias" f32 [1024]
+source "enc.blk.13.attn_norm.weight" f32 [1024]
+source "enc.blk.13.attn_norm.bias" f32 [1024]
+source "enc.blk.13.attn_q.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.13.attn_q.bias" f32 [1024]
+source "enc.blk.13.attn_k.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.13.attn_v.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.13.attn_v.bias" f32 [1024]
+source "enc.blk.13.attn_output.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.13.attn_output.bias" f32 [1024]
+source "enc.blk.13.ffn_norm.weight" f32 [1024]
+source "enc.blk.13.ffn_norm.bias" f32 [1024]
+source "enc.blk.13.ffn_up.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [4096,1024]
+source "enc.blk.13.ffn_up.bias" f32 [4096]
+source "enc.blk.13.ffn_down.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,4096]
+source "enc.blk.13.ffn_down.bias" f32 [1024]
+source "enc.blk.14.attn_norm.weight" f32 [1024]
+source "enc.blk.14.attn_norm.bias" f32 [1024]
+source "enc.blk.14.attn_q.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.14.attn_q.bias" f32 [1024]
+source "enc.blk.14.attn_k.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.14.attn_v.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.14.attn_v.bias" f32 [1024]
+source "enc.blk.14.attn_output.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.14.attn_output.bias" f32 [1024]
+source "enc.blk.14.ffn_norm.weight" f32 [1024]
+source "enc.blk.14.ffn_norm.bias" f32 [1024]
+source "enc.blk.14.ffn_up.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [4096,1024]
+source "enc.blk.14.ffn_up.bias" f32 [4096]
+source "enc.blk.14.ffn_down.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,4096]
+source "enc.blk.14.ffn_down.bias" f32 [1024]
+source "enc.blk.15.attn_norm.weight" f32 [1024]
+source "enc.blk.15.attn_norm.bias" f32 [1024]
+source "enc.blk.15.attn_q.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.15.attn_q.bias" f32 [1024]
+source "enc.blk.15.attn_k.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.15.attn_v.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.15.attn_v.bias" f32 [1024]
+source "enc.blk.15.attn_output.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.15.attn_output.bias" f32 [1024]
+source "enc.blk.15.ffn_norm.weight" f32 [1024]
+source "enc.blk.15.ffn_norm.bias" f32 [1024]
+source "enc.blk.15.ffn_up.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [4096,1024]
+source "enc.blk.15.ffn_up.bias" f32 [4096]
+source "enc.blk.15.ffn_down.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,4096]
+source "enc.blk.15.ffn_down.bias" f32 [1024]
+source "enc.blk.16.attn_norm.weight" f32 [1024]
+source "enc.blk.16.attn_norm.bias" f32 [1024]
+source "enc.blk.16.attn_q.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.16.attn_q.bias" f32 [1024]
+source "enc.blk.16.attn_k.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.16.attn_v.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.16.attn_v.bias" f32 [1024]
+source "enc.blk.16.attn_output.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.16.attn_output.bias" f32 [1024]
+source "enc.blk.16.ffn_norm.weight" f32 [1024]
+source "enc.blk.16.ffn_norm.bias" f32 [1024]
+source "enc.blk.16.ffn_up.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [4096,1024]
+source "enc.blk.16.ffn_up.bias" f32 [4096]
+source "enc.blk.16.ffn_down.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,4096]
+source "enc.blk.16.ffn_down.bias" f32 [1024]
+source "enc.blk.17.attn_norm.weight" f32 [1024]
+source "enc.blk.17.attn_norm.bias" f32 [1024]
+source "enc.blk.17.attn_q.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.17.attn_q.bias" f32 [1024]
+source "enc.blk.17.attn_k.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.17.attn_v.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.17.attn_v.bias" f32 [1024]
+source "enc.blk.17.attn_output.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.17.attn_output.bias" f32 [1024]
+source "enc.blk.17.ffn_norm.weight" f32 [1024]
+source "enc.blk.17.ffn_norm.bias" f32 [1024]
+source "enc.blk.17.ffn_up.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [4096,1024]
+source "enc.blk.17.ffn_up.bias" f32 [4096]
+source "enc.blk.17.ffn_down.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,4096]
+source "enc.blk.17.ffn_down.bias" f32 [1024]
+source "enc.blk.18.attn_norm.weight" f32 [1024]
+source "enc.blk.18.attn_norm.bias" f32 [1024]
+source "enc.blk.18.attn_q.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.18.attn_q.bias" f32 [1024]
+source "enc.blk.18.attn_k.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.18.attn_v.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.18.attn_v.bias" f32 [1024]
+source "enc.blk.18.attn_output.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.18.attn_output.bias" f32 [1024]
+source "enc.blk.18.ffn_norm.weight" f32 [1024]
+source "enc.blk.18.ffn_norm.bias" f32 [1024]
+source "enc.blk.18.ffn_up.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [4096,1024]
+source "enc.blk.18.ffn_up.bias" f32 [4096]
+source "enc.blk.18.ffn_down.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,4096]
+source "enc.blk.18.ffn_down.bias" f32 [1024]
+source "enc.blk.19.attn_norm.weight" f32 [1024]
+source "enc.blk.19.attn_norm.bias" f32 [1024]
+source "enc.blk.19.attn_q.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.19.attn_q.bias" f32 [1024]
+source "enc.blk.19.attn_k.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.19.attn_v.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.19.attn_v.bias" f32 [1024]
+source "enc.blk.19.attn_output.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.19.attn_output.bias" f32 [1024]
+source "enc.blk.19.ffn_norm.weight" f32 [1024]
+source "enc.blk.19.ffn_norm.bias" f32 [1024]
+source "enc.blk.19.ffn_up.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [4096,1024]
+source "enc.blk.19.ffn_up.bias" f32 [4096]
+source "enc.blk.19.ffn_down.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,4096]
+source "enc.blk.19.ffn_down.bias" f32 [1024]
+source "enc.blk.20.attn_norm.weight" f32 [1024]
+source "enc.blk.20.attn_norm.bias" f32 [1024]
+source "enc.blk.20.attn_q.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.20.attn_q.bias" f32 [1024]
+source "enc.blk.20.attn_k.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.20.attn_v.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.20.attn_v.bias" f32 [1024]
+source "enc.blk.20.attn_output.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.20.attn_output.bias" f32 [1024]
+source "enc.blk.20.ffn_norm.weight" f32 [1024]
+source "enc.blk.20.ffn_norm.bias" f32 [1024]
+source "enc.blk.20.ffn_up.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [4096,1024]
+source "enc.blk.20.ffn_up.bias" f32 [4096]
+source "enc.blk.20.ffn_down.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,4096]
+source "enc.blk.20.ffn_down.bias" f32 [1024]
+source "enc.blk.21.attn_norm.weight" f32 [1024]
+source "enc.blk.21.attn_norm.bias" f32 [1024]
+source "enc.blk.21.attn_q.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.21.attn_q.bias" f32 [1024]
+source "enc.blk.21.attn_k.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.21.attn_v.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.21.attn_v.bias" f32 [1024]
+source "enc.blk.21.attn_output.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.21.attn_output.bias" f32 [1024]
+source "enc.blk.21.ffn_norm.weight" f32 [1024]
+source "enc.blk.21.ffn_norm.bias" f32 [1024]
+source "enc.blk.21.ffn_up.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [4096,1024]
+source "enc.blk.21.ffn_up.bias" f32 [4096]
+source "enc.blk.21.ffn_down.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,4096]
+source "enc.blk.21.ffn_down.bias" f32 [1024]
+source "enc.blk.22.attn_norm.weight" f32 [1024]
+source "enc.blk.22.attn_norm.bias" f32 [1024]
+source "enc.blk.22.attn_q.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.22.attn_q.bias" f32 [1024]
+source "enc.blk.22.attn_k.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.22.attn_v.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.22.attn_v.bias" f32 [1024]
+source "enc.blk.22.attn_output.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.22.attn_output.bias" f32 [1024]
+source "enc.blk.22.ffn_norm.weight" f32 [1024]
+source "enc.blk.22.ffn_norm.bias" f32 [1024]
+source "enc.blk.22.ffn_up.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [4096,1024]
+source "enc.blk.22.ffn_up.bias" f32 [4096]
+source "enc.blk.22.ffn_down.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,4096]
+source "enc.blk.22.ffn_down.bias" f32 [1024]
+source "enc.blk.23.attn_norm.weight" f32 [1024]
+source "enc.blk.23.attn_norm.bias" f32 [1024]
+source "enc.blk.23.attn_q.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.23.attn_q.bias" f32 [1024]
+source "enc.blk.23.attn_k.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.23.attn_v.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.23.attn_v.bias" f32 [1024]
+source "enc.blk.23.attn_output.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "enc.blk.23.attn_output.bias" f32 [1024]
+source "enc.blk.23.ffn_norm.weight" f32 [1024]
+source "enc.blk.23.ffn_norm.bias" f32 [1024]
+source "enc.blk.23.ffn_up.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [4096,1024]
+source "enc.blk.23.ffn_up.bias" f32 [4096]
+source "enc.blk.23.ffn_down.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,4096]
+source "enc.blk.23.ffn_down.bias" f32 [1024]
+source "enc.output_norm.weight" f32 [1024]
+source "enc.output_norm.bias" f32 [1024]
+source "adaptor.fc1.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,4096]
+source "adaptor.fc1.bias" f32 [1024]
+source "adaptor.fc2.weight" f32,f16,bf16,q8_0,q6_k,q5_k,q5_0,q4_k,q4_0 [1024,1024]
+source "adaptor.fc2.bias" f32 [1024]
+source "adaptor.norm.weight" f32 [1024]
+source "adaptor.norm.bias" f32 [1024]
+blob 64 fp16 245760 f16(t("enc.conv1.weight"))
+blob 491648 fp16 1024 f16(t("enc.conv1.bias"))
+blob 493760 fp16 3145728 f16(t("enc.conv2.weight"))
+blob 6785280 fp16 1024 f16(t("enc.conv2.bias"))
+blob 6787392 fp16 1536000 f16(t("enc.pos_embd"))
+blob 9859456 fp16 1024 f16(t("enc.blk.0.attn_norm.weight"))
+blob 9861568 fp16 1024 f16(t("enc.blk.0.attn_norm.bias"))
+blob 9863680 fp16 1048576 f16(t("enc.blk.0.attn_q.weight"))
+blob 11960896 fp16 1024 f16(t("enc.blk.0.attn_q.bias"))
+blob 11963008 fp16 1048576 f16(t("enc.blk.0.attn_k.weight"))
+blob 14060224 fp16 1024 f16(zeros([1024]))
+blob 14062336 fp16 1048576 f16(t("enc.blk.0.attn_v.weight"))
+blob 16159552 fp16 1024 f16(t("enc.blk.0.attn_v.bias"))
+blob 16161664 fp16 1048576 f16(t("enc.blk.0.attn_output.weight"))
+blob 18258880 fp16 1024 f16(t("enc.blk.0.attn_output.bias"))
+blob 18260992 fp16 1024 f16(t("enc.blk.0.ffn_norm.weight"))
+blob 18263104 fp16 1024 f16(t("enc.blk.0.ffn_norm.bias"))
+blob 18265216 fp16 4194304 f16(t("enc.blk.0.ffn_up.weight"))
+blob 26653888 fp16 4096 f16(t("enc.blk.0.ffn_up.bias"))
+blob 26662144 fp16 4194304 f16(t("enc.blk.0.ffn_down.weight"))
+blob 35050816 fp16 1024 f16(t("enc.blk.0.ffn_down.bias"))
+blob 35052928 fp16 1024 f16(t("enc.blk.1.attn_norm.weight"))
+blob 35055040 fp16 1024 f16(t("enc.blk.1.attn_norm.bias"))
+blob 35057152 fp16 1048576 f16(t("enc.blk.1.attn_q.weight"))
+blob 37154368 fp16 1024 f16(t("enc.blk.1.attn_q.bias"))
+blob 37156480 fp16 1048576 f16(t("enc.blk.1.attn_k.weight"))
+blob 39253696 fp16 1048576 f16(t("enc.blk.1.attn_v.weight"))
+blob 41350912 fp16 1024 f16(t("enc.blk.1.attn_v.bias"))
+blob 41353024 fp16 1048576 f16(t("enc.blk.1.attn_output.weight"))
+blob 43450240 fp16 1024 f16(t("enc.blk.1.attn_output.bias"))
+blob 43452352 fp16 1024 f16(t("enc.blk.1.ffn_norm.weight"))
+blob 43454464 fp16 1024 f16(t("enc.blk.1.ffn_norm.bias"))
+blob 43456576 fp16 4194304 f16(t("enc.blk.1.ffn_up.weight"))
+blob 51845248 fp16 4096 f16(t("enc.blk.1.ffn_up.bias"))
+blob 51853504 fp16 4194304 f16(t("enc.blk.1.ffn_down.weight"))
+blob 60242176 fp16 1024 f16(t("enc.blk.1.ffn_down.bias"))
+blob 60244288 fp16 1024 f16(t("enc.blk.2.attn_norm.weight"))
+blob 60246400 fp16 1024 f16(t("enc.blk.2.attn_norm.bias"))
+blob 60248512 fp16 1048576 f16(t("enc.blk.2.attn_q.weight"))
+blob 62345728 fp16 1024 f16(t("enc.blk.2.attn_q.bias"))
+blob 62347840 fp16 1048576 f16(t("enc.blk.2.attn_k.weight"))
+blob 64445056 fp16 1048576 f16(t("enc.blk.2.attn_v.weight"))
+blob 66542272 fp16 1024 f16(t("enc.blk.2.attn_v.bias"))
+blob 66544384 fp16 1048576 f16(t("enc.blk.2.attn_output.weight"))
+blob 68641600 fp16 1024 f16(t("enc.blk.2.attn_output.bias"))
+blob 68643712 fp16 1024 f16(t("enc.blk.2.ffn_norm.weight"))
+blob 68645824 fp16 1024 f16(t("enc.blk.2.ffn_norm.bias"))
+blob 68647936 fp16 4194304 f16(t("enc.blk.2.ffn_up.weight"))
+blob 77036608 fp16 4096 f16(t("enc.blk.2.ffn_up.bias"))
+blob 77044864 fp16 4194304 f16(t("enc.blk.2.ffn_down.weight"))
+blob 85433536 fp16 1024 f16(t("enc.blk.2.ffn_down.bias"))
+blob 85435648 fp16 1024 f16(t("enc.blk.3.attn_norm.weight"))
+blob 85437760 fp16 1024 f16(t("enc.blk.3.attn_norm.bias"))
+blob 85439872 fp16 1048576 f16(t("enc.blk.3.attn_q.weight"))
+blob 87537088 fp16 1024 f16(t("enc.blk.3.attn_q.bias"))
+blob 87539200 fp16 1048576 f16(t("enc.blk.3.attn_k.weight"))
+blob 89636416 fp16 1048576 f16(t("enc.blk.3.attn_v.weight"))
+blob 91733632 fp16 1024 f16(t("enc.blk.3.attn_v.bias"))
+blob 91735744 fp16 1048576 f16(t("enc.blk.3.attn_output.weight"))
+blob 93832960 fp16 1024 f16(t("enc.blk.3.attn_output.bias"))
+blob 93835072 fp16 1024 f16(t("enc.blk.3.ffn_norm.weight"))
+blob 93837184 fp16 1024 f16(t("enc.blk.3.ffn_norm.bias"))
+blob 93839296 fp16 4194304 f16(t("enc.blk.3.ffn_up.weight"))
+blob 102227968 fp16 4096 f16(t("enc.blk.3.ffn_up.bias"))
+blob 102236224 fp16 4194304 f16(t("enc.blk.3.ffn_down.weight"))
+blob 110624896 fp16 1024 f16(t("enc.blk.3.ffn_down.bias"))
+blob 110627008 fp16 1024 f16(t("enc.blk.4.attn_norm.weight"))
+blob 110629120 fp16 1024 f16(t("enc.blk.4.attn_norm.bias"))
+blob 110631232 fp16 1048576 f16(t("enc.blk.4.attn_q.weight"))
+blob 112728448 fp16 1024 f16(t("enc.blk.4.attn_q.bias"))
+blob 112730560 fp16 1048576 f16(t("enc.blk.4.attn_k.weight"))
+blob 114827776 fp16 1048576 f16(t("enc.blk.4.attn_v.weight"))
+blob 116924992 fp16 1024 f16(t("enc.blk.4.attn_v.bias"))
+blob 116927104 fp16 1048576 f16(t("enc.blk.4.attn_output.weight"))
+blob 119024320 fp16 1024 f16(t("enc.blk.4.attn_output.bias"))
+blob 119026432 fp16 1024 f16(t("enc.blk.4.ffn_norm.weight"))
+blob 119028544 fp16 1024 f16(t("enc.blk.4.ffn_norm.bias"))
+blob 119030656 fp16 4194304 f16(t("enc.blk.4.ffn_up.weight"))
+blob 127419328 fp16 4096 f16(t("enc.blk.4.ffn_up.bias"))
+blob 127427584 fp16 4194304 f16(t("enc.blk.4.ffn_down.weight"))
+blob 135816256 fp16 1024 f16(t("enc.blk.4.ffn_down.bias"))
+blob 135818368 fp16 1024 f16(t("enc.blk.5.attn_norm.weight"))
+blob 135820480 fp16 1024 f16(t("enc.blk.5.attn_norm.bias"))
+blob 135822592 fp16 1048576 f16(t("enc.blk.5.attn_q.weight"))
+blob 137919808 fp16 1024 f16(t("enc.blk.5.attn_q.bias"))
+blob 137921920 fp16 1048576 f16(t("enc.blk.5.attn_k.weight"))
+blob 140019136 fp16 1048576 f16(t("enc.blk.5.attn_v.weight"))
+blob 142116352 fp16 1024 f16(t("enc.blk.5.attn_v.bias"))
+blob 142118464 fp16 1048576 f16(t("enc.blk.5.attn_output.weight"))
+blob 144215680 fp16 1024 f16(t("enc.blk.5.attn_output.bias"))
+blob 144217792 fp16 1024 f16(t("enc.blk.5.ffn_norm.weight"))
+blob 144219904 fp16 1024 f16(t("enc.blk.5.ffn_norm.bias"))
+blob 144222016 fp16 4194304 f16(t("enc.blk.5.ffn_up.weight"))
+blob 152610688 fp16 4096 f16(t("enc.blk.5.ffn_up.bias"))
+blob 152618944 fp16 4194304 f16(t("enc.blk.5.ffn_down.weight"))
+blob 161007616 fp16 1024 f16(t("enc.blk.5.ffn_down.bias"))
+blob 161009728 fp16 1024 f16(t("enc.blk.6.attn_norm.weight"))
+blob 161011840 fp16 1024 f16(t("enc.blk.6.attn_norm.bias"))
+blob 161013952 fp16 1048576 f16(t("enc.blk.6.attn_q.weight"))
+blob 163111168 fp16 1024 f16(t("enc.blk.6.attn_q.bias"))
+blob 163113280 fp16 1048576 f16(t("enc.blk.6.attn_k.weight"))
+blob 165210496 fp16 1048576 f16(t("enc.blk.6.attn_v.weight"))
+blob 167307712 fp16 1024 f16(t("enc.blk.6.attn_v.bias"))
+blob 167309824 fp16 1048576 f16(t("enc.blk.6.attn_output.weight"))
+blob 169407040 fp16 1024 f16(t("enc.blk.6.attn_output.bias"))
+blob 169409152 fp16 1024 f16(t("enc.blk.6.ffn_norm.weight"))
+blob 169411264 fp16 1024 f16(t("enc.blk.6.ffn_norm.bias"))
+blob 169413376 fp16 4194304 f16(t("enc.blk.6.ffn_up.weight"))
+blob 177802048 fp16 4096 f16(t("enc.blk.6.ffn_up.bias"))
+blob 177810304 fp16 4194304 f16(t("enc.blk.6.ffn_down.weight"))
+blob 186198976 fp16 1024 f16(t("enc.blk.6.ffn_down.bias"))
+blob 186201088 fp16 1024 f16(t("enc.blk.7.attn_norm.weight"))
+blob 186203200 fp16 1024 f16(t("enc.blk.7.attn_norm.bias"))
+blob 186205312 fp16 1048576 f16(t("enc.blk.7.attn_q.weight"))
+blob 188302528 fp16 1024 f16(t("enc.blk.7.attn_q.bias"))
+blob 188304640 fp16 1048576 f16(t("enc.blk.7.attn_k.weight"))
+blob 190401856 fp16 1048576 f16(t("enc.blk.7.attn_v.weight"))
+blob 192499072 fp16 1024 f16(t("enc.blk.7.attn_v.bias"))
+blob 192501184 fp16 1048576 f16(t("enc.blk.7.attn_output.weight"))
+blob 194598400 fp16 1024 f16(t("enc.blk.7.attn_output.bias"))
+blob 194600512 fp16 1024 f16(t("enc.blk.7.ffn_norm.weight"))
+blob 194602624 fp16 1024 f16(t("enc.blk.7.ffn_norm.bias"))
+blob 194604736 fp16 4194304 f16(t("enc.blk.7.ffn_up.weight"))
+blob 202993408 fp16 4096 f16(t("enc.blk.7.ffn_up.bias"))
+blob 203001664 fp16 4194304 f16(t("enc.blk.7.ffn_down.weight"))
+blob 211390336 fp16 1024 f16(t("enc.blk.7.ffn_down.bias"))
+blob 211392448 fp16 1024 f16(t("enc.blk.8.attn_norm.weight"))
+blob 211394560 fp16 1024 f16(t("enc.blk.8.attn_norm.bias"))
+blob 211396672 fp16 1048576 f16(t("enc.blk.8.attn_q.weight"))
+blob 213493888 fp16 1024 f16(t("enc.blk.8.attn_q.bias"))
+blob 213496000 fp16 1048576 f16(t("enc.blk.8.attn_k.weight"))
+blob 215593216 fp16 1048576 f16(t("enc.blk.8.attn_v.weight"))
+blob 217690432 fp16 1024 f16(t("enc.blk.8.attn_v.bias"))
+blob 217692544 fp16 1048576 f16(t("enc.blk.8.attn_output.weight"))
+blob 219789760 fp16 1024 f16(t("enc.blk.8.attn_output.bias"))
+blob 219791872 fp16 1024 f16(t("enc.blk.8.ffn_norm.weight"))
+blob 219793984 fp16 1024 f16(t("enc.blk.8.ffn_norm.bias"))
+blob 219796096 fp16 4194304 f16(t("enc.blk.8.ffn_up.weight"))
+blob 228184768 fp16 4096 f16(t("enc.blk.8.ffn_up.bias"))
+blob 228193024 fp16 4194304 f16(t("enc.blk.8.ffn_down.weight"))
+blob 236581696 fp16 1024 f16(t("enc.blk.8.ffn_down.bias"))
+blob 236583808 fp16 1024 f16(t("enc.blk.9.attn_norm.weight"))
+blob 236585920 fp16 1024 f16(t("enc.blk.9.attn_norm.bias"))
+blob 236588032 fp16 1048576 f16(t("enc.blk.9.attn_q.weight"))
+blob 238685248 fp16 1024 f16(t("enc.blk.9.attn_q.bias"))
+blob 238687360 fp16 1048576 f16(t("enc.blk.9.attn_k.weight"))
+blob 240784576 fp16 1048576 f16(t("enc.blk.9.attn_v.weight"))
+blob 242881792 fp16 1024 f16(t("enc.blk.9.attn_v.bias"))
+blob 242883904 fp16 1048576 f16(t("enc.blk.9.attn_output.weight"))
+blob 244981120 fp16 1024 f16(t("enc.blk.9.attn_output.bias"))
+blob 244983232 fp16 1024 f16(t("enc.blk.9.ffn_norm.weight"))
+blob 244985344 fp16 1024 f16(t("enc.blk.9.ffn_norm.bias"))
+blob 244987456 fp16 4194304 f16(t("enc.blk.9.ffn_up.weight"))
+blob 253376128 fp16 4096 f16(t("enc.blk.9.ffn_up.bias"))
+blob 253384384 fp16 4194304 f16(t("enc.blk.9.ffn_down.weight"))
+blob 261773056 fp16 1024 f16(t("enc.blk.9.ffn_down.bias"))
+blob 261775168 fp16 1024 f16(t("enc.blk.10.attn_norm.weight"))
+blob 261777280 fp16 1024 f16(t("enc.blk.10.attn_norm.bias"))
+blob 261779392 fp16 1048576 f16(t("enc.blk.10.attn_q.weight"))
+blob 263876608 fp16 1024 f16(t("enc.blk.10.attn_q.bias"))
+blob 263878720 fp16 1048576 f16(t("enc.blk.10.attn_k.weight"))
+blob 265975936 fp16 1048576 f16(t("enc.blk.10.attn_v.weight"))
+blob 268073152 fp16 1024 f16(t("enc.blk.10.attn_v.bias"))
+blob 268075264 fp16 1048576 f16(t("enc.blk.10.attn_output.weight"))
+blob 270172480 fp16 1024 f16(t("enc.blk.10.attn_output.bias"))
+blob 270174592 fp16 1024 f16(t("enc.blk.10.ffn_norm.weight"))
+blob 270176704 fp16 1024 f16(t("enc.blk.10.ffn_norm.bias"))
+blob 270178816 fp16 4194304 f16(t("enc.blk.10.ffn_up.weight"))
+blob 278567488 fp16 4096 f16(t("enc.blk.10.ffn_up.bias"))
+blob 278575744 fp16 4194304 f16(t("enc.blk.10.ffn_down.weight"))
+blob 286964416 fp16 1024 f16(t("enc.blk.10.ffn_down.bias"))
+blob 286966528 fp16 1024 f16(t("enc.blk.11.attn_norm.weight"))
+blob 286968640 fp16 1024 f16(t("enc.blk.11.attn_norm.bias"))
+blob 286970752 fp16 1048576 f16(t("enc.blk.11.attn_q.weight"))
+blob 289067968 fp16 1024 f16(t("enc.blk.11.attn_q.bias"))
+blob 289070080 fp16 1048576 f16(t("enc.blk.11.attn_k.weight"))
+blob 291167296 fp16 1048576 f16(t("enc.blk.11.attn_v.weight"))
+blob 293264512 fp16 1024 f16(t("enc.blk.11.attn_v.bias"))
+blob 293266624 fp16 1048576 f16(t("enc.blk.11.attn_output.weight"))
+blob 295363840 fp16 1024 f16(t("enc.blk.11.attn_output.bias"))
+blob 295365952 fp16 1024 f16(t("enc.blk.11.ffn_norm.weight"))
+blob 295368064 fp16 1024 f16(t("enc.blk.11.ffn_norm.bias"))
+blob 295370176 fp16 4194304 f16(t("enc.blk.11.ffn_up.weight"))
+blob 303758848 fp16 4096 f16(t("enc.blk.11.ffn_up.bias"))
+blob 303767104 fp16 4194304 f16(t("enc.blk.11.ffn_down.weight"))
+blob 312155776 fp16 1024 f16(t("enc.blk.11.ffn_down.bias"))
+blob 312157888 fp16 1024 f16(t("enc.blk.12.attn_norm.weight"))
+blob 312160000 fp16 1024 f16(t("enc.blk.12.attn_norm.bias"))
+blob 312162112 fp16 1048576 f16(t("enc.blk.12.attn_q.weight"))
+blob 314259328 fp16 1024 f16(t("enc.blk.12.attn_q.bias"))
+blob 314261440 fp16 1048576 f16(t("enc.blk.12.attn_k.weight"))
+blob 316358656 fp16 1048576 f16(t("enc.blk.12.attn_v.weight"))
+blob 318455872 fp16 1024 f16(t("enc.blk.12.attn_v.bias"))
+blob 318457984 fp16 1048576 f16(t("enc.blk.12.attn_output.weight"))
+blob 320555200 fp16 1024 f16(t("enc.blk.12.attn_output.bias"))
+blob 320557312 fp16 1024 f16(t("enc.blk.12.ffn_norm.weight"))
+blob 320559424 fp16 1024 f16(t("enc.blk.12.ffn_norm.bias"))
+blob 320561536 fp16 4194304 f16(t("enc.blk.12.ffn_up.weight"))
+blob 328950208 fp16 4096 f16(t("enc.blk.12.ffn_up.bias"))
+blob 328958464 fp16 4194304 f16(t("enc.blk.12.ffn_down.weight"))
+blob 337347136 fp16 1024 f16(t("enc.blk.12.ffn_down.bias"))
+blob 337349248 fp16 1024 f16(t("enc.blk.13.attn_norm.weight"))
+blob 337351360 fp16 1024 f16(t("enc.blk.13.attn_norm.bias"))
+blob 337353472 fp16 1048576 f16(t("enc.blk.13.attn_q.weight"))
+blob 339450688 fp16 1024 f16(t("enc.blk.13.attn_q.bias"))
+blob 339452800 fp16 1048576 f16(t("enc.blk.13.attn_k.weight"))
+blob 341550016 fp16 1048576 f16(t("enc.blk.13.attn_v.weight"))
+blob 343647232 fp16 1024 f16(t("enc.blk.13.attn_v.bias"))
+blob 343649344 fp16 1048576 f16(t("enc.blk.13.attn_output.weight"))
+blob 345746560 fp16 1024 f16(t("enc.blk.13.attn_output.bias"))
+blob 345748672 fp16 1024 f16(t("enc.blk.13.ffn_norm.weight"))
+blob 345750784 fp16 1024 f16(t("enc.blk.13.ffn_norm.bias"))
+blob 345752896 fp16 4194304 f16(t("enc.blk.13.ffn_up.weight"))
+blob 354141568 fp16 4096 f16(t("enc.blk.13.ffn_up.bias"))
+blob 354149824 fp16 4194304 f16(t("enc.blk.13.ffn_down.weight"))
+blob 362538496 fp16 1024 f16(t("enc.blk.13.ffn_down.bias"))
+blob 362540608 fp16 1024 f16(t("enc.blk.14.attn_norm.weight"))
+blob 362542720 fp16 1024 f16(t("enc.blk.14.attn_norm.bias"))
+blob 362544832 fp16 1048576 f16(t("enc.blk.14.attn_q.weight"))
+blob 364642048 fp16 1024 f16(t("enc.blk.14.attn_q.bias"))
+blob 364644160 fp16 1048576 f16(t("enc.blk.14.attn_k.weight"))
+blob 366741376 fp16 1048576 f16(t("enc.blk.14.attn_v.weight"))
+blob 368838592 fp16 1024 f16(t("enc.blk.14.attn_v.bias"))
+blob 368840704 fp16 1048576 f16(t("enc.blk.14.attn_output.weight"))
+blob 370937920 fp16 1024 f16(t("enc.blk.14.attn_output.bias"))
+blob 370940032 fp16 1024 f16(t("enc.blk.14.ffn_norm.weight"))
+blob 370942144 fp16 1024 f16(t("enc.blk.14.ffn_norm.bias"))
+blob 370944256 fp16 4194304 f16(t("enc.blk.14.ffn_up.weight"))
+blob 379332928 fp16 4096 f16(t("enc.blk.14.ffn_up.bias"))
+blob 379341184 fp16 4194304 f16(t("enc.blk.14.ffn_down.weight"))
+blob 387729856 fp16 1024 f16(t("enc.blk.14.ffn_down.bias"))
+blob 387731968 fp16 1024 f16(t("enc.blk.15.attn_norm.weight"))
+blob 387734080 fp16 1024 f16(t("enc.blk.15.attn_norm.bias"))
+blob 387736192 fp16 1048576 f16(t("enc.blk.15.attn_q.weight"))
+blob 389833408 fp16 1024 f16(t("enc.blk.15.attn_q.bias"))
+blob 389835520 fp16 1048576 f16(t("enc.blk.15.attn_k.weight"))
+blob 391932736 fp16 1048576 f16(t("enc.blk.15.attn_v.weight"))
+blob 394029952 fp16 1024 f16(t("enc.blk.15.attn_v.bias"))
+blob 394032064 fp16 1048576 f16(t("enc.blk.15.attn_output.weight"))
+blob 396129280 fp16 1024 f16(t("enc.blk.15.attn_output.bias"))
+blob 396131392 fp16 1024 f16(t("enc.blk.15.ffn_norm.weight"))
+blob 396133504 fp16 1024 f16(t("enc.blk.15.ffn_norm.bias"))
+blob 396135616 fp16 4194304 f16(t("enc.blk.15.ffn_up.weight"))
+blob 404524288 fp16 4096 f16(t("enc.blk.15.ffn_up.bias"))
+blob 404532544 fp16 4194304 f16(t("enc.blk.15.ffn_down.weight"))
+blob 412921216 fp16 1024 f16(t("enc.blk.15.ffn_down.bias"))
+blob 412923328 fp16 1024 f16(t("enc.blk.16.attn_norm.weight"))
+blob 412925440 fp16 1024 f16(t("enc.blk.16.attn_norm.bias"))
+blob 412927552 fp16 1048576 f16(t("enc.blk.16.attn_q.weight"))
+blob 415024768 fp16 1024 f16(t("enc.blk.16.attn_q.bias"))
+blob 415026880 fp16 1048576 f16(t("enc.blk.16.attn_k.weight"))
+blob 417124096 fp16 1048576 f16(t("enc.blk.16.attn_v.weight"))
+blob 419221312 fp16 1024 f16(t("enc.blk.16.attn_v.bias"))
+blob 419223424 fp16 1048576 f16(t("enc.blk.16.attn_output.weight"))
+blob 421320640 fp16 1024 f16(t("enc.blk.16.attn_output.bias"))
+blob 421322752 fp16 1024 f16(t("enc.blk.16.ffn_norm.weight"))
+blob 421324864 fp16 1024 f16(t("enc.blk.16.ffn_norm.bias"))
+blob 421326976 fp16 4194304 f16(t("enc.blk.16.ffn_up.weight"))
+blob 429715648 fp16 4096 f16(t("enc.blk.16.ffn_up.bias"))
+blob 429723904 fp16 4194304 f16(t("enc.blk.16.ffn_down.weight"))
+blob 438112576 fp16 1024 f16(t("enc.blk.16.ffn_down.bias"))
+blob 438114688 fp16 1024 f16(t("enc.blk.17.attn_norm.weight"))
+blob 438116800 fp16 1024 f16(t("enc.blk.17.attn_norm.bias"))
+blob 438118912 fp16 1048576 f16(t("enc.blk.17.attn_q.weight"))
+blob 440216128 fp16 1024 f16(t("enc.blk.17.attn_q.bias"))
+blob 440218240 fp16 1048576 f16(t("enc.blk.17.attn_k.weight"))
+blob 442315456 fp16 1048576 f16(t("enc.blk.17.attn_v.weight"))
+blob 444412672 fp16 1024 f16(t("enc.blk.17.attn_v.bias"))
+blob 444414784 fp16 1048576 f16(t("enc.blk.17.attn_output.weight"))
+blob 446512000 fp16 1024 f16(t("enc.blk.17.attn_output.bias"))
+blob 446514112 fp16 1024 f16(t("enc.blk.17.ffn_norm.weight"))
+blob 446516224 fp16 1024 f16(t("enc.blk.17.ffn_norm.bias"))
+blob 446518336 fp16 4194304 f16(t("enc.blk.17.ffn_up.weight"))
+blob 454907008 fp16 4096 f16(t("enc.blk.17.ffn_up.bias"))
+blob 454915264 fp16 4194304 f16(t("enc.blk.17.ffn_down.weight"))
+blob 463303936 fp16 1024 f16(t("enc.blk.17.ffn_down.bias"))
+blob 463306048 fp16 1024 f16(t("enc.blk.18.attn_norm.weight"))
+blob 463308160 fp16 1024 f16(t("enc.blk.18.attn_norm.bias"))
+blob 463310272 fp16 1048576 f16(t("enc.blk.18.attn_q.weight"))
+blob 465407488 fp16 1024 f16(t("enc.blk.18.attn_q.bias"))
+blob 465409600 fp16 1048576 f16(t("enc.blk.18.attn_k.weight"))
+blob 467506816 fp16 1048576 f16(t("enc.blk.18.attn_v.weight"))
+blob 469604032 fp16 1024 f16(t("enc.blk.18.attn_v.bias"))
+blob 469606144 fp16 1048576 f16(t("enc.blk.18.attn_output.weight"))
+blob 471703360 fp16 1024 f16(t("enc.blk.18.attn_output.bias"))
+blob 471705472 fp16 1024 f16(t("enc.blk.18.ffn_norm.weight"))
+blob 471707584 fp16 1024 f16(t("enc.blk.18.ffn_norm.bias"))
+blob 471709696 fp16 4194304 f16(t("enc.blk.18.ffn_up.weight"))
+blob 480098368 fp16 4096 f16(t("enc.blk.18.ffn_up.bias"))
+blob 480106624 fp16 4194304 f16(t("enc.blk.18.ffn_down.weight"))
+blob 488495296 fp16 1024 f16(t("enc.blk.18.ffn_down.bias"))
+blob 488497408 fp16 1024 f16(t("enc.blk.19.attn_norm.weight"))
+blob 488499520 fp16 1024 f16(t("enc.blk.19.attn_norm.bias"))
+blob 488501632 fp16 1048576 f16(t("enc.blk.19.attn_q.weight"))
+blob 490598848 fp16 1024 f16(t("enc.blk.19.attn_q.bias"))
+blob 490600960 fp16 1048576 f16(t("enc.blk.19.attn_k.weight"))
+blob 492698176 fp16 1048576 f16(t("enc.blk.19.attn_v.weight"))
+blob 494795392 fp16 1024 f16(t("enc.blk.19.attn_v.bias"))
+blob 494797504 fp16 1048576 f16(t("enc.blk.19.attn_output.weight"))
+blob 496894720 fp16 1024 f16(t("enc.blk.19.attn_output.bias"))
+blob 496896832 fp16 1024 f16(t("enc.blk.19.ffn_norm.weight"))
+blob 496898944 fp16 1024 f16(t("enc.blk.19.ffn_norm.bias"))
+blob 496901056 fp16 4194304 f16(t("enc.blk.19.ffn_up.weight"))
+blob 505289728 fp16 4096 f16(t("enc.blk.19.ffn_up.bias"))
+blob 505297984 fp16 4194304 f16(t("enc.blk.19.ffn_down.weight"))
+blob 513686656 fp16 1024 f16(t("enc.blk.19.ffn_down.bias"))
+blob 513688768 fp16 1024 f16(t("enc.blk.20.attn_norm.weight"))
+blob 513690880 fp16 1024 f16(t("enc.blk.20.attn_norm.bias"))
+blob 513692992 fp16 1048576 f16(t("enc.blk.20.attn_q.weight"))
+blob 515790208 fp16 1024 f16(t("enc.blk.20.attn_q.bias"))
+blob 515792320 fp16 1048576 f16(t("enc.blk.20.attn_k.weight"))
+blob 517889536 fp16 1048576 f16(t("enc.blk.20.attn_v.weight"))
+blob 519986752 fp16 1024 f16(t("enc.blk.20.attn_v.bias"))
+blob 519988864 fp16 1048576 f16(t("enc.blk.20.attn_output.weight"))
+blob 522086080 fp16 1024 f16(t("enc.blk.20.attn_output.bias"))
+blob 522088192 fp16 1024 f16(t("enc.blk.20.ffn_norm.weight"))
+blob 522090304 fp16 1024 f16(t("enc.blk.20.ffn_norm.bias"))
+blob 522092416 fp16 4194304 f16(t("enc.blk.20.ffn_up.weight"))
+blob 530481088 fp16 4096 f16(t("enc.blk.20.ffn_up.bias"))
+blob 530489344 fp16 4194304 f16(t("enc.blk.20.ffn_down.weight"))
+blob 538878016 fp16 1024 f16(t("enc.blk.20.ffn_down.bias"))
+blob 538880128 fp16 1024 f16(t("enc.blk.21.attn_norm.weight"))
+blob 538882240 fp16 1024 f16(t("enc.blk.21.attn_norm.bias"))
+blob 538884352 fp16 1048576 f16(t("enc.blk.21.attn_q.weight"))
+blob 540981568 fp16 1024 f16(t("enc.blk.21.attn_q.bias"))
+blob 540983680 fp16 1048576 f16(t("enc.blk.21.attn_k.weight"))
+blob 543080896 fp16 1048576 f16(t("enc.blk.21.attn_v.weight"))
+blob 545178112 fp16 1024 f16(t("enc.blk.21.attn_v.bias"))
+blob 545180224 fp16 1048576 f16(t("enc.blk.21.attn_output.weight"))
+blob 547277440 fp16 1024 f16(t("enc.blk.21.attn_output.bias"))
+blob 547279552 fp16 1024 f16(t("enc.blk.21.ffn_norm.weight"))
+blob 547281664 fp16 1024 f16(t("enc.blk.21.ffn_norm.bias"))
+blob 547283776 fp16 4194304 f16(t("enc.blk.21.ffn_up.weight"))
+blob 555672448 fp16 4096 f16(t("enc.blk.21.ffn_up.bias"))
+blob 555680704 fp16 4194304 f16(t("enc.blk.21.ffn_down.weight"))
+blob 564069376 fp16 1024 f16(t("enc.blk.21.ffn_down.bias"))
+blob 564071488 fp16 1024 f16(t("enc.blk.22.attn_norm.weight"))
+blob 564073600 fp16 1024 f16(t("enc.blk.22.attn_norm.bias"))
+blob 564075712 fp16 1048576 f16(t("enc.blk.22.attn_q.weight"))
+blob 566172928 fp16 1024 f16(t("enc.blk.22.attn_q.bias"))
+blob 566175040 fp16 1048576 f16(t("enc.blk.22.attn_k.weight"))
+blob 568272256 fp16 1048576 f16(t("enc.blk.22.attn_v.weight"))
+blob 570369472 fp16 1024 f16(t("enc.blk.22.attn_v.bias"))
+blob 570371584 fp16 1048576 f16(t("enc.blk.22.attn_output.weight"))
+blob 572468800 fp16 1024 f16(t("enc.blk.22.attn_output.bias"))
+blob 572470912 fp16 1024 f16(t("enc.blk.22.ffn_norm.weight"))
+blob 572473024 fp16 1024 f16(t("enc.blk.22.ffn_norm.bias"))
+blob 572475136 fp16 4194304 f16(t("enc.blk.22.ffn_up.weight"))
+blob 580863808 fp16 4096 f16(t("enc.blk.22.ffn_up.bias"))
+blob 580872064 fp16 4194304 f16(t("enc.blk.22.ffn_down.weight"))
+blob 589260736 fp16 1024 f16(t("enc.blk.22.ffn_down.bias"))
+blob 589262848 fp16 1024 f16(t("enc.blk.23.attn_norm.weight"))
+blob 589264960 fp16 1024 f16(t("enc.blk.23.attn_norm.bias"))
+blob 589267072 fp16 1048576 f16(t("enc.blk.23.attn_q.weight"))
+blob 591364288 fp16 1024 f16(t("enc.blk.23.attn_q.bias"))
+blob 591366400 fp16 1048576 f16(t("enc.blk.23.attn_k.weight"))
+blob 593463616 fp16 1048576 f16(t("enc.blk.23.attn_v.weight"))
+blob 595560832 fp16 1024 f16(t("enc.blk.23.attn_v.bias"))
+blob 595562944 fp16 1048576 f16(t("enc.blk.23.attn_output.weight"))
+blob 597660160 fp16 1024 f16(t("enc.blk.23.attn_output.bias"))
+blob 597662272 fp16 1024 f16(t("enc.blk.23.ffn_norm.weight"))
+blob 597664384 fp16 1024 f16(t("enc.blk.23.ffn_norm.bias"))
+blob 597666496 fp16 4194304 f16(t("enc.blk.23.ffn_up.weight"))
+blob 606055168 fp16 4096 f16(t("enc.blk.23.ffn_up.bias"))
+blob 606063424 fp16 4194304 f16(t("enc.blk.23.ffn_down.weight"))
+blob 614452096 fp16 1024 f16(t("enc.blk.23.ffn_down.bias"))
+blob 614454208 fp16 1024 f16(t("enc.output_norm.weight"))
+blob 614456320 fp16 1024 f16(t("enc.output_norm.bias"))
+blob 614458432 fp16 4194304 f16(t("adaptor.fc1.weight"))
+blob 622847104 fp16 1024 f16(t("adaptor.fc1.bias"))
+blob 622849216 fp16 1048576 f16(t("adaptor.fc2.weight"))
+blob 624946432 fp16 1024 f16(t("adaptor.fc2.bias"))
+blob 624948544 fp16 1024 f16(t("adaptor.norm.weight"))
+blob 624950656 fp16 1024 f16(t("adaptor.norm.bias"))
+end

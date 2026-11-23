@@ -1,0 +1,115 @@
+{
+  "schema": 1,
+  "id": "moss-transcribe-enc-f3000",
+  "family": "moss-transcribe",
+  "stage": "encoder",
+  "exporter": {
+    "path": "engines/parakeet/scripts/export-moss-transcribe-encoder-coreml.py",
+    "sha256": "2a24376952048f7be8fa1c63973488147afd99e56384a401b0439ca6d1bc7e6c",
+    "args": [
+      "--gguf",
+      "{gguf}",
+      "--out",
+      "{out}/moss-transcribe-encoder.mlpackage"
+    ]
+  },
+  "min_os": {
+    "macos": "15.0"
+  },
+  "multifunction_ane": false,
+  "default_compute_units": "all",
+  "export_kind": "moss-transcribe-encoder-v1",
+  "pad_safe": false,
+  "match": {
+    "architecture": "moss-transcribe",
+    "metadata": {
+      "moss-transcribe.audio.n_mels": 80,
+      "moss-transcribe.audio.chunk_frames": 3000,
+      "moss-transcribe.encoder.block_count": 24,
+      "moss-transcribe.encoder.embedding_length": 1024,
+      "moss-transcribe.encoder.feed_forward_length": 4096,
+      "moss-transcribe.encoder.attention.head_count": 16,
+      "moss-transcribe.encoder.context_length": 1500,
+      "moss-transcribe.encoder.attention.layer_norm_epsilon": 9.999999747378752e-06,
+      "moss-transcribe.adaptor.merge_size": 4,
+      "moss-transcribe.adaptor.layer_norm_epsilon": 9.999999974752427e-07,
+      "moss-transcribe.text.embedding_length": 1024
+    }
+  },
+  "memory": {
+    "runtime_weight_bytes": 624952768,
+    "workspace_bytes": 0,
+    "compile_peak_bytes": 173015040,
+    "ane_compile_reserve_bytes": 1586495488,
+    "load_peak_bytes": {
+      "cpu_and_ane": null,
+      "all": 853540864,
+      "cpu_and_gpu": null,
+      "cpu_only": null
+    },
+    "margin": 1.0,
+    "coreml_bound": "measured",
+    "validated_for": [
+      {
+        "units": "all",
+        "os": "27.2.1",
+        "chip": "M2"
+      },
+      {
+        "units": "all",
+        "os": "26.7.2",
+        "chip": "M4 Max"
+      }
+    ],
+    "measured": {
+      "margin": 1.25,
+      "runs": 17,
+      "resident_bytes": 627448768,
+      "basis": "Each constant is 1.25 x the largest value measured over every overlapped generated-schedule run on the validated_for hosts, rounded up to 1 MiB, so the envelope's own margin is 1.0: the prepare charge (generation_peak_bytes + 8 MiB + compile_peak_bytes) covers the prepare from the start of the encoder's generation to the end of its compile; load_peak_bytes.all the load and warm increment; the resident part (runtime_weight_bytes, the weights' size, + 2 x I/O + workspace_bytes) the step in the process's settled footprint once the encoder is ready, which the weights and I/O already cover (workspace_bytes 0 when they do); and ane_compile_reserve_bytes ANECompilerService's largest absolute size while loading (not every host has a clean-baseline run)"
+    }
+  },
+  "toolchain": {
+    "coremltools": "9.0",
+    "torch": "2.7.0",
+    "numpy": "1.26.4"
+  },
+  "functions": [
+    {
+      "name": "main",
+      "inputs": [
+        {
+          "name": "mel",
+          "dtype": "fp16",
+          "shape": [
+            1,
+            80,
+            3000
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "embeddings",
+          "dtype": "fp16",
+          "shape": [
+            1,
+            375,
+            1024
+          ]
+        }
+      ]
+    }
+  ],
+  "stateful": false,
+  "weight_bin_size": 624952768,
+  "patches": [],
+  "shareable": true,
+  "state_bytes": 0,
+  "expected_warm_load_ms": {
+    "main": 0
+  },
+  "prefer_ggml_on": [],
+  "literals": [],
+  "provided": [],
+  "generation_peak_bytes": 25165824
+}

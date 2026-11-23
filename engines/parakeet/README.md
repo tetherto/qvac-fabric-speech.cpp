@@ -283,6 +283,7 @@ these templates in the library:
 | `nemotron-diar-f745` | Nemotron 3 Diarization diarizer | 745 |
 | `nemotron-diar-f1125` | Nemotron 3 Diarization diarizer | 1125 |
 | `sortformer-diar-f410` | Sortformer v2.1 (`sortformer-streaming-v2.1-aosc`) diarizer | 410 |
+| `moss-transcribe-enc-f3000` | MOSS-Transcribe-Diarize audio encoder and adaptor | 3000 mel frames (one 30 s window, 375 tokens) |
 
 When a capacity has no adjacent bundle, the engine generates it from the GGUF
 alone: it writes the package's weights from the GGUF's tensors (dequantised by
@@ -328,6 +329,16 @@ v2.1, every capacity up to the full AOSC step slab of a default stream, 409
 frames, since the slab grows with the speaker cache and FIFO, together with
 any adjacent prebuilt bundles on the way); see
 [docs/backends.md](docs/backends.md#generated-diarizers).
+
+The MOSS-Transcribe-Diarize encoder works the same way in
+`parakeet::moss::TranscribeEngine` and the `moss-transcribe` CLI: with no
+`<stem>-encoder.mlmodelc` beside the GGUF, the engine generates the encoder
+from the GGUF (architecture `moss-transcribe`, the template's window and
+encoder hyperparameters, matrices in f32, f16, bf16, q8_0, q6_k, q5_k, q5_0,
+q4_k or q4_0) into `TranscribeOptions::coreml.cache_dir`, about 600 MB, and
+every 30 s window runs on ggml until it is ready. The template is validated for
+the `all` compute units (the encoder's default). See
+[docs/moss-transcribe.md](docs/moss-transcribe.md#core-ml-encoder-sidecar).
 
 ## Backend selection
 

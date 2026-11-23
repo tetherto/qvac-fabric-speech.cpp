@@ -39,10 +39,22 @@ namespace pcm = QVAC_COREML_NS;
 // Public options -> the runtime's internal mirror (field by field).
 pcm::Options to_runtime_options(const CoremlOptions & opts);
 
-// Resolves once with Parakeet's environment prefix (PARAKEET_COREML_*).
-pcm::Resolved resolve_parakeet_coreml(const CoremlOptions & opts);
+// Resolves once with Parakeet's environment prefix (PARAKEET_COREML_*), or
+// another engine's (MOSS-Transcribe resolves with MOSS_COREML_*).
+pcm::Resolved resolve_parakeet_coreml(const CoremlOptions & opts, const char * env_prefix = "PARAKEET");
 
 pcm::Prewarm to_runtime_prewarm(CoremlOptions::Prewarm scope);
+
+// The runtime's compute units as the fit projection's mirror of them.
+inline CoremlFitUnits fit_units(pcm::ComputeUnits units) {
+    switch (units) {
+        case pcm::ComputeUnits::all: return CoremlFitUnits::all;
+        case pcm::ComputeUnits::cpu_and_ane: return CoremlFitUnits::cpu_and_ane;
+        case pcm::ComputeUnits::cpu_and_gpu: return CoremlFitUnits::cpu_and_gpu;
+        case pcm::ComputeUnits::cpu_only: return CoremlFitUnits::cpu_only;
+    }
+    return CoremlFitUnits::all;
+}
 
 // The resolved compute units as the argument the synchronous loaders take
 // (the TDT decoder bundle and the encoder owner): their status name, or
@@ -88,7 +100,7 @@ uint64_t ane_compile_reserve_bytes(const std::string & mlmodelc, pcm::ComputeUni
 
 // The loader that opens a sidecar, first in its geometry: an encoder, bypass
 // encoder and diarizer bundle at one path are never one shared model.
-enum class SidecarLoader : int64_t { encoder = 1, bypass_encoder = 2, diarizer = 3 };
+enum class SidecarLoader : int64_t { encoder = 1, bypass_encoder = 2, diarizer = 3, transcribe_encoder = 4 };
 
 inline std::vector<int64_t> sidecar_geometry(SidecarLoader loader, std::vector<int64_t> rest = {}) {
     rest.insert(rest.begin(), static_cast<int64_t>(loader));
@@ -119,9 +131,12 @@ public:
     // `manager` null uses the library image's manager. `memory_degraded`:
     // the Core ML-inclusive fit failed where the ggml-only one passed, so
     // the instance resolves use = off with the reason "memory".
+    // `env_prefix` names the environment variables the options resolve
+    // with (<prefix>_COREML_DISABLE, _STRICT, _COMPUTE_UNITS).
     explicit CoremlSidecars(const CoremlOptions & opts,
                             std::shared_ptr<pcm::Manager> manager = nullptr,
-                            bool memory_degraded = false);
+                            bool memory_degraded = false,
+                            const char * env_prefix = "PARAKEET");
     CoremlSidecars(const CoremlSidecars &) = delete;
     CoremlSidecars & operator=(const CoremlSidecars &) = delete;
     // Drops the slots; never waits.

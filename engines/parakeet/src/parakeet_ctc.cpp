@@ -3445,12 +3445,6 @@ int encode_on_context(void *, parakeet_coreml_context * ctx, int n_mel_frames, i
                                         n_enc_frames, d_model, encoder_out);
 }
 
-const EncoderModelOps & encoder_ops() {
-    static const EncoderModelOps ops{&encoder_context_of, &describe_encoder, &encoder_label,
-                                     &encode_on_context};
-    return ops;
-}
-
 // The synchronous context as a route. The owner never retires, and a
 // failure is an error (there are no ggml encoder weights to fall back to).
 // Under use = require it is strict like a slot's route: a dispatch it cannot
@@ -3468,6 +3462,16 @@ EncoderRoute synchronous_route(const ParakeetCtcModel & m, bool strict) {
                                 strict);
 }
 
+}  // namespace
+
+const EncoderModelOps & coreml_encoder_model_ops() {
+    static const EncoderModelOps ops{&encoder_context_of, &describe_encoder, &encoder_label,
+                                     &encode_on_context};
+    return ops;
+}
+
+namespace {
+
 bool resolved_strict(const ParakeetCtcModel & m) {
     return m.impl && m.impl->coreml && m.impl->coreml->resolved().strict();
 }
@@ -3479,7 +3483,7 @@ EncoderRoute ready_encoder_route(const ParakeetCtcModel & m) {
     if (!m.impl) return {};
     if (m.impl->ctx_coreml != nullptr) return synchronous_route(m, /*strict=*/false);
     if (!m.impl->encoder_slot) return {};
-    return route_from_acquired(acquire_if_ready(*m.impl->encoder_slot), encoder_ops(), m.mel_cfg.n_mels,
+    return route_from_acquired(acquire_if_ready(*m.impl->encoder_slot), coreml_encoder_model_ops(), m.mel_cfg.n_mels,
                                /*strict=*/false);
 }
 
@@ -3495,7 +3499,7 @@ EncoderRoute acquire_encoder_route(ParakeetCtcModel & m, const std::atomic<bool>
     // One acquisition per unit: raised to `now`, then the resolved wait mode
     // (none: no blocking; call: until ready or terminal; strict throws).
     return route_from_acquired(m.impl->encoder_slot->acquire(pcm::Demand::now, std::nullopt, cancel),
-                               encoder_ops(), m.mel_cfg.n_mels, m.impl->coreml->resolved().strict());
+                               coreml_encoder_model_ops(), m.mel_cfg.n_mels, m.impl->coreml->resolved().strict());
 #else
     (void) m;
     (void) cancel;

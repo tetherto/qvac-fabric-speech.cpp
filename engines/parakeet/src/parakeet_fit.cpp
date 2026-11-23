@@ -192,16 +192,6 @@ uint64_t nemotron_diarization_host_bytes(const ParakeetCtcModel & model,
 }
 
 #ifdef PARAKEET_USE_COREML
-CoremlFitUnits fit_units(pcm::ComputeUnits units) {
-    switch (units) {
-        case pcm::ComputeUnits::all: return CoremlFitUnits::all;
-        case pcm::ComputeUnits::cpu_and_ane: return CoremlFitUnits::cpu_and_ane;
-        case pcm::ComputeUnits::cpu_and_gpu: return CoremlFitUnits::cpu_and_gpu;
-        case pcm::ComputeUnits::cpu_only: return CoremlFitUnits::cpu_only;
-    }
-    return CoremlFitUnits::all;
-}
-
 uint64_t bundle_weight_bytes(const std::string & bundle) {
     std::error_code ec;
     const uintmax_t size = std::filesystem::file_size(std::filesystem::path(bundle) / "weights" / "weight.bin", ec);

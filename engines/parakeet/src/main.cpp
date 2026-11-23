@@ -14,6 +14,7 @@
 #include "mel_preprocess.h"
 #include "long_form_encoder.h"
 #include "encoder_device_decode.h"
+#include "coreml_cli_options.h"
 #include "coreml_tdt_segments.h"
 #include "streaming_defaults.h"
 
@@ -514,68 +515,11 @@ void log_cli_long_form(const parakeet::ParakeetCtcModel & model, const parakeet:
                       100.0 * 2.0 * context_frames / window_frames);
 }
 
-bool parse_coreml_use(const std::string & v, parakeet::CoremlOptions::Use & out) {
-    using U = parakeet::CoremlOptions::Use;
-    if (v == "auto") out = U::automatic;
-    else if (v == "off") out = U::off;
-    else if (v == "require") out = U::require;
-    else {
-        PARAKEET_LOG_ERROR("error: --coreml-use must be auto, off or require (got '%s')\n", v.c_str());
-        return false;
-    }
-    return true;
-}
-
-bool parse_coreml_generate(const std::string & v, parakeet::CoremlOptions::Generate & out) {
-    using G = parakeet::CoremlOptions::Generate;
-    if (v == "background") out = G::background;
-    else if (v == "never") out = G::never;
-    else {
-        PARAKEET_LOG_ERROR("error: --coreml-generate must be background or never (got '%s')\n", v.c_str());
-        return false;
-    }
-    return true;
-}
-
-bool parse_coreml_wait(const std::string & v, parakeet::CoremlOptions::Wait & out) {
-    using W = parakeet::CoremlOptions::Wait;
-    if (v == "none") out = W::none;
-    else if (v == "construct") out = W::construct;
-    else if (v == "call") out = W::call;
-    else {
-        PARAKEET_LOG_ERROR("error: --coreml-wait must be none, construct or call (got '%s')\n", v.c_str());
-        return false;
-    }
-    return true;
-}
-
-bool parse_coreml_prewarm(const std::string & v, parakeet::CoremlOptions::Prewarm & out) {
-    using P = parakeet::CoremlOptions::Prewarm;
-    if (v == "none") out = P::none;
-    else if (v == "minimal") out = P::minimal;
-    else if (v == "predicted") out = P::predicted;
-    else if (v == "all") out = P::all;
-    else {
-        PARAKEET_LOG_ERROR("error: --coreml-prewarm must be none, minimal, predicted or all (got '%s')\n",
-                           v.c_str());
-        return false;
-    }
-    return true;
-}
-
-// CLIs keep warm hints under Application Support (Library/Caches can
-// be purged, and a purge means a new path and a cold ANE compile).
-void apply_cli_coreml_defaults(parakeet::CoremlOptions & coreml) {
-#if defined(__APPLE__)
-    const char * shared = std::getenv("QVAC_COREML_CACHE_DIR");
-    const char * home = std::getenv("HOME");
-    if (!coreml.cache_dir && (shared == nullptr || *shared == '\0') && home != nullptr && *home != '\0') {
-        coreml.cache_dir = std::string(home) + "/Library/Application Support/qvac-speech/coreml";
-    }
-#else
-    (void) coreml;
-#endif
-}
+using parakeet::apply_cli_coreml_defaults;
+using parakeet::parse_coreml_generate;
+using parakeet::parse_coreml_prewarm;
+using parakeet::parse_coreml_use;
+using parakeet::parse_coreml_wait;
 
 // Writes the Core ML status on every exit path once the model has loaded:
 // the status of the engine(s) that ran when one did (captured before they

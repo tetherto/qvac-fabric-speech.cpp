@@ -45,7 +45,8 @@ set(PARAKEET_COREML_OBJC_SOURCES
 # Parakeet's adoption of the shared Core ML runtime (engines/coreml): C++
 # compiled with the runtime's namespace (QVAC_COREML_NS=parakeet_coreml).
 set(PARAKEET_COREML_RUNTIME_GLUE_SOURCES
-    src/coreml/parakeet_coreml_sidecars.cpp)
+    src/coreml/parakeet_coreml_sidecars.cpp
+    src/moss/transcribe_coreml_slot.cpp)
 set(PARAKEET_COREML_RUNTIME_NS parakeet_coreml)
 
 # ccache shaves ~30 % off iterative rebuild time on developer machines.
@@ -476,6 +477,7 @@ if (PARAKEET_BUILD_LIBRARY)
         ${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/nemotron-diar-f358
         ${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/nemotron-diar-f745
         ${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/nemotron-diar-f1125
+        ${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/moss-transcribe-enc-f3000
         ${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/sortformer-diar-f410)
     qvac_coreml_add_to(qvac-parakeet NAMESPACE ${PARAKEET_COREML_RUNTIME_NS} PREFIX PARAKEET ENABLE ${PARAKEET_COREML}
                        TEMPLATES ${PARAKEET_COREML_TEMPLATE_DIRS})
@@ -1734,6 +1736,31 @@ if (PARAKEET_BUILD_TESTS)
         ARGS  "${CMAKE_CURRENT_SOURCE_DIR}/test/samples/diarization-sample-16k.wav")
     set_property(TEST test-moss-transcribe-coreml-parity PROPERTY SKIP_RETURN_CODE 77)
 
+    # The encoder generated from a MOSS-Transcribe GGUF that has no bundle
+    # beside it (PARAKEET_TEST_MOSS_GENERATED_GGUF): generation into an empty
+    # cache, window and transcript parity against ggml, cache adoption, fit
+    # before and after, unvalidated units and memory-degrade. Registered only
+    # with the GGUF set; it has no skip path then.
+    set(PARAKEET_TEST_MOSS_GENERATED_GGUF "" CACHE FILEPATH
+        "parakeet: a MOSS-Transcribe GGUF with no -encoder.mlmodelc beside it, for the generated Core ML encoder")
+    if (PARAKEET_COREML AND PARAKEET_TEST_MOSS_GENERATED_GGUF)
+        add_executable(test-moss-transcribe-coreml-generated test/moss/test_transcribe_coreml_generated.cpp
+            ${PARAKEET_MOSS_TEST_SOURCES} src/coreml/parakeet_coreml_shape.cpp ${PARAKEET_COREML_OBJC_SOURCES})
+        target_link_libraries(test-moss-transcribe-coreml-generated PRIVATE ggml parakeet-backend-defs
+            ${PARAKEET_FOUNDATION_FRAMEWORK} ${PARAKEET_COREML_FRAMEWORK})
+        target_include_directories(test-moss-transcribe-coreml-generated PRIVATE src include ggml/include)
+        target_compile_definitions(test-moss-transcribe-coreml-generated PRIVATE PARAKEET_USE_COREML)
+        parakeet_apply_backend_defs(test-moss-transcribe-coreml-generated)
+        parakeet_apply_ccache(test-moss-transcribe-coreml-generated)
+        parakeet_test_use_coreml_runtime(test-moss-transcribe-coreml-generated)
+        add_test(NAME test-moss-transcribe-coreml-generated
+            COMMAND test-moss-transcribe-coreml-generated
+                    "${CMAKE_CURRENT_SOURCE_DIR}/test/samples/diarization-sample-16k.wav")
+        set_tests_properties(test-moss-transcribe-coreml-generated PROPERTIES
+            LABELS "fixture;coreml;coreml-generated" TIMEOUT 2400
+            ENVIRONMENT "MOSS_TRANSCRIBE_GENERATED_MODEL=${PARAKEET_TEST_MOSS_GENERATED_GGUF}")
+    endif()
+
     # Not a test: times one 30 s window on the staged sidecar against the
     # ggml GPU encoder (median of 5 after a warm-up) as a markdown row.
     add_executable(bench-moss-transcribe-coreml test/moss/bench_transcribe_coreml.cpp
@@ -2063,6 +2090,13 @@ if (PARAKEET_BUILD_TESTS)
         # passes overlapped with background prepares and loads, footprint and
         # ANECompilerService sampled. A measurement tool, not a ctest: it needs
         # a cold ANE and minutes per run.
+        # The same validation for the MOSS-Transcribe encoder template:
+        # transcriptions of one window overlapped with the encoder's
+        # background prepare and load.
+        add_executable(moss-transcribe-coreml-memory test/moss/transcribe_coreml_memory.cpp)
+        target_link_libraries(moss-transcribe-coreml-memory PRIVATE qvac-parakeet)
+        target_include_directories(moss-transcribe-coreml-memory PRIVATE include src ggml/include)
+        parakeet_apply_ccache(moss-transcribe-coreml-memory)
         add_executable(diarizer-coreml-memory test/diarizer_coreml_memory.cpp)
         target_link_libraries(diarizer-coreml-memory PRIVATE qvac-parakeet)
         target_include_directories(diarizer-coreml-memory PRIVATE include src ggml/include)

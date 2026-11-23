@@ -497,6 +497,18 @@ uint64_t TranscribeModel::weight_bytes() const {
     const uint64_t head = impl_->head_buffer ? ggml_backend_buffer_get_size(impl_->head_buffer) : 0;
     return ggml_backend_buffer_get_size(impl_->weight_buffer) + head;
 }
+uint64_t TranscribeModel::encoder_parameters() const {
+    uint64_t count = 0;
+    for (auto * tensor = ggml_get_first_tensor(impl_->weights); tensor;
+         tensor = ggml_get_next_tensor(impl_->weights, tensor)) {
+        const std::string name = ggml_get_name(tensor);
+        if (name.rfind("enc.", 0) == 0 || name.rfind("adaptor.", 0) == 0) {
+            count = fitutil::sat_add(count, (uint64_t) ggml_nelements(tensor));
+        }
+    }
+    return count;
+}
+
 TranscribeMemory TranscribeModel::allocated_memory() const { return impl_->scheduler->allocated_memory(); }
 
 bool TranscribeModel::measure_only() const { return impl_->measure_only; }

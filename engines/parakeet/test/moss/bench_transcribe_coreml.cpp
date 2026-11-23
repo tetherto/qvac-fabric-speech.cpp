@@ -2,6 +2,7 @@
 #include "moss/transcribe_coreml.h"
 #include "moss/transcribe_model.h"
 #include "moss/transcribe_networks.h"
+#include "transcribe_coreml_window.h"
 
 #include "mel_preprocess.h"
 
@@ -23,6 +24,9 @@ constexpr int BENCH_THREADS = 8;
 constexpr int RUNS = 5;
 constexpr double PARITY_COSINE = 0.999;
 constexpr const char * MODEL_ENV = "MOSS_TRANSCRIBE_COREML_MODEL";
+// Optional: a Core ML cache directory, so a GGUF with no bundle beside it is
+// benchmarked on its generated encoder.
+constexpr const char * CACHE_ENV = "MOSS_TRANSCRIBE_COREML_CACHE_DIR";
 
 double median_ms(const std::function<void()> & run) {
     run();
@@ -66,12 +70,10 @@ int main(int argc, char ** argv) {
         return SKIP;
     }
     TranscribeModel model(model_path, true, BENCH_THREADS);
-    auto sidecar = open_transcribe_encoder_sidecar(model_path, model.config(), {});
-    if (!sidecar) {
-        std::fprintf(stderr, "FAIL: no encoder sidecar beside %s\n", model_path);
-        return 1;
-    }
     const TranscribeConfig & config = model.config();
+    const char * cache_dir = std::getenv(CACHE_ENV);
+    const auto sidecar = moss_transcribe_coreml::ready_encoder(model_path, config, cache_dir ? cache_dir : "");
+    const parakeet::EncoderRoute route = sidecar->acquire();
     const std::vector<float> audio = read_wav(argv[1]);
     const size_t count = std::min(audio.size(), (size_t) config.audio.chunk_samples);
     const TranscribeMel mel(config.audio, read_mel_filters(model));
@@ -80,11 +82,15 @@ int main(int argc, char ** argv) {
     std::vector<float> reference;
     std::vector<float> rows;
     const double ggml_ms = median_ms([&] { reference = encode_audio_chunk(model, window, tokens, false).embeddings; });
-    const double coreml_ms = median_ms([&] { sidecar->encode(window, rows); });
-    const double agreement = cosine(rows, reference);
+    bool predicted = true;
+    const double coreml_ms = median_ms([&] {
+        predicted = moss_transcribe_coreml::encode_window(route, config, window, rows) && predicted;
+    });
+    rows.resize(reference.size());
+    const double agreement = predicted ? cosine(rows, reference) : 0.0;
     std::printf("| stage | workload | ggml GPU | Core ML | speedup | agreement | placement |\n");
     std::printf("|---|---|---:|---:|---:|---:|---|\n");
     std::printf("| MOSS-Transcribe encoder | one 30 s window | %.1f ms | %.1f ms | %.2fx | %.6f | %s |\n", ggml_ms,
-                coreml_ms, ggml_ms / coreml_ms, agreement, sidecar->label());
+                coreml_ms, ggml_ms / coreml_ms, agreement, route.coreml_label().c_str());
     return agreement >= PARITY_COSINE ? 0 : 1;
 }

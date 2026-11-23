@@ -234,18 +234,117 @@ quantization tag, so `moss-transcribe-diarize-q8_0.gguf` and
 `moss-transcribe-diarize-f16.gguf` both use
 `moss-transcribe-diarize-encoder.mlmodelc`.
 
-A sidecar whose input or output shapes do not match the model is not attached.
-If a prediction fails, the engine retires the sidecar, encodes that window and
-the rest of the run on ggml, and reports the run as `mixed`.
-`TranscribeEngine::encoder_on_coreml()` says whether a sidecar is attached, and
-`TranscribeResult::encoder_backend` says where this run's windows went: `ggml`,
-the Core ML placement label (`coreml-all`, `coreml-cpu-gpu`, `coreml-ane`,
-`coreml-cpu`), or `mixed`. The CLI prints the placement on stderr and writes
-`encoder_backend` to the JSON. Three environment variables control routing:
-`MOSS_COREML_DISABLE` keeps the encoder on ggml, `MOSS_COREML_STRICT` makes a
-missing sidecar or a failed prediction an error instead of a fallback, and
-`MOSS_COREML_COMPUTE_UNITS` (`all`, the default, `cpu_and_gpu`, `cpu_and_ane`,
-or `cpu_only`) picks the Core ML compute units.
+The sidecar loads on the library's shared Core ML runtime (see
+[the runtime's README](../../coreml/README.md)): `TranscribeEngine` returns as
+soon as the ggml model has loaded, and the sidecar loads in the background.
+Each 30 s window takes the sidecar if it is ready when the window starts and
+runs on ggml otherwise, so the first windows of the first transcription can run
+on ggml while the sidecar loads (`TranscribeResult::coreml_pending` is then
+true). A sidecar whose input or output is not exactly the model's window is
+refused (the slot is `failed`) and every window runs on ggml. If a prediction
+fails, the engine retires the sidecar, encodes that window and the rest of the
+run on ggml, and reports the run as `mixed`; later runs stay on ggml.
+`TranscribeEngine::encoder_on_coreml()` says whether the sidecar is loaded and
+ready now, and `TranscribeResult::encoder_backend` says where this run's
+windows went: `ggml`, the Core ML placement label (`coreml-all`,
+`coreml-cpu-gpu`, `coreml-ane`, `coreml-cpu`), or `mixed`.
+
+`TranscribeOptions::coreml` takes the options of
+[`parakeet/coreml_options.h`](../include/parakeet/coreml_options.h):
+
+| Option | Effect |
+|---|---|
+| `use` | `automatic` (default): Core ML once the sidecar is ready, ggml until then. `off`: ggml only. `require`: each window waits for the sidecar, and a window it cannot serve (no sidecar, a failed load or prediction) throws instead of running on ggml. |
+| `wait` | `none` (default on macOS): never block. `construct`: the constructor waits until the sidecar is ready or has failed. `call`: each window waits. |
+| `generate` | `background` (default): generate the sidecar from the GGUF when none sits beside it. `never`: only an adjacent sidecar. |
+| `cache_dir` | Where generated sidecars and warm-load hints are kept. Unset: `QVAC_COREML_CACHE_DIR`, else no cache (no generation). |
+| `compute_units` | `all` (the default), `cpu_and_gpu`, `cpu_and_ane` or `cpu_only`. |
+| `memory_budget_bytes` | The budget the host assessed fit against (with `TranscribeOptions::coreml_fit`, its totals): when the Core ML-inclusive verdict fails and the ggml-only one passes, the engine resolves `use = off` (`memory`). |
+
+The environment variables of earlier releases keep their meaning:
+`MOSS_COREML_DISABLE` forces `use = off`, `MOSS_COREML_STRICT` gives
+`use = require`, and `MOSS_COREML_COMPUTE_UNITS` sets `compute_units` when the
+option is unset. `TranscribeEngine::coreml_status_json()` reports the sidecar's
+state, route (`prebuilt`, `generated` or `cached`), compute units, label and
+timings; `coreml_construction_json()` and `coreml_wait(timeout_ms)` report and
+wait for the construction load. The CLI takes the same options as
+`--coreml-use`, `--coreml-wait`, `--coreml-generate`, `--coreml-prewarm`,
+`--coreml-compute-units` and `--coreml-cache-dir` (default
+`~/Library/Application Support/qvac-speech/coreml`), writes the status with
+`--coreml-status-json PATH` (`-` for stdout), prints the encoder backend of
+the run on stderr, and writes `encoder_backend` and `coreml_pending` to the
+JSON.
+
+### Generated encoder
+
+When no sidecar sits beside the GGUF, the engine generates it from the GGUF
+alone with the template `moss-transcribe-enc-f3000` embedded in the library
+(macOS 15 or later, `PARAKEET_COREML_GENERATE`, default `ON` on macOS): it
+writes the encoder and adaptor weights from the GGUF's tensors (dequantised by
+ggml and cast to fp16), compiles the package on the device and publishes it in
+`cache_dir` (about 600 MB). The generated package has the same weights and
+program, byte for byte, as the exporter's fp16 export of that GGUF. A later
+load of the same GGUF finds it in the cache. The GGUF must match the template:
+architecture `moss-transcribe`, 80 mel bands, 3000-frame windows, the
+encoder's 24 layers of width 1024 with 16 heads and a 4096-wide feed-forward,
+the adaptor's merge size 4, the layer-norm epsilons and a 1024-wide decoder
+embedding, with the encoder and adaptor matrices in f32, f16, bf16, q8_0,
+q6_k, q5_k, q5_0, q4_k or q4_0. The template is validated for the `all`
+compute units, so another `compute_units` value turns generation off
+(`unsupported(unvalidated_units)` in the status). An adjacent sidecar always
+wins.
+
+`parakeet::moss::fit_params` reports both verdicts: `ggml_only_fits` and
+`coreml.fits`, which adds the encoder's Core ML envelope
+(`coreml.bytes`, route `coreml.encoder_route`: `prebuilt`, `generate` or
+`none`). An adjacent sidecar is charged at its fp16 runtime size, twice its
+I/O and one load transient, with a 1.25 margin; a generated one with the
+template's measured constants (see the memory validation below). The
+projection never reads the cache, so it is the same before and after the first
+load. The top-level `fits` stays the ggml verdict.
+
+### Memory validation
+
+`moss-transcribe-coreml-memory` runs one-window transcriptions on ggml while
+the engine generates, compiles, loads and warms the encoder in the background
+(an overlapped schedule), sampling the process footprint every 2 ms and
+`ANECompilerService` every 100 ms, from a re-signed copy of the tool and an
+empty cache so the Neural Engine load is cold. It writes the report
+`scripts/check-coreml-memory-schedule.py` checks against the template:
+
+```sh
+moss-transcribe-coreml-memory --ggml-only --gguf moss-transcribe-diarize-q8_0.gguf \
+    --wav engines/parakeet/test/samples/diarization-sample-16k.wav --json ggml.json
+moss-transcribe-coreml-memory --gguf moss-transcribe-diarize-q8_0.gguf \
+    --wav engines/parakeet/test/samples/diarization-sample-16k.wav --cache-dir EMPTY_DIR \
+    --baseline-bytes "$(python3 -c "import json; print(json.load(open('ggml.json'))['peak_footprint'])")" \
+    --json run.json
+python3 engines/parakeet/scripts/check-coreml-memory-schedule.py \
+    --template-dir engines/parakeet/coreml-templates/moss-transcribe-enc-f3000 run.json
+```
+
+The Core ML lane of `parakeet-ci.yml` runs it twice on its runner. The
+template's constants follow the runtime's convention
+([measured memory constants](../../coreml/README.md#measured-memory-constants)):
+each is 1.25 times the largest value over every run on every host in
+`validated_for`, rounded up to 1 MiB, and the envelope's own margin is 1.0.
+Measured on the q8_0 GGUF with the `all` compute units (17 runs: 7 on an M2,
+macOS 27.2.1; 10 on the M4 Max CI runner, macOS 26.7.2):
+
+| Measurement | M2 | M4 Max | Constant |
+|---|---:|---:|---:|
+| Prepare (generate and compile), over the footprint before it | 10.7–140.6 MiB | 128.8–157.0 MiB | 197 MiB (`compile_peak_bytes` 165 MiB + generation 24 MiB + 8 MiB) |
+| Load and warm, over the footprint before it | 6.7–66.0 MiB | 580.6–651.0 MiB | `load_peak_bytes.all` 814 MiB |
+| Settled footprint once ready, over the ggml-only run | 0 | 0 | resident 598.4 MiB (the weights and twice the I/O; `workspace_bytes` 0) |
+| `ANECompilerService` while loading | 744.7–1150.3 MiB (growth 594–755 MiB; 2 clean baselines) | 959.3–1209.8 MiB (dirty baselines) | `ane_compile_reserve_bytes` 1513 MiB |
+| Peak increment over the ggml-only run | up to 83.9 MiB | up to 658.8 MiB | fit charges 1412 MiB |
+
+The two chips place `all` differently. On the M2 all 564 operations run on
+the Neural Engine and the load adds little to the process. On the M4 Max the
+load and warm-up add about 650 MiB to the process. Neither keeps more than the
+ggml-only run's footprint once the encoder is ready. Not every host has a
+run that starts from a clean `ANECompilerService`, so the reserve is 1.25
+times the largest size the service reached while loading.
 
 `bench-moss-transcribe-coreml` times one 30 s window of
 `test/samples/diarization-sample-16k.wav` with the f16 GGUF (median of five
@@ -441,20 +540,35 @@ on prompt-shaped strings (default, English, and hotword prompts, CJK and
 full-width punctuation, whitespace and newline runs, digits, contractions,
 emoji).
 
-`test-moss-transcribe` also covers the sidecar routing without Core ML: the
-sidecar path rule, window and row selection, retiring a failed sidecar, the
-strict and disable switches, and the per-run backend report.
+`test-moss-transcribe` also covers the sidecar routing without Core ML, on
+fake encoder routes: the sidecar path rule, window and row selection, a
+sidecar of another window, a window that runs on ggml while the sidecar is
+pending, retiring a failed sidecar, `use = require`, the per-run backend
+report and the `--coreml-*` flags. `test-parakeet-coreml-route` checks the
+encoder slot's glue on the runtime with fake loaders: the `MOSS_COREML_*`
+variables, the slot request and the fit charge per route.
 `test-export-moss-transcribe-coreml` (Python; skips without `numpy` or
 `torch`) checks the exporter's PyTorch rebuild against an independent NumPy
 Whisper encoder and adaptor on tiny random weights, the sidecar name rule, and,
 with `coremltools`, the converted program's input and output.
 `test-moss-transcribe-coreml-parity` runs on a Mac with a compiled sidecar: set
-`MOSS_TRANSCRIBE_COREML_MODEL` to the GGUF and pass a 16 kHz WAV. It compares a
-full and a short window with the ggml encoder (cosine 0.999 for the window,
-0.99 for every token), checks that a transcription runs on the sidecar and
-follows the ggml transcript, and covers strict mode and an invalid sidecar.
+`MOSS_TRANSCRIBE_COREML_MODEL` to the GGUF and pass a 16 kHz WAV. It loads the
+sidecar through the engine's runtime path, compares a full and a short window
+with the ggml encoder (cosine 0.999 for the window, 0.99 for every token),
+checks that a transcription runs on the sidecar and follows the ggml
+transcript, and covers `use = require` without a sidecar and an invalid
+sidecar. `test-moss-transcribe-coreml-generated` (registered when the CMake
+cache variable `PARAKEET_TEST_MOSS_GENERATED_GGUF` names a GGUF with no sidecar
+beside it) generates the encoder into an empty cache and fails unless it did,
+then checks the same window and transcript parity, a second instance adopting
+the cached encoder, the same fit with an empty and a full cache, units the
+template was not validated for, and memory-degrade one byte below the Core
+ML-inclusive verdict. `moss-transcribe-coreml-memory` is the memory validation
+behind the template's constants (below).
 `bench-moss-transcribe-coreml` (same arguments) prints one window's time on
-ggml and on Core ML for the compute units in `MOSS_COREML_COMPUTE_UNITS`.
+ggml and on Core ML for the compute units in `MOSS_COREML_COMPUTE_UNITS`;
+with `MOSS_TRANSCRIBE_COREML_CACHE_DIR` set and no sidecar beside the GGUF it
+times the generated encoder.
 
 ## Memory-fit preflight
 

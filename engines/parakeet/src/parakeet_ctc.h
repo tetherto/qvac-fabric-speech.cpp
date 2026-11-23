@@ -769,6 +769,11 @@ CoremlCallStats model_coreml_call_stats(ParakeetCtcModel & m);
 #ifdef PARAKEET_USE_COREML
 class CoremlDiarizers;
 CoremlDiarizers * model_coreml_diarizers(const ParakeetCtcModel & m);
+// The operations on a loaded Core ML encoder model (coreml/parakeet-encoder.mm)
+// that route_from_acquired takes, shared by every encoder slot of the
+// library: Parakeet's encoder and MOSS-Transcribe's.
+struct EncoderModelOps;
+const EncoderModelOps & coreml_encoder_model_ops();
 // Tests: called with "open" just before load_from_gguf opens the GGUF (its
 // one open: metadata and tensor data are read through that descriptor), with
 // "opened" once the descriptor's identity is taken, and with "read" after its

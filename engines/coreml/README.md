@@ -585,7 +585,8 @@ The real-weights gate (`coreml_template.py real`) runs in the engine's Core
 ML lane on a staged production GGUF: the Parakeet lane in `parakeet-ci.yml`
 checks the Nemotron 3 Diarization templates on the official q8_0 GGUF
 (pinned revision and sha256), then runs the parity test on diarizers the
-engine generated from it.
+engine generated from it, and does the same for the MOSS-Transcribe-Diarize
+encoder template on the model registry's q8_0 GGUF (pinned key and sha256).
 
 `engines/coreml/test/golden.txt` holds, per template, the generator version,
 `template_sha256` and the sha256 of the `weight.bin` generated from twin A.

@@ -11,6 +11,9 @@ struct TranscribeCliArgs {
     TranscribeRequest request;
     std::string audio_path;
     std::string out_path;
+    // --coreml-status-json: where to write the Core ML sidecar status after
+    // the run ("-" prints it to stdout).
+    std::string coreml_status_json_path;
 };
 
 void print_usage();

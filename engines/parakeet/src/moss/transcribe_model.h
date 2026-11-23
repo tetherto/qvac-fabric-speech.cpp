@@ -127,6 +127,9 @@ public:
 
     FitResult measure_weights();
     uint64_t weight_bytes() const;
+    // Parameters of the audio encoder and adaptor (the enc.* and adaptor.*
+    // tensors): what a Core ML encoder holds at its fp16 runtime geometry.
+    uint64_t encoder_parameters() const;
     TranscribeMemory allocated_memory() const;
     TranscribeMemory measure(TranscribeGraph & graph);
     bool measure_only() const;

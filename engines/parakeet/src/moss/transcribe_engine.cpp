@@ -1,4 +1,5 @@
 #include "parakeet/moss_transcribe.h"
+#include "parakeet/moss_transcribe_fit.h"
 
 #include "moss/transcribe_audio.h"
 #include "moss/transcribe_coreml.h"
@@ -24,6 +25,8 @@ using detail::TranscribeMel;
 using detail::TranscribeModel;
 using detail::TranscribeTokenizer;
 
+constexpr double DEGRADE_FIT_SECONDS = 300.0;
+constexpr uint64_t DEGRADE_FIT_MARGIN_BYTES = 256ull * 1024 * 1024;
 
 [[noreturn]] void fail(const std::string & message) {
     throw std::runtime_error("moss transcribe: " + message);
@@ -37,6 +40,36 @@ int32_t greedy_token(const std::vector<float> & logits) {
     return (int32_t) std::distance(logits.begin(), std::max_element(logits.begin(), logits.end()));
 }
 
+// Memory-degrade: with a budget, an instance whose Core ML-inclusive fit
+// fails where the ggml-only fit passes resolves use = off ("memory"), so
+// Core ML never turns a working ggml verdict into a refusal. Without a budget
+// the options apply as given. The verdict comes from the totals the host
+// assessed (TranscribeOptions::coreml_fit) when it passed them; otherwise
+// from a projection of 300 s of audio with the default request and a 256 MiB
+// margin (the parakeet::FitOptions defaults).
+bool coreml_memory_degraded(const TranscribeOptions & options) {
+#ifdef PARAKEET_USE_COREML
+    if (!options.coreml.memory_budget_bytes.has_value() || *options.coreml.memory_budget_bytes < 0) return false;
+    CoremlFitTotals totals;
+    if (options.coreml_fit.has_value()) {
+        totals = *options.coreml_fit;
+    } else {
+        const FitResult fit = fit_params(options, TranscribeRequest{}, DEGRADE_FIT_SECONDS, DEGRADE_FIT_MARGIN_BYTES);
+        if (fit.status == FitStatus::Error) return false;
+        totals.ggml_required_bytes = fit.ggml_required_bytes;
+        totals.coreml_bytes = fit.coreml.bytes;
+    }
+    const uint64_t budget = static_cast<uint64_t>(*options.coreml.memory_budget_bytes);
+    const uint64_t coreml_required = totals.ggml_required_bytes + totals.coreml_bytes;
+    const bool ggml_fits = totals.ggml_required_bytes <= budget;
+    const bool coreml_fits = coreml_required >= totals.ggml_required_bytes && coreml_required <= budget;
+    return ggml_fits && !coreml_fits;
+#else
+    (void) options;
+    return false;
+#endif
+}
+
 } // namespace
 
 struct TranscribeEngine::Impl {
@@ -47,6 +80,9 @@ struct TranscribeEngine::Impl {
     std::unique_ptr<detail::TranscribeAudioEncoder> audio_encoder;
     std::atomic<bool> cancel_requested{false};
     std::mutex transcription_mutex;
+    // Declared last: destroyed first, so no window holds the sidecar while
+    // the model goes away.
+    std::unique_ptr<detail::TranscribeCoremlEncoder> coreml;
 
     void load() {
         if (options.model_path.empty()) {
@@ -55,6 +91,8 @@ struct TranscribeEngine::Impl {
         if (!options.backends_dir.empty()) {
             ::parakeet::set_backends_directory(options.backends_dir);
         }
+        coreml = std::make_unique<detail::TranscribeCoremlEncoder>(options.model_path, options.coreml,
+                                                                   coreml_memory_degraded(options));
         model = std::make_unique<TranscribeModel>(options.model_path, options.use_gpu, options.n_threads, options.backend);
         detail::validate_transcribe_encoder(*model);
         detail::validate_transcribe_decoder(*model);
@@ -64,9 +102,11 @@ struct TranscribeEngine::Impl {
     }
 
     void attach_audio_encoder() {
-        const detail::CoremlPolicy policy = detail::read_coreml_policy();
-        audio_encoder = std::make_unique<detail::TranscribeAudioEncoder>(*model,
-                detail::open_transcribe_encoder_sidecar(options.model_path, model->config(), policy), policy.strict);
+        coreml->attach(model->config(), &cancel_requested);
+        detail::TranscribeCoremlEncoder * sidecar = coreml.get();
+        audio_encoder = std::make_unique<detail::TranscribeAudioEncoder>(*model, [sidecar] {
+            return sidecar->acquire();
+        });
     }
 
     void require_context(int prompt_tokens, int limit) const {
@@ -157,6 +197,7 @@ struct TranscribeEngine::Impl {
         result.cancelled = !encode_audio(pcm, samples, embeddings);
         result.encode_ms = elapsed_ms(encode_start);
         result.encoder_backend = audio_encoder->run_backend();
+        result.coreml_pending = audio_encoder->run_pending();
         if (result.cancelled) {
             return result;
         }
@@ -212,7 +253,19 @@ const char * TranscribeEngine::backend_name() const noexcept {
 }
 
 bool TranscribeEngine::encoder_on_coreml() const noexcept {
-    return impl_->audio_encoder->on_coreml();
+    return impl_->coreml->ready();
+}
+
+std::string TranscribeEngine::coreml_status_json() const {
+    return impl_->coreml->status_json();
+}
+
+std::string TranscribeEngine::coreml_construction_json() const {
+    return impl_->coreml->construction_json();
+}
+
+bool TranscribeEngine::coreml_wait(int64_t timeout_ms) {
+    return impl_->coreml->wait(timeout_ms);
 }
 
 } // namespace parakeet::moss
