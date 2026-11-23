@@ -297,6 +297,17 @@ PrepareResult fake_prepare(const PrepareRequest & req, PrepareContext & ctx) {
     return out;
 }
 
+// LookupFn: a hit for keys starting with "hit", at fake_prepare's path.
+std::atomic<int> g_lookups{0};
+bool fake_lookup(const PrepareRequest & req, PrepareResult & out) {
+    ++g_lookups;
+    if (req.key.rfind("hit", 0) != 0) return false;
+    out.artifact_path = req.cache_dir + "/qvac-coreml-v1/artifacts/" + req.key + ".mlmodelc";
+    out.artifact_key = req.key;
+    out.cache_hit = true;
+    return true;
+}
+
 uint64_t fake_mem() { return g_mem.load(); }
 bool fake_low_power() { return g_low_power.load(); }
 
@@ -359,13 +370,15 @@ struct Env {
                                Wait w = Wait::none) const {
         return m->make_slot(spec(fn, u), policy(w));
     }
-    std::shared_ptr<Slot> generated(const std::string & fn, const std::string & key) const {
+    std::shared_ptr<Slot> generated(const std::string & fn, const std::string & key,
+                                    LookupFn lookup = nullptr) const {
         SlotSpec s = spec(fn);
         s.route = Route::generate;
         s.artifact_path.clear();
         s.prepare.key = key;
         s.prepare.cache_dir = cache();
         s.prepare_fn = &fake_prepare;
+        s.lookup_fn = lookup;
         return m->make_slot(s, policy());
     }
 
@@ -705,6 +718,58 @@ void case_stale_hint_cooldown() {
     release("cold");
 }
 
+// A cooldown ends at the first later load that is as fast as the hint's warm
+// time (within 1.5 x): the plan is cached again, so the next acquisition waits
+// again. A slow later load (still cold) and a stale_until written while the
+// load ran keep the cooldown.
+void case_stale_hint_refresh() {
+    Env e;
+    const int64_t until = detail::unix_now_s() + 24 * 3600;
+    // A fast load on a stale hint: no wait (the hint is stale), then the
+    // load refreshes it and trains warm_load_ms.
+    auto s = e.slot("refresh");
+    seed_hint(s, 400, until);
+    set_beh("refresh", {false, 10});
+    const auto d0 = Clock::now() + 10s;
+    Acquired a = s->acquire(Demand::now, d0);
+    CHECK(!a && a.pending && Clock::now() < d0);  // no wait on a stale hint
+    CHECK(wait_for([&] { return is_ready(s); }));
+    auto h = hint_of(s);
+    CHECK(h && !h->stale_until_s.has_value());
+    CHECK(h && h->warm_load_ms && *h->warm_load_ms < 400);
+    CHECK(s->status().hint && !s->status().hint->stale);
+    // The next acquisition waits for the reload again.
+    s->evict();
+    set_beh("refresh", {false, 80});
+    Acquired a2 = s->acquire(Demand::now, Clock::now() + 10s);
+    CHECK(a2 && !a2.pending);
+
+    // A load slower than 1.5 x the warm time keeps the cooldown.
+    auto slow = e.slot("stillcold");
+    seed_hint(slow, 20, until);
+    set_beh("stillcold", {false, 200});
+    slow->request(Priority::minimal);
+    CHECK(wait_for([&] { return is_ready(slow); }));
+    h = hint_of(slow);
+    CHECK(h && h->stale_until_s == std::optional<int64_t>(until));
+    CHECK(h && h->warm_load_ms && *h->warm_load_ms == 20);
+    CHECK(h && h->cold_load_ms && *h->cold_load_ms >= 200);
+
+    // A stale_until written while the load ran is not the one it started
+    // under: preserved, and the load counts as cold.
+    auto later = e.slot("restaled");
+    seed_hint(later, 400, until);
+    set_beh("restaled", {true});
+    later->request(Priority::minimal);
+    CHECK(wait_for([] { return in_progress("restaled"); }));
+    seed_hint(later, 400, until + 60);
+    release("restaled");
+    CHECK(wait_for([&] { return is_ready(later); }));
+    h = hint_of(later);
+    CHECK(h && h->stale_until_s == std::optional<int64_t>(until + 60));
+    CHECK(h && h->warm_load_ms && *h->warm_load_ms == 400 && h->cold_load_ms);
+}
+
 void case_warm_queued_behind_cold() {
     Env e;
     auto cold = e.slot("coldjob");  // no hint: possibly a cold compile
@@ -755,6 +820,37 @@ void case_prepare_ahead_no_wait() {
     Acquired a = s->acquire(Demand::now, deadline);
     CHECK(!a && a.pending && Clock::now() < deadline);
     release("prepare:p");
+}
+
+void case_cached_adopt_on_demand() {
+    // A generated slot whose cache already holds the artifact (a previous
+    // process prepared it and observed a warm load): decode demand adopts
+    // it before deciding the bounded wait, so the first acquisition waits for
+    // the warm load instead of queueing a preparation and running on ggml.
+    Env e;
+    g_lookups = 0;
+    {
+        auto primer = e.generated("cachedfn", "hit-a", &fake_lookup);
+        primer->request(Priority::prewarm);  // a request never looks up: it prepares
+        CHECK(wait_for([&] { return is_ready(primer); }));
+        CHECK(calls("prepare:hit-a") == 1 && g_lookups == 0);
+        seed_hint(primer, 20);
+    }
+    set_beh("cachedfn", {false, 40});
+    auto s = e.generated("cachedfn", "hit-a", &fake_lookup);
+    CHECK(s->state() == SlotState::idle && s->hint_path().empty());
+    const auto deadline = Clock::now() + 3000ms;
+    Acquired a = s->acquire(Demand::now, deadline);
+    CHECK(a && !a.pending);
+    CHECK(g_lookups == 1);
+    CHECK(calls("prepare:hit-a") == 1);  // no second preparation
+    CHECK(!s->hint_path().empty());
+    CHECK(s->status().route == StatusRoute::cached);
+    // A miss queues the preparation as before; without a hint nothing waits.
+    auto miss = e.generated("missfn", "miss-b", &fake_lookup);
+    Acquired m = miss->acquire(Demand::now, Clock::now() + 3000ms);
+    CHECK(!m && m.pending);
+    CHECK(wait_for([&] { return calls("prepare:miss-b") == 1; }));
 }
 
 void case_groups_construct() {
@@ -3685,9 +3781,11 @@ const Case kCases[] = {
     {"bounded-wait-queued", case_bounded_wait_queued},
     {"bounded-wait-loading", case_bounded_wait_loading},
     {"stale-hint-cooldown", case_stale_hint_cooldown},
+    {"stale-hint-refresh", case_stale_hint_refresh},
     {"warm-queued-behind-cold", case_warm_queued_behind_cold},
     {"queued-behind-expiry", case_queued_behind_expiry},
     {"prepare-ahead-no-wait", case_prepare_ahead_no_wait},
+    {"cached-adopt-on-demand", case_cached_adopt_on_demand},
     {"groups-construct", case_groups_construct},
     {"nothing-to-prepare", case_nothing_to_prepare},
     {"low-power", case_low_power},

@@ -1,0 +1,105 @@
+{
+  "schema": 1,
+  "id": "acestep-vae-t64",
+  "family": "acestep",
+  "stage": "vae",
+  "export_kind": "acestep-vae-v1",
+  "exporter": {
+    "path": "engines/audiogen/scripts/export-vae-coreml.py",
+    "sha256": "5b2675b307aff2bba36a397fa128a8488e178d42676bb62f7f337e3726a72c46",
+    "args": [
+      "--gguf",
+      "{gguf}",
+      "--out",
+      "{out}/vae-decoder.mlpackage",
+      "--t-latent",
+      "64"
+    ]
+  },
+  "min_os": {
+    "macos": "15.0"
+  },
+  "multifunction_ane": false,
+  "default_compute_units": "all",
+  "shareable": true,
+  "pad_safe": false,
+  "state_bytes": 0,
+  "expected_warm_load_ms": {
+    "main": 525
+  },
+  "memory": {
+    "runtime_weight_bytes": 170113920,
+    "workspace_bytes": 948765824,
+    "compile_peak_bytes": 0,
+    "ane_compile_reserve_bytes": 959447040,
+    "load_peak_bytes": {
+      "cpu_and_ane": null,
+      "all": 1438646272,
+      "cpu_and_gpu": null,
+      "cpu_only": null
+    },
+    "margin": 1.0,
+    "coreml_bound": "measured",
+    "validated_for": [
+      {
+        "units": "all",
+        "os": "27.2.1",
+        "chip": "M2"
+      },
+      {
+        "units": "all",
+        "os": "26.7.2",
+        "chip": "M4 Max"
+      }
+    ],
+    "measured": {
+      "margin": 1.25,
+      "runs": 27,
+      "resident_bytes": 1119879168,
+      "basis": "Each constant is 1.25 x the largest value measured over every overlapped generated-schedule run on the validated_for hosts (27 runs: on the M2 six early-completion and six late-completion runs, on the M4 Max nine and six; the latest three late runs on the M2 and two on the M4 Max evict while the load is held at its completion and release it after), rounded up to 1 MiB, so the envelope's own margin is 1.0. The prepare charge (generation_peak_bytes + 8 MiB + compile_peak_bytes, compile_peak_bytes 0) covers the prepare from the start of generation to the end of the compile (at most 242.6 MiB, M2). load_peak_bytes.all is the transient charged outside the VAE decode phase, so it covers every sample after a late run's eviction taken over the warmed ggml-only baseline, preparation leftovers included: at most 1097.4 MiB (M2; earlier late runs are bounded by their whole-run peak over that baseline; the M4 Max at most 797.0 MiB, 403.9 MiB where measured after the eviction), which also covers the load and warm-up over the footprint just before the load (at most 854.4 MiB, M2). The resident part (runtime_weight_bytes + 2 x I/O + workspace_bytes, runtime_weight_bytes being weight.bin's size) covers the steady state over the footprint just before the load, at most 854.1 MiB (M2), which holds the memory the warm-up prediction allocates for the program's GPU and CPU segments; the M4 Max stayed below each of these (prepare 242.4, load 555.3, steady 555.3 MiB). ane_compile_reserve_bytes covers ANECompilerService's absolute size while a load runs, 731.4 MiB on the M4 Max (its largest; the M2 466.6 MiB). No M4 Max run found the service clean (it held 373-454 MiB of other jobs' compiles before every load, and grew 0-329 MiB over that), and a service that already holds memory may reuse it, so its growth understates a cold compile on a clean service; the absolute size bounds it. On the M2 a load from a clean service (20 MiB) grew 104.0 MiB against at most 97.6 MiB from a dirty one."
+    }
+  },
+  "patches": [],
+  "prefer_ggml_on": [],
+  "match": {
+    "architecture": "acestep-vae",
+    "metadata": {}
+  },
+  "literals": [],
+  "provided": [],
+  "toolchain": {
+    "coremltools": "9.0",
+    "torch": "2.7.0",
+    "numpy": "1.26.4"
+  },
+  "functions": [
+    {
+      "name": "main",
+      "inputs": [
+        {
+          "name": "latent",
+          "dtype": "fp16",
+          "shape": [
+            1,
+            64,
+            64
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "pcm",
+          "dtype": "fp16",
+          "shape": [
+            1,
+            2,
+            122880
+          ]
+        }
+      ]
+    }
+  ],
+  "stateful": false,
+  "weight_bin_size": 170113920,
+  "generation_peak_bytes": 419430400
+}

@@ -879,6 +879,66 @@ private:
             return o;
         }
         if (op == "provided") return provided(e);
+        if (op == "tile") {
+            // np.concatenate of n copies along `axis` (torch's 1-D repeat(n)).
+            V x = eval(*e.args[0]);
+            const size_t axis = static_cast<size_t>(e.args[1]->number);
+            const size_t n = static_cast<size_t>(e.args[2]->number);
+            const size_t outer = count_of(x->shape, 0, axis);
+            const size_t blk = count_of(x->shape, axis);
+            return relayout(x, e.shape, [&](const auto * in, auto * out) {
+                size_t w = 0;
+                for (size_t o = 0; o < outer; ++o) {
+                    for (size_t k = 0; k < n; ++k) {
+                        std::copy(in + o * blk, in + (o + 1) * blk, out + w);
+                        w += blk;
+                    }
+                }
+            });
+        }
+        if (op == "exp") {
+            // round_to_dtype(libm exp in f64).
+            V x = eval(*e.args[0]);
+            V o = fresh();
+            if (x->dt == DType::weak) {
+                o->weak = std::exp(x->weak);
+                return o;
+            }
+            o->alloc(x->dt, x->shape);
+            for (size_t i = 0; i < x->f.size(); ++i) o->f[i] = static_cast<float>(std::exp(static_cast<double>(x->f[i])));
+            for (size_t i = 0; i < x->g.size(); ++i) o->g[i] = std::exp(x->g[i]);
+            return o;
+        }
+        if (op == "l2norm") {
+            // sqrt of the sum of squares over `axes`, reduced dims kept. One
+            // row-major pass over the input adds each element, in f64, to its
+            // output position, so every output sums its reduced elements in
+            // row-major order. The f64 sqrt is rounded to the input dtype.
+            V x = eval(*e.args[0]);
+            const size_t rank = x->shape.size();
+            const std::vector<size_t> os = strides_of(e.shape);
+            std::vector<size_t> st(rank);
+            for (size_t d = 0; d < rank; ++d) st[d] = e.shape[d] == x->shape[d] ? os[d] : 0;
+            V acc = fresh();
+            acc->alloc(DType::f64, e.shape);
+            const size_t n = x->size();
+            std::vector<int64_t> idx(rank, 0);
+            size_t off = 0;
+            for (size_t i = 0; i < n; ++i) {
+                const double v = x->dt == DType::f32 ? static_cast<double>(x->f[i]) : x->g[i];
+                acc->g[off] += v * v;
+                for (size_t d = rank; d-- > 0;) {
+                    if (++idx[d] < x->shape[d]) {
+                        off += st[d];
+                        break;
+                    }
+                    off -= st[d] * static_cast<size_t>(idx[d] - 1);
+                    idx[d] = 0;
+                }
+            }
+            for (double & v : acc->g) v = std::sqrt(v);
+            return cast(acc, x->dt);
+        }
         throw EvalError(Error::deterministic("recipe: op " + op + "() cannot be evaluated"));
     }
 

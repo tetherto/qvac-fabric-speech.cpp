@@ -1,5 +1,6 @@
 #include "audiogen-cpp/acestep/engine.h"
 
+#include "audiogen-cpp/acestep/fit.h"
 #include "audiogen-cpp/acestep/vae.h"
 
 #include "acestep/bpe_tokenizer.h"
@@ -26,6 +27,8 @@
 #include "acestep/generation_conditioning.h"
 #include "acestep/generation_plan.h"
 #include "acestep/stage_placement.h"
+#include "acestep/vae_access.h"
+#include "acestep/vae_coreml.h"
 
 #include "ggml-backend.h"
 
@@ -136,11 +139,22 @@ struct Engine::Impl {
     DitModel *     dit     = nullptr;
 
     std::unique_ptr<Vae> vae;
+    // The VAE decoder's Core ML stage: one slot for the Engine's lifetime,
+    // shared by every (re)load of the ggml VAE (route none, with no slot,
+    // without Core ML).
+    std::shared_ptr<detail::vae_coreml_stage> vae_coreml;
+    // What this call's VAE decodes ran on (merged label) and whether one ran
+    // on ggml only because the sidecar was not ready yet.
+    std::string vae_label;
+    bool        vae_pending = false;
 
     BpeTokenizer bpe_lm;    // LM vocab (+ audio codes) — Phase-2 prompt
     BpeTokenizer bpe_text;  // text-encoder vocab — DiT prompt / lyric lookup
 
-    mutable std::atomic<bool> cancel_flag{ false };
+    // Engine::cancel(): the generations' flag (cancel_flag) and the blocking
+    // Core ML waits, each with its own flag.
+    mutable EngineCancel canceller;
+    std::atomic<bool> & cancel_flag = canceller.flag;
 
     // Sequential-loading state (see create()/generate()). In the default low-mem
     // mode no stage is resident after create(); generate() loads each stage right
@@ -207,15 +221,23 @@ struct Engine::Impl {
         dit = dit_model_load(opts.dit_model_path, backend, nth, opts.verbose);
         if (!dit) throw std::runtime_error("acestep engine: DiT load failed");
     }
+    // Loads the ggml VAE. The Core ML decoder is never requested here (an
+    // encoding needs none); Vae::decode requests it.
     void ensure_vae(bool with_encoder = false) {
         if (vae && (!with_encoder || vae->has_encoder())) return;
-        if (vae) free_vae();
+        vae.reset();  // reloading with the encoder: the Core ML decoder stays
         if (opts.verbose) fprintf(stderr, "[acestep-engine] loading VAE\n");
         VaeOptions load_opts = vae_opts;
         load_opts.with_encoder = with_encoder;
-        vae = Vae::load(opts.vae_model_path, load_opts);
+        vae = detail::VaeAccess::load(opts.vae_model_path, load_opts, vae_coreml);
         if (!vae) throw std::runtime_error("acestep engine: VAE load failed");
         sr = vae->sample_rate();
+    }
+    // After each VAE decode: merges its backend into the call's label.
+    void note_vae_decode() {
+        if (!vae) return;
+        vae_label   = detail::vae_merge_backend(vae_label, vae->last_decode_backend());
+        vae_pending = vae_pending || vae->last_decode_coreml_pending();
     }
     void free_textenc() { if (textenc) { textenc_model_free(textenc); textenc = nullptr; } }
     void free_lm()      { if (lm)      { lm_model_free(lm);           lm      = nullptr; } }
@@ -223,7 +245,20 @@ struct Engine::Impl {
     void free_detok()   { if (detok)   { detok_model_free(detok);     detok   = nullptr; } }
     void free_tok()     { if (tok)     { tok_model_free(tok);         tok     = nullptr; } }
     void free_dit()     { if (dit)     { dit_model_free(dit);         dit     = nullptr; } }
-    void free_vae()     { vae.reset(); }
+    // A VAE stage boundary: the ggml VAE is released and the Core ML decoder
+    // evicted (unstarted jobs cancelled; a started load finishes, writes its
+    // warm hint and never repopulates the slot). Readiness persists: the
+    // artifact and the hint stay, so the next decode reloads warm.
+    void free_vae() {
+        vae.reset();
+        if (vae_coreml) vae_coreml->evict();
+    }
+    // The end of a decode that the same VAE phase follows with an encode
+    // (repaint materialisation): the Core ML decoder is evicted, the ggml VAE
+    // the encode needs stays. Fit charges that encode without the decoder.
+    void evict_vae_decoder() {
+        if (vae_coreml) vae_coreml->evict();
+    }
 };
 
 // ------------------------------------------------------------ construction
@@ -351,6 +386,44 @@ std::unique_ptr<Engine> Engine::create(const EngineOptions & opts_in) {
         if (!dit_gguf_open(g, opts.vae_model_path))
             throw std::runtime_error("acestep engine: cannot open VAE GGUF: " + opts.vae_model_path);
         dit_gguf_close(g);
+    }
+
+    // The VAE decoder's Core ML stage. Nothing is requested here unless
+    // coreml.prewarm is all; in low-memory mode a waited construction load is
+    // released again once it is ready. With a memory budget, fit's
+    // memory-degrade decides first whether only the ggml projection fits:
+    // the caller's decision (coreml.memory_degrade) when it passes one,
+    // otherwise fit with the default workload.
+    {
+        bool degrade = false;
+#ifdef AUDIOGEN_USE_COREML
+        if (opts.coreml.memory_budget_bytes && opts.coreml.memory_degrade) {
+            // The caller's fit decided for its own workload and margin.
+            degrade = *opts.coreml.memory_degrade;
+        } else if (opts.coreml.memory_budget_bytes) {
+            FitOptions fit;
+            fit.text_enc_model_path = opts.text_enc_model_path;
+            fit.lm_model_path       = opts.lm_model_path;
+            fit.dit_model_path      = opts.dit_model_path;
+            fit.vae_model_path      = opts.vae_model_path;
+            fit.n_threads           = opts.n_threads;
+            fit.n_gpu_layers        = opts.n_gpu_layers;
+            fit.backend             = opts.backend;
+            fit.lm_backend          = opts.lm_backend;
+            fit.backends_dir        = opts.backends_dir;
+            fit.keep_stages         = m->keep_stages ? 1 : 0;
+            fit.coreml              = opts.coreml;
+            degrade = fit_params(fit).coreml.disabled_reason == "memory";
+        }
+#endif
+        m->vae_coreml = detail::vae_coreml_stage::create(opts.vae_model_path, opts.coreml, degrade,
+                                                         /*release_after_construction=*/!m->keep_stages,
+                                                         &m->cancel_flag);
+        if (v && m->vae_coreml) {
+            const detail::vae_coreml_route & r = m->vae_coreml->route();
+            fprintf(stderr, "[acestep-engine] Core ML VAE decoder: route %s (%s)%s%s\n", r.route.c_str(),
+                    r.compute_units.c_str(), r.reason.empty() ? "" : ", ", r.reason.c_str());
+        }
     }
 
     // ACESTEP_KEEP_STAGES: eager-load every stage now and keep it resident (the
@@ -523,6 +596,29 @@ static constexpr const char * ENGINE_ERROR_PREFIX = "acestep engine: ";
 static constexpr const char * EDIT_TASK_TYPE_SUFFIX = "'";
 
 using StageReporter = std::function<bool(const char *, int, int)>;
+
+// A low-memory VAE phase: from the VAE load to the stage boundary. The VAE is
+// released (and the Core ML decoder evicted) on every exit of the phase:
+// completion, cancellation, a failed decode or an exception. release() ends
+// the phase early, where the pipeline continues after it.
+template <typename EngineImpl>
+class LowMemoryVaePhase {
+public:
+    LowMemoryVaePhase(EngineImpl & engine, bool low_memory) : engine_(engine), armed_(low_memory) {}
+    ~LowMemoryVaePhase() { release(); }
+    LowMemoryVaePhase(const LowMemoryVaePhase &) = delete;
+    LowMemoryVaePhase & operator=(const LowMemoryVaePhase &) = delete;
+    void release() {
+        if (!armed_) return;
+        armed_ = false;
+        if (engine_.vae && engine_.opts.verbose) fprintf(stderr, "[acestep-engine] freeing VAE (low-mem)\n");
+        engine_.free_vae();
+    }
+
+private:
+    EngineImpl & engine_;
+    bool armed_;
+};
 
 static long long resolve_seed(long long seed) {
     if (seed >= 0) return seed;
@@ -716,6 +812,7 @@ static bool prepare_audio_conditioning(EngineImpl & engine, const GenerateParams
     if (!state.plan.encode_source && !state.plan.encode_reference) return true;
 
     engine.ensure_vae(true);
+    LowMemoryVaePhase<EngineImpl> vae_phase(engine, state.low_memory);
     const AudioEncoder encode =
         [&](const std::vector<float> & pcm, const char * stage, EncodedAudio & output) {
             return encode_audio(*engine.vae, pcm, stage, resolve_conditioning_dump_name(stage),
@@ -728,7 +825,6 @@ static bool prepare_audio_conditioning(EngineImpl & engine, const GenerateParams
         state.latent_frames = state.conditioning.source.frames;
         state.prompt.duration = (float) state.latent_frames / AUDIO_LATENT_RATE;
     }
-    if (state.low_memory) engine.free_vae();
     return true;
 }
 
@@ -1359,6 +1455,7 @@ static bool decode_audio(EngineImpl & engine, const std::vector<float> & latent,
                          const StageReporter & report, StageDump & dump,
                          StageTimes & timing, GenerateResult & result) {
     engine.ensure_vae();
+    LowMemoryVaePhase<EngineImpl> vae_phase(engine, low_memory);
     if (!report("vae", 0, 1)) return false;
 
     bool completed = true;
@@ -1366,7 +1463,10 @@ static bool decode_audio(EngineImpl & engine, const std::vector<float> & latent,
         completed = report("vae", done, total);
         return completed;
     });
-    if (!completed) {
+    engine.note_vae_decode();
+    // A cancel that interrupted the decoder's acquisition returns no PCM
+    // without a progress report.
+    if (!completed || (result.pcm.empty() && engine.cancel_flag.load())) {
         result.pcm.clear();
         return false;
     }
@@ -1375,11 +1475,6 @@ static bool decode_audio(EngineImpl & engine, const std::vector<float> & latent,
     timing.mark("vae");
     dump.write("09_vae_pcm", result.pcm, (int) (result.pcm.size() / AUDIO_CHANNELS), AUDIO_CHANNELS);
     if (engine.opts.verbose) timing.dump(stderr);
-
-    if (low_memory) {
-        if (engine.vae && engine.opts.verbose) fprintf(stderr, "[acestep-engine] freeing VAE (low-mem)\n");
-        engine.free_vae();
-    }
     return true;
 }
 
@@ -1581,6 +1676,7 @@ static bool encode_edit_plan_inputs(EngineImpl & engine, const GenerateParams & 
                                     StageDump & dump, StageTimes & timing,
                                     AudioEditArtifact & artifact) {
     engine.ensure_vae(true);
+    LowMemoryVaePhase<EngineImpl> vae_phase(engine, state.generation.low_memory);
     EncodedAudio source;
     if (!encode_audio(*engine.vae, params.source_audio, EDIT_STAGE_SOURCE,
                       EDIT_DUMP_SOURCE_LATENT, report, engine.opts.verbose,
@@ -1593,7 +1689,7 @@ static bool encode_edit_plan_inputs(EngineImpl & engine, const GenerateParams & 
                       dump, timing, state.generation.conditioning.reference)) {
         return false;
     }
-    if (state.generation.low_memory) engine.free_vae();
+    vae_phase.release();
     artifact.latent = std::move(source.latent);
     artifact.latent_frames = source.frames;
     artifact.pcm = params.source_audio;
@@ -1606,13 +1702,15 @@ static void materialize_repaint_source(EngineImpl & engine, const EditPlanState 
                                        AudioEditArtifact & artifact,
                                        const StageReporter & report) {
     engine.ensure_vae(true);
+    LowMemoryVaePhase<EngineImpl> vae_phase(engine, state.generation.low_memory);
     bool completed = true;
     std::vector<float> materialized = engine.vae->decode(
         artifact.latent, artifact.latent_frames, [&](int done, int total) {
             completed = report(EDIT_STAGE_VAE, done, total);
             return completed;
         });
-    if (!completed) return;
+    engine.note_vae_decode();
+    if (!completed || (materialized.empty() && engine.cancel_flag.load())) return;
     if (materialized.empty()) {
         throw std::runtime_error(EDIT_ERROR_INTERMEDIATE_DECODE);
     }
@@ -1626,6 +1724,7 @@ static void materialize_repaint_source(EngineImpl & engine, const EditPlanState 
     artifact.pcm = std::move(materialized);
     artifact.pcm_is_current = true;
     artifact.pending_waveform_splice = false;
+    if (state.generation.low_memory) engine.evict_vae_decoder();  // decode -> encode boundary
     artifact.latent = engine.vae->encode(
         artifact.pcm, (int) artifact.pcm.size() / AUDIO_CHANNELS,
         &artifact.latent_frames, [&](int done, int total) {
@@ -1636,7 +1735,6 @@ static void materialize_repaint_source(EngineImpl & engine, const EditPlanState 
     if (artifact.latent.empty() || artifact.latent_frames <= 0) {
         throw std::runtime_error(EDIT_ERROR_INTERMEDIATE_ENCODE);
     }
-    if (state.generation.low_memory) engine.free_vae();
 }
 
 static RepaintRange resolve_repaint_operation_range(const RepaintParams & edit,
@@ -1967,6 +2065,7 @@ static GenerateResult decode_edit_plan_result(
     result.sample_rate = engine.sr;
     result.channels = AUDIO_CHANNELS;
     engine.ensure_vae();
+    LowMemoryVaePhase<EngineImpl> vae_phase(engine, state.generation.low_memory);
     if (!report(EDIT_STAGE_VAE, EDIT_PROGRESS_START, EDIT_PROGRESS_TOTAL)) {
         return result;
     }
@@ -1976,7 +2075,8 @@ static GenerateResult decode_edit_plan_result(
           completed = report(EDIT_STAGE_VAE, done, total);
           return completed;
         });
-    if (!completed) {
+    engine.note_vae_decode();
+    if (!completed || (result.pcm.empty() && engine.cancel_flag.load())) {
         result.pcm.clear();
         return result;
     }
@@ -1989,7 +2089,7 @@ static GenerateResult decode_edit_plan_result(
         result.pcm.size(), (size_t) state.output_samples * AUDIO_CHANNELS));
     apply_pending_waveform_splice(artifact, result.pcm);
     report(EDIT_STAGE_VAE, EDIT_PROGRESS_COMPLETE, EDIT_PROGRESS_TOTAL);
-    if (state.generation.low_memory) engine.free_vae();
+    vae_phase.release();
     populate_metadata(state.generation, result);
     return result;
 }
@@ -2034,7 +2134,17 @@ static void populate_metadata(const GenerationState & state, GenerateResult & re
 
 GenerateResult Engine::generate(const GenerateParams & params, const ProgressFn & progress) const {
     Impl & engine = *impl_;
-    CancellationScope cancellation_scope(engine.cancel_flag);
+    engine.vae_label.clear();
+    engine.vae_pending = false;
+    GenerateResult result = generate_unlabelled(params, progress);
+    result.vae_backend    = engine.vae_label.empty() ? detail::VAE_GGML_BACKEND : engine.vae_label;
+    result.coreml_pending = engine.vae_pending;
+    return result;
+}
+
+GenerateResult Engine::generate_unlabelled(const GenerateParams & params, const ProgressFn & progress) const {
+    Impl & engine = *impl_;
+    EngineCancel::Call cancellation_scope(engine.canceller);
 
     GenerateResult result;
     result.sample_rate = engine.sr;
@@ -2098,7 +2208,7 @@ static void validate_understand_request(const UnderstandParams & params) {
 
 UnderstandResult Engine::understand(const UnderstandParams & params, const ProgressFn & progress) const {
     Impl & engine = *impl_;
-    CancellationScope cancellation_scope(engine.cancel_flag);
+    EngineCancel::Call cancellation_scope(engine.canceller);
 
     UnderstandResult result;
     if (engine.cancel_flag.load()) {
@@ -2119,12 +2229,13 @@ UnderstandResult Engine::understand(const UnderstandParams & params, const Progr
     StageDump  dump(engine.opts.dump_stages_dir, engine.opts.verbose);
 
     engine.ensure_vae(true);
+    LowMemoryVaePhase<Engine::Impl> vae_phase(engine, low_memory);
     EncodedAudio source;
     if (!encode_audio(*engine.vae, params.audio, "source", "00_source_latent", report,
                       engine.opts.verbose, dump, timing, source)) {
         return result;
     }
-    if (low_memory) engine.free_vae();
+    vae_phase.release();
 
     if (!report("tok", 0, 1)) return result;
     engine.ensure_tok();
@@ -2164,7 +2275,30 @@ UnderstandResult Engine::understand(const UnderstandParams & params, const Progr
     return result;
 }
 
-void        Engine::cancel() const { impl_->cancel_flag.store(true); }
+void        Engine::cancel() const { impl_->canceller.cancel(); }
+
+std::string Engine::coreml_status() const {
+    return impl_->vae_coreml ? impl_->vae_coreml->status_json() : std::string("{}");
+}
+
+std::string Engine::coreml_construction() const {
+    return impl_->vae_coreml ? impl_->vae_coreml->construction_json() : std::string("{}");
+}
+
+std::string Engine::coreml_prewarm(CoremlOptions::Prewarm scope, bool wait) const {
+    if (!impl_->vae_coreml) return "{}";
+    if (!wait) return impl_->vae_coreml->prewarm(scope, false, !impl_->keep_stages);
+    const EngineCancel::Wait cancelled(impl_->canceller);
+    return impl_->vae_coreml->prewarm(scope, true, !impl_->keep_stages, cancelled.stop());
+}
+
+bool Engine::coreml_wait(int64_t timeout_ms) const {
+    if (!impl_->vae_coreml) return false;
+    // A readiness poll has nothing to cancel.
+    if (timeout_ms == 0) return impl_->vae_coreml->wait(0);
+    const EngineCancel::Wait cancelled(impl_->canceller);
+    return impl_->vae_coreml->wait(timeout_ms, cancelled.stop());
+}
 int         Engine::sample_rate() const { return impl_->sr; }  // cached; VAE loaded lazily
 std::string Engine::backend_name() const { return impl_->backend ? ggml_backend_name(impl_->backend) : "cpu"; }
 

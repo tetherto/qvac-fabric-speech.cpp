@@ -21,7 +21,19 @@
 //
 // Decode uses backend-adaptive overlapping windows for bounded memory on long
 // inputs. Encode is not windowed and allocates one full graph.
+//
+// Core ML (Apple, AUDIOGEN_COREML builds): the decode runs on a Core ML
+// sidecar of the decoder, mostly on the Neural Engine, once one is loaded. The
+// sidecar is either prebuilt next to the GGUF (`vae-BF16.gguf` ->
+// `vae-decoder.mlmodelc`, the quant tag dropped) or, with
+// VaeOptions::coreml.cache_dir set and macOS 15 or later, generated from the
+// GGUF's own decoder weights into that cache. Either loads in the background:
+// load() never waits for it, the first decode requests it, and until it is
+// ready each decode runs on ggml (last_decode_coreml_pending()). A decode waits
+// for a load only when this host loaded the sidecar quickly before (a warm
+// hint) and the load would finish before the ggml decode would.
 
+#include "audiogen-cpp/coreml_options.h"
 #include "audiogen-cpp/export.h"
 
 #include <functional>
@@ -43,7 +55,14 @@ struct VaeOptions {
                                // EngineOptions::backends_dir. Empty when loaded
                                // via Engine (which loads the modules once up
                                // front); set for a standalone Vae::load on arm64.
+    // The decoder's Core ML sidecar (audiogen-cpp/coreml_options.h) for a
+    // standalone Vae; an Engine's VAE uses EngineOptions::coreml instead.
+    CoremlOptions coreml;
 };
+
+namespace detail {
+struct VaeAccess;
+}  // namespace detail
 
 class AUDIOGEN_API Vae {
 public:
@@ -80,7 +99,19 @@ public:
     int         upsample_factor() const;  // 1920
     std::string backend_name() const;
 
+    // What the last decode ran on: "ggml", or the Core ML label of the
+    // sidecar's compute units ("coreml-all", "coreml-ane", "coreml-gpu",
+    // "coreml-cpu"). "ggml" before any decode.
+    std::string last_decode_backend() const;
+    // True when the last decode ran on ggml only because the Core ML sidecar
+    // was not ready yet (still generating, compiling or loading).
+    bool last_decode_coreml_pending() const;
+    // Core ML status of the decoder as JSON (see Engine::coreml_status); "{}"
+    // in builds without AUDIOGEN_COREML.
+    std::string coreml_status() const;
+
 private:
+    friend struct detail::VaeAccess;
     Vae();
     struct Impl;
     std::unique_ptr<Impl> impl_;

@@ -1,21 +1,20 @@
 #include "audiogen-cpp/acestep/vae.h"
 
 #include "vae_ggml.h"              // internal: VaeModel + vae_model_*
+#include "vae_access.h"
+#include "vae_coreml.h"
+#include "vae_coreml_windows.h"
 #include "vae_encode_windows.h"
 
 #include "acestep/backend_registry.h"
 #include "acestep/engine_backends.h"
 
-#ifdef AUDIOGEN_USE_COREML
-#include "coreml/vae-decoder.h"
-#include "vae_coreml_path.h"
-#include "vae_coreml_windows.h"
-#endif
-
 #include "ggml-backend.h"
 
 #include <cstdio>
 #include <cstdlib>
+#include <chrono>
+#include <mutex>
 #include <stdexcept>
 
 namespace tts_cpp::acestep {
@@ -24,45 +23,29 @@ struct Vae::Impl {
     ggml_backend_t backend = nullptr;  // owned
     VaeModel *     model   = nullptr;
     std::string    backend_name = "CPU";
-#ifdef AUDIOGEN_USE_COREML
-    acestep_coreml_vae_context * coreml = nullptr;  // owned; nullptr = ggml decode
-#endif
+    // The decoder's Core ML stage: owned by this Vae when loaded standalone,
+    // shared with the Engine otherwise. Null: ggml only.
+    std::shared_ptr<detail::vae_coreml_stage> coreml;
+    // The ggml weights came from the file the Core ML decoder is generated
+    // from (vae_coreml_stage::serves_loaded_source). When false, no decode of
+    // this Vae acquires the decoder.
+    bool coreml_source_ok = true;
+
+    mutable std::mutex  last_mu;
+    mutable std::string last_backend = detail::VAE_GGML_BACKEND;
+    mutable bool        last_pending = false;
 
     ~Impl() {
         if (model) vae_model_free(model);
         if (backend) ggml_backend_free(backend);
-#ifdef AUDIOGEN_USE_COREML
-        if (coreml) acestep_coreml_vae_free(coreml);
-#endif
     }
 };
 
-#ifdef AUDIOGEN_USE_COREML
-enum class CoremlDecodeStatus { done, unavailable, cancelled };
+namespace {
 
-// ACESTEP_COREML_STRICT turns the silent ggml fallback into a decode failure,
-// so a parity or benchmark run cannot accidentally measure ggml and report it
-// as Core ML. A production decode never sets it.
-static bool coreml_strict() { return std::getenv("ACESTEP_COREML_STRICT") != nullptr; }
+enum class CoremlDecodeStatus { done, too_short, failed, cancelled };
 
-static acestep_coreml_vae_context * load_coreml_sidecar(const std::string & gguf_path, bool verbose) {
-    if (std::getenv("ACESTEP_COREML_DISABLE")) return nullptr;
-    const std::string path = coreml_vae_sidecar_path(gguf_path);
-    acestep_coreml_vae_context * ctx = acestep_coreml_vae_init(path.c_str());
-    if (verbose) {
-        if (ctx) {
-            fprintf(stderr, "[acestep-vae] Core ML decoder sidecar loaded (%s, window %lld frames, %s)\n",
-                    path.c_str(), (long long) acestep_coreml_vae_window_frames(ctx),
-                    acestep_coreml_vae_backend_label(ctx));
-        } else {
-            fprintf(stderr, "[acestep-vae] no Core ML decoder sidecar at %s; using ggml\n", path.c_str());
-        }
-    }
-    return ctx;
-}
-
-static void copy_window_core(const VaeCoremlWindow & w, const std::vector<float> & pcm_win,
-                             std::vector<float> & pcm_out) {
+void copy_window_core(const VaeCoremlWindow & w, const std::vector<float> & pcm_win, std::vector<float> & pcm_out) {
     const size_t samples_per_frame = (size_t) VAE_ENCODER_UPSAMPLE * VAE_PCM_CHANNELS;
     const size_t core_off = (size_t) (w.core_a - w.win_a) * samples_per_frame;
     const size_t core_len = (size_t) (w.core_b - w.core_a) * samples_per_frame;
@@ -70,21 +53,23 @@ static void copy_window_core(const VaeCoremlWindow & w, const std::vector<float>
     std::copy(pcm_win.begin() + core_off, pcm_win.begin() + core_off + core_len, pcm_out.begin() + dst);
 }
 
-static CoremlDecodeStatus coreml_decode(acestep_coreml_vae_context * ctx, const float * latent, int T_latent,
-                                        std::vector<float> & pcm_out, const Vae::ProgressCb & on_progress) {
-    const int window_frames = (int) acestep_coreml_vae_window_frames(ctx);
-    const std::vector<VaeCoremlWindow> plan =
-        vae_coreml_plan_windows(T_latent, window_frames, VAE_COREML_OVERLAP);
-    if (plan.empty()) return CoremlDecodeStatus::unavailable;
+// The whole decode on the acquired decoder, in fixed overlapped windows of its
+// exported length (the last one end-aligned), with the trimmed-core stitching
+// of the ggml chunked decode.
+CoremlDecodeStatus coreml_decode(detail::vae_coreml_decoder & dec, const float * latent, int T_latent,
+                                 std::vector<float> & pcm_out, const Vae::ProgressCb & on_progress) {
+    const int window_frames = dec.window();
+    const std::vector<VaeCoremlWindow> plan = vae_coreml_plan_windows(T_latent, window_frames, VAE_COREML_OVERLAP);
+    if (plan.empty()) return CoremlDecodeStatus::too_short;
 
     pcm_out.assign((size_t) T_latent * VAE_ENCODER_UPSAMPLE * VAE_PCM_CHANNELS, 0.0f);
     std::vector<float> pcm_win((size_t) window_frames * VAE_ENCODER_UPSAMPLE * VAE_PCM_CHANNELS);
     const int n_windows = (int) plan.size();
     for (int i = 0; i < n_windows; ++i) {
         const VaeCoremlWindow & w = plan[i];
-        if (acestep_coreml_vae_decode(ctx, latent + (size_t) w.win_a * VAE_LATENT_CHANNELS, pcm_win.data()) != 0) {
+        if (!dec.decode(latent + (size_t) w.win_a * VAE_LATENT_CHANNELS, pcm_win.data())) {
             pcm_out.clear();
-            return CoremlDecodeStatus::unavailable;
+            return CoremlDecodeStatus::failed;
         }
         copy_window_core(w, pcm_win, pcm_out);
         if (on_progress && !on_progress(i + 1, n_windows)) {
@@ -94,13 +79,16 @@ static CoremlDecodeStatus coreml_decode(acestep_coreml_vae_context * ctx, const 
     }
     return CoremlDecodeStatus::done;
 }
-#endif
+
+}  // namespace
 
 Vae::Vae() : impl_(std::make_unique<Impl>()) {}
 Vae::~Vae() = default;
 
-std::unique_ptr<Vae> Vae::load(const std::string & gguf_path, const VaeOptions & opts) {
+std::unique_ptr<Vae> detail::VaeAccess::load(const std::string & gguf_path, const VaeOptions & opts,
+                                             std::shared_ptr<vae_coreml_stage> stage) {
     std::unique_ptr<Vae> v(new Vae());
+    v->impl_->coreml = std::move(stage);
 
     // The two custom ops (col2im_1d, snake) have CPU, Metal and Vulkan kernels
     // in the fabric ggml, so the decode/encode graph can run on a GPU
@@ -122,45 +110,138 @@ std::unique_ptr<Vae> Vae::load(const std::string & gguf_path, const VaeOptions &
     if (!backend) throw std::runtime_error("acestep-vae: failed to init backend '" + opts.backend + "'");
     v->impl_->backend = backend;
 
-    VaeModel * model = vae_model_load(gguf_path, backend, opts.with_encoder, opts.verbose);
+    // The identity of the file the weights were read from, compared with the
+    // one the decoder's slot generates from, at every (re)load.
+    const std::shared_ptr<detail::vae_coreml_stage> & stage_ref = v->impl_->coreml;
+    bool source_ok = true;
+    VaeModel * model = vae_model_load(gguf_path, backend, opts.with_encoder, opts.verbose, [&](int fd) {
+        if (stage_ref && stage_ref->active()) source_ok = stage_ref->serves_loaded_source(fd);
+    });
     if (!model) throw std::runtime_error("acestep-vae: failed to load VAE GGUF: " + gguf_path);
     v->impl_->model = model;
+    v->impl_->coreml_source_ok = source_ok;
+    if (!source_ok) {
+        fprintf(stderr,
+                "[acestep-vae] %s is not the file the Core ML VAE decoder is generated from (it was replaced "
+                "after the engine was created); this VAE decodes on ggml%s\n",
+                gguf_path.c_str(), v->impl_->coreml->strict() ? ", which the Core ML strict policy refuses" : "");
+    }
     const char * bn   = ggml_backend_name(backend);
     v->impl_->backend_name = bn ? bn : "CPU";
-#ifdef AUDIOGEN_USE_COREML
-    v->impl_->coreml = load_coreml_sidecar(gguf_path, opts.verbose);
-#endif
+    return v;
+}
+
+bool detail::VaeAccess::coreml_source_ok(const Vae & v) { return v.impl_->coreml_source_ok; }
+
+std::unique_ptr<Vae> Vae::load(const std::string & gguf_path, const VaeOptions & opts) {
+    // The Core ML stage first: it validates the options, may throw under
+    // strict, and starts any construction work (prewarm all) while the ggml
+    // weights load. A standalone Vae has no low-memory mode, so a construction
+    // load is kept.
+    std::shared_ptr<detail::vae_coreml_stage> stage =
+        detail::vae_coreml_stage::create(gguf_path, opts.coreml,
+                                         /*memory_degrade=*/opts.coreml.memory_budget_bytes.has_value() &&
+                                             opts.coreml.memory_degrade.value_or(false),
+                                         /*release_after_construction=*/false);
+    std::unique_ptr<Vae> v = detail::VaeAccess::load(gguf_path, opts, stage);
+    if (opts.verbose && stage) {
+        fprintf(stderr, "[acestep-vae] Core ML decoder: route %s%s%s\n", stage->route().route.c_str(),
+                stage->route().reason.empty() ? "" : ", ", stage->route().reason.c_str());
+    }
     return v;
 }
 
 std::vector<float> Vae::decode(const std::vector<float> & latent, int T_latent,
                                const ProgressCb & on_progress) const {
-    std::vector<float> pcm;
     if (T_latent <= 0 || (int) latent.size() < T_latent * 64) return {};
-#ifdef AUDIOGEN_USE_COREML
-    if (impl_->coreml) {
-        switch (coreml_decode(impl_->coreml, latent.data(), T_latent, pcm, on_progress)) {
-            case CoremlDecodeStatus::done:      return pcm;
-            case CoremlDecodeStatus::cancelled: return {};
-            case CoremlDecodeStatus::unavailable:
-                if (coreml_strict()) {
-                    fprintf(stderr, "[acestep-vae] Core ML decode unavailable for T_latent=%d and "
-                                    "ACESTEP_COREML_STRICT is set; failing instead of ggml fallback\n", T_latent);
-                    return {};
-                }
-                if (std::getenv("AUDIOGEN_VERBOSE"))
-                    fprintf(stderr, "[acestep-vae] Core ML decode unavailable for T_latent=%d; using ggml\n", T_latent);
-                break;
+    std::string backend = detail::VAE_GGML_BACKEND;
+    bool        pending = false;
+    auto finish = [&](std::vector<float> pcm) {
+        std::lock_guard<std::mutex> lock(impl_->last_mu);
+        impl_->last_backend = backend;
+        impl_->last_pending = pending;
+        return pcm;
+    };
+
+    // A VAE loaded from another file than the decoder's never acquires it.
+    if (impl_->coreml && impl_->coreml->active() && !impl_->coreml_source_ok) {
+        if (impl_->coreml->strict()) {
+            fprintf(stderr, "[acestep-vae] the loaded VAE GGUF is not the file the Core ML decoder is generated "
+                            "from and Core ML strict policy is enabled; failing instead of the ggml decode\n");
+            return finish({});
         }
-    } else if (coreml_strict()) {
-        fprintf(stderr, "[acestep-vae] no Core ML sidecar loaded and ACESTEP_COREML_STRICT is set; "
-                        "failing instead of ggml fallback\n");
-        return {};
+    } else if (impl_->coreml && impl_->coreml->active() && !impl_->coreml->eligible(T_latent)) {
+        // Shorter than the decoder's window: it could not serve this decode
+        // even when ready, so it is neither requested nor pending.
+        if (impl_->coreml->strict()) {
+            fprintf(stderr, "[acestep-vae] T_latent=%d is shorter than the Core ML window (%d) and Core ML strict "
+                            "policy is enabled; failing instead of the ggml decode\n",
+                    T_latent, impl_->coreml->route().window_frames);
+            return finish({});
+        }
+    } else if (impl_->coreml && impl_->coreml->active()) {
+        // The backend of the whole decode is chosen here, once: the decoder
+        // this acquisition returns, or ggml.
+        detail::vae_coreml_call call;
+        try {
+            call = impl_->coreml->acquire(T_latent);
+        } catch (const std::exception & e) {
+            fprintf(stderr, "[acestep-vae] %s\n", e.what());
+            return finish({});
+        }
+        pending = call.pending;
+        if (call.cancelled) return finish({});  // neither backend: the caller cancelled
+        if (call.decoder) {
+            const bool strict = impl_->coreml->strict();
+            std::vector<float> pcm;
+            switch (coreml_decode(*call.decoder, latent.data(), T_latent, pcm, on_progress)) {
+                case CoremlDecodeStatus::done:
+                    backend = call.decoder->label();
+                    return finish(std::move(pcm));
+                case CoremlDecodeStatus::cancelled:
+                    backend = call.decoder->label();
+                    return finish({});
+                case CoremlDecodeStatus::too_short:
+                    if (strict) {
+                        fprintf(stderr, "[acestep-vae] T_latent=%d is shorter than the Core ML window (%d) and "
+                                        "Core ML strict policy is enabled; failing instead of the ggml decode\n",
+                                T_latent, call.decoder->window());
+                        return finish({});
+                    }
+                    break;  // today's rule: a latent shorter than one window decodes on ggml
+                case CoremlDecodeStatus::failed:
+                    // Retire the sidecar and redo the whole decode on ggml, so
+                    // no output mixes a failed decode's windows.
+                    fprintf(stderr, "[acestep-vae] Core ML VAE decoder (%s) failed; retiring it%s\n",
+                            call.decoder->label(), strict ? "" : ", decoding on ggml");
+                    if (call.retire) call.retire("a Core ML VAE prediction failed");
+                    if (strict) return finish({});
+                    break;
+            }
+        }
     }
-#endif
-    int T_audio = vae_model_decode(impl_->model, latent.data(), T_latent, pcm, on_progress);
-    if (T_audio < 0) return {};
-    return pcm;
+    // A whole decode on ggml trains the Core ML deadline's cost per frame,
+    // timed without the caller's progress callbacks.
+    using steady = std::chrono::steady_clock;
+    steady::duration in_callbacks{};
+    ProgressCb timed_progress;
+    if (on_progress) {
+        timed_progress = [&on_progress, &in_callbacks](int done, int total) {
+            const steady::time_point t = steady::now();
+            const bool go_on = on_progress(done, total);
+            in_callbacks += steady::now() - t;
+            return go_on;
+        };
+    }
+    std::vector<float> pcm;
+    const steady::time_point t0 = steady::now();
+    const int T_audio = vae_model_decode(impl_->model, latent.data(), T_latent, pcm, timed_progress);
+    if (T_audio < 0) return finish({});
+    if (impl_->coreml) {
+        impl_->coreml->record_ggml_decode(
+            T_latent, std::chrono::duration_cast<std::chrono::milliseconds>(steady::now() - t0 - in_callbacks).count());
+    }
+    return finish(std::move(pcm));
 }
 
 std::vector<float> Vae::encode(const std::vector<float> & pcm_interleaved, int frames,
@@ -185,6 +266,20 @@ std::vector<float> Vae::encode(const std::vector<float> & pcm_interleaved, int f
         return encoded;
     };
     return encode_vae_pcm_bounded(pcm_interleaved, frames, encode, T_latent_out);
+}
+
+std::string Vae::last_decode_backend() const {
+    std::lock_guard<std::mutex> lock(impl_->last_mu);
+    return impl_->last_backend;
+}
+
+bool Vae::last_decode_coreml_pending() const {
+    std::lock_guard<std::mutex> lock(impl_->last_mu);
+    return impl_->last_pending;
+}
+
+std::string Vae::coreml_status() const {
+    return impl_->coreml ? impl_->coreml->status_json() : std::string("{}");
 }
 
 bool        Vae::has_encoder() const   { return vae_model_has_encoder(impl_->model); }

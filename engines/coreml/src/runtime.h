@@ -134,6 +134,11 @@ struct Job {
 
     std::atomic<bool> hinted_at_start{false};
     std::atomic<bool> wait_expired{false};  // a bounded wait expired on this slow load
+    // A load that started on a stale hint (mu): that hint's stale_until and
+    // its expected warm time (-1: none). Finishing within 1.5 x that time
+    // shows the plan is warm again, and the load refreshes the hint.
+    std::optional<int64_t> stale_until_at_start;
+    int64_t stale_w_ms = -1;
 };
 
 struct SlotCore {
@@ -233,6 +238,10 @@ public:
     // Pins this image before work is requested; never under mu. Every
     // entry point that reaches request_locked() calls it first.
     void pin_for_work();
+    // Route generate on decode demand: when the slot has no artifact and no
+    // job yet, runs its LookupFn outside mu and adopts a cached artifact
+    // (with its hint path) as a finished preparation would. Never under mu.
+    void adopt_cached(const std::shared_ptr<SlotCore> & c);
     Stats stats_snapshot();
     std::vector<std::string> events_snapshot();
 
@@ -330,7 +339,7 @@ private:
     // in a row: kMaxRegenerations for a vanished artifact, 1 after a
     // rejection); the others fail with `e`.
     void regenerate(const std::shared_ptr<Job> & j, const Error & e, int limit);
-    std::optional<HintView> record_hint(const Job & j, int64_t ms, bool warm);
+    std::optional<HintView> record_hint(const Job & j, int64_t ms, bool warm, bool refresh = false);
     void write_stale(const std::string & path, const std::string & artifact);
     WaitPlan plan_bounded_wait_locked(SlotCore & c, std::optional<Clock::time_point> deadline,
                                       Clock::time_point now, Graveyard & gy);
