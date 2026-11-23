@@ -90,6 +90,12 @@ QVAC_PLUGIN_EXPORT int qvac_coreml_plugin_slot_only(const char * dir, int on_wor
     return 0;
 }
 
+QVAC_PLUGIN_EXPORT int qvac_coreml_plugin_empty_group() {
+    auto group = Manager::instance()->issue_group(GroupKind::construction, {}, true);
+    const auto result = group->wait();
+    return result.success && result.nothing_to_prepare;
+}
+
 // arm_exit_guard() from a worker thread (on_worker) or the calling thread.
 QVAC_PLUGIN_EXPORT int qvac_coreml_plugin_arm(int on_worker) {
     if (!on_worker) return arm_exit_guard() ? 1 : 0;

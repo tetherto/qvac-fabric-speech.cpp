@@ -10,6 +10,7 @@
 // The LM and the two codec halves are separate GGUFs, so a text-only build
 // can skip the encoder.
 
+#include "audio8/codec_coreml.h"
 #include "ggml.h"
 #include "ggml-backend.h"
 #include "sched_dispatch.h"
@@ -22,11 +23,6 @@
 #include <vector>
 
 #include "audio8/tokenizer.h"
-
-// The Core ML synthesis sidecar (src/audio8/coreml/codec-synth.h), opaque here
-// so the model struct compiles on every platform; only TTS_CPP_USE_COREML
-// builds ever hold a non-null one.
-struct audio8_coreml_codec_context;
 
 namespace tts_cpp {
 namespace audio8 {
@@ -348,11 +344,7 @@ struct codec_model {
     size_t synthesis_scratch_budget = 0;
     int analysis_block_columns = 128;
 
-    // Core ML sidecar for the synthesis stack (decoder only; TTS_CPP_COREML
-    // builds, compiled model next to the GGUF). Synthesis runs in windows of
-    // the exported width and falls back to the ggml blocks when it cannot.
-    audio8_coreml_codec_context * coreml = nullptr;
-    bool synthesis_on_coreml = false;
+    std::shared_ptr<codec_coreml> coreml;
 
     conv_weights enc_in;
     std::vector<dac_stage> enc_stages;
@@ -411,7 +403,9 @@ bool peek_codec_header(const std::string & path, codec_header & header,
 
 bool load_codec(const std::string & path, int n_gpu_layers,
                 const std::string & backend, codec_model & model,
-                std::string * error);
+                std::string * error, const CoremlOptions & coreml = {},
+                codec_budget budget = codec_budget::unprojected,
+                const std::function<void()> & upload_observer = {});
 void free_codec(codec_model & model);
 
 // Prompt frames, laid out the way the model reads them: row 0 is the semantic
@@ -539,11 +533,15 @@ int synthesis_context_frames(const codec_model & model);
 size_t synthesis_scratch_budget(size_t configured, size_t free_bytes, size_t total_bytes);
 
 // codes: [num_codebooks, n_frames] row-major. Writes n_frames * frame_size
-// samples at the codec sample rate.
+// samples at the codec sample rate. An unlatched route may wait for Core ML.
+// Use acquisition_cancel to interrupt that wait without polling the block hook.
 bool decode_codes(codec_model & model, const int32_t * codes, int n_frames,
                   int n_threads, const cancel_hook & cancel,
                   std::vector<float> & pcm_out, std::string * error,
-                  decode_taps * taps = nullptr, decode_timing * timing = nullptr);
+                  decode_taps * taps = nullptr,
+                  decode_timing * timing = nullptr,
+                  const codec_coreml_call * call = nullptr,
+                  const std::atomic<bool> * acquisition_cancel = nullptr);
 
 // The post transformer a chunk at a time: each call computes frames [done,
 // end) from their codes and the keys and values the previous chunk left for its
@@ -568,15 +566,19 @@ std::vector<int32_t> codebook_rows(const std::vector<int32_t> & frames, int book
                                    int end);
 
 class window_stream;
-std::unique_ptr<window_stream> open_synthesis_stream(codec_model & model,
-                                                     const std::vector<int32_t> & frames,
-                                                     int n_threads, const cancel_hook & cancel,
-                                                     const std::function<void(const std::vector<float> &)> & emit = {});
+std::unique_ptr<window_stream> open_synthesis_stream(
+    codec_model & model, const codec_coreml_call & call,
+    const std::vector<int32_t> & frames, int n_threads,
+    const cancel_hook & cancel,
+    const std::function<void(const std::vector<float> &)> & emit = {});
 
-bool finish_synthesis_stream(codec_model & model, window_stream & stream,
-                             const int32_t * codes, int n_frames, int n_threads,
-                             const cancel_hook & cancel, std::vector<float> & pcm_out,
-                             std::string * error, decode_timing * timing);
+bool finish_synthesis_stream(codec_model & model,
+                             const codec_coreml_call & call,
+                             window_stream & stream, const int32_t * codes,
+                             int n_frames, int n_threads,
+                             const cancel_hook & cancel,
+                             std::vector<float> & pcm_out, std::string * error,
+                             decode_timing * timing);
 
 // The convolutional encoder's output, [latent_dim, 4 * frames], and what the
 // downsampling stages and the pre-module make of it, [latent_dim, frames].

@@ -396,6 +396,17 @@ void case_op_layout() {
     CHECK(f32s(out[4]) == t1);
 }
 
+void case_op_tile_audio8_bias() {
+    const std::string source = "source \"bias\" f32 [2,3]\n";
+    MemSource data({TT{"bias", T_F32, {2, 3}, {1, -2, 3, 4, -5, 6}}}, {});
+    auto out = run(recipe_text("t", zeros64(), source,
+                               {blob("fp32", 18, "f32(tile(t(\"bias\"), 1, 3))")}), data);
+    CHECK(out.size() == 1);
+    if (out.size() != 1) return;
+    CHECK(f32s(out[0]) == std::vector<float>({1, -2, 3, 1, -2, 3, 1, -2, 3,
+                                            4, -5, 6, 4, -5, 6, 4, -5, 6}));
+}
+
 void case_parler_examples() {
     // Parler DAC phase kernel on a small layer: w [IC, OC, 2s]; out[r*OC+o, i, 0] =
     // w[i,o,r+s], out[r*OC+o, i, 1] = w[i,o,r].
@@ -1932,6 +1943,7 @@ int main(int argc, char ** argv) {
                          {"dtype-promotion", case_dtype_promotion},
                          {"op-recip-clip", case_op_recip_clip},
                          {"op-layout", case_op_layout},
+                         {"op-tile-audio8-bias", case_op_tile_audio8_bias},
                          {"op-slice-neg-consts", case_op_slice_neg_consts},
                          {"op-lit", case_op_lit},
                          {"op-sub-sqrt", case_op_sub_sqrt},

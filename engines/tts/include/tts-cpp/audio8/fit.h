@@ -25,6 +25,7 @@
 //
 // See tts-cpp/fit.h for the status contract and result layout.
 
+#include "tts-cpp/coreml_options.h"
 #include "tts-cpp/export.h"
 #include "tts-cpp/fit.h"
 
@@ -74,6 +75,9 @@ struct FitOptions {
     // Free-memory headroom that must remain on the device for the projection
     // to count as fitting.
     uint64_t margin_bytes = 256ull * 1024 * 1024;
+
+    // Same Core ML route policy as EngineOptions::coreml.
+    CoremlOptions coreml;
 };
 
 // Project the model set + workload in `opts` against the device memory

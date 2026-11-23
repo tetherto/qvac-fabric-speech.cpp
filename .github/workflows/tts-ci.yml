@@ -1092,6 +1092,60 @@ jobs:
             audio8-coreml-fixture-fallback/audio8-codec-decoder-f16.gguf
           ./build/test-audio8-codec-coreml-parity
 
+      # Reuse the pinned decoder already staged above. The binaries are run
+      # directly, so missing fixtures and skipped gates fail the step.
+      - name: Test (generated Audio8 codec, pinned checkpoint)
+        if: runner.os == 'macOS'
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          set -euo pipefail
+          py=.venv-coreml/bin/python
+          if [ ! -x "$py" ]; then py=.venv-cosyvoice-coreml/bin/python; fi
+          if [ ! -x "$py" ]; then py=.venv-parler-coreml/bin/python; fi
+          test -x "$py"
+          template=engines/tts/coreml-templates/audio8-codec-w64
+          prebuilt="$PWD/audio8-coreml-fixture/audio8-codec-decoder-f16.gguf"
+          "$py" engines/coreml/python/coreml_template.py --tool build/qvac-coreml-tool real \
+            --template-dir "$template" --gguf "$prebuilt"
+          tmp=$(mktemp -d "$PWD/audio8-generated.XXXXXX")
+          export QVAC_BENCH_HOSTS="$tmp/hosts"
+          host=
+          cleanup() {
+            if [ -n "$host" ]; then scripts/coreml/fresh-host.sh cleanup "$host"; fi
+            rm -rf "$tmp"
+          }
+          trap cleanup EXIT
+          gguf="$tmp/audio8-codec-decoder-f16.gguf"
+          ln -s "$prebuilt" "$gguf"
+          ./build/test-audio8-codec-coreml-parity --unvalidated "$gguf" "$tmp/cache"
+
+          # Exercise the generated route through a dev-only template copy.
+          # The production unit allowlist is populated from validated memory
+          # measurements. This fixture grants admission solely for the test.
+          "$py" - "$template" "$tmp/templates/audio8-codec-w64" <<'PY'
+          import json
+          import shutil
+          import sys
+          from pathlib import Path
+          target = Path(sys.argv[2])
+          shutil.copytree(sys.argv[1], target)
+          path = target / "template.json"
+          data = json.loads(path.read_text())
+          data["memory"]["validated_for"] = [
+              {"units": "all", "os": "test fixture", "chip": "test fixture"}
+          ]
+          path.write_text(json.dumps(data))
+          PY
+          host=$(scripts/coreml/fresh-host.sh new build/test-audio8-codec-coreml-parity |
+            "$py" -c 'import json, sys; print(json.load(sys.stdin)["binary"])')
+          QVAC_COREML_TEMPLATE_DIR="$tmp/templates" \
+            "$host" --generated "$gguf" "$tmp/cache"
+          scripts/coreml/fresh-host.sh cleanup "$host"
+          host=$(scripts/coreml/fresh-host.sh new build/test-audio8-codec-coreml-parity |
+            "$py" -c 'import json, sys; print(json.load(sys.stdin)["binary"])')
+          "$host" --prebuilt-overlap "$prebuilt"
+
       # Synthesis benchmark, ggml Metal vs the Core ML sidecar on the runner;
       # the markdown table lands in the job summary. The binary fails on
       # parity below the gate, so the numbers are gated, not decorative.

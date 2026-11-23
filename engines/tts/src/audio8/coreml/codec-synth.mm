@@ -7,8 +7,8 @@
 
 #include "audio8/coreml/codec-synth.h"
 
-#include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -28,32 +28,21 @@ uint16_t encode_float16(float f) {
     return out;
 }
 
-struct placement {
-    MLComputeUnits units;
-    const char *   label;
-};
-
-constexpr placement CPU_PLACEMENT = {MLComputeUnitsCPUOnly, "coreml-cpu"};
-constexpr placement GPU_PLACEMENT = {MLComputeUnitsCPUAndGPU, "coreml-gpu"};
-constexpr placement ANE_PLACEMENT = {MLComputeUnitsCPUAndNeuralEngine, "coreml-ane"};
-constexpr placement ALL_PLACEMENT = {MLComputeUnitsAll, "coreml-all"};
-
-placement requested_placement() {
-    const char * env = std::getenv("AUDIO8_COREML_COMPUTE_UNITS");
-    const std::string requested = env != nullptr ? env : "";
-    if (requested == "cpu_only") return CPU_PLACEMENT;
-    if (requested == "cpu_and_gpu") return GPU_PLACEMENT;
-    if (requested == "cpu_and_ane") return ANE_PLACEMENT;
-    return ALL_PLACEMENT;
+MLComputeUnits requested_placement(const std::string & requested) {
+    if (requested == "cpu_only")
+        return MLComputeUnitsCPUOnly;
+    if (requested == "cpu_and_gpu")
+        return MLComputeUnitsCPUAndGPU;
+    if (requested == "cpu_and_ane")
+        return MLComputeUnitsCPUAndNeuralEngine;
+    return MLComputeUnitsAll;
 }
 
-MLModel * load_model(const char * path_mlmodelc, std::string * label) {
+MLModel * load_model(const char * path_mlmodelc, const char * units) {
     NSString * path = [[NSString alloc] initWithUTF8String:path_mlmodelc];
     if (path == nil) return nil;
-    const placement where = requested_placement();
-    *label = where.label;
     MLModelConfiguration * config = [[MLModelConfiguration alloc] init];
-    config.computeUnits = where.units;
+    config.computeUnits = requested_placement(units);
     NSError * err   = nil;
     MLModel * model = [MLModel modelWithContentsOfURL:[NSURL fileURLWithPath:path]
                                         configuration:config
@@ -107,6 +96,9 @@ int64_t validate_model_interface(MLModel * model, int64_t latent_dim, int64_t fr
     const std::vector<int64_t> out_dims = dims_of(out_constraint.shape);
     if (in_dims.size() < 2 || in_dims.back() <= 0) return 0;
     const int64_t window = in_dims.back();
+    if (window > std::numeric_limits<int>::max() ||
+        window > std::numeric_limits<int64_t>::max() / frame_size)
+        return 0;
     if (!shape_is(in_dims, latent_dim, window)) return 0;
     if (!shape_is(out_dims, 1, window * frame_size)) return 0;
     return window;
@@ -191,7 +183,6 @@ struct audio8_coreml_codec_context {
     const void * output_array       = nullptr;  // retained MLMultiArray *
     const void * prediction_options = nullptr;  // retained MLPredictionOptions *
     std::string  output_name;
-    std::string  label;
     int64_t      latent_dim = 0;
     int64_t      frame_size = 0;
     int64_t      window     = 0;
@@ -200,10 +191,9 @@ struct audio8_coreml_codec_context {
 
 namespace {
 
-audio8_coreml_codec_context * create_context(MLModel * model, const CachedIo & io,
-                                             NSString * out_name, std::string label,
-                                             int64_t latent_dim, int64_t frame_size,
-                                             int64_t window) {
+audio8_coreml_codec_context *
+create_context(MLModel * model, const CachedIo & io, NSString * out_name,
+               int64_t latent_dim, int64_t frame_size, int64_t window) {
     auto * ctx = new audio8_coreml_codec_context();
     ctx->model              = CFBridgingRetain(model);
     ctx->input_array        = CFBridgingRetain(io.input);
@@ -211,7 +201,6 @@ audio8_coreml_codec_context * create_context(MLModel * model, const CachedIo & i
     ctx->output_array       = CFBridgingRetain(io.output);
     ctx->prediction_options = CFBridgingRetain(io.options);
     ctx->output_name        = out_name.UTF8String;
-    ctx->label              = std::move(label);
     ctx->latent_dim         = latent_dim;
     ctx->frame_size         = frame_size;
     ctx->window             = window;
@@ -220,14 +209,15 @@ audio8_coreml_codec_context * create_context(MLModel * model, const CachedIo & i
 
 }  // namespace
 
-struct audio8_coreml_codec_context * audio8_coreml_codec_init(const char * path_mlmodelc,
-                                                              int64_t      latent_dim,
-                                                              int64_t      frame_size) {
-    if (path_mlmodelc == nullptr || latent_dim <= 0 || frame_size <= 0) return nullptr;
+struct audio8_coreml_codec_context *
+audio8_coreml_codec_init(const char * path_mlmodelc, int64_t latent_dim,
+                         int64_t frame_size, const char * compute_units) {
+    if (path_mlmodelc == nullptr || compute_units == nullptr ||
+        latent_dim <= 0 || frame_size <= 0)
+        return nullptr;
 
     @autoreleasepool {
-        std::string label;
-        MLModel * model = load_model(path_mlmodelc, &label);
+        MLModel * model = load_model(path_mlmodelc, compute_units);
         if (model == nil) return nullptr;
 
         NSString * in_name  = nil;
@@ -238,7 +228,7 @@ struct audio8_coreml_codec_context * audio8_coreml_codec_init(const char * path_
 
         CachedIo io;
         if (!create_cached_io(model, in_name, out_name, &io)) return nullptr;
-        return create_context(model, io, out_name, std::move(label), latent_dim, frame_size,
+        return create_context(model, io, out_name, latent_dim, frame_size,
                               window);
     }
 }
@@ -281,8 +271,4 @@ int audio8_coreml_codec_synthesize(struct audio8_coreml_codec_context * ctx,
         copy_pcm_array(out_arr, pcm, ctx->window * ctx->frame_size);
         return 0;
     }
-}
-
-const char * audio8_coreml_codec_backend_label(const struct audio8_coreml_codec_context * ctx) {
-    return ctx != nullptr ? ctx->label.c_str() : "coreml";
 }

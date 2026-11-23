@@ -3,11 +3,16 @@
 #include "audio8/internal.h"
 #include "audio8/window_stream.h"
 #include "gguf.h"
+#include "tiny_lm.h"
+#include "tts-cpp/audio8/engine.h"
+#include "tts-cpp/audio8/fit.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <initializer_list>
 #include <memory>
 #include <stdexcept>
@@ -92,7 +97,8 @@ static void write_decoder(const fs::path & path, int max_frames = 8) {
     conv("dec/0/conv", 4, 4, 1);
     tensor("dec/1/alpha", {4}, true, 1.0f);
     conv("dec/2/conv", 4, 1, 1);
-    require(gguf_write_to_file(file.get(), path.string().c_str(), false), "cannot write fixture decoder");
+    require(gguf_write_to_file(file.get(), path.u8string().c_str(), false),
+            "cannot write fixture decoder");
 }
 
 struct owned_codec {
@@ -122,6 +128,129 @@ static void compare_pcm(const std::vector<float> & got, const std::vector<float>
     }
 }
 
+// Fail a chosen prediction to exercise replay before PCM and fatal failure
+// after PCM with the production decoder and the real stream worker.
+class failing_sidecar final : public codec::codec_coreml_model {
+  public:
+    explicit failing_sidecar(int fail_on, bool throw_on_failure = false)
+        : fail_on_(fail_on), throw_on_failure_(throw_on_failure) {}
+    int window() const override { return 16; }
+    const char * label() const override { return "coreml-test"; }
+    bool synthesize(const float *, float * pcm) const override {
+        if (++calls_ == fail_on_) {
+            if (throw_on_failure_)
+                throw std::runtime_error("injected prediction exception");
+            return false;
+        }
+        std::fill_n(pcm, window() * 4, 0.5f);
+        return true;
+    }
+    void retire(const char *) const override { retired.set_value(); }
+    mutable std::promise<void> retired;
+
+  private:
+    int fail_on_;
+    bool throw_on_failure_;
+    mutable int calls_ = 0;
+};
+
+static void check_batch_prediction_exception(
+    codec::codec_model & model, const std::vector<int32_t> & rows,
+    int count, const std::vector<float> & expected) {
+    for (bool strict : {false, true}) {
+        auto sidecar = std::make_shared<failing_sidecar>(1, true);
+        auto retired = sidecar->retired.get_future();
+        const codec::codec_coreml_call call{sidecar, false, strict};
+        std::vector<float> pcm;
+        std::string error;
+        codec::decode_timing timing;
+        const bool ok = codec::decode_codes(model, rows.data(), count, 1, {},
+                                            pcm, &error, nullptr, &timing,
+                                            &call);
+        require(retired.wait_for(std::chrono::seconds(0)) ==
+                    std::future_status::ready,
+                "throwing sidecar was not retired");
+        if (strict) {
+            require(!ok && pcm.empty() &&
+                        error == "audio8: required Core ML synthesis unavailable",
+                    "strict batch did not report its prediction failure");
+        } else {
+            require(ok && timing.synthesis_backend == "ggml" && pcm == expected,
+                    "throwing batch prediction did not replay on ggml");
+        }
+    }
+}
+
+static void check_stream_failure(codec::codec_model & model,
+                                 const std::vector<int32_t> & frames,
+                                 const std::vector<int32_t> & rows,
+                                 const std::vector<float> & expected,
+                                 int fail_on) {
+    auto sidecar = std::make_shared<failing_sidecar>(fail_on);
+    auto retired = sidecar->retired.get_future();
+    const codec::codec_coreml_call call{sidecar};
+    int delivered = 0;
+    auto stream = codec::open_synthesis_stream(
+        model, call, frames, 1, {},
+        [&](const std::vector<float> &) { ++delivered; });
+    require(stream && stream->asynchronous(),
+            "selected Core ML stream unavailable");
+    const int count = static_cast<int>(frames.size()) / model.hp.num_codebooks;
+    feed_stream(*stream, count);
+    std::vector<float> pcm;
+    std::string error;
+    codec::decode_timing timing;
+    const bool ok = codec::finish_synthesis_stream(
+        model, call, *stream, rows.data(), count, 1, {}, pcm, &error, &timing);
+    require(retired.wait_for(std::chrono::seconds(0)) ==
+                std::future_status::ready,
+            "failed sidecar was not retired");
+    if (fail_on == 1) {
+        require(ok && delivered == 0 && timing.synthesis_backend == "ggml" &&
+                    pcm == expected,
+                "failed first prediction did not replay wholly on ggml");
+    } else {
+        require(!ok && delivered == 1 &&
+                    error == "audio8: codec failed after PCM delivery began",
+                "stream did not fail after delivering PCM");
+    }
+}
+
+static void
+check_stream_failure_before_finish(codec::codec_model & model,
+                                   const std::vector<int32_t> & frames,
+                                   const std::vector<int32_t> & rows) {
+    for (bool unwind : {false, true}) {
+        auto sidecar = std::make_shared<failing_sidecar>(1);
+        auto retired = sidecar->retired.get_future();
+        const codec::codec_coreml_call call{sidecar};
+        std::atomic<bool> cancel{false};
+        const auto cancelled = [&] { return cancel.load(); };
+        auto stream = codec::open_synthesis_stream(
+            model, call, frames, 1, cancelled, [](const auto &) {});
+        require(static_cast<bool>(stream), "Core ML stream unavailable");
+        const int count =
+            static_cast<int>(frames.size()) / model.hp.num_codebooks;
+        feed_stream(*stream, count);
+        require(retired.wait_for(std::chrono::seconds(5)) ==
+                    std::future_status::ready,
+                "worker did not retire its failed prediction before finish");
+        cancel = true;
+        if (unwind) {
+            stream.reset();
+            continue;
+        }
+        std::vector<float> pcm;
+        std::string error;
+        require(
+            !codec::finish_synthesis_stream(model, call, *stream, rows.data(),
+                                            count, 1, cancelled, pcm, &error,
+                                            nullptr) &&
+                error == codec::CANCELLED && pcm.empty() && !stream->emitted(),
+            "cancelled stream replayed or delivered PCM");
+    }
+}
+
 static void check_streaming_decoder(const fs::path & root) {
     constexpr int frames_count = 51;
     const auto path = root / "stream-decoder.gguf";
@@ -134,17 +263,91 @@ static void check_streaming_decoder(const fs::path & root) {
     std::vector<float> expected;
     require(codec::decode_codes(loaded.model, rows.data(), frames_count, 1, {}, expected, &error), error);
     std::vector<float> delivered;
-    auto stream = codec::open_synthesis_stream(loaded.model, frames, 1, {},
-        [&](const std::vector<float> & chunk) { delivered.insert(delivered.end(), chunk.begin(), chunk.end()); });
+    auto stream = codec::open_synthesis_stream(
+        loaded.model, {}, frames, 1, {}, [&](const std::vector<float> & chunk) {
+            delivered.insert(delivered.end(), chunk.begin(), chunk.end());
+        });
     require(static_cast<bool>(stream), "ggml stream unavailable");
     feed_stream(*stream, frames_count);
     require(!delivered.empty(), "ggml PCM delayed until finish");
     std::vector<float> result;
-    require(codec::finish_synthesis_stream(loaded.model, *stream, rows.data(), frames_count,
-                                          1, {}, result, &error, nullptr), error);
+    require(codec::finish_synthesis_stream(loaded.model, {}, *stream,
+                                           rows.data(), frames_count, 1, {},
+                                           result, &error, nullptr),
+            error);
     require(delivered == result, "callback PCM differs from returned PCM");
     compare_pcm(delivered, expected);
+    check_stream_failure(loaded.model, frames, rows, expected, 1);
+    check_stream_failure(loaded.model, frames, rows, expected, 2);
+    check_stream_failure_before_finish(loaded.model, frames, rows);
+    check_batch_prediction_exception(loaded.model, rows, frames_count, expected);
+
+    loaded.model.synthesis_block_frames = 4;
+    int calls = 0;
+    result.clear();
+    require(!codec::decode_codes(
+                loaded.model, rows.data(), frames_count, 1,
+                [&] { return calls++ >= 1; }, result, &error) &&
+                error == codec::CANCELLED && calls == 2 &&
+                result.size() == 16 &&
+                std::equal(result.begin(), result.end(), expected.begin()),
+            "batched cancellation did not keep exactly the first ggml block");
     fs::remove(path);
+}
+
+static void check_utf8_paths(const fs::path & root, const fs::path & decoder) {
+    using namespace tts_cpp;
+    const auto dir = root / fs::u8path(u8"\u97f3\u58f0-\u00e9");
+    fs::create_directory(dir);
+    const auto codec_path = dir / fs::u8path(u8"\u5fa9\u53f7.gguf");
+    fs::copy_file(decoder, codec_path);
+
+    codec::codec_header header;
+    std::string error;
+    require(codec::peek_codec_header(codec_path.u8string(), header, &error),
+            error);
+    require(header.part == "decoder", "wrong decoder header");
+
+    audio8_test::tiny_lm lm;
+    lm.num_codebooks = header.hp.num_codebooks;
+    lm.codebook_size = header.hp.semantic_codebook_size;
+    lm.semantic_end = lm.semantic_begin + lm.codebook_size - 1;
+    lm.max_seq_len = 127;
+    lm.ascii_tokenizer = true;
+    const auto lm_path = (dir / fs::u8path(u8"\u8a00\u8a9e.gguf")).u8string();
+    require(!audio8_test::write_tiny_lm_gguf(lm, lm_path).empty(),
+            "cannot write UTF-8 LM fixture");
+
+    audio8::FitOptions fit;
+    fit.lm_gguf_path = lm_path;
+    fit.codec_decoder_gguf_path = codec_path.u8string();
+    fit.backend = "cpu";
+    fit.max_frames = 3;
+    fit.coreml.use = CoremlOptions::Use::off;
+    const auto too_long = audio8::fit_params(fit);
+    require(too_long.status == FitStatus::Error &&
+                too_long.reason == "workload-too-large",
+            "the default projection prompt fit the short LM");
+    fit.prompt_tokens = 124;
+    const auto projection = audio8::fit_params(fit);
+    require(projection.status == FitStatus::Success, projection.reason);
+
+    audio8::EngineOptions options;
+    options.lm_gguf_path = lm_path;
+    options.codec_decoder_gguf_path = codec_path.u8string();
+    options.backend = "cpu";
+    options.n_threads = 1;
+    options.max_frames = 3;
+    options.greedy = true;
+    options.coreml.use = CoremlOptions::Use::off;
+    options.coreml.memory_budget_bytes = 1LL << 30;
+    audio8::Engine engine(options);
+    const auto result = engine.synthesize("a");
+    require(result.frames > 0 && result.frames <= options.max_frames &&
+                result.pcm.size() ==
+                    static_cast<size_t>(result.frames) * header.hp.frame_size &&
+                result.codec_synthesis_backend == "ggml",
+            "budgeted Core ML-off synthesis failed through UTF-8 paths");
 }
 
 int main(int argc, char ** argv) {
@@ -177,6 +380,7 @@ int main(int argc, char ** argv) {
         }
         require(std::fflush(reference.get()) == 0, "cannot flush reference PCM");
         check_streaming_decoder(root);
+        check_utf8_paths(root, decoder);
         return 0;
     } catch (const std::exception & error) {
         std::fprintf(stderr, "codec bench fixture: %s\n", error.what());
