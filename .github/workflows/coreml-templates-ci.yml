@@ -151,6 +151,17 @@ jobs:
           .venv-coreml-templates/bin/python -B engines/coreml/python/coreml_template.py report \
             --all --allow-empty --json template-gates.json
 
+      # Twin Q in q8_0 plus another block type the model ships: Sortformer
+      # v2.1 ships q8_0 and q4_0, so its twin Q mixes both (the step above
+      # covers q8_0 alone).
+      - name: Cross-seed gate, Sortformer v2.1 twin Q in q8_0 and q4_0
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          .venv-coreml-templates/bin/python -B engines/coreml/python/coreml_template.py report \
+            --template-dir engines/parakeet/coreml-templates/sortformer-diar-f410 \
+            --quant-types q8_0,q4_0 --json template-gates-sortformer.json
+
       - name: Generator tripwire (golden.txt)
         run: python3 -B engines/coreml/python/golden.py check --tool "$QVAC_COREML_TOOL"
 
@@ -161,5 +172,6 @@ jobs:
           name: coreml-template-gates
           path: |
             template-gates.json
+            template-gates-sortformer.json
             template-py.log
           if-no-files-found: ignore

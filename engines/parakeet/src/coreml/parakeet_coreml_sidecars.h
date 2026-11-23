@@ -225,6 +225,17 @@ SidecarRequest diarizer_request(const std::string & gguf_path, const DiarizerCap
 std::vector<CoremlDiarizerCharge> diarizer_fit_charges(const CoremlSidecars & sidecars, const std::string & gguf_path,
                                                        const std::vector<DiarizerCapacity> & capacities);
 
+// Whether a diarization model's encoder and bypass-encoder sidecars are in
+// the minimal (construction) set: only when no diarizer capacity can serve a
+// pass (`serving_diarizer_capacities`, DiarizerSlots::capacities()). A
+// template capacity that is only status-only (no cache directory, generate =
+// never, an unsupported OS or unvalidated units, a GGUF the template does not
+// match) serves nothing, so the adjacent prebuilt encoders keep loading at
+// construction as they do with no diarizer at all.
+inline bool encoder_sidecars_minimal(const std::vector<int> & serving_diarizer_capacities) {
+    return serving_diarizer_capacities.empty();
+}
+
 // DiarizerSlots::run's status when the pass runs on ggml.
 constexpr int kNoDiarizerSidecar = -1;
 

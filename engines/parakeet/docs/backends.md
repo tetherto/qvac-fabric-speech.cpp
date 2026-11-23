@@ -806,13 +806,14 @@ python engines/parakeet/scripts/export-sortformer-diarizer-coreml.py \
 
 ### Generated diarizers
 
-The library can also make the Nemotron 3 Diarization bundles itself, from the
-GGUF alone. macOS builds with `PARAKEET_COREML=ON` compile the Core ML
-generator (`PARAKEET_COREML_GENERATE`, default `ON` on macOS and `OFF` on iOS)
-and embed one template per capacity under
-`engines/parakeet/coreml-templates/nemotron-diar-f{358,745,1125}/`. A template
-is the exporter's weight-free Core ML program plus a recipe that says how
-every weight of `weight.bin` is computed from the GGUF's tensors:
+The library can also make the Nemotron 3 Diarization and Sortformer v2.1
+bundles itself, from the GGUF alone. macOS builds with `PARAKEET_COREML=ON`
+compile the Core ML generator (`PARAKEET_COREML_GENERATE`, default `ON` on
+macOS and `OFF` on iOS) and embed one template per capacity under
+`engines/parakeet/coreml-templates/`: `nemotron-diar-f{358,745,1125}/` and
+`sortformer-diar-f410/`. A template is the exporter's weight-free Core ML
+program plus a recipe that says how every weight of `weight.bin` is computed
+from the GGUF's tensors. For Nemotron 3 Diarization:
 
 - most weights are the GGUF tensor cast to fp16, after ggml dequantises it;
 - each layer's `w_qkv` has its query rows scaled by `1/sqrt(head_width)`
@@ -824,10 +825,34 @@ every weight of `weight.bin` is computed from the GGUF's tensors:
 - the negated speaker-head bias is an inline constant of the program, which a
   `patch` writes into the spec.
 
+For Sortformer v2.1 (`sortformer-diar-f410`, the AOSC streaming variant):
+
+- most weights are the GGUF tensor cast to fp16, after ggml dequantises it;
+- scales are folded into weights (`mul`): the conformer's query scale
+  `1/sqrt(64)` into each layer's query projection, its bias and the two
+  position biases; the speaker transformer's `1/sqrt(24)` (as float32) into
+  its query projection and bias; the feed-forward half-step `0.5` into each
+  second feed-forward projection and bias;
+- each conformer layer's relative-position projection is split into one 1x1
+  convolution per head, with its input columns in phase order, even then odd
+  (`slice` with step 2, `concat`, `permute`), as the exporter's
+  angle-difference rewrite needs;
+- the batch-norm scale and shift are folded into each depthwise convolution's
+  weight and bias (`mul`, `add`);
+- the query-side sine and cosine tables and the key-side table of the
+  capacity do not depend on the weights and are stored in the template
+  (`literals.bin`);
+- the compiler folded the layer-norm constants (`zeros`, `ones`) and the
+  negated speaker-head weight (`neg`); the negated speaker-head bias is an
+  inline constant of the program, written by a `patch`.
+
 When a capacity has no adjacent bundle, the engine plans route `generate` for
-it if the GGUF matches the template (architecture `sortformer`, version `v3`,
-the template's hyperparameters, and every tensor's name and shape, with
-matrices in f32, f16, bf16, q8_0, q6_k, q5_k or q4_k), a cache directory is
+it if the GGUF matches the template (Nemotron 3 Diarization: architecture
+`sortformer`, version `v3`; Sortformer v2.1: architecture `parakeet-ctc`,
+model type `sortformer`, variant `sortformer-streaming-v2.1-aosc`; then the
+template's hyperparameters, and every tensor's name and shape, with matrices
+in f32, f16, bf16, q8_0, q6_k, q5_k or q4_k, for Sortformer v2.1 also q4_0),
+a cache directory is
 set (`CoremlOptions::cache_dir`, `QVAC_COREML_CACHE_DIR`, or the CLI's
 default), `generate` is not `never`, the OS is macOS 15 or later, and the
 resolved compute units are ones the template's memory envelope was validated
@@ -887,7 +912,7 @@ The templates' memory envelope is validated for `cpu_and_ane` on two hosts
 ggml until a capacity is ready and on Core ML after, while the runtime
 prepares (generates and compiles), loads and warms all three capacities in the
 background (`prewarm = all`, `wait = none`).
-`nemotron-diarization-coreml-memory` (built with the Core ML tests) samples
+`diarizer-coreml-memory` (built with the Core ML tests) samples
 the process's `phys_footprint` every 2 ms and `ANECompilerService` every
 100 ms, from fresh process identities and paths so every Neural Engine load is
 cold. Per capacity it reports the prepare (from the start of its generation to
@@ -909,9 +934,12 @@ generate, compile or load phase, a compile has no generate before it, a phase
 has no footprint sample, a load has no `ANECompilerService` sample, the tool
 reports sampler errors (a footprint or `ps` read that failed), a capacity does
 not end the run ready or serves no Core ML pass after every capacity is ready
-(counted by the capacity that served it), or the compiler grew less than
-64 MiB (a warm run). The tool itself exits 1 when a capacity never became
-ready or served too few passes. The Core ML lane of `parakeet-ci.yml` runs the generated schedule and
+(counted by the capacity that served it), the compiler grew less than
+64 MiB (a warm run), or the schedule was not overlapped: the report records
+every pass's interval, and some ggml pass must have run during a prepare
+(generate or compile) and some during a load or warm (one pass spanning both
+counts for both). The tool itself exits 1 when a capacity never became ready,
+served too few passes, or no ggml pass overlapped a prepare or a load. The Core ML lane of `parakeet-ci.yml` runs the generated schedule and
 the check on its macOS runner. Increments are over a ggml-only run of the same
 passes on the same host:
 
@@ -962,6 +990,48 @@ ggml's 2.97 %, all of it speaker confusion in the long-form chunks around
 90 s, with the generated and the exporter's bundles alike. The same bundles on
 `cpu_only` (2.99 %) and `cpu_and_gpu` (2.97 %) match ggml, so the difference
 comes from the Neural Engine's arithmetic, not from generation.
+
+The Sortformer v2.1 template (`sortformer-diar-f410`) is validated the same
+way, on the same two hosts. Its one capacity is in the construction set, so
+`diarizer-coreml-memory` runs diarizer passes over the sample (342 encoder
+frames each) on ggml while the runtime generates, compiles, loads and warms
+the capacity in the background, and on Core ML after. Increments over a
+ggml-only run of the same passes:
+
+| Host | Runs | Peak increment | Prepare | Load and warm | Resident step | `ANECompilerService` growth |
+|---|---:|---:|---:|---:|---:|---:|
+| M2, macOS 27.2.1 | 22 | 62.5-108.9 MiB | 72.8-82.5 MiB | 36.5-90.3 MiB | 0.0-108.9 MiB | 252.1-674.2 MiB |
+| M4 Max, macOS 26.7.2 | 10 | 55.8-72.8 MiB | 80.9-96.3 MiB | 35.8-51.2 MiB | 39.2-61.0 MiB | 120.0-460.4 MiB |
+
+Each constant is 1.25 times the largest value over the 32 runs, rounded up
+to 1 MiB:
+
+| Constant | Largest measured | Recorded |
+|---|---:|---:|
+| prepare: `generation_peak_bytes` (8 MiB) + 8 MiB + `compile_peak_bytes` | 96.3 MiB (M4 Max) | 121 MiB |
+| `load_peak_bytes.cpu_and_ane` | 90.3 MiB (M2) | 113 MiB |
+| resident part: `runtime_weight_bytes` + 2 x I/O (`workspace_bytes` 0) | 108.9 MiB (M2) | 137 MiB |
+| `ane_compile_reserve_bytes` | 674.2 MiB (M2) | 843 MiB |
+
+Fit charges the capacity 137 + 121 = 258 MiB, against a largest measured
+peak increment of 108.9 MiB. As with Nemotron, the M2 sometimes keeps most of
+a load resident: in 3 of 22 runs the load grew the footprint by 83-90 MiB and
+the step to the settled footprint was 104-109 MiB; the M4 Max never did. The
+schedule checker accepts only runs from the current tool, which report no
+sampler errors, a compile segment, an `ANECompilerService` sample during the
+load and the passes that overlapped the background work. Runs recorded before
+those fields existed count only towards the maxima.
+`diarizer-coreml-memory` labels the compiler's size before the load as a
+clean (at most 32 MiB), dirty or unknown baseline, because a service that
+already holds memory grows less than a clean one would. Every run here
+started from a dirty baseline (61-632 MiB held), and the largest growth came
+from the smallest baseline (61.5 MiB, on the M2), so a clean host may grow
+somewhat more.
+
+On the pinned diarization set (AOSC streaming, 250 ms collar) the generated
+diarizer produces the same segments as the exporter's bundle, so generation
+changes the DER by 0: `abcba` 23.76 % (ggml 23.74 %) and `abcdba` 23.38 %
+(ggml 23.44 %).
 
 Each capacity is a separate bundle of Float16 weights, about 190 MB for
 Nemotron 3 Diarization and 220 MB for Sortformer v2.1. A multifunction package

@@ -201,9 +201,9 @@ everything.
 
 | Field | Values (default first) | Meaning |
 |---|---|---|
-| `use` | `automatic`, `off`, `require` | `require` (also `PARAKEET_COREML_STRICT`) waits like `wait = call`, and throws an exception derived from `std::runtime_error` instead of running on ggml when a sidecar cannot serve the call: it failed to load or timed out, the input is longer than a fixed-capacity encoder (for example with long-form windowing disabled, or a standard TDT input or push-stream window past the sidecar's capacity, which is never split into Core ML windows), the sidecar rejects the shape, or a prediction fails. `stream_start` refuses a push stream whose windows (left context, chunk and lookahead) are longer than a fixed-capacity encoder, before any audio; with a 15 s standard TDT sidecar that is every offline TDT push stream, since those use 30 s chunks. A diarization pass throws when no diarizer capacity that covers it can serve it: each one failed, or is a template capacity that is not generated (`no_template`, `unsupported(...)`, or `disabled` with `generate = never`), and when it is longer than every capacity (under `automatic` that pass runs on ggml). This changes `require` for a Nemotron 3 Diarization model with no adjacent bundles in a build that embeds the templates (see [Generated sidecars](#generated-sidecars)): with no `cache_dir` (the library's default) every pass of up to 1125 frames now throws `unsupported(no_cache_dir)`, where it used to run on ggml; set `cache_dir` to generate the capacities, or use `automatic`. Builds without the generator (`PARAKEET_COREML_GENERATE=OFF`, iOS) have no template capacities and still run those passes on ggml. Calls that never use a sidecar, such as model families or shapes without one, still run on ggml. |
+| `use` | `automatic`, `off`, `require` | `require` (also `PARAKEET_COREML_STRICT`) waits like `wait = call`, and throws an exception derived from `std::runtime_error` instead of running on ggml when a sidecar cannot serve the call: it failed to load or timed out, the input is longer than a fixed-capacity encoder (for example with long-form windowing disabled, or a standard TDT input or push-stream window past the sidecar's capacity, which is never split into Core ML windows), the sidecar rejects the shape, or a prediction fails. `stream_start` refuses a push stream whose windows (left context, chunk and lookahead) are longer than a fixed-capacity encoder, before any audio; with a 15 s standard TDT sidecar that is every offline TDT push stream, since those use 30 s chunks. A diarization pass throws when no diarizer capacity that covers it can serve it: each one failed, or is a template capacity that is not generated (`no_template`, `unsupported(...)`, or `disabled` with `generate = never`), and when it is longer than every capacity (under `automatic` that pass runs on ggml). This changes `require` for a Nemotron 3 Diarization or Sortformer v2.1 model with no adjacent bundles in a build that embeds the templates (see [Generated sidecars](#generated-sidecars)): with no `cache_dir` (the library's default) every pass of up to 1125 frames (410 for Sortformer v2.1) now throws `unsupported(no_cache_dir)`, where it used to run on ggml; set `cache_dir` to generate the capacities, or use `automatic`. Builds without the generator (`PARAKEET_COREML_GENERATE=OFF`, iOS) have no template capacities and still run those passes on ggml. Calls that never use a sidecar, such as model families or shapes without one, still run on ggml. |
 | `wait` | `none` on macOS and `call` on iOS; `construct` | `none` never blocks a call. `construct` makes the constructor wait for the construction group. `call` makes each call wait until its sidecar is ready or has failed. |
-| `prewarm` | `predicted`, `none`, `minimal`, `all` | Sidecars requested at construction. `minimal` is the encoder (and bypass encoder), or the smallest diarizer capacity for a diarization model. `predicted` requests the same at construction, and each call also requests what it needs. `all` requests every diarizer capacity. |
+| `prewarm` | `predicted`, `none`, `minimal`, `all` | Sidecars requested at construction. `minimal` is the encoder (and bypass encoder), or for a diarization model the smallest diarizer capacity that can serve a pass (the encoders when every capacity is status-only, for example with no cache directory). `predicted` requests the same at construction, and each call also requests what it needs. `all` requests every diarizer capacity. |
 | `compute_units` | the stage's own; `all`, `cpu_and_ane`, `cpu_and_gpu`, `cpu_only` | Also `PARAKEET_COREML_COMPUTE_UNITS`. Applies to the encoder, bypass-encoder, diarizer and TDT decoder sidecars. Unless the field is set, `PARAKEET_COREML_DECODER_COMPUTE_UNITS` overrides it for the TDT decoder. |
 | `generate` | `background`, `never` | `background` generates a sidecar that has no adjacent bundle from the GGUF into `cache_dir`, on the runtime's background queue, when the library embeds a template that matches the GGUF (see [Generated sidecars](#generated-sidecars)). `never` turns generation off; adjacent bundles still load. |
 | `cache_dir` | `QVAC_COREML_CACHE_DIR`, else none | Where generated sidecars and warm-load hints are kept. Without it nothing is generated and no hints are kept. |
@@ -282,6 +282,7 @@ these templates in the library:
 | `nemotron-diar-f358` | Nemotron 3 Diarization diarizer | 358 |
 | `nemotron-diar-f745` | Nemotron 3 Diarization diarizer | 745 |
 | `nemotron-diar-f1125` | Nemotron 3 Diarization diarizer | 1125 |
+| `sortformer-diar-f410` | Sortformer v2.1 (`sortformer-streaming-v2.1-aosc`) diarizer | 410 |
 
 When a capacity has no adjacent bundle, the engine generates it from the GGUF
 alone: it writes the package's weights from the GGUF's tensors (dequantised by
@@ -293,9 +294,17 @@ generated bundle has the same weights, byte for byte, as the exporter's
 bundle for that GGUF.
 
 Generation needs macOS 15, a `cache_dir` (the CLI defaults to one) and
-`generate = background`. The GGUF must match the template: architecture
-`sortformer`, version `v3`, the template's hyperparameters, and every tensor's
-name and shape, with matrices in f32, f16, bf16, q8_0, q6_k, q5_k or q4_k. The
+`generate = background`. The GGUF must match the template: for Nemotron 3
+Diarization architecture `sortformer` and version `v3`, for Sortformer v2.1
+architecture `parakeet-ctc`, model type `sortformer` and variant
+`sortformer-streaming-v2.1-aosc`, with the encoder settings the exporter
+accepts (symmetric convolution, `conv_context_style` `regular`, regular
+full-context attention, non-causal 8x subsampling; any other value, such as a
+causal convolution, gets `no_template` and runs on ggml); then the template's
+hyperparameters and
+every tensor's name and shape, with matrices in f32, f16, bf16, q8_0, q6_k,
+q5_k or q4_k (Sortformer v2.1 also q4_0, and its depthwise convolutions in
+f32, f16 or bf16). The
 templates are validated for the `cpu_and_ane` compute units (the diarizers'
 default), so another `compute_units` value turns generation off for them. An
 adjacent bundle always wins. `Engine::coreml_status_json()` reports
@@ -310,11 +319,14 @@ the reason generation is off for the whole instance otherwise (for example
 capacity is listed. When every capacity is suppressed for its units,
 `generation.reason` is `unvalidated_units`. Such a capacity never serves a
 pass; under `use = require` a pass it covers throws instead of running on ggml.
-Each generated capacity takes about 200 MB in the cache. `parakeet-fit-params`
-charges the generated capacities' Core ML memory in the Core ML-inclusive
-verdict (every generated capacity under `prewarm = all`, otherwise those the
-workload's calls, and any shorter single pass, can load, or fall back to when
-a capacity fails); see
+Each generated capacity takes about 200 MB in the cache (232 MB for
+Sortformer v2.1). `parakeet-fit-params` charges the generated capacities'
+Core ML memory in the Core ML-inclusive verdict (every generated capacity
+under `prewarm = all`, otherwise those the workload's calls, and any shorter
+single pass, can load, or fall back to when a capacity fails; for Sortformer
+v2.1, every capacity up to the full AOSC step slab of a default stream, 409
+frames, since the slab grows with the speaker cache and FIFO, together with
+any adjacent prebuilt bundles on the way); see
 [docs/backends.md](docs/backends.md#generated-diarizers).
 
 ## Backend selection

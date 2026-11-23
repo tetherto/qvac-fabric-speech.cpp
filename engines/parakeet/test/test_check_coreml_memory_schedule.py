@@ -63,6 +63,10 @@ def run_report():
             "ane_compiler_before_loads": 280 * MIB, "coreml_passes": 10, "ggml_passes_after_ready": 0,
             "sampler_errors": 0, "all_ready_s": 10.0,
             "coreml_passes_by_capacity": {s.rsplit("-", 1)[-1]: 3 for s in STAGES},
+            # A ggml pass during the first generate, one during the first
+            # load, and Core ML passes after every load.
+            "pass_intervals": [[0.5, 0.6, 0], [2 * len(STAGES) + 0.5, 2 * len(STAGES) + 0.6, 0],
+                               [t + 1, t + 1.1, 1], [t + 2, t + 2.1, 1]],
             "segments": segs,
             "status": {"stages": [{"stage": s, "compute_units": "cpu_and_ane", "state": "ready"} for s in STAGES]}}
 
@@ -174,6 +178,18 @@ class CheckerTest(unittest.TestCase):
         r = run_report()
         del r["ane_compiler_before_loads"]
         self.assertFails(r, "no ane_compiler_before_loads")
+
+    def test_each_row_labels_the_compiler_baseline(self):
+        dirty, clean = run_report(), run_report()
+        dirty["ane_compiler_baseline"] = "dirty"
+        clean["ane_compiler_baseline"] = "clean"
+        rc, out = self.check(dirty, clean, run_report())
+        self.assertEqual(rc, 0, out)
+        rows = [line for line in out.splitlines() if line.startswith("| run-")]
+        self.assertEqual(len(rows), 3, out)
+        self.assertIn("dirty baseline", rows[0])
+        self.assertIn("clean baseline", rows[1])
+        self.assertIn("unknown baseline", rows[2])  # a report without the label
 
     def test_a_resident_step_over_the_charge_fails(self):
         r = run_report()
@@ -343,6 +359,40 @@ class CheckerTest(unittest.TestCase):
             if s["phase"] == "load":
                 s["ane_compiler_before"] = s["ane_compiler_peak"] - 20 * MIB
         self.assertFails(r, "below the 64.0 MiB of a cold run")
+
+    def test_a_run_without_a_ggml_pass_during_a_prepare_fails(self):
+        r = run_report()
+        r["pass_intervals"][0] = [-1.0, -0.9, 0]  # before the first prepare
+        self.assertFails(r, "no ggml pass ran during a prepare: the schedule was not overlapped")
+        rc, out = self.check(r)
+        self.assertNotIn("during a load or warm", out)
+
+    def test_a_run_without_a_ggml_pass_during_a_load_fails(self):
+        r = run_report()
+        r["pass_intervals"][1] = [100.0, 100.1, 0]  # after every load
+        self.assertFails(r, "no ggml pass ran during a load or warm: the schedule was not overlapped")
+        rc, out = self.check(r)
+        self.assertNotIn("during a prepare", out)
+
+    def test_a_pass_on_core_ml_is_not_an_overlap(self):
+        # Every pass on Core ML (the passes ran only after the loads finished).
+        r = run_report()
+        r["pass_intervals"] = [[p[0], p[1], 1] for p in r["pass_intervals"]]
+        rc, out = self.check(r)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("no ggml pass ran during a prepare", out)
+        self.assertIn("no ggml pass ran during a load or warm", out)
+
+    def test_one_pass_spanning_a_prepare_and_a_load_counts_for_both(self):
+        r = run_report()
+        r["pass_intervals"] = [[0.5, 2 * len(STAGES) + 0.5, 0]] + r["pass_intervals"][2:]
+        rc, out = self.check(r)
+        self.assertEqual(rc, 0, out)
+
+    def test_a_report_without_pass_intervals_fails(self):
+        r = run_report()
+        del r["pass_intervals"]
+        self.assertFails(r, "no pass_intervals (an older tool's report)")
 
     def test_every_run_is_checked(self):
         bad = run_report()

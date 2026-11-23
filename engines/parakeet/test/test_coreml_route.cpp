@@ -70,7 +70,10 @@
 //                         listed by the construction group (every capacity
 //                         when generation is off) and, under use = require,
 //                         refuses a pass it covers, and a pass longer than
-//                         every capacity (under automatic that one runs on ggml)
+//                         every capacity (under automatic that one runs on ggml);
+//                         adjacent encoder and bypass-encoder sidecars stay in
+//                         the construction group unless a diarizer capacity
+//                         serves
 //   diarizer-loaded-source generated capacities prepare only from the
 //                         identity the load passes (a file renamed over the
 //                         path after the load: source_changed)
@@ -1193,6 +1196,85 @@ void case_generated_diarizer_envelope() {
           "prewarm all: prebuilt capacities alone charge nothing");
 }
 
+// Sortformer v2.1: an AOSC stream's step slab grows from the first chunk to
+// the full speaker cache and FIFO plus one chunk (409 frames by default), so
+// every capacity up to it loads whatever the input's length. Prebuilt 128
+// and 256 (220 MiB weights each) with the generated 410 (the template's
+// 137 MiB resident, 121 MiB transient, margin 1.0), for a 5 s input (63
+// encoder frames), exact bytes.
+void case_sortformer_aosc_diarizer_charge() {
+    constexpr uint64_t MiB = 1024ull * 1024;
+    CHECK(sortformer_default_aosc_slab_frames(80) == 409, "the default AOSC slab is 409 encoder frames");
+    const std::vector<CoremlFrameRange> offline = sortformer_diarizer_demand(63, 0);
+    const std::vector<CoremlFrameRange> aosc = sortformer_diarizer_demand(63, sortformer_default_aosc_slab_frames(80));
+    CHECK(offline.size() == 1 && offline[0].min_frames == 1 && offline[0].max_frames == 63,
+          "without AOSC streaming the demand is every offline pass up to the input's length");
+    CHECK(aosc.size() == 2 && aosc[1].min_frames == 1 && aosc[1].max_frames == 409,
+          "with AOSC streaming the demand covers every slab from 1 to 409 frames");
+    auto pre = [](int frames, uint64_t weights) {
+        CoremlDiarizerCharge c{frames};
+        c.prebuilt = true;
+        c.weights_bytes = weights;
+        return c;
+    };
+    const std::vector<CoremlDiarizerCharge> caps = {pre(128, 220 * MiB), pre(256, 220 * MiB),
+                                                    CoremlDiarizerCharge{410, true, 137 * MiB, 121 * MiB, 1.0}};
+    auto charge = [&](const std::vector<CoremlFrameRange> & demand) {
+        return coreml_diarizers_charge(caps, demand, CoremlDiarizerPrewarm::minimal, CoremlFitUnits::cpu_and_ane);
+    };
+    // Offline only: 128 (construction and the pass), falling back to 256 or
+    // 410 one at a time; the worst is one bundle, 2 x 220 + 160 = 600 MiB
+    // resident and its 55 MiB load transient.
+    const CoremlDiarizersCharge before = charge(offline);
+    CHECK(before.charge.resident == 600 * MiB && before.charge.transient == 55 * MiB && before.prebuilt,
+          "offline demand: one capacity at a time, 655 MiB");
+    // AOSC: 128, 256 and 410 all stay resident: 2 x 440 + 160 + 137 =
+    // 1177 MiB, plus the larger transient (the generated 121): 1298 MiB.
+    const CoremlDiarizersCharge after = charge(aosc);
+    CHECK(after.charge.resident == 1177 * MiB && after.charge.transient == 121 * MiB && after.prebuilt,
+          "AOSC demand: every capacity up to the full slab resident, 1298 MiB");
+    // A budget between the two: the offline charge fits, the stream's does not.
+    auto fits = [](const CoremlDiarizersCharge & c) {
+        FitResult r;
+        r.device_shares_host_memory = true;
+        r.device_free_bytes = 1000 * MiB + 1000 * MiB;
+        apply_coreml_verdicts(r, 1000 * MiB, true, "", c.charge, false, CoremlCharge{});
+        return r.coreml.fits;
+    };
+    CHECK(fits(before) && !fits(after), "a 1000 MiB Core ML budget: refused once the AOSC slabs are charged");
+
+    // A generated 410 and an adjacent prebuilt 512 (220 MiB weights), prewarm
+    // minimal, a 300 s projection (3750 frames, longer than both). The AOSC
+    // slabs load 410; a shorter offline call of 500 frames loads 512 while
+    // 410 stays resident. Charging the offline pass only at 3750 frames (no
+    // capacity) left 410 alone, which falls back to 512 one at a time:
+    // 600 + 55 = 655 MiB. Every offline length up to 3750 holds both:
+    // 600 + 137 = 737 MiB resident plus the larger transient (121): 858 MiB.
+    const std::vector<CoremlDiarizerCharge> mixed = {CoremlDiarizerCharge{410, true, 137 * MiB, 121 * MiB, 1.0},
+                                                     pre(512, 220 * MiB)};
+    const std::vector<CoremlFrameRange> long_input =
+        sortformer_diarizer_demand(3750, sortformer_default_aosc_slab_frames(80));
+    const CoremlDiarizersCharge reachable =
+        coreml_diarizers_charge(mixed, long_input, CoremlDiarizerPrewarm::minimal, CoremlFitUnits::cpu_and_ane);
+    CHECK(reachable.charge.resident == 737 * MiB && reachable.charge.transient == 121 * MiB && reachable.prebuilt,
+          "a 3750-frame projection charges the 410 and the 512 a shorter offline call loads: 858 MiB");
+    const CoremlDiarizersCharge single_length = coreml_diarizers_charge(
+        mixed, {CoremlFrameRange{3750, 3750}, CoremlFrameRange{1, 409}}, CoremlDiarizerPrewarm::minimal,
+        CoremlFitUnits::cpu_and_ane);
+    CHECK(single_length.charge.resident == 600 * MiB && single_length.charge.transient == 55 * MiB,
+          "the offline length alone reaches one capacity at a time: 655 MiB");
+    // 700 MiB available for Core ML: the residents alone (737 MiB) exceed it.
+    auto fits_in = [](const CoremlDiarizersCharge & c, uint64_t coreml_room) {
+        FitResult r;
+        r.device_shares_host_memory = true;
+        r.device_free_bytes = 1000 * MiB + coreml_room;
+        apply_coreml_verdicts(r, 1000 * MiB, true, "", c.charge, false, CoremlCharge{});
+        return r.coreml.fits;
+    };
+    CHECK(fits_in(single_length, 700 * MiB) && !fits_in(reachable, 700 * MiB),
+          "700 MiB for Core ML: refused once the shorter offline calls are charged");
+}
+
 // coreml.validated: true only when the charged bytes are all generated
 // envelopes. A prebuilt diarizer or encoder charge in the bytes is today's
 // unvalidated estimate.
@@ -1742,6 +1824,60 @@ void case_diarizer_capacities() {
               "the construction group loads the smallest prebuilt capacity above the status-only ones");
     }
 
+    // A diarization model with one template capacity and adjacent prebuilt
+    // encoder and bypass-encoder bundles. With the capacity status-only (no
+    // cache directory, the library's default) the encoders stay in the
+    // construction group as requests, so they load there as with no diarizer
+    // at all; with a serving capacity the diarizer takes their place.
+    {
+        fs::create_directories(dir / "m-encoder.mlmodelc");
+        fs::create_directories(dir / "m-bypass-encoder.mlmodelc");
+        auto encoder_request = [&](const char * stage, const char * name, bool minimal) {
+            SidecarRequest r;
+            r.stage = stage;
+            r.path = (dir / name).string();
+            r.present = true;
+            r.stage_default = pcm::ComputeUnits::cpu_and_ane;
+            r.load_fn = &fake_load;
+            r.minimal = minimal;
+            return r;
+        };
+        // The group JSON lists `skipped_route_none` before `slots` (sorted
+        // keys): a stage after `"slots":[` is a request of the group.
+        auto requested = [](const std::string & group, const char * stage) {
+            const size_t slots = group.find("\"slots\":[");
+            const size_t at = group.find(std::string("\"stage\":\"") + stage + "\"");
+            return slots != std::string::npos && at != std::string::npos && at > slots;
+        };
+        for (const bool serving : {false, true}) {
+            const std::string what = serving ? "serving diarizer capacity: " : "status-only diarizer capacity: ";
+            CoremlOptions o = base;
+            o.wait = CoremlOptions::Wait::construct;
+            o.prewarm = CoremlOptions::Prewarm::predicted;
+            if (!serving) o.cache_dir = "";
+            CoremlSidecars sidecars(o, m);
+            const std::vector<pcm::generation::Candidate> probed =
+                probe_diarizer_templates(sidecars, gguf.string(), {"toy-stateless"});
+            const DiarizerSlots slots(gguf.string(), diarizer_capacities({}, {410}, probed), sidecars, &fake_load);
+            CHECK(slots.capacities().size() == (serving ? 1u : 0u),
+                  (what + "the template capacity serves only with a cache directory").c_str());
+            const bool minimal = encoder_sidecars_minimal(slots.capacities());
+            CHECK(minimal == !serving, (what + "the encoders are minimal only without a serving capacity").c_str());
+            auto encoder = sidecars.add(encoder_request("encoder", "m-encoder.mlmodelc", minimal));
+            auto bypass = sidecars.add(encoder_request("bypass-encoder", "m-bypass-encoder.mlmodelc", minimal));
+            sidecars.start();
+            const std::string group = sidecars.construction_json();
+            CHECK(requested(group, "encoder") == !serving && requested(group, "bypass-encoder") == !serving,
+                  (what + "the construction group requests the encoder and bypass encoder only "
+                          "without a serving capacity").c_str());
+            CHECK(requested(group, "diarizer-410") == serving,
+                  (what + "the construction group requests the diarizer only when it serves").c_str());
+            const pcm::SlotState encoders = serving ? pcm::SlotState::idle : pcm::SlotState::ready;
+            CHECK(encoder->state() == encoders && bypass->state() == encoders,
+                  (what + "wait = construct returns with the encoders loaded only when they are minimal").c_str());
+        }
+    }
+
     pcm::generation::set_compile_override(nullptr);
     ::unsetenv("QVAC_COREML_TEMPLATE_DIR");
 }
@@ -1834,6 +1970,7 @@ int main() {
     case_options();
     case_fit_envelope();
     case_generated_diarizer_envelope();
+    case_sortformer_aosc_diarizer_charge();
     case_coreml_verdicts_validated();
 #if defined(QVAC_COREML_HAVE_GGML)
     case_generated_sidecar();
