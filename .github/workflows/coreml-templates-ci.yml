@@ -9,7 +9,7 @@
 # Q quantised and dequantised by ggml for the exporter) and compares the
 # exporter's weight.bin, blob by blob, with the one the C++ generator writes
 # from the same twin (qvac-coreml-tool verify), and the exporter's spec with
-# the template's. golden.py check regenerates each template's weight.bin from
+# the generated one (patches applied). golden.py check regenerates each template's weight.bin from
 # twin A and compares it with engines/coreml/test/golden.txt.
 #
 # Path-filtered: the exporters, the templates, the shared runtime and the venv

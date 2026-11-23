@@ -205,6 +205,8 @@ void print_usage(const char * argv0) {
         "                               waits for the sidecars), or call (each call\n"
         "                               waits for its sidecar)\n"
         "  --coreml-prewarm SCOPE       none, minimal, predicted (default) or all\n"
+        "  --coreml-generate MODE       background (default: generate a missing sidecar\n"
+        "                               from the GGUF into the cache) or never\n"
         "  --coreml-compute-units U     all, cpu_and_ane, cpu_and_gpu or cpu_only\n"
         "  --coreml-cache-dir DIR       Core ML cache and warm hints (default\n"
         "                               ~/Library/Application Support/qvac-speech/coreml)\n"
@@ -524,6 +526,17 @@ bool parse_coreml_use(const std::string & v, parakeet::CoremlOptions::Use & out)
     return true;
 }
 
+bool parse_coreml_generate(const std::string & v, parakeet::CoremlOptions::Generate & out) {
+    using G = parakeet::CoremlOptions::Generate;
+    if (v == "background") out = G::background;
+    else if (v == "never") out = G::never;
+    else {
+        PARAKEET_LOG_ERROR("error: --coreml-generate must be background or never (got '%s')\n", v.c_str());
+        return false;
+    }
+    return true;
+}
+
 bool parse_coreml_wait(const std::string & v, parakeet::CoremlOptions::Wait & out) {
     using W = parakeet::CoremlOptions::Wait;
     if (v == "none") out = W::none;
@@ -720,6 +733,8 @@ static int parakeet_cli_run(int argc, char ** argv) {
             if (!parse_coreml_use(argv[++i], extra.coreml.use)) return 2;
         } else if (a == "--coreml-wait" && i + 1 < argc) {
             if (!parse_coreml_wait(argv[++i], extra.coreml.wait)) return 2;
+        } else if (a == "--coreml-generate" && i + 1 < argc) {
+            if (!parse_coreml_generate(argv[++i], extra.coreml.generate)) return 2;
         } else if (a == "--coreml-prewarm" && i + 1 < argc) {
             if (!parse_coreml_prewarm(argv[++i], extra.coreml.prewarm)) return 2;
         } else if (a == "--coreml-compute-units" && i + 1 < argc) {
@@ -1030,12 +1045,13 @@ static int parakeet_cli_run(int argc, char ** argv) {
         if (opts.verbose) {
             PARAKEET_LOG_INFO(
                 "[diarize] load=%.1fms audio=%.2fs samples=%zu@%dHz frames=%d num_spks=%d\n"
-                "[diarize] mel=%.1fms enc=%.1fms dec=%.1fms total=%.1fms RTF=%.3f segments=%zu\n",
+                "[diarize] mel=%.1fms enc=%.1fms dec=%.1fms total=%.1fms RTF=%.3f segments=%zu\n"
+                "[diarize] backend=%s pending=%d\n",
                 load_ms, audio_ms / 1000.0, samples.size(), sr,
                 diar.n_frames, diar.num_spks,
                 diar.preprocess_ms, diar.encoder_ms, diar.decode_ms,
                 diar.total_ms, diar.total_ms / audio_ms,
-                diar.segments.size());
+                diar.segments.size(), diar.encoder_backend.c_str(), diar.coreml_pending ? 1 : 0);
         }
         return 0;
     }

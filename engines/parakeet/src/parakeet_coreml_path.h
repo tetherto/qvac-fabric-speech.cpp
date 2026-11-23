@@ -61,9 +61,16 @@ struct CoremlFrameRange {
 // capacities when max_frames exceeds them. Measured on an M4: the Neural
 // Engine keeps about two copies of the weights, and the first bundle adds a
 // fixed runtime cost.
+// The resident charge of `bundles` loaded prebuilt bundles holding
+// `weights_bytes` of weights together (0 when none).
+uint64_t coreml_diarizer_bundle_set_resident_bytes(int bundles, uint64_t weights_bytes);
+
 uint64_t coreml_diarizer_resident_bytes(const std::vector<CoremlDiarizerBundle> & bundles,
                                         const std::vector<CoremlFrameRange> & ranges);
 
+// The capacities (ascending) that calls in `ranges` can load, by the same rule.
+std::vector<int> coreml_diarizer_loaded_capacities(const std::vector<int> & sorted_capacities,
+                                                   const std::vector<CoremlFrameRange> & ranges);
 // The bundles calls in `ranges` can load (the ones resident_bytes charges).
 std::vector<CoremlDiarizerBundle> coreml_diarizer_loaded_bundles(
     const std::vector<CoremlDiarizerBundle> & bundles, const std::vector<CoremlFrameRange> & ranges);

@@ -85,6 +85,10 @@ struct PlanInput {
     OsVersion os;
 };
 
+// plan()'s reason for a generated route whose resolved units the template's
+// memory envelope was not validated for (state unsupported(unvalidated_units)).
+inline constexpr char kUnvalidatedUnits[] = "unvalidated_units";
+
 struct Plan {
     Route route = Route::none;
     SlotState none_state = SlotState::unsupported;  // when route == none

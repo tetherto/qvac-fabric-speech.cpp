@@ -42,6 +42,9 @@ int64_t * timing_slot(Timings & t, SlotState phase) {
 }
 
 constexpr int64_t kStaleSeconds = 24 * 60 * 60;
+// Consecutive regenerations of a slot whose generated artifact vanished before
+// its load; then the slot fails.
+constexpr int kMaxRegenerations = 2;
 
 #ifdef QVAC_COREML_TEST_HOOKS
 #define QVAC_COREML_TEST_HOOK(name)                              \
@@ -968,13 +971,14 @@ void Runtime::set_phase(const std::shared_ptr<Job> & j, SlotState st) {
     state_cv.notify_all();
 }
 
-void Runtime::fail(const std::shared_ptr<Job> & j, const Error & e, SlotState st) {
+void Runtime::fail(const std::shared_ptr<Job> & j, const Error & e, SlotState st, const std::string & reason) {
     Graveyard gy;
     std::lock_guard<std::mutex> lk(mu);
-    fail_locked(j, e, st, gy);
+    fail_locked(j, e, st, gy, reason);
 }
 
-void Runtime::fail_locked(const std::shared_ptr<Job> & j, const Error & e, SlotState st, Graveyard & gy) {
+void Runtime::fail_locked(const std::shared_ptr<Job> & j, const Error & e, SlotState st, Graveyard & gy,
+                          const std::string & reason) {
     j->done = true;
     gy.keep(j->adopt);  // released outside mu
     j->adopt.reset();
@@ -986,10 +990,42 @@ void Runtime::fail_locked(const std::shared_ptr<Job> & j, const Error & e, SlotS
         c->job.reset();
         c->state = st;
         c->error = e;
-        c->reason = e.message;
+        c->reason = reason.empty() ? e.message : reason;
     }
     if (j->kind == JobKind::load) ++stats_.load_failures;
     event_locked("fail:" + j->load.stage + "/" + j->load.function + ":" + e.message);
+    bump_locked();
+}
+
+void Runtime::regenerate(const std::shared_ptr<Job> & j, const Error & e, int limit) {
+    Graveyard gy;
+    std::lock_guard<std::mutex> lk(mu);
+    j->done = true;
+    gy.keep(j->adopt);  // released outside mu
+    j->adopt.reset();
+    if (auto f = inflight_.find(j->dedup_key); f != inflight_.end() && f->second == j) inflight_.erase(f);
+    ++stats_.load_failures;
+    event_locked("gone:" + j->load.stage + "/" + j->load.function + ":" + e.message);
+    for (const Sub & s : j->subs) {
+        std::shared_ptr<SlotCore> c = live_core(s, *j, gy);
+        if (!c) continue;
+        c->job.reset();
+        if (c->spec.route != Route::generate || c->spec.prepare_fn == nullptr ||
+            c->regenerations >= limit || stopping_ || exiting()) {
+            c->state = SlotState::failed;
+            c->error = e;
+            c->reason = e.message;
+            continue;
+        }
+        // Back to step 2 of the pipeline: the prepare job regenerates (or
+        // adopts what another process published meanwhile).
+        ++c->regenerations;
+        c->artifact_path.clear();
+        c->artifact_key.clear();
+        c->hint_path.clear();
+        subscribe_prepare_locked(c, s.prio, s.non_deferrable);
+    }
+    ensure_threads_locked();
     bump_locked();
 }
 
@@ -1085,6 +1121,14 @@ void Runtime::run_load(const std::shared_ptr<Job> & j) {
         requeue(j);
         return;
     }
+    if (r.artifact_gone && !r.model) {
+        if (r.lease_fd >= 0) ::close(r.lease_fd);
+        // A rejected artifact is regenerated once (its content is the same,
+        // only the compile is redone); a vanished one up to kMaxRegenerations.
+        regenerate(j, r.error.ok() ? Error::transient("the generated artifact is gone") : r.error,
+                   r.rejected ? 1 : kMaxRegenerations);
+        return;
+    }
     if (!r.error.ok() || !r.model) {
         if (r.lease_fd >= 0) ::close(r.lease_fd);
         fail(j, r.error.ok() ? Error::deterministic("LoadFn returned no model") : r.error);
@@ -1153,6 +1197,14 @@ void Runtime::run_prepare(const std::shared_ptr<Job> & j) {
     }
     if (r.would_block) {
         requeue(j);
+        return;
+    }
+    if (!r.unsupported.empty()) {
+        // Not a failure: generation cannot run here (status unsupported(<reason>)).
+        Error e = r.error;
+        e.cls = ErrorClass::none;
+        if (e.message.empty()) e.message = "generation is unsupported: " + r.unsupported;
+        fail(j, e, SlotState::unsupported, r.unsupported);
         return;
     }
     if (!r.error.ok() || r.artifact_path.empty()) {
@@ -1231,6 +1283,7 @@ void Runtime::publish(const std::shared_ptr<Job> & j, const std::shared_ptr<Shar
         c->model = m;
         c->job.reset();
         c->state = SlotState::ready;
+        c->regenerations = 0;
         c->reason.clear();
         c->error = Error{};
         c->queued_behind = false;

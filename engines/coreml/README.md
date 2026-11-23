@@ -209,6 +209,22 @@ route `generate`:
    `generation::end_load` after: a generated bundle loads under the shared
    lease of its cache entry, and `used/<key>` is touched after a successful
    load. Both do nothing for a prebuilt bundle.
+   - The preparation releases its lease when it returns, so a prune can
+     delete the artifact before the load takes its own. `begin_load` then
+     sets `LoadResult::artifact_gone`, and the scheduler sends the slot back
+     to preparation, which regenerates the artifact (or adopts what another
+     process published).
+   - After a deterministic load failure (the engine rejected the model or
+     its geometry), `end_load` moves the artifact to `quarantine/` under the
+     key's exclusive lock and sets `artifact_gone`, so the slot regenerates
+     it at the same key. A transient failure, or an artifact another holder
+     has leased, keeps it.
+   - The scheduler allows two such regenerations in a row per slot (a ready
+     load resets the count); after that the slot is `failed`.
+5. A cache directory on a volume where generation cannot run (not a local
+   apfs or hfs volume) gives `PrepareResult::unsupported = "cache_fs"`: the
+   slot reports `unsupported(cache_fs)`, terminal and with no error class,
+   and the stage stays on ggml.
 
 Fit charges a generated stage with `generation::envelope_bytes(memory,
 units)`: resident (runtime weights, twice the function I/O, state,
@@ -468,6 +484,12 @@ the templates, `engines/coreml` and the venv pin, on the self-hosted
 Apple-silicon lane: the `coreml_template.py` unit checks, `report` on the toy
 templates (a harness self-check), `report --all` (the extraction and
 cross-seed gates) and `golden.py check`.
+
+The real-weights gate (`coreml_template.py real`) runs in the engine's Core
+ML lane on a staged production GGUF: the Parakeet lane in `parakeet-ci.yml`
+checks the Nemotron 3 Diarization templates on the official q8_0 GGUF
+(pinned revision and sha256), then runs the parity test on diarizers the
+engine generated from it.
 
 `engines/coreml/test/golden.txt` holds, per template, the generator version,
 `template_sha256` and the sha256 of the `weight.bin` generated from twin A.
