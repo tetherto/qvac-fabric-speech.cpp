@@ -415,6 +415,7 @@ set(TTS_CPP_LIB_SOURCES
     src/moss/speech_generation.cpp
     src/moss/speech_engine.cpp
     src/moss/coreml_sidecar.cpp
+    src/moss/coreml_generation.cpp
     src/moss/sfx_coreml.cpp
     src/moss/codec_coreml.cpp
     # Memory-fit preflight (include/tts-cpp/fit.h + the *-fit-params tools).
@@ -508,11 +509,13 @@ if (TTS_CPP_BUILD_LIBRARY)
         message(STATUS "tts-cpp: Core ML sidecars enabled (TTS_CPP_USE_COREML): Audio8 codec, Supertonic encoder/vector/vocoder, Chatterbox S3Gen stages, Pocket FlowLM step and Mimi decoder, CosyVoice3 stages, Parler DAC/optional decoder, MOSS stages, LavaSR denoiser/enhancer")
     endif()
     # Shared Core ML runtime (engines/coreml): compiled into libtts-cpp under its
-    # own namespace when TTS_CPP_COREML is on. With TTS_CPP_COREML_GENERATE
-    # (macOS default), the models below can generate from their GGUF weights.
+    # own namespace when TTS_CPP_COREML is on. TTS_CPP_COREML_GENERATE
+    # (macOS default) embeds the models' weight-free generation templates.
     include(${CMAKE_CURRENT_SOURCE_DIR}/../coreml/qvac_coreml.cmake)
     qvac_coreml_add_to(tts-cpp NAMESPACE tts_cpp_coreml PREFIX TTS_CPP ENABLE ${TTS_CPP_COREML}
         TEMPLATES "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/parler-dac-w128"
+                  "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/moss-speech-tokenizer-30s"
+                  "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/moss-sfx-vae-w320"
                   "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/audio8-codec-w64"
                   "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/supertonic-vocoder-w64"
                   "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/supertonic-vocoder-pw2d-w64"
@@ -1356,14 +1359,22 @@ if (TTS_CPP_BUILD_TESTS)
         set_tests_properties(test-pocket-coreml-exporter PROPERTIES
             LABELS "unit" ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1" SKIP_REGULAR_EXPRESSION "SKIP: ")
 
+        set(TTS_CPP_MOSS_EXPORTER_PYTHON "" CACHE FILEPATH
+            "Python with the pinned Core ML dependencies for the speech tokenizer and SFX exporter tests")
         foreach(_moss_exporter IN ITEMS speech_tokenizer sfx codec)
             string(REPLACE "_" "-" _moss_exporter_test "${_moss_exporter}")
+            set(_moss_python "${Python3_EXECUTABLE}")
+            set(_moss_test_env "PYTHONDONTWRITEBYTECODE=1")
+            if (TTS_CPP_MOSS_EXPORTER_PYTHON AND NOT _moss_exporter STREQUAL "codec")
+                set(_moss_python "${TTS_CPP_MOSS_EXPORTER_PYTHON}")
+                list(APPEND _moss_test_env "MOSS_REQUIRE_EXPORTER_DEPS=1")
+            endif()
             add_test(NAME test-moss-${_moss_exporter_test}-coreml-exporter
-                     COMMAND "${Python3_EXECUTABLE}"
+                     COMMAND "${_moss_python}"
                              "${CMAKE_CURRENT_SOURCE_DIR}/test/test_export_moss_${_moss_exporter}_coreml.py")
             set_property(TEST test-moss-${_moss_exporter_test}-coreml-exporter PROPERTY LABELS "unit")
             set_property(TEST test-moss-${_moss_exporter_test}-coreml-exporter
-                         PROPERTY ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+                         PROPERTY ENVIRONMENT "${_moss_test_env}")
             set_property(TEST test-moss-${_moss_exporter_test}-coreml-exporter
                          PROPERTY SKIP_REGULAR_EXPRESSION "SKIP: ")
         endforeach()
@@ -1852,6 +1863,58 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_register_test(test-moss-coreml-parity LABEL "fixture"
         ARGS "${CMAKE_CURRENT_SOURCE_DIR}/test/reference-audio/jfk.wav")
     set_property(TEST test-moss-coreml-parity PROPERTY SKIP_RETURN_CODE 77)
+
+    # The MOSS speech tokenizer and SoundEffect VAE generated from their
+    # GGUFs (--tokenizer, --vae; CI passes the staged stage-only GGUFs):
+    # parity against ggml, routes, status, fit and memory-degrade, and with
+    # --memory-schedule the overlapped memory schedule. Self-skips (77)
+    # without TTS_CPP_COREML or a stage; --require-coreml fails instead.
+    add_executable(test-moss-coreml-generated test/moss/test_coreml_generated.cpp)
+    target_link_libraries(test-moss-coreml-generated PRIVATE tts-cpp)
+    # memory_probe.h and memory_schedule.h: the shared schedule rules.
+    target_include_directories(test-moss-coreml-generated PRIVATE src ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/test)
+    target_compile_definitions(test-moss-coreml-generated PRIVATE
+        TTS_CPP_MOSS_TEST_WAV="${CMAKE_CURRENT_SOURCE_DIR}/test/reference-audio/jfk.wav")
+    if (TTS_CPP_COREML)
+        target_compile_definitions(test-moss-coreml-generated PRIVATE TTS_CPP_USE_COREML)
+    endif()
+    tts_cpp_apply_ccache(test-moss-coreml-generated)
+
+    # The MOSS generated routes and the SoundEffect fit never read the cache,
+    # so they are the same before and after a generation, with and without
+    # warm hints. Checked on twins of the templates' reference manifests (the
+    # tokenizer in q4_0, small enough for every build); CI also runs it on
+    # the staged GGUFs with the cache a generated run populated.
+    add_executable(test-moss-fit-stable test/moss/test_fit_stable.cpp)
+    target_link_libraries(test-moss-fit-stable PRIVATE tts-cpp)
+    target_include_directories(test-moss-fit-stable PRIVATE src)
+    if (TTS_CPP_COREML)
+        # The hint cases write records where the runtime looks for them, so
+        # the test uses the runtime's hint-path helper (same namespace).
+        get_target_property(_tcb_coreml_ns tts-cpp QVAC_COREML_NS)
+        target_compile_definitions(test-moss-fit-stable PRIVATE TTS_CPP_USE_COREML
+                                   QVAC_COREML_NS=${_tcb_coreml_ns})
+        target_include_directories(test-moss-fit-stable PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/include ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/src)
+    endif()
+    tts_cpp_apply_ccache(test-moss-fit-stable)
+    if (TARGET qvac-coreml-tool)
+        set(_moss_vae_twin "${CMAKE_CURRENT_BINARY_DIR}/moss-sfx-vae-w320-twin.gguf")
+        set(_moss_tokenizer_twin "${CMAKE_CURRENT_BINARY_DIR}/moss-speech-tokenizer-30s-twin.gguf")
+        add_test(NAME test-moss-fit-stable-vae-twin
+                 COMMAND qvac-coreml-tool twin
+                         --manifest "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/moss-sfx-vae-w320/reference-gguf.json"
+                         --seed 1 --types f32 -o "${_moss_vae_twin}")
+        add_test(NAME test-moss-fit-stable-tokenizer-twin
+                 COMMAND qvac-coreml-tool twin
+                         --manifest "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/moss-speech-tokenizer-30s/reference-gguf.json"
+                         --seed 1 --types q4_0 -o "${_moss_tokenizer_twin}")
+        set_tests_properties(test-moss-fit-stable-vae-twin test-moss-fit-stable-tokenizer-twin
+                             PROPERTIES LABELS "unit" FIXTURES_SETUP moss-twins)
+        add_test(NAME test-moss-fit-stable COMMAND test-moss-fit-stable
+                 --vae "${_moss_vae_twin}" --tokenizer "${_moss_tokenizer_twin}")
+        set_tests_properties(test-moss-fit-stable PROPERTIES LABELS "unit" FIXTURES_REQUIRED moss-twins)
+    endif()
 
     # Parler DAC Core ML sidecar: the retire-on-failure, strict-mode and host
     # quantizer gates run on every build with a fake sidecar; the Core ML

@@ -46,7 +46,9 @@ struct SoundEffectEngine::Impl {
     std::unique_ptr<SfxTokenizer> tokenizer;
     std::unique_ptr<detail::SfxDitSidecar> dit_sidecar;
     std::unique_ptr<detail::SfxVaeSidecar> vae_sidecar;
-    bool strict = false;
+    std::unique_ptr<detail::MossCoremlGeneration> vae_generation;
+    bool dit_strict = false;
+    bool vae_strict = false;
     detail::StageBackends dit_backends;
     detail::StageBackends vae_backends;
     std::atomic<bool> cancel_requested{false};
@@ -59,6 +61,9 @@ struct SoundEffectEngine::Impl {
         if (!options.backends_dir.empty()) {
             ::tts_cpp::detail::set_backends_directory(options.backends_dir);
         }
+        vae_generation = std::make_unique<detail::MossCoremlGeneration>(
+            detail::GeneratedStage::sfx_vae, options.model_path,
+            options.coreml);
         model = std::make_unique<SfxModel>(options.model_path, detail::backend_request(options), options.n_threads);
         validate_networks();
         tokenizer = std::make_unique<SfxTokenizer>(*model);
@@ -68,8 +73,26 @@ struct SoundEffectEngine::Impl {
     void attach_sidecars() {
         const detail::CoremlPolicy policy = detail::read_coreml_policy();
         dit_sidecar = detail::open_sfx_dit_sidecar(options.model_path, model->config(), policy);
-        vae_sidecar = detail::open_sfx_vae_sidecar(options.model_path, model->config(), policy);
-        strict = policy.strict;
+        const auto & config = model->config();
+        vae_sidecar = detail::open_sfx_vae_sidecar(
+            options.model_path, config, vae_generation->prebuilt_policy());
+        dit_strict = policy.strict;
+
+        std::optional<uint64_t> baseline;
+        if (vae_generation->can_generate() &&
+            options.coreml.memory_budget_bytes) {
+            try {
+                baseline = detail::sfx_ggml_budget_baseline(options);
+            } catch (const std::exception &) {
+                // An unavailable estimate suppresses generation; ggml can still
+                // run.
+            }
+        }
+        const int window = detail::GENERATED_VAE_WINDOW;
+        vae_generation->start({1, config.vae.latent_dim, window},
+                              {1, 1, (int64_t)window * config.vae.hop_length()},
+                              baseline);
+        vae_strict = vae_generation->prebuilt_policy().strict;
     }
 
     void validate_networks() const {
@@ -108,7 +131,8 @@ struct SoundEffectEngine::Impl {
     bool denoise(std::vector<float> & latents, const ResolvedRequest & request, const std::vector<float> & positive,
                  const std::vector<float> & negative, const SoundEffectProgress & progress) {
         const std::vector<float> sigmas = detail::flow_sigmas(request.steps, request.shift);
-        SfxDitRunner dit(*model, model->config().latent_frames(), dit_sidecar, strict, dit_backends);
+        SfxDitRunner dit(*model, model->config().latent_frames(), dit_sidecar,
+                         dit_strict, dit_backends);
         if (request.guidance == UNGUIDED) dit.prepare_contexts({positive});
         else dit.prepare_contexts({positive, negative});
         return run_steps(dit, latents, request, sigmas, positive, negative, progress);
@@ -138,9 +162,17 @@ struct SoundEffectEngine::Impl {
 
     std::vector<float> decode(const std::vector<float> & latents, int tenths) {
         const int64_t samples = output_samples(tenths);
-        std::vector<float> pcm = detail::decode_sfx_latents(*model, vae_sidecar, strict, vae_backends, latents,
-                model->config().latent_frames(), kept_frames(samples), detail::SFX_DECODE_WINDOW_FRAMES,
-                [this](int, int) { return !cancel_requested.load(); });
+        auto generated = vae_sidecar ? nullptr
+                                     : detail::acquire_sfx_vae_sidecar(
+                                           *vae_generation, &cancel_requested);
+        if (cancel_requested)
+            return {};
+        auto & sidecar = vae_sidecar ? vae_sidecar : generated;
+        std::vector<float> pcm = detail::decode_sfx_latents(
+            *model, sidecar, vae_strict, vae_backends, latents,
+            model->config().latent_frames(), kept_frames(samples),
+            detail::SFX_DECODE_WINDOW_FRAMES,
+            [this](int, int) { return !cancel_requested.load(); });
         pcm.resize(std::min(pcm.size(), (size_t) samples));
         return pcm;
     }
@@ -234,7 +266,11 @@ bool SoundEffectEngine::dit_on_coreml() const noexcept {
 }
 
 bool SoundEffectEngine::vae_on_coreml() const noexcept {
-    return impl_->vae_sidecar != nullptr;
+    return impl_->vae_sidecar || impl_->vae_generation->ready();
+}
+
+std::string SoundEffectEngine::vae_coreml_status_json() const {
+    return impl_->vae_generation->status_json(impl_->vae_sidecar != nullptr);
 }
 
 } // namespace tts_cpp::moss

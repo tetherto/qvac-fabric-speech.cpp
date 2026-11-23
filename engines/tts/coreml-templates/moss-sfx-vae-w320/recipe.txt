@@ -1,0 +1,305 @@
+mlrecipe 1
+template moss-sfx-vae-w320
+spec_sha256 ae511d86ac6ad9c74f3ad06a6f1dd414670eaa544980b6cfeb5be28ebb055e8f
+weight_bin_size 151002880
+blobs 147
+source "vae.post_quant.weight" f32,f16,bf16,q8_0,q4_0 [128,128]
+source "vae.post_quant.bias" f32,f16,bf16 [128,1]
+source "vae.conv_in.weight" f32,f16,bf16 [2048,128,7]
+source "vae.conv_in.bias" f32,f16,bf16 [2048,1]
+source "vae.blk.0.snake.alpha" f32,f16,bf16 [2048,1]
+source "vae.blk.0.snake.inv" f32,f16,bf16 [2048,1]
+source "vae.blk.0.up.weight" f32,f16,bf16,q8_0,q4_0 [16384,2048]
+source "vae.blk.0.up.bias" f32,f16,bf16 [1024,1]
+source "vae.blk.0.res.0.snake1.alpha" f32,f16,bf16 [1024,1]
+source "vae.blk.0.res.0.snake1.inv" f32,f16,bf16 [1024,1]
+source "vae.blk.0.res.0.conv1.weight" f32,f16,bf16 [1024,1024,7]
+source "vae.blk.0.res.0.conv1.bias" f32,f16,bf16 [1024,1]
+source "vae.blk.0.res.0.snake2.alpha" f32,f16,bf16 [1024,1]
+source "vae.blk.0.res.0.snake2.inv" f32,f16,bf16 [1024,1]
+source "vae.blk.0.res.0.conv2.weight" f32,f16,bf16 [1024,1024,1]
+source "vae.blk.0.res.0.conv2.bias" f32,f16,bf16 [1024,1]
+source "vae.blk.0.res.1.snake1.alpha" f32,f16,bf16 [1024,1]
+source "vae.blk.0.res.1.snake1.inv" f32,f16,bf16 [1024,1]
+source "vae.blk.0.res.1.conv1.weight" f32,f16,bf16 [1024,1024,7]
+source "vae.blk.0.res.1.conv1.bias" f32,f16,bf16 [1024,1]
+source "vae.blk.0.res.1.snake2.alpha" f32,f16,bf16 [1024,1]
+source "vae.blk.0.res.1.snake2.inv" f32,f16,bf16 [1024,1]
+source "vae.blk.0.res.1.conv2.weight" f32,f16,bf16 [1024,1024,1]
+source "vae.blk.0.res.1.conv2.bias" f32,f16,bf16 [1024,1]
+source "vae.blk.0.res.2.snake1.alpha" f32,f16,bf16 [1024,1]
+source "vae.blk.0.res.2.snake1.inv" f32,f16,bf16 [1024,1]
+source "vae.blk.0.res.2.conv1.weight" f32,f16,bf16 [1024,1024,7]
+source "vae.blk.0.res.2.conv1.bias" f32,f16,bf16 [1024,1]
+source "vae.blk.0.res.2.snake2.alpha" f32,f16,bf16 [1024,1]
+source "vae.blk.0.res.2.snake2.inv" f32,f16,bf16 [1024,1]
+source "vae.blk.0.res.2.conv2.weight" f32,f16,bf16 [1024,1024,1]
+source "vae.blk.0.res.2.conv2.bias" f32,f16,bf16 [1024,1]
+source "vae.blk.1.snake.alpha" f32,f16,bf16 [1024,1]
+source "vae.blk.1.snake.inv" f32,f16,bf16 [1024,1]
+source "vae.blk.1.up.weight" f32,f16,bf16,q8_0,q4_0 [5120,1024]
+source "vae.blk.1.up.bias" f32,f16,bf16 [512,1]
+source "vae.blk.1.res.0.snake1.alpha" f32,f16,bf16 [512,1]
+source "vae.blk.1.res.0.snake1.inv" f32,f16,bf16 [512,1]
+source "vae.blk.1.res.0.conv1.weight" f32,f16,bf16 [512,512,7]
+source "vae.blk.1.res.0.conv1.bias" f32,f16,bf16 [512,1]
+source "vae.blk.1.res.0.snake2.alpha" f32,f16,bf16 [512,1]
+source "vae.blk.1.res.0.snake2.inv" f32,f16,bf16 [512,1]
+source "vae.blk.1.res.0.conv2.weight" f32,f16,bf16 [512,512,1]
+source "vae.blk.1.res.0.conv2.bias" f32,f16,bf16 [512,1]
+source "vae.blk.1.res.1.snake1.alpha" f32,f16,bf16 [512,1]
+source "vae.blk.1.res.1.snake1.inv" f32,f16,bf16 [512,1]
+source "vae.blk.1.res.1.conv1.weight" f32,f16,bf16 [512,512,7]
+source "vae.blk.1.res.1.conv1.bias" f32,f16,bf16 [512,1]
+source "vae.blk.1.res.1.snake2.alpha" f32,f16,bf16 [512,1]
+source "vae.blk.1.res.1.snake2.inv" f32,f16,bf16 [512,1]
+source "vae.blk.1.res.1.conv2.weight" f32,f16,bf16 [512,512,1]
+source "vae.blk.1.res.1.conv2.bias" f32,f16,bf16 [512,1]
+source "vae.blk.1.res.2.snake1.alpha" f32,f16,bf16 [512,1]
+source "vae.blk.1.res.2.snake1.inv" f32,f16,bf16 [512,1]
+source "vae.blk.1.res.2.conv1.weight" f32,f16,bf16 [512,512,7]
+source "vae.blk.1.res.2.conv1.bias" f32,f16,bf16 [512,1]
+source "vae.blk.1.res.2.snake2.alpha" f32,f16,bf16 [512,1]
+source "vae.blk.1.res.2.snake2.inv" f32,f16,bf16 [512,1]
+source "vae.blk.1.res.2.conv2.weight" f32,f16,bf16 [512,512,1]
+source "vae.blk.1.res.2.conv2.bias" f32,f16,bf16 [512,1]
+source "vae.blk.2.snake.alpha" f32,f16,bf16 [512,1]
+source "vae.blk.2.snake.inv" f32,f16,bf16 [512,1]
+source "vae.blk.2.up.weight" f32,f16,bf16,q8_0,q4_0 [2048,512]
+source "vae.blk.2.up.bias" f32,f16,bf16 [256,1]
+source "vae.blk.2.res.0.snake1.alpha" f32,f16,bf16 [256,1]
+source "vae.blk.2.res.0.snake1.inv" f32,f16,bf16 [256,1]
+source "vae.blk.2.res.0.conv1.weight" f32,f16,bf16 [256,256,7]
+source "vae.blk.2.res.0.conv1.bias" f32,f16,bf16 [256,1]
+source "vae.blk.2.res.0.snake2.alpha" f32,f16,bf16 [256,1]
+source "vae.blk.2.res.0.snake2.inv" f32,f16,bf16 [256,1]
+source "vae.blk.2.res.0.conv2.weight" f32,f16,bf16 [256,256,1]
+source "vae.blk.2.res.0.conv2.bias" f32,f16,bf16 [256,1]
+source "vae.blk.2.res.1.snake1.alpha" f32,f16,bf16 [256,1]
+source "vae.blk.2.res.1.snake1.inv" f32,f16,bf16 [256,1]
+source "vae.blk.2.res.1.conv1.weight" f32,f16,bf16 [256,256,7]
+source "vae.blk.2.res.1.conv1.bias" f32,f16,bf16 [256,1]
+source "vae.blk.2.res.1.snake2.alpha" f32,f16,bf16 [256,1]
+source "vae.blk.2.res.1.snake2.inv" f32,f16,bf16 [256,1]
+source "vae.blk.2.res.1.conv2.weight" f32,f16,bf16 [256,256,1]
+source "vae.blk.2.res.1.conv2.bias" f32,f16,bf16 [256,1]
+source "vae.blk.2.res.2.snake1.alpha" f32,f16,bf16 [256,1]
+source "vae.blk.2.res.2.snake1.inv" f32,f16,bf16 [256,1]
+source "vae.blk.2.res.2.conv1.weight" f32,f16,bf16 [256,256,7]
+source "vae.blk.2.res.2.conv1.bias" f32,f16,bf16 [256,1]
+source "vae.blk.2.res.2.snake2.alpha" f32,f16,bf16 [256,1]
+source "vae.blk.2.res.2.snake2.inv" f32,f16,bf16 [256,1]
+source "vae.blk.2.res.2.conv2.weight" f32,f16,bf16 [256,256,1]
+source "vae.blk.2.res.2.conv2.bias" f32,f16,bf16 [256,1]
+source "vae.blk.3.snake.alpha" f32,f16,bf16 [256,1]
+source "vae.blk.3.snake.inv" f32,f16,bf16 [256,1]
+source "vae.blk.3.up.weight" f32,f16,bf16,q8_0,q4_0 [768,256]
+source "vae.blk.3.up.bias" f32,f16,bf16 [128,1]
+source "vae.blk.3.res.0.snake1.alpha" f32,f16,bf16 [128,1]
+source "vae.blk.3.res.0.snake1.inv" f32,f16,bf16 [128,1]
+source "vae.blk.3.res.0.conv1.weight" f32,f16,bf16 [128,128,7]
+source "vae.blk.3.res.0.conv1.bias" f32,f16,bf16 [128,1]
+source "vae.blk.3.res.0.snake2.alpha" f32,f16,bf16 [128,1]
+source "vae.blk.3.res.0.snake2.inv" f32,f16,bf16 [128,1]
+source "vae.blk.3.res.0.conv2.weight" f32,f16,bf16 [128,128,1]
+source "vae.blk.3.res.0.conv2.bias" f32,f16,bf16 [128,1]
+source "vae.blk.3.res.1.snake1.alpha" f32,f16,bf16 [128,1]
+source "vae.blk.3.res.1.snake1.inv" f32,f16,bf16 [128,1]
+source "vae.blk.3.res.1.conv1.weight" f32,f16,bf16 [128,128,7]
+source "vae.blk.3.res.1.conv1.bias" f32,f16,bf16 [128,1]
+source "vae.blk.3.res.1.snake2.alpha" f32,f16,bf16 [128,1]
+source "vae.blk.3.res.1.snake2.inv" f32,f16,bf16 [128,1]
+source "vae.blk.3.res.1.conv2.weight" f32,f16,bf16 [128,128,1]
+source "vae.blk.3.res.1.conv2.bias" f32,f16,bf16 [128,1]
+source "vae.blk.3.res.2.snake1.alpha" f32,f16,bf16 [128,1]
+source "vae.blk.3.res.2.snake1.inv" f32,f16,bf16 [128,1]
+source "vae.blk.3.res.2.conv1.weight" f32,f16,bf16 [128,128,7]
+source "vae.blk.3.res.2.conv1.bias" f32,f16,bf16 [128,1]
+source "vae.blk.3.res.2.snake2.alpha" f32,f16,bf16 [128,1]
+source "vae.blk.3.res.2.snake2.inv" f32,f16,bf16 [128,1]
+source "vae.blk.3.res.2.conv2.weight" f32,f16,bf16 [128,128,1]
+source "vae.blk.3.res.2.conv2.bias" f32,f16,bf16 [128,1]
+source "vae.blk.4.snake.alpha" f32,f16,bf16 [128,1]
+source "vae.blk.4.snake.inv" f32,f16,bf16 [128,1]
+source "vae.blk.4.up.weight" f32,f16,bf16,q8_0,q4_0 [256,128]
+source "vae.blk.4.up.bias" f32,f16,bf16 [64,1]
+source "vae.blk.4.res.0.snake1.alpha" f32,f16,bf16 [64,1]
+source "vae.blk.4.res.0.snake1.inv" f32,f16,bf16 [64,1]
+source "vae.blk.4.res.0.conv1.weight" f32,f16,bf16 [64,64,7]
+source "vae.blk.4.res.0.conv1.bias" f32,f16,bf16 [64,1]
+source "vae.blk.4.res.0.snake2.alpha" f32,f16,bf16 [64,1]
+source "vae.blk.4.res.0.snake2.inv" f32,f16,bf16 [64,1]
+source "vae.blk.4.res.0.conv2.weight" f32,f16,bf16 [64,64,1]
+source "vae.blk.4.res.0.conv2.bias" f32,f16,bf16 [64,1]
+source "vae.blk.4.res.1.snake1.alpha" f32,f16,bf16 [64,1]
+source "vae.blk.4.res.1.snake1.inv" f32,f16,bf16 [64,1]
+source "vae.blk.4.res.1.conv1.weight" f32,f16,bf16 [64,64,7]
+source "vae.blk.4.res.1.conv1.bias" f32,f16,bf16 [64,1]
+source "vae.blk.4.res.1.snake2.alpha" f32,f16,bf16 [64,1]
+source "vae.blk.4.res.1.snake2.inv" f32,f16,bf16 [64,1]
+source "vae.blk.4.res.1.conv2.weight" f32,f16,bf16 [64,64,1]
+source "vae.blk.4.res.1.conv2.bias" f32,f16,bf16 [64,1]
+source "vae.blk.4.res.2.snake1.alpha" f32,f16,bf16 [64,1]
+source "vae.blk.4.res.2.snake1.inv" f32,f16,bf16 [64,1]
+source "vae.blk.4.res.2.conv1.weight" f32,f16,bf16 [64,64,7]
+source "vae.blk.4.res.2.conv1.bias" f32,f16,bf16 [64,1]
+source "vae.blk.4.res.2.snake2.alpha" f32,f16,bf16 [64,1]
+source "vae.blk.4.res.2.snake2.inv" f32,f16,bf16 [64,1]
+source "vae.blk.4.res.2.conv2.weight" f32,f16,bf16 [64,64,1]
+source "vae.blk.4.res.2.conv2.bias" f32,f16,bf16 [64,1]
+source "vae.snake_out.alpha" f32,f16,bf16 [64,1]
+source "vae.snake_out.inv" f32,f16,bf16 [64,1]
+source "vae.conv_out.bias" f32,f16,bf16 [1,1]
+source "vae.conv_out.weight" f32,f16,bf16 [1,64,7]
+# Upsample kernels split the GEMM taps into two banks, then reverse the
+# banks and put phase first to match the stride-one two-tap convolution.
+blob 64 fp16 16384 f16(t("vae.post_quant.weight"))
+blob 32896 fp16 128 f16(t("vae.post_quant.bias"))
+blob 33216 fp16 1835008 f16(t("vae.conv_in.weight"))
+blob 3703296 fp16 2048 f16(t("vae.conv_in.bias"))
+blob 3707456 fp16 2048 f16(t("vae.blk.0.snake.alpha"))
+blob 3711616 fp16 2048 f16(clip(t("vae.blk.0.snake.inv"), -60000, 60000))
+blob 3715776 fp16 33554432 f16(permute(take(reshape(t("vae.blk.0.up.weight"), [1024,2,8,2048]), 1, [1,0]), [2,0,3,1]))
+blob 70824704 fp16 1024 f16(t("vae.blk.0.up.bias"))
+blob 70826816 fp16 1024 f16(t("vae.blk.0.res.0.snake1.alpha"))
+blob 70828928 fp16 1024 f16(clip(t("vae.blk.0.res.0.snake1.inv"), -60000, 60000))
+blob 70831040 fp16 7340032 f16(t("vae.blk.0.res.0.conv1.weight"))
+blob 85511168 fp16 1024 f16(t("vae.blk.0.res.0.conv1.bias"))
+blob 85513280 fp16 1024 f16(t("vae.blk.0.res.0.snake2.alpha"))
+blob 85515392 fp16 1024 f16(clip(t("vae.blk.0.res.0.snake2.inv"), -60000, 60000))
+blob 85517504 fp16 1048576 f16(t("vae.blk.0.res.0.conv2.weight"))
+blob 87614720 fp16 1024 f16(t("vae.blk.0.res.0.conv2.bias"))
+blob 87616832 fp16 1024 f16(t("vae.blk.0.res.1.snake1.alpha"))
+blob 87618944 fp16 1024 f16(clip(t("vae.blk.0.res.1.snake1.inv"), -60000, 60000))
+blob 87621056 fp16 7340032 f16(t("vae.blk.0.res.1.conv1.weight"))
+blob 102301184 fp16 1024 f16(t("vae.blk.0.res.1.conv1.bias"))
+blob 102303296 fp16 1024 f16(t("vae.blk.0.res.1.snake2.alpha"))
+blob 102305408 fp16 1024 f16(clip(t("vae.blk.0.res.1.snake2.inv"), -60000, 60000))
+blob 102307520 fp16 1048576 f16(t("vae.blk.0.res.1.conv2.weight"))
+blob 104404736 fp16 1024 f16(t("vae.blk.0.res.1.conv2.bias"))
+blob 104406848 fp16 1024 f16(t("vae.blk.0.res.2.snake1.alpha"))
+blob 104408960 fp16 1024 f16(clip(t("vae.blk.0.res.2.snake1.inv"), -60000, 60000))
+blob 104411072 fp16 7340032 f16(t("vae.blk.0.res.2.conv1.weight"))
+blob 119091200 fp16 1024 f16(t("vae.blk.0.res.2.conv1.bias"))
+blob 119093312 fp16 1024 f16(t("vae.blk.0.res.2.snake2.alpha"))
+blob 119095424 fp16 1024 f16(clip(t("vae.blk.0.res.2.snake2.inv"), -60000, 60000))
+blob 119097536 fp16 1048576 f16(t("vae.blk.0.res.2.conv2.weight"))
+blob 121194752 fp16 1024 f16(t("vae.blk.0.res.2.conv2.bias"))
+blob 121196864 fp16 1024 f16(t("vae.blk.1.snake.alpha"))
+blob 121198976 fp16 1024 f16(clip(t("vae.blk.1.snake.inv"), -60000, 60000))
+blob 121201088 fp16 5242880 f16(permute(take(reshape(t("vae.blk.1.up.weight"), [512,2,5,1024]), 1, [1,0]), [2,0,3,1]))
+blob 131686912 fp16 512 f16(t("vae.blk.1.up.bias"))
+blob 131688000 fp16 512 f16(t("vae.blk.1.res.0.snake1.alpha"))
+blob 131689088 fp16 512 f16(clip(t("vae.blk.1.res.0.snake1.inv"), -60000, 60000))
+blob 131690176 fp16 1835008 f16(t("vae.blk.1.res.0.conv1.weight"))
+blob 135360256 fp16 512 f16(t("vae.blk.1.res.0.conv1.bias"))
+blob 135361344 fp16 512 f16(t("vae.blk.1.res.0.snake2.alpha"))
+blob 135362432 fp16 512 f16(clip(t("vae.blk.1.res.0.snake2.inv"), -60000, 60000))
+blob 135363520 fp16 262144 f16(t("vae.blk.1.res.0.conv2.weight"))
+blob 135887872 fp16 512 f16(t("vae.blk.1.res.0.conv2.bias"))
+blob 135888960 fp16 512 f16(t("vae.blk.1.res.1.snake1.alpha"))
+blob 135890048 fp16 512 f16(clip(t("vae.blk.1.res.1.snake1.inv"), -60000, 60000))
+blob 135891136 fp16 1835008 f16(t("vae.blk.1.res.1.conv1.weight"))
+blob 139561216 fp16 512 f16(t("vae.blk.1.res.1.conv1.bias"))
+blob 139562304 fp16 512 f16(t("vae.blk.1.res.1.snake2.alpha"))
+blob 139563392 fp16 512 f16(clip(t("vae.blk.1.res.1.snake2.inv"), -60000, 60000))
+blob 139564480 fp16 262144 f16(t("vae.blk.1.res.1.conv2.weight"))
+blob 140088832 fp16 512 f16(t("vae.blk.1.res.1.conv2.bias"))
+blob 140089920 fp16 512 f16(t("vae.blk.1.res.2.snake1.alpha"))
+blob 140091008 fp16 512 f16(clip(t("vae.blk.1.res.2.snake1.inv"), -60000, 60000))
+blob 140092096 fp16 1835008 f16(t("vae.blk.1.res.2.conv1.weight"))
+blob 143762176 fp16 512 f16(t("vae.blk.1.res.2.conv1.bias"))
+blob 143763264 fp16 512 f16(t("vae.blk.1.res.2.snake2.alpha"))
+blob 143764352 fp16 512 f16(clip(t("vae.blk.1.res.2.snake2.inv"), -60000, 60000))
+blob 143765440 fp16 262144 f16(t("vae.blk.1.res.2.conv2.weight"))
+blob 144289792 fp16 512 f16(t("vae.blk.1.res.2.conv2.bias"))
+blob 144290880 fp16 512 f16(t("vae.blk.2.snake.alpha"))
+blob 144291968 fp16 512 f16(clip(t("vae.blk.2.snake.inv"), -60000, 60000))
+blob 144293056 fp16 1048576 f16(permute(take(reshape(t("vae.blk.2.up.weight"), [256,2,4,512]), 1, [1,0]), [2,0,3,1]))
+blob 146390272 fp16 256 f16(t("vae.blk.2.up.bias"))
+blob 146390848 fp16 256 f16(t("vae.blk.2.res.0.snake1.alpha"))
+blob 146391424 fp16 256 f16(clip(t("vae.blk.2.res.0.snake1.inv"), -60000, 60000))
+blob 146392000 fp16 458752 f16(t("vae.blk.2.res.0.conv1.weight"))
+blob 147309568 fp16 256 f16(t("vae.blk.2.res.0.conv1.bias"))
+blob 147310144 fp16 256 f16(t("vae.blk.2.res.0.snake2.alpha"))
+blob 147310720 fp16 256 f16(clip(t("vae.blk.2.res.0.snake2.inv"), -60000, 60000))
+blob 147311296 fp16 65536 f16(t("vae.blk.2.res.0.conv2.weight"))
+blob 147442432 fp16 256 f16(t("vae.blk.2.res.0.conv2.bias"))
+blob 147443008 fp16 256 f16(t("vae.blk.2.res.1.snake1.alpha"))
+blob 147443584 fp16 256 f16(clip(t("vae.blk.2.res.1.snake1.inv"), -60000, 60000))
+blob 147444160 fp16 458752 f16(t("vae.blk.2.res.1.conv1.weight"))
+blob 148361728 fp16 256 f16(t("vae.blk.2.res.1.conv1.bias"))
+blob 148362304 fp16 256 f16(t("vae.blk.2.res.1.snake2.alpha"))
+blob 148362880 fp16 256 f16(clip(t("vae.blk.2.res.1.snake2.inv"), -60000, 60000))
+blob 148363456 fp16 65536 f16(t("vae.blk.2.res.1.conv2.weight"))
+blob 148494592 fp16 256 f16(t("vae.blk.2.res.1.conv2.bias"))
+blob 148495168 fp16 256 f16(t("vae.blk.2.res.2.snake1.alpha"))
+blob 148495744 fp16 256 f16(clip(t("vae.blk.2.res.2.snake1.inv"), -60000, 60000))
+blob 148496320 fp16 458752 f16(t("vae.blk.2.res.2.conv1.weight"))
+blob 149413888 fp16 256 f16(t("vae.blk.2.res.2.conv1.bias"))
+blob 149414464 fp16 256 f16(t("vae.blk.2.res.2.snake2.alpha"))
+blob 149415040 fp16 256 f16(clip(t("vae.blk.2.res.2.snake2.inv"), -60000, 60000))
+blob 149415616 fp16 65536 f16(t("vae.blk.2.res.2.conv2.weight"))
+blob 149546752 fp16 256 f16(t("vae.blk.2.res.2.conv2.bias"))
+blob 149547328 fp16 256 f16(t("vae.blk.3.snake.alpha"))
+blob 149547904 fp16 256 f16(clip(t("vae.blk.3.snake.inv"), -60000, 60000))
+blob 149548480 fp16 196608 f16(permute(take(reshape(t("vae.blk.3.up.weight"), [128,2,3,256]), 1, [1,0]), [2,0,3,1]))
+blob 149941760 fp16 128 f16(t("vae.blk.3.up.bias"))
+blob 149942080 fp16 128 f16(t("vae.blk.3.res.0.snake1.alpha"))
+blob 149942400 fp16 128 f16(clip(t("vae.blk.3.res.0.snake1.inv"), -60000, 60000))
+blob 149942720 fp16 114688 f16(t("vae.blk.3.res.0.conv1.weight"))
+blob 150172160 fp16 128 f16(t("vae.blk.3.res.0.conv1.bias"))
+blob 150172480 fp16 128 f16(t("vae.blk.3.res.0.snake2.alpha"))
+blob 150172800 fp16 128 f16(clip(t("vae.blk.3.res.0.snake2.inv"), -60000, 60000))
+blob 150173120 fp16 16384 f16(t("vae.blk.3.res.0.conv2.weight"))
+blob 150205952 fp16 128 f16(t("vae.blk.3.res.0.conv2.bias"))
+blob 150206272 fp16 128 f16(t("vae.blk.3.res.1.snake1.alpha"))
+blob 150206592 fp16 128 f16(clip(t("vae.blk.3.res.1.snake1.inv"), -60000, 60000))
+blob 150206912 fp16 114688 f16(t("vae.blk.3.res.1.conv1.weight"))
+blob 150436352 fp16 128 f16(t("vae.blk.3.res.1.conv1.bias"))
+blob 150436672 fp16 128 f16(t("vae.blk.3.res.1.snake2.alpha"))
+blob 150436992 fp16 128 f16(clip(t("vae.blk.3.res.1.snake2.inv"), -60000, 60000))
+blob 150437312 fp16 16384 f16(t("vae.blk.3.res.1.conv2.weight"))
+blob 150470144 fp16 128 f16(t("vae.blk.3.res.1.conv2.bias"))
+blob 150470464 fp16 128 f16(t("vae.blk.3.res.2.snake1.alpha"))
+blob 150470784 fp16 128 f16(clip(t("vae.blk.3.res.2.snake1.inv"), -60000, 60000))
+blob 150471104 fp16 114688 f16(t("vae.blk.3.res.2.conv1.weight"))
+blob 150700544 fp16 128 f16(t("vae.blk.3.res.2.conv1.bias"))
+blob 150700864 fp16 128 f16(t("vae.blk.3.res.2.snake2.alpha"))
+blob 150701184 fp16 128 f16(clip(t("vae.blk.3.res.2.snake2.inv"), -60000, 60000))
+blob 150701504 fp16 16384 f16(t("vae.blk.3.res.2.conv2.weight"))
+blob 150734336 fp16 128 f16(t("vae.blk.3.res.2.conv2.bias"))
+blob 150734656 fp16 128 f16(t("vae.blk.4.snake.alpha"))
+blob 150734976 fp16 128 f16(clip(t("vae.blk.4.snake.inv"), -60000, 60000))
+blob 150735296 fp16 32768 f16(permute(take(reshape(t("vae.blk.4.up.weight"), [64,2,2,128]), 1, [1,0]), [2,0,3,1]))
+blob 150800896 fp16 64 f16(t("vae.blk.4.up.bias"))
+blob 150801088 fp16 64 f16(t("vae.blk.4.res.0.snake1.alpha"))
+blob 150801280 fp16 64 f16(clip(t("vae.blk.4.res.0.snake1.inv"), -60000, 60000))
+blob 150801472 fp16 28672 f16(t("vae.blk.4.res.0.conv1.weight"))
+blob 150858880 fp16 64 f16(t("vae.blk.4.res.0.conv1.bias"))
+blob 150859072 fp16 64 f16(t("vae.blk.4.res.0.snake2.alpha"))
+blob 150859264 fp16 64 f16(clip(t("vae.blk.4.res.0.snake2.inv"), -60000, 60000))
+blob 150859456 fp16 4096 f16(t("vae.blk.4.res.0.conv2.weight"))
+blob 150867712 fp16 64 f16(t("vae.blk.4.res.0.conv2.bias"))
+blob 150867904 fp16 64 f16(t("vae.blk.4.res.1.snake1.alpha"))
+blob 150868096 fp16 64 f16(clip(t("vae.blk.4.res.1.snake1.inv"), -60000, 60000))
+blob 150868288 fp16 28672 f16(t("vae.blk.4.res.1.conv1.weight"))
+blob 150925696 fp16 64 f16(t("vae.blk.4.res.1.conv1.bias"))
+blob 150925888 fp16 64 f16(t("vae.blk.4.res.1.snake2.alpha"))
+blob 150926080 fp16 64 f16(clip(t("vae.blk.4.res.1.snake2.inv"), -60000, 60000))
+blob 150926272 fp16 4096 f16(t("vae.blk.4.res.1.conv2.weight"))
+blob 150934528 fp16 64 f16(t("vae.blk.4.res.1.conv2.bias"))
+blob 150934720 fp16 64 f16(t("vae.blk.4.res.2.snake1.alpha"))
+blob 150934912 fp16 64 f16(clip(t("vae.blk.4.res.2.snake1.inv"), -60000, 60000))
+blob 150935104 fp16 28672 f16(t("vae.blk.4.res.2.conv1.weight"))
+blob 150992512 fp16 64 f16(t("vae.blk.4.res.2.conv1.bias"))
+blob 150992704 fp16 64 f16(t("vae.blk.4.res.2.snake2.alpha"))
+blob 150992896 fp16 64 f16(clip(t("vae.blk.4.res.2.snake2.inv"), -60000, 60000))
+blob 150993088 fp16 4096 f16(t("vae.blk.4.res.2.conv2.weight"))
+blob 151001344 fp16 64 f16(t("vae.blk.4.res.2.conv2.bias"))
+blob 151001536 fp16 64 f16(t("vae.snake_out.alpha"))
+blob 151001728 fp16 64 f16(clip(t("vae.snake_out.inv"), -60000, 60000))
+blob 151001920 fp16 448 f16(t("vae.conv_out.weight"))
+# drafted by extract from twin A (main:CoreML7/conv_out_bias_to_fp16.val): confirm against the exporter
+patch 198317 fp16 1 f16(t("vae.conv_out.bias"))
+end

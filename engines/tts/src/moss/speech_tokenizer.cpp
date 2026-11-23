@@ -1,4 +1,5 @@
 #include "moss/speech_tokenizer.h"
+#include "moss/coreml_generation.h"
 
 #include "moss/gguf_metadata.h"
 #include "moss/sfx_model.h"
@@ -234,6 +235,7 @@ struct SpeechTokenizer::Impl {
     std::vector<float> code_bias;
     int n_threads = 1;
     std::unique_ptr<SpeechTokenizerSidecar> sidecar;
+    std::unique_ptr<MossCoremlGeneration> generation;
     bool strict = false;
     AttentionLayout attention_layout = AttentionLayout::Automatic;
     bool fused = false;
@@ -366,11 +368,14 @@ struct SpeechTokenizer::Impl {
         return values;
     }
 
-    void load(const std::string & path, const BackendRequest & request, int threads) {
+    void load(const std::string & path, const BackendRequest & request,
+              int threads, const CoremlOptions & coreml) {
         if (!within(threads, 1, MAX_THREADS)) {
             fail("threads must be 1.." + std::to_string(MAX_THREADS));
         }
         n_threads = threads;
+        generation = std::make_unique<MossCoremlGeneration>(
+            GeneratedStage::speech_tokenizer, path, coreml);
         file = gguf_init_from_file(path.c_str(), {true, &metadata});
         if (!file || !metadata) {
             fail("cannot read GGUF: " + path);
@@ -389,9 +394,13 @@ struct SpeechTokenizer::Impl {
         mel_filters = read_tensor(find("whispervq.mel_filters"));
         code_bias = half_squared_norms(read_tensor(find("whispervq.codebook")), (size_t) config.codebook_size,
                 (size_t) config.n_embd);
-        const CoremlPolicy policy = read_coreml_policy();
+        const CoremlPolicy policy = generation->prebuilt_policy();
         sidecar = open_speech_tokenizer_sidecar(path, config, policy);
-        strict = policy.strict;
+        const SpeechSegmentCapacity capacity = speech_segment_capacity(config);
+        generation->start({1, config.n_mels, capacity.mel_frames},
+                          {1, capacity.tokens, config.n_embd});
+        // start() drops strictness when a memory budget suppresses generation.
+        strict = generation->prebuilt_policy().strict;
     }
 
     std::vector<float> log_mel(const float * samples, size_t count) const {
@@ -540,13 +549,27 @@ struct SpeechTokenizer::Impl {
         return true;
     }
 
-    std::vector<int32_t> encode_frames(const std::vector<float> & mel, int64_t mel_frames) {
+    std::vector<int32_t> encode_frames(const std::vector<float> & mel,
+                                       int64_t mel_frames, bool full_segment) {
         const int64_t tokens = mel_frames / CONV_DOWNSAMPLE / config.pooling_kernel;
         std::vector<float> pooled;
         if (sidecar_takes(mel_frames) && pooled_on_sidecar(mel, pooled)) {
             return quantize_pooled(pooled, tokens);
         }
-        if (strict && !sidecar) {
+        if (generation && full_segment) {
+            auto model = generation->acquire();
+            if (model) {
+                if (model->predict(mel, pooled)) {
+                    backends.note(model->label());
+                    return quantize_pooled(pooled, tokens);
+                }
+                model->retire();
+            }
+        }
+        // A partial segment never runs on the generated tokenizer, so it is not
+        // a strict failure while that route exists.
+        if (strict && !sidecar &&
+            (full_segment || !generation || !generation->can_generate())) {
             fail_strict(OWNER, "tokenizer");
         }
         backends.note(GGML_STAGE_BACKEND);
@@ -580,7 +603,9 @@ struct SpeechTokenizer::Impl {
             fail("segment must hold 1.." + std::to_string(config.chunk_samples) + " samples");
         }
         const std::vector<float> mel = log_mel(samples, count);
-        std::vector<int32_t> codes = encode_frames(mel, (int64_t) (mel.size() / (size_t) config.n_mels));
+        std::vector<int32_t> codes =
+            encode_frames(mel, (int64_t)(mel.size() / (size_t)config.n_mels),
+                          count == (size_t)config.chunk_samples);
         codes.resize(std::min(codes.size(), speech_segment_tokens(config, count)));
         return codes;
     }
@@ -596,10 +621,13 @@ struct SpeechTokenizer::Impl {
     }
 };
 
-SpeechTokenizer::SpeechTokenizer(const std::string & codec_path, const BackendRequest & backend, int n_threads,
-                                 AttentionLayout attention) : impl_(new Impl) {
+SpeechTokenizer::SpeechTokenizer(const std::string & codec_path,
+                                 const BackendRequest & backend, int n_threads,
+                                 AttentionLayout attention,
+                                 const CoremlOptions & coreml)
+    : impl_(new Impl) {
     impl_->attention_layout = attention;
-    impl_->load(codec_path, backend, n_threads);
+    impl_->load(codec_path, backend, n_threads, coreml);
 }
 
 SpeechTokenizer::~SpeechTokenizer() = default;
@@ -621,12 +649,19 @@ std::vector<int32_t> SpeechTokenizer::encode(const std::vector<float> & pcm_16k,
 }
 
 void SpeechTokenizer::attach_sidecar(std::unique_ptr<SpeechTokenizerSidecar> sidecar, bool strict) {
+    impl_->generation.reset();
     impl_->sidecar = std::move(sidecar);
     impl_->strict = strict;
 }
 
 bool SpeechTokenizer::on_coreml() const {
-    return impl_->sidecar != nullptr;
+    return impl_->sidecar || (impl_->generation && impl_->generation->ready());
+}
+
+std::string SpeechTokenizer::coreml_status_json() const {
+    return impl_->generation
+               ? impl_->generation->status_json(impl_->sidecar != nullptr)
+               : "{}";
 }
 
 void SpeechTokenizer::begin_run() {

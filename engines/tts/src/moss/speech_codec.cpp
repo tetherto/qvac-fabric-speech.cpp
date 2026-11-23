@@ -142,9 +142,10 @@ struct SpeechCodec::Impl {
         }
     }
 
-    void load() {
+    void load(const CoremlOptions & coreml) {
         read_assets();
-        tokenizer = std::make_unique<SpeechTokenizer>(path, request, n_threads);
+        tokenizer = std::make_unique<SpeechTokenizer>(
+            path, request, n_threads, AttentionLayout::Automatic, coreml);
         if (!campplus_load(path, speaker)) {
             fail("the codec GGUF carries no CAM++ speaker encoder");
         }
@@ -302,13 +303,15 @@ struct SpeechCodec::Impl {
     }
 };
 
-SpeechCodec::SpeechCodec(const std::string & codec_path, const BackendRequest & backend, int n_threads)
+SpeechCodec::SpeechCodec(const std::string & codec_path,
+                         const BackendRequest & backend, int n_threads,
+                         const CoremlOptions & coreml)
     : impl_(new Impl) {
     impl_->path = codec_path;
     impl_->request = backend;
     impl_->decoder_gpu = decoder_uses_gpu(backend);
     impl_->n_threads = n_threads;
-    impl_->load();
+    impl_->load(coreml);
 }
 
 SpeechCodec::~SpeechCodec() = default;

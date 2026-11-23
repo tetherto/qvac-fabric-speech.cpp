@@ -49,6 +49,9 @@ int moss_coreml_predict(struct moss_coreml_model * model,
                         const char * const * input_names, const float * const * inputs, int n_inputs,
                         const char * const * output_names, float * const * outputs, int n_outputs);
 
+// Run one stateless prediction with zeroed input backings.
+int moss_coreml_warm(struct moss_coreml_model * model);
+
 int moss_coreml_predict_batch(struct moss_coreml_model * model,
                               const char * const * input_names, const float * const * inputs, int n_inputs,
                               const char * const * output_names, float * const * outputs, int n_outputs,

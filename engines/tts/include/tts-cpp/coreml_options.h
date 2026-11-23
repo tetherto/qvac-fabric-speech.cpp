@@ -2,7 +2,8 @@
 
 // Core ML options for tts-cpp engines that load sidecars through the shared
 // Core ML runtime, including the Parler DAC decoder, Chatterbox S3Gen
-// encoder, CFM estimator and HiFT decoder, and Audio8 codec.
+// encoder, CFM estimator and HiFT decoder, Audio8 codec, MOSS speech
+// tokenizer, and MOSS SoundEffect VAE.
 //
 // Every field is unset by default. An engine resolves them once, at
 // construction (or once per call for direct pipeline callers), in this order

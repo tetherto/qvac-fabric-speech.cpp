@@ -35,7 +35,8 @@ bool decoder_uses_gpu(const BackendRequest & backend);
 
 class SpeechCodec {
 public:
-    SpeechCodec(const std::string & codec_path, const BackendRequest & backend, int n_threads);
+    SpeechCodec(const std::string & codec_path, const BackendRequest & backend,
+                int n_threads, const CoremlOptions & coreml = {});
     ~SpeechCodec();
     SpeechCodec(const SpeechCodec &) = delete;
     SpeechCodec & operator=(const SpeechCodec &) = delete;

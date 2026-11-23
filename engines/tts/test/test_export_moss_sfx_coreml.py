@@ -8,6 +8,7 @@ coremltools) both converted interfaces. Skips without numpy or torch.
 """
 import importlib.util
 import math
+import os
 import pathlib
 import sys
 import unittest
@@ -17,6 +18,8 @@ try:
     import torch
     import torch.nn.functional as F
 except ImportError as error:
+    if os.getenv("MOSS_REQUIRE_EXPORTER_DEPS"):
+        raise
     print(f"SKIP: {error.name} is not installed")
     sys.exit(0)
 
@@ -236,6 +239,8 @@ class CoremlContractTest(unittest.TestCase):
         try:
             import coremltools  # noqa: F401
         except ImportError:
+            if os.getenv("MOSS_REQUIRE_EXPORTER_DEPS"):
+                raise
             self.skipTest("coremltools is not installed")
         exporter = load_exporter()
         rng = np.random.default_rng(SEED)

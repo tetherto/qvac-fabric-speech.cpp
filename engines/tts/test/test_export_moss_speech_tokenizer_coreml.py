@@ -8,6 +8,7 @@ interface. Skips without numpy or torch.
 """
 import importlib.util
 import math
+import os
 import pathlib
 import sys
 import unittest
@@ -16,6 +17,8 @@ try:
     import numpy as np
     import torch
 except ImportError as error:
+    if os.getenv("MOSS_REQUIRE_EXPORTER_DEPS"):
+        raise
     print(f"SKIP: {error.name} is not installed")
     sys.exit(0)
 
@@ -173,6 +176,8 @@ class CoremlContractTest(unittest.TestCase):
         try:
             import coremltools  # noqa: F401
         except ImportError:
+            if os.getenv("MOSS_REQUIRE_EXPORTER_DEPS"):
+                raise
             self.skipTest("coremltools is not installed")
         exporter = load_exporter()
         model = exporter.TokenizerEncoder(tiny_tensors(np.random.default_rng(SEED)), tiny_hparams()).eval()

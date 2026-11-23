@@ -95,6 +95,20 @@ void test_workloads() {
           "step schedule is included");
 }
 
+void test_fit_with_generation_disabled() {
+    Model model;
+    auto options = model.options();
+    options.coreml.generate = CoremlOptions::Generate::never;
+    const auto disabled = moss::fit_params(options, request(), 0);
+    options.coreml.use = CoremlOptions::Use::off;
+    const auto off = moss::fit_params(options, request(), 0);
+    check(disabled.status == off.status &&
+              disabled.device.total_bytes == off.device.total_bytes &&
+              disabled.host_bytes == off.host_bytes &&
+              disabled.coreml.bytes == 0 && off.coreml.bytes == 0,
+          "generation disabled and Core ML off preserve the ggml fit");
+}
+
 void test_errors() {
     Model model;
     auto invalid = request();
@@ -202,6 +216,7 @@ void test_real_model() {
 int main() {
     test_weightless();
     test_workloads();
+    test_fit_with_generation_disabled();
     test_cache_memory();
     test_errors();
     test_explicit_backend();

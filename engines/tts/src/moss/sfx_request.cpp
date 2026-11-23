@@ -5,7 +5,6 @@
 
 namespace tts_cpp::moss::detail {
 namespace {
-constexpr int MAX_STEPS = 1000;
 constexpr float MAX_GUIDANCE = 50.0f;
 constexpr float MAX_SHIFT = 100.0f;
 constexpr float UNGUIDED = 1.0f;
@@ -22,7 +21,8 @@ bool is_valid_override(float value) {
 
 void validate_overrides(const SoundEffectRequest & request) {
     if (request.steps < 0) {
-        fail("steps must be 1.." + std::to_string(MAX_STEPS) + ", or 0 for the model default");
+        fail("steps must be 1.." + std::to_string(SFX_MAX_STEPS) +
+             ", or 0 for the model default");
     }
     if (!is_valid_override(request.guidance)) {
         fail("guidance must be in [1, " + std::to_string((int) MAX_GUIDANCE) + "], or 0 for the model default");
@@ -49,8 +49,8 @@ void validate(const SfxConfig & config, const ResolvedRequest & request) {
     if (request.tenths < 1 || (float) request.tenths > max_seconds * TENTHS_PER_SECOND) {
         fail("seconds must be in (0, " + std::to_string(max_seconds) + "]");
     }
-    if (request.steps > MAX_STEPS) {
-        fail("steps must be 1.." + std::to_string(MAX_STEPS));
+    if (request.steps > SFX_MAX_STEPS) {
+        fail("steps must be 1.." + std::to_string(SFX_MAX_STEPS));
     }
     if (request.guidance < UNGUIDED || request.guidance > MAX_GUIDANCE) {
         fail("guidance must be in [1, " + std::to_string((int) MAX_GUIDANCE) + "]");
@@ -60,7 +60,7 @@ void validate(const SfxConfig & config, const ResolvedRequest & request) {
     }
 }
 
-}
+} // namespace
 
 ResolvedRequest resolve_sfx_request(const SfxConfig & config, const SoundEffectRequest & request) {
     validate_overrides(request);

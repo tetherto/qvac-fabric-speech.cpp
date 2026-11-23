@@ -2,6 +2,7 @@
 
 #include "moss/backend_request.h"
 #include "moss/coreml_sidecar.h"
+#include "tts-cpp/coreml_options.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -53,7 +54,8 @@ std::unique_ptr<SpeechTokenizerSidecar> open_speech_tokenizer_sidecar(const std:
 class SpeechTokenizer {
 public:
     SpeechTokenizer(const std::string & codec_path, const BackendRequest & backend, int n_threads,
-                    AttentionLayout attention = AttentionLayout::Automatic);
+                    AttentionLayout attention = AttentionLayout::Automatic,
+                    const CoremlOptions & coreml = {});
     ~SpeechTokenizer();
     SpeechTokenizer(const SpeechTokenizer &) = delete;
     SpeechTokenizer & operator=(const SpeechTokenizer &) = delete;
@@ -67,6 +69,7 @@ public:
 
     void attach_sidecar(std::unique_ptr<SpeechTokenizerSidecar> sidecar, bool strict);
     bool on_coreml() const;
+    std::string coreml_status_json() const;
     void begin_run();
     std::string run_backend() const;
 

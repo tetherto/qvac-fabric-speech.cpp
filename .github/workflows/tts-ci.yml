@@ -474,12 +474,19 @@ jobs:
       # exported fixtures below, so the feature is functionally covered on
       # every PR, not just compiled. The parity binaries exit 77 when built
       # without it, which fails their steps on purpose.
+      - name: Install MOSS Core ML exporter test dependencies
+        run: |
+          coreml_python="$(command -v python3.11 || command -v python3)"
+          "$coreml_python" -m venv .venv-moss-coreml
+          .venv-moss-coreml/bin/python -m pip install -r engines/parakeet/scripts/requirements-coreml.txt
+
       - name: Configure
         run: |
           cmake -S engines/tts -B build \
             -DCMAKE_BUILD_TYPE=Release \
             -DTTS_CPP_BUILD_TESTS=ON \
             -DTTS_CPP_COREML=ON \
+            -DTTS_CPP_MOSS_EXPORTER_PYTHON="$PWD/.venv-moss-coreml/bin/python" \
             -DCMAKE_PREFIX_PATH="$PWD/ggml-install"
 
       - name: Build
@@ -933,6 +940,152 @@ jobs:
           rm -rf parler-dac-cache
           exit "$status"
 
+      # MOSS stage-only GGUFs, the real-weights inputs of the generated
+      # speech tokenizer (template moss-speech-tokenizer-30s) and SoundEffect
+      # VAE (moss-sfx-vae-w320) sidecars: the repo's converters write only
+      # the tokenizer (--tokenizer-only) and only the VAE (--vae-only) from
+      # the pinned checkpoint revisions, so the job skips the GBs of text
+      # encoder, DiT and codec decoder these stages never read. The converters
+      # record the checkpoint directory's name as general.name, so the
+      # downloads go to directories named after the Hugging Face
+      # repositories. Cache key: checkpoint revisions + converter hashes.
+      - name: Cache MOSS stage GGUFs
+        if: runner.os == 'macOS'
+        id: moss-stage-cache
+        uses: actions/cache@v4
+        with:
+          path: moss-stage
+          key: moss-stage-eeec733e-e35df4d8-${{ hashFiles('engines/tts/scripts/convert-moss-speech-codec-to-gguf.py', 'engines/tts/scripts/convert-moss-sfx-to-gguf.py') }}
+
+      - name: Stage MOSS stage GGUFs
+        if: runner.os == 'macOS' && steps.moss-stage-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          codec_rev=eeec733e4e1dea7da444d332d8e1621ef257414c
+          sfx_rev=e35df4d82fbe87fcd5d14e5d100e349c0c3c076d
+          codec=MOSS-Speech-Codec
+          sfx=MOSS-SoundEffect-v2.0
+          mkdir -p moss-stage "$codec" "$sfx/vae" "$sfx/transformer" "$sfx/scheduler" "$sfx/text_encoder"
+          for f in config.json preprocessor_config.json model.safetensors; do
+            curl -sSfL --retry 3 -o "$codec/$f" \
+              "https://huggingface.co/OpenMOSS-Team/MOSS-Speech-Codec/resolve/$codec_rev/$f"
+          done
+          for f in model_index.json vae/config.json vae/vae_128d_48k.pth transformer/config.json \
+                   scheduler/scheduler_config.json text_encoder/config.json; do
+            curl -sSfL --retry 3 -o "$sfx/$f" \
+              "https://huggingface.co/OpenMOSS-Team/MOSS-SoundEffect-v2.0/resolve/$sfx_rev/$f"
+          done
+          shasum -a 256 -c - <<'SUMS'
+          d9a266ec22ad81910a4a2ac4241f8582ded172faba87693e0df32d6570186367  MOSS-Speech-Codec/model.safetensors
+          07e6139ff33bd21ba8a7a7f40ed24aab13ac0d100cd686f8a9f3e03dc5251cb1  MOSS-SoundEffect-v2.0/vae/vae_128d_48k.pth
+          SUMS
+          coreml_python="$(command -v python3.11 || command -v python3)"
+          "$coreml_python" -m venv .venv-moss-stage
+          .venv-moss-stage/bin/python -m pip install --upgrade pip
+          .venv-moss-stage/bin/python -m pip install -r engines/parakeet/scripts/requirements-coreml.txt \
+            safetensors==0.8.0 transformers==4.46.1 tokenizers==0.20.3
+          .venv-moss-stage/bin/python engines/tts/scripts/convert-moss-speech-codec-to-gguf.py "$codec" \
+            --tokenizer-only --outtype f16 --outfile moss-stage/moss-speech-tokenizer-f16.gguf
+          .venv-moss-stage/bin/python engines/tts/scripts/convert-moss-sfx-to-gguf.py "$sfx" \
+            --vae-only --outfile moss-stage/moss-sfx-vae-f16.gguf
+          rm -rf "$codec" "$sfx" .venv-moss-stage
+
+      # Checked on every run, whether the GGUFs were just converted or
+      # restored from the cache.
+      - name: Check MOSS stage GGUFs
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          shasum -a 256 moss-stage/*.gguf
+          shasum -a 256 -c - <<'SUMS'
+          18881e238ab1e6cab9a9082785afbed410e2cd1b794086266412f53e959f0a1d  moss-stage/moss-speech-tokenizer-f16.gguf
+          32d7b98f1019fd3c880805575fd6901644bfccdfc22faa3e9be780823ad55c50  moss-stage/moss-sfx-vae-f16.gguf
+          SUMS
+
+      # The generated MOSS sidecars on real weights:
+      # - the real-weights gate per template: the C++ generator on the staged
+      #   GGUF is byte-equal to the template's exporter run on it, and the
+      #   specs match;
+      # - each stage generated from its GGUF alone into an empty cache,
+      #   compiled, loaded and warmed on the GPU (cpu_and_gpu), then parity
+      #   against ggml on the same weights: tokenizer codes on one full
+      #   segment agree at >= 0.95, the VAE waveform at cosine >= 0.999; the
+      #   routes, status, strict mode, the cached second slot, fit's
+      #   envelope and near-budget memory-degrade.
+      # --require-coreml fails the step if a Core ML gate would skip. The
+      # cache stays for the fit step below.
+      - name: Test (Core ML MOSS generated tokenizer and VAE, staged GGUFs)
+        id: moss-generated
+        if: runner.os == 'macOS'
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          set -euo pipefail
+          sw_vers
+          py=.venv-moss-coreml/bin/python
+          tokenizer=moss-stage/moss-speech-tokenizer-f16.gguf
+          vae=moss-stage/moss-sfx-vae-f16.gguf
+          "$py" engines/coreml/python/coreml_template.py --tool build/qvac-coreml-tool real \
+            --template-dir engines/tts/coreml-templates/moss-speech-tokenizer-30s --gguf "$tokenizer"
+          "$py" engines/coreml/python/coreml_template.py --tool build/qvac-coreml-tool real \
+            --template-dir engines/tts/coreml-templates/moss-sfx-vae-w320 --gguf "$vae"
+          rm -rf moss-generated-cache
+          ./build/test-moss-coreml-generated --tokenizer "$tokenizer" --vae "$vae" \
+            --cache-dir "$PWD/moss-generated-cache" --require-coreml
+
+      # The memory validation behind the MOSS templates' memory constants on
+      # this runner's chip: ggml calls run while each stage's sidecar is
+      # generated, compiled, loaded and warmed in the background, three
+      # times, each from a re-signed copy of the test and an empty cache.
+      # Each run prints its per-phase table and fails unless 1.25 x each
+      # phase it measured (the prepare, the load and warm-up, the steady
+      # state) fits the template constant that charges it, and the whole run
+      # fits the envelope: the constants are 1.25 x the largest value of
+      # every run on every validated host, so a run that sets a new maximum
+      # fails until they are recomputed (docs/moss.md). The stages run on the
+      # GPU, so there is no ANECompilerService reserve to check. Runs
+      # whenever the generated-sidecar step ran, so a parity failure does not
+      # hide it.
+      - name: Memory schedule (generated MOSS tokenizer and VAE, overlapped, this runner)
+        id: moss-memory
+        if: >-
+          !cancelled() && runner.os == 'macOS' &&
+          (steps.moss-generated.outcome == 'success' || steps.moss-generated.outcome == 'failure')
+        run: |
+          set -euo pipefail
+          sw_vers
+          sysctl -n machdep.cpu.brand_string hw.memsize
+          rm -rf moss-memory
+          mkdir -p moss-memory
+          status=0
+          for i in 1 2 3; do
+            id="qvac-memory-$(uuidgen)"
+            cp build/test-moss-coreml-generated "moss-memory/$id"
+            codesign -s - -f -i "$id" "moss-memory/$id"
+            "moss-memory/$id" --tokenizer moss-stage/moss-speech-tokenizer-f16.gguf \
+              --vae moss-stage/moss-sfx-vae-f16.gguf --memory-schedule "$PWD/moss-memory/cache-$i" \
+              --require-coreml 2>&1 | tee "moss-memory/run-$i.log" || status=1
+            rm -rf "moss-memory/cache-$i" "moss-memory/$id" "$HOME/Library/Caches/$id"
+          done
+          grep -hE 'memory report:|^FAIL:' moss-memory/run-*.log > moss-memory-summary.log || true
+          rm -rf moss-memory
+          exit "$status"
+
+      # The MOSS routes and the VAE's fit are the same with an empty cache
+      # and with the cache the generated step populated, whose hints are
+      # also rewritten stale and non-stale.
+      - name: Test (MOSS fit with an empty and a populated Core ML cache)
+        if: >-
+          !cancelled() && runner.os == 'macOS' &&
+          (steps.moss-generated.outcome == 'success' || steps.moss-generated.outcome == 'failure')
+        run: |
+          set -euo pipefail
+          status=0
+          ./build/test-moss-fit-stable --tokenizer moss-stage/moss-speech-tokenizer-f16.gguf \
+            --vae moss-stage/moss-sfx-vae-f16.gguf --cache-dir "$PWD/moss-generated-cache" || status=1
+          rm -rf moss-generated-cache
+          exit "$status"
+
       # Runs whenever the generated-sidecar step ran, so a failure there does
       # not hide the decoder results.
       - name: Test (Core ML Parler decoder state and recovery)
@@ -1312,6 +1465,14 @@ jobs:
           SUPERTONIC_COREML_STRICT: '1'
           SUPERTONIC_COREML_VECTOR_COMPUTE_UNITS: cpu_only
         run: ./build/test-supertonic-coreml-vector
+
+      - name: Report MOSS memory measurements
+        if: >-
+          !cancelled() && (steps.moss-memory.outcome == 'success' || steps.moss-memory.outcome == 'failure')
+        run: |
+          if [ -s moss-memory-summary.log ]; then
+            cat moss-memory-summary.log
+          fi
 
       # Supertonic 2 at a pinned Hugging Face revision, converted by the
       # repo's converter (f16) and requantised by requantize-gguf.py (q8_0,
