@@ -13,7 +13,8 @@ namespace {
 
 constexpr int kThreads = 8;
 constexpr int kGpuLayers = 99;
-// Capturing intermediates forces ggml even when a Core ML sidecar is staged.
+// Both runs take a ggml encoder route and capture intermediates, so a staged
+// Core ML sidecar is never used.
 constexpr bool kCaptureIntermediates = true;
 constexpr float kFrameStep = 0.17f;
 constexpr float kChannelStep = 0.11f;
@@ -42,16 +43,16 @@ bool check_padding(parakeet::ParakeetCtcModel &model, const PaddingCase &test) {
     const int channels = model.mel_cfg.n_mels;
     auto mel = make_mel(test.frames, channels);
     parakeet::EncoderOutputs reference;
-    if (parakeet::run_encoder(model, mel.data(), test.frames, channels, reference, -1,
-                              kCaptureIntermediates) != 0) {
+    if (parakeet::run_encoder(model, mel.data(), test.frames, channels, reference,
+                              parakeet::EncoderRoute::ggml(), -1, kCaptureIntermediates) != 0) {
         std::fprintf(stderr, "FAIL: encoding the valid input\n");
         return false;
     }
 
     mel.resize((size_t)(test.frames + test.padding) * channels, 0.0f);
     parakeet::EncoderOutputs padded;
-    if (parakeet::run_encoder(model, mel.data(), test.frames + test.padding, channels, padded, -1,
-                              kCaptureIntermediates) != 0) {
+    if (parakeet::run_encoder(model, mel.data(), test.frames + test.padding, channels, padded,
+                              parakeet::EncoderRoute::ggml(), -1, kCaptureIntermediates) != 0) {
         std::fprintf(stderr, "FAIL: encoding the padded input\n");
         return false;
     }

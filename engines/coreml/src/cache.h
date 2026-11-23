@@ -198,6 +198,17 @@ Adoption adopt(const Layout & l, const std::string & template_id, const std::str
 
 // Moves an unusable artifact aside (quarantine/<template-id>.<key32>.<pid>) under
 // LOCK_EX|LOCK_NB, i.e. only when no lease is held. `would_block` when leased.
+// The (dev, inode) of a published artifact directory: which publication a
+// holder adopted. A repair (quarantine, then a new publication) changes it.
+bool artifact_identity(const Layout & l, const std::string & template_id, const std::string & key32, uint64_t & dev,
+                       uint64_t & ino);
+
+// quarantine(), but only the publication (dev, ino) a holder adopted: under
+// EX, a different (or no) artifact at the key is left alone and *replaced is
+// set (another process repaired it after the holder's lease was released).
+KeyLock::Result quarantine_if(const Layout & l, const std::string & template_id, const std::string & key32,
+                              uint64_t dev, uint64_t ino, bool * replaced, Error * err);
+
 KeyLock::Result quarantine(const Layout & l, const std::string & template_id, const std::string & key32,
                            Error * err = nullptr);
 

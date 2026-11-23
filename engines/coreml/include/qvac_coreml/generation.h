@@ -108,15 +108,22 @@ PrepareRequest prepare_request(const Candidate & c, const SourceStat & source, c
 
 // PrepareFn of route `generate`: the cache pipeline (memo, digest, generate,
 // compile, publish, adopt) with the on-device compile. The artifact's lease
-// is released when it returns; the LoadFn takes its own (begin_load).
+// is released when it returns; the LoadFn takes its own (begin_load). An
+// unsupported cache volume returns PrepareResult::unsupported ("cache_fs").
 PrepareResult prepare(const PrepareRequest & req, PrepareContext & ctx);
 
 // For LoadFns. A generated artifact (LoadRequest::tmpl set) loads under the
 // shared lease of its cache entry: begin_load takes it and returns false
 // when the load must not start (`out` then carries would_block, or the
-// error when the artifact is gone). end_load, after the engine's load,
-// touches used/<key> on success and releases the lease on failure. Both do
-// nothing for a prebuilt artifact.
+// error with artifact_gone when the artifact is gone or incomplete, which
+// returns the slot to preparation). end_load, after the engine's load,
+// touches used/<key> and clears the (function, units) load failure record on
+// success, and releases the lease on failure. A failure is recorded (a repeat
+// in another process promotes it to deterministic, except resource errors,
+// and begin_load then refuses to load); a rejection (LoadResult::rejected, or
+// a deterministic error) that is not a resource error also moves the artifact
+// to quarantine/ under the key's exclusive lock and sets artifact_gone, so the
+// slot regenerates it once. Both do nothing for a prebuilt artifact.
 bool begin_load(const LoadRequest & req, LoadResult & out);
 void end_load(const LoadRequest & req, LoadResult & out);
 

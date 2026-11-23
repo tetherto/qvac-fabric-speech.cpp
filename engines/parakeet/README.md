@@ -166,6 +166,150 @@ they run 1.4-2.7x faster than ggml Metal. On an M3 Ultra, whose GPU is faster,
 they only tie with it (0.70-1.17x), so leave them out on Max and Ultra
 machines; see [the diarizer guide](docs/backends.md#core-ml-diarizer-sidecars).
 
+### Background loading, waiting and status
+
+Encoder, bypass-encoder and diarizer sidecars load in the background. The
+`Engine` constructor returns as soon as the GGUF is loaded. Until a sidecar
+is ready, every call runs on ggml with the same plan as a ggml-only build, and
+the result reports `coreml_pending = true`. The backend is chosen once per call
+(one transcription, one diarization or one streaming window), so a sidecar
+that becomes ready part-way through a call is used from the next call. A
+prediction that fails retires the sidecar for the rest of the process, and the
+call finishes on ggml (`encoder_backend` is `"mixed"` when some windows had
+already run on Core ML). An input the sidecar cannot take, such as one longer
+than a fixed capacity, runs that call on ggml and keeps the sidecar. Two loads
+still happen inside the constructor: the TDT decoder sidecar, and an encoder
+sidecar that owns the encoder (a GGUF without encoder weights, or
+`PARAKEET_COREML_ONLY`). A standard TDT sidecar without a validated seam
+policy never owns the encoder. With `PARAKEET_COREML_ONLY` and a full GGUF, the
+GGUF keeps its encoder weights and the sidecar loads in the background like any
+other; when the bundle's `metadata.json` shows it is not the fixed-window
+Neural Engine export, the constructor does not load it first (a bundle without
+metadata is loaded once in the constructor to read its seam context). An
+encoder-less GGUF with such a sidecar is rejected. Full TranscribePsy-250M-EU keeps its own Core ML
+programs outside this background runtime: its English, other-language and
+gate programs load in the constructor, its precise programs on first use, and
+a program that cannot serve a call falls back to ggml, also under
+`use = require`. `use = off`, `PARAKEET_COREML_DISABLE` and `compute_units`
+apply to it; `wait`, `prewarm` and the status methods do not.
+
+`EngineOptions::coreml` (`parakeet::CoremlOptions`, in
+`include/parakeet/coreml_options.h`) controls this. Every field is unset by
+default and resolves, in order, from the field, the environment, then the
+default. `PARAKEET_COREML_DISABLE` forces `use = off` and overrides
+everything.
+
+| Field | Values (default first) | Meaning |
+|---|---|---|
+| `use` | `automatic`, `off`, `require` | `require` (also `PARAKEET_COREML_STRICT`) waits like `wait = call`, and throws an exception derived from `std::runtime_error` instead of running on ggml when a sidecar cannot serve the call: it failed to load or timed out, the input is longer than a fixed-capacity encoder (for example with long-form windowing disabled, or a standard TDT input or push-stream window past the sidecar's capacity, which is never split into Core ML windows), the sidecar rejects the shape, or a prediction fails. `stream_start` refuses a push stream whose windows (left context, chunk and lookahead) are longer than a fixed-capacity encoder, before any audio; with a 15 s standard TDT sidecar that is every offline TDT push stream, since those use 30 s chunks. A diarization pass throws when no diarizer capacity that covers it can serve it: each one failed, or is a template capacity that is not generated (`no_template`, `unsupported(...)`, or `disabled` with `generate = never`), and when it is longer than every capacity (under `automatic` that pass runs on ggml). This changes `require` for a Nemotron 3 Diarization model with no adjacent bundles in a build that embeds the templates (see [Generated sidecars](#generated-sidecars)): with no `cache_dir` (the library's default) every pass of up to 1125 frames now throws `unsupported(no_cache_dir)`, where it used to run on ggml; set `cache_dir` to generate the capacities, or use `automatic`. Builds without the generator (`PARAKEET_COREML_GENERATE=OFF`, iOS) have no template capacities and still run those passes on ggml. Calls that never use a sidecar, such as model families or shapes without one, still run on ggml. |
+| `wait` | `none` on macOS and `call` on iOS; `construct` | `none` never blocks a call. `construct` makes the constructor wait for the construction group. `call` makes each call wait until its sidecar is ready or has failed. |
+| `prewarm` | `predicted`, `none`, `minimal`, `all` | Sidecars requested at construction. `minimal` is the encoder (and bypass encoder), or the smallest diarizer capacity for a diarization model. `predicted` requests the same at construction, and each call also requests what it needs. `all` requests every diarizer capacity. |
+| `compute_units` | the stage's own; `all`, `cpu_and_ane`, `cpu_and_gpu`, `cpu_only` | Also `PARAKEET_COREML_COMPUTE_UNITS`. Applies to the encoder, bypass-encoder, diarizer and TDT decoder sidecars. Unless the field is set, `PARAKEET_COREML_DECODER_COMPUTE_UNITS` overrides it for the TDT decoder. |
+| `generate` | `background`, `never` | `background` generates a sidecar that has no adjacent bundle from the GGUF into `cache_dir`, on the runtime's background queue, when the library embeds a template that matches the GGUF (see [Generated sidecars](#generated-sidecars)). `never` turns generation off; adjacent bundles still load. |
+| `cache_dir` | `QVAC_COREML_CACHE_DIR`, else none | Where generated sidecars and warm-load hints are kept. Without it nothing is generated and no hints are kept. |
+| `strict_wait_ms` | unbounded | Upper bound on the wait under `use = require`. |
+| `memory_budget_bytes` | none | The memory budget the caller checked with `parakeet-fit-params`. When it is set, and the ggml-only fit passes but the fit including the Core ML sidecars does not, the sidecars are disabled for this engine and it runs on ggml. Pass the totals of that check in `EngineOptions::coreml_fit` (`ggml_required_bytes` and `coreml.bytes` from `fit_params`) so the engine applies the same verdict; without them it projects fit itself with the default audio length, margin and streaming chunk. |
+
+The engine reports progress through these methods:
+
+- `Engine::coreml_status_json()` returns one JSON entry per sidecar: `stage`,
+  `state` (`queued`, `loading`, `ready`, `failed`, `retired`, ...), `route`
+  (`prebuilt`, `cached`, `generated` or `none`), `compute_units`, `label`,
+  `path`, timings and the warm hint. It returns `{}` on builds without
+  `PARAKEET_COREML`.
+- `Engine::coreml_wait(timeout_ms)` blocks until the construction group has
+  finished (no limit when `timeout_ms < 0`), and returns true when every
+  sidecar in it is ready.
+- `Engine::coreml_prewarm(scope, wait)` requests more sidecars (for example
+  every diarizer capacity) and, with `wait`, blocks until they finish.
+- `Engine::coreml_construction_json()` returns the construction group's result.
+- `Engine::encoder_on_coreml()` reports whether a sidecar is ready now. It is
+  false while a load is in flight.
+- `EngineResult::encoder_used_coreml`, `encoder_backend` and `coreml_pending`
+  report where each call ran. `DiarizationResult` has the same fields.
+
+The `parakeet` CLI exposes the same controls:
+
+| Flag | Values |
+|---|---|
+| `--coreml-use MODE` | `auto` (default), `off` or `require` |
+| `--coreml-wait MODE` | `none` (default), `construct` or `call` |
+| `--coreml-prewarm SCOPE` | `none`, `minimal`, `predicted` (default) or `all` |
+| `--coreml-compute-units U` | `all`, `cpu_and_ane`, `cpu_and_gpu` or `cpu_only` |
+| `--coreml-generate MODE` | `background` (default) or `never` |
+| `--coreml-cache-dir DIR` | default `QVAC_COREML_CACHE_DIR`, else `~/Library/Application Support/qvac-speech/coreml` |
+| `--coreml-status-json PATH` | writes the status JSON on exit; `-` writes to stdout |
+
+```bash
+parakeet --model tdt-0.6b-v3-q8_0.gguf --wav talk.wav \
+    --coreml-wait construct --coreml-prewarm all --coreml-status-json -
+```
+
+`--require-coreml` (benchmark mode) implies `--coreml-wait construct`, so the
+benchmark measures the sidecar and not the ggml calls made while it loads.
+
+When `--coreml-use require` refuses a call, the CLI prints `error: <reason>`
+to stderr and exits with status 1.
+
+With `--verbose`, a diarization run also prints where its passes ran:
+
+```text
+[diarize] backend=coreml-ane pending=0
+```
+
+`backend` is the call's `encoder_backend`: `ggml`, the Core ML label of the
+diarizer capacities that served it (`coreml-ane`, `coreml-all`,
+`coreml-cpu-gpu` or `coreml-cpu`), or `mixed` when some passes ran on Core ML
+and others on ggml. `pending=1` (`coreml_pending`) means at least one pass ran
+on ggml because the capacity that covers it was still being generated or
+loaded.
+
+### Generated sidecars
+
+macOS builds with `PARAKEET_COREML=ON` also compile the Core ML generator
+(`PARAKEET_COREML_GENERATE`, default `ON` on macOS and `OFF` on iOS) and embed
+these templates in the library:
+
+| Template | Sidecar | Capacity |
+|---|---|---:|
+| `nemotron-diar-f358` | Nemotron 3 Diarization diarizer | 358 |
+| `nemotron-diar-f745` | Nemotron 3 Diarization diarizer | 745 |
+| `nemotron-diar-f1125` | Nemotron 3 Diarization diarizer | 1125 |
+
+When a capacity has no adjacent bundle, the engine generates it from the GGUF
+alone: it writes the package's weights from the GGUF's tensors (dequantised by
+ggml and cast to fp16), compiles the package on the device and publishes the
+result in `cache_dir`. A later load of the same GGUF finds it there. This runs
+on the runtime's background queue after the model has loaded; until the
+capacity is ready, diarization runs on ggml and reports `coreml_pending`. The
+generated bundle has the same weights, byte for byte, as the exporter's
+bundle for that GGUF.
+
+Generation needs macOS 15, a `cache_dir` (the CLI defaults to one) and
+`generate = background`. The GGUF must match the template: architecture
+`sortformer`, version `v3`, the template's hyperparameters, and every tensor's
+name and shape, with matrices in f32, f16, bf16, q8_0, q6_k, q5_k or q4_k. The
+templates are validated for the `cpu_and_ane` compute units (the diarizers'
+default), so another `compute_units` value turns generation off for them. An
+adjacent bundle always wins. `Engine::coreml_status_json()` reports
+`route: generated` for a bundle generated in this process, `cached` for one
+found in the cache, and `generation.supported` with the reason when generation
+is off. A capacity that is not generated keeps an entry with `route: none`,
+which the construction group lists under `skipped_route_none`: state
+`no_template` when the GGUF does not match the template,
+`unsupported(unvalidated_units)` when the compute units are not validated, and
+the reason generation is off for the whole instance otherwise (for example
+`unsupported(no_cache_dir)`, or `disabled` with `generate = never`); every such
+capacity is listed. When every capacity is suppressed for its units,
+`generation.reason` is `unvalidated_units`. Such a capacity never serves a
+pass; under `use = require` a pass it covers throws instead of running on ggml.
+Each generated capacity takes about 200 MB in the cache. `parakeet-fit-params`
+charges the generated capacities' Core ML memory in the Core ML-inclusive
+verdict (every generated capacity under `prewarm = all`, otherwise those the
+workload's calls, and any shorter single pass, can load, or fall back to when
+a capacity fails); see
+[docs/backends.md](docs/backends.md#generated-diarizers).
+
 ## Backend selection
 
 `parakeet --backend NAME` and `EngineOptions::backend` select the runtime device
