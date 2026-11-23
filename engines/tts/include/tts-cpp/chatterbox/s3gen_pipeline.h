@@ -6,11 +6,14 @@
 //
 // Implementation in src/chatterbox_tts.cpp.
 
+#include "tts-cpp/coreml_options.h"
 #include "tts-cpp/export.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -20,6 +23,10 @@ inline constexpr int kS3GenSilenceToken    = 4299;
 inline constexpr int kS3GenLookaheadTokens = 3;
 
 } // namespace tts_cpp::chatterbox
+
+// The Core ML models one S3Gen call runs on (opaque; see
+// s3gen_acquire_coreml_plan below).
+struct S3genCoremlPlan;
 
 struct s3gen_synthesize_opts {
     std::string s3gen_gguf_path;  // required: chatterbox-s3gen.gguf
@@ -228,15 +235,15 @@ struct s3gen_synthesize_opts {
 
     // Core ML sidecars (TTS_CPP_COREML builds on Apple; docs/chatterbox.md
     // "Core ML sidecars"): the encoder, CFM estimator and HiFT decoder run on
-    // `<s3gen stem>-{encoder,cfm,hift}.mlmodelc` next to the GGUF when present,
-    // whatever `backend` says; the rest of the pipeline keeps it.
-    //   coreml_compute_units  Empty inherits CHATTERBOX_COREML_COMPUTE_UNITS
-    //                         (default cpu_and_ane); else all, cpu_and_ane,
-    //                         cpu_and_gpu or cpu_only.
-    //   coreml_strict         < 0 inherits CHATTERBOX_COREML_STRICT; > 0 makes
-    //                         a present sidecar that cannot serve a call an
-    //                         error instead of a ggml fallback.
-    //   coreml_disabled       Keep every stage on ggml (also set by the
+    // `<s3gen stem>-{encoder,cfm,hift}.mlmodelc` next to the GGUF once those
+    // are loaded, whatever `backend` says; until then, and for the rest of the
+    // pipeline, ggml runs them. The legacy fields below are aliases of
+    // `coreml`: each fills the matching field of `coreml` when that is unset.
+    //   coreml_compute_units  -> coreml.compute_units (all, cpu_and_ane,
+    //                         cpu_and_gpu or cpu_only; default cpu_and_ane).
+    //   coreml_strict         > 0 -> coreml.use = require, 0 -> automatic,
+    //                         < 0 leaves it unset (CHATTERBOX_COREML_STRICT).
+    //   coreml_disabled       -> coreml.use = off (as does the
     //                         CHATTERBOX_COREML_DISABLE environment variable).
     //   s3gen_backend_out     Output: "ggml", the sidecar label ("coreml-ane",
     //                         ...) when all three stages ran on Core ML, or
@@ -245,6 +252,16 @@ struct s3gen_synthesize_opts {
     int           coreml_strict     = -1;
     bool          coreml_disabled   = false;
     std::string * s3gen_backend_out = nullptr;
+
+    // Core ML options, resolved for this call (tts-cpp/coreml_options.h).
+    tts_cpp::CoremlOptions coreml;
+
+    // The Core ML models this call runs on, from s3gen_acquire_coreml_plan
+    // for the same options and speech tokens. When set, the call uses exactly
+    // these models (a stage without one runs on ggml); when null, the call
+    // acquires its own plan, with a deadline of now plus
+    // s3gen_estimate_metal_ms.
+    std::shared_ptr<const S3genCoremlPlan> coreml_plan;
 };
 
 inline float resolve_s3gen_cfg_rate(float caller_cfg_rate, float model_cfg_rate) {
@@ -267,10 +284,36 @@ inline float apply_cfg_rate_env_override(float current, const char * env) {
 }
 
 // Runs encoder + CFM + HiFT on the given T3 speech tokens and writes a WAV.
-// Returns 0 on success, non-zero on error.
+// Returns 0 on success, 2 when cancelled, another non-zero value on error.
 TTS_CPP_API int s3gen_synthesize_to_wav(
     const std::vector<int32_t> & speech_tokens,
     const s3gen_synthesize_opts & opts);
+
+// Acquires the Core ML models one S3Gen call on `speech_tokens` with `opts`
+// will run on, once, before the call: the encoder and CFM functions for the
+// call's exact token and frame counts (the narrowest loaded function that
+// covers each, padding masked) and HiFT. A stage whose function is not loaded
+// yet runs that call on ggml; the load keeps going in the background. All
+// three acquisitions share `deadline`: a load this host finished quickly
+// before (a warm hint) is waited for only while it ends before the deadline.
+// Pass the result as `opts.coreml_plan`, so readiness never changes a stage's
+// backend inside the call. Null when Core ML is not built, disabled, or no
+// sidecar sits next to the GGUF. With `coreml.use = require` (or wait = call)
+// it waits for the functions instead and throws when one cannot serve.
+TTS_CPP_API std::shared_ptr<const S3genCoremlPlan> s3gen_acquire_coreml_plan(
+    const s3gen_synthesize_opts & opts, const std::vector<int32_t> & speech_tokens,
+    std::chrono::steady_clock::time_point deadline);
+
+// True when the plan holds Core ML CFM and HiFT models that run on the CPU and
+// Neural Engine only, i.e. the call leaves the GPU to T3 and may overlap T3 of
+// the next sentence.
+TTS_CPP_API bool s3gen_coreml_plan_offloads(const S3genCoremlPlan & plan);
+
+// Estimated wall time of the S3Gen call on ggml (Metal), in milliseconds: the
+// deadline estimator the Engine and tts-cli give s3gen_acquire_coreml_plan.
+// Linear in the call's mel frames, per model variant; never negative.
+TTS_CPP_API double s3gen_estimate_metal_ms(const s3gen_synthesize_opts & opts,
+                                           const std::vector<int32_t> & speech_tokens);
 
 // Eagerly load the S3Gen GGUF into the internal model cache so the first
 // call to s3gen_synthesize_to_wav skips the ~700 ms tensor-load cost.
