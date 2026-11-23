@@ -161,6 +161,15 @@ the same sidecar under `cpu_and_ane` to 54 dB. The M2's 54 dB gate under
 `all` is checked by the device run, not by CI. See
 [Parler-TTS generated sidecar](docs/parler.md#generated-sidecar-and-background-loading).
 
+The Supertonic vocoder sidecar is generated the same way, for Supertonic 1, 2
+and 3 and every quantisation tier (generated from the loaded tier's own
+weights, so the prebuilt sidecar's 8-bit floor does not apply): cosine 0.9999
+against the ggml vocoder of the same tier on an M2. On Max and Ultra parts the
+GPU runs the ggml vocoder faster than the Neural Engine runs the sidecar, so
+the engine does not generate it there unless `coreml.use = require`. Prebuilt
+Supertonic vocoder sidecars now load in the background too. See
+[Supertonic generated vocoder sidecar](docs/supertonic.md#generated-vocoder-sidecar).
+
 CosyVoice3 HiFT sidecars use FP32 for waveform parity. With enabled Chatterbox,
 Pocket TTS, CosyVoice3 or prebuilt Parler-TTS sidecars present, `fit_params` returns `Error` with
 `coreml-memory-estimate-unavailable`; it cannot project Core ML resident memory.
@@ -168,6 +177,8 @@ A generated Parler-TTS DAC is projected: fit adds its template's Core ML memory 
 963 MiB under `all` (1.25 times the largest values measured on an M2 and on the M4 Max CI
 runner, where `all` runs on the GPU, with no further margin). Phones are not affected today, since sidecars are generated
 on macOS only; see [Parler-TTS memory validation](docs/parler.md#generated-sidecar-and-background-loading).
+A generated Supertonic vocoder is projected the same way: 125 MiB under `all`, measured on an M2 and on the M4 Max
+CI runner ([Supertonic memory validation](docs/supertonic.md#generated-vocoder-sidecar)).
 Re-export CosyVoice3 LM sidecars with the current exporter for correct cache
 feedback on macOS 15 and 26; see [CosyVoice3 Core ML](docs/cosyvoice3.md#core-ml-sidecars).
 

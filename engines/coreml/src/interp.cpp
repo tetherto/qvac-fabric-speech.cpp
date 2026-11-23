@@ -518,6 +518,7 @@ private:
             using T = decltype(x);
             if (op == "add") return static_cast<T>(x + y);
             if (op == "mul") return static_cast<T>(x * y);
+            if (op == "sub") return static_cast<T>(x - y);
             return static_cast<T>(x / y);
         };
         if (a->dt == DType::weak && b->dt == DType::weak) {
@@ -626,6 +627,20 @@ private:
             V one = fresh();
             one->weak = 1.0;
             return binary(Expr{Expr::Kind::call, 0.0, "div", {}, e.line, e.dtype, e.shape}, one, x);
+        }
+        if (op == "sub") return binary(e, eval(*e.args[0]), eval(*e.args[1]));
+        if (op == "sqrt") {
+            // std::sqrt is the IEEE square root, correctly rounded in float and double.
+            V x = eval(*e.args[0]);
+            V o = fresh();
+            if (x->dt == DType::weak) {
+                o->weak = std::sqrt(x->weak);
+                return o;
+            }
+            o->alloc(x->dt, x->shape);
+            for (size_t i = 0; i < x->f.size(); ++i) o->f[i] = std::sqrt(x->f[i]);
+            for (size_t i = 0; i < x->g.size(); ++i) o->g[i] = std::sqrt(x->g[i]);
+            return o;
         }
         if (op == "clip") {
             V x = eval(*e.args[0]);

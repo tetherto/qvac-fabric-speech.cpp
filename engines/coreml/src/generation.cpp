@@ -156,6 +156,19 @@ TemplateMemory memory_of(const recipe::Template & t) {
     return m;
 }
 
+std::vector<std::string> prefer_ggml_on_of(const recipe::Template & t) {
+    std::vector<std::string> out;
+    const recipe::TemplateFile * f = t.file("template.json");
+    const json j = json::parse(std::string(reinterpret_cast<const char *>(f->data), f->size), nullptr, false);
+    if (!j.is_object()) return out;
+    if (auto p = j.find("prefer_ggml_on"); p != j.end() && p->is_array()) {
+        for (const json & v : *p) {
+            if (v.is_string()) out.push_back(v.get<std::string>());
+        }
+    }
+    return out;
+}
+
 // Templates found through the development override are parsed per directory
 // and kept for the process, so PrepareRequest::tmpl stays valid like an
 // embedded template's.
@@ -253,14 +266,21 @@ std::vector<Candidate> probe(const std::vector<std::string> & template_ids, cons
         c.sha256_hex = t->sha256_hex();
         c.default_units = parse_compute_units(t->info().default_compute_units);
         c.memory = memory_of(*t);
+        c.prefer_ggml_on = prefer_ggml_on_of(*t);
         if (!opened) {
             src = GgufSource::open(gguf_path, open_error);
             opened = true;
         }
         if (!src) {
             c.reason = "cannot read the GGUF: " + open_error.message;
-        } else {
+        } else if (t->info().names.empty()) {
             const recipe::MatchResult m = recipe::match(*t, *src);
+            c.matched = m.ok;
+            c.reason = m.reason;
+        } else {
+            const recipe::RenamedSource named(*src, t->info().names);
+            const recipe::MatchResult m =
+                named.error().empty() ? recipe::match(*t, named) : recipe::MatchResult{false, named.error()};
             c.matched = m.ok;
             c.reason = m.reason;
         }

@@ -542,10 +542,24 @@ void run_coreml_verdict_gates() {
     v = decide(1000 * MiB, (int64_t) (64 * 1024 * MiB));
     expect(v.ggml_only_fits && !v.coreml_fits && v.degraded && v.fits,
            "a huge budget with required <= free < required + envelope degrades and fits");
-    // A budget below the free memory decides the same way on the budget.
+    // A budget below the free memory decides the same way on the budget, and
+    // every verdict reads that capacity: Core ML does not fit it.
     v = decide(64 * 1024 * MiB, (int64_t) (1000 * MiB));
-    expect(v.coreml_fits && v.degraded && v.fits,
+    expect(v.ggml_only_fits && !v.coreml_fits && v.degraded && v.fits && v.capacity == 1000 * MiB,
            "a budget that fits only ggml degrades even with free memory to spare");
+    // Both projections over the budget, both within the free memory: refused,
+    // not degraded, and no verdict reads the free memory instead.
+    const auto decide_small = [&](std::optional<int64_t> budget) {
+        return parler_decide_coreml_fit(required, 125 * MiB, true, 1000 * MiB, budget);
+    };
+    v = decide_small((int64_t) (700 * MiB));
+    expect(!v.ggml_only_fits && !v.coreml_fits && !v.degraded && !v.fits && v.capacity == 700 * MiB,
+           "a budget below both projections refuses");
+    // A budget between them: Core ML does not fit it, ggml does, degrade.
+    v = decide_small((int64_t) (850 * MiB));
+    expect(v.ggml_only_fits && !v.coreml_fits && v.degraded && v.fits && v.charged == required &&
+               v.capacity == 850 * MiB,
+           "a budget between the projections degrades with the Core ML verdict false");
     // Room for both: Core ML kept.
     v = decide(2000 * MiB, (int64_t) (64 * 1024 * MiB));
     expect(v.coreml_fits && !v.degraded && v.fits, "room for Core ML keeps it");

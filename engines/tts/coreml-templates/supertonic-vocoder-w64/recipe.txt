@@ -1,0 +1,203 @@
+mlrecipe 1
+template supertonic-vocoder-w64
+spec_sha256 3bf6778dea8fbc11a2014b03bb3d8b7fac62eb0118fe7b797d5cea3da81e7e96
+weight_bin_size 50670336
+blobs 89
+source "vocoder:tts.ttl.normalizer.scale" f32,f16,bf16,q8_0,q5_0,q4_0 [1]
+source "vocoder:tts.ae.latent_std" f32,f16,bf16,q8_0,q5_0,q4_0 [1,24,1]
+source "vocoder:tts.ae.latent_mean" f32,f16,bf16,q8_0,q5_0,q4_0 [1,24,1]
+source "vocoder:node:/decoder/embed/net/Conv#1" f32,f16,bf16,q8_0,q5_0,q4_0 [512,24,7]
+source "vocoder:node:/decoder/embed/net/Conv#2" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.0.dwconv.net.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [512,1,7]
+source "vocoder:tts.ae.decoder.convnext.0.dwconv.net.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.0.norm.norm.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.0.norm.norm.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.0.pwconv1.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [2048,512,1]
+source "vocoder:tts.ae.decoder.convnext.0.pwconv1.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [2048]
+source "vocoder:tts.ae.decoder.convnext.0.pwconv2.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [512,2048,1]
+source "vocoder:tts.ae.decoder.convnext.0.pwconv2.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.0.gamma" f32,f16,bf16,q8_0,q5_0,q4_0 [1,512,1]
+source "vocoder:tts.ae.decoder.convnext.1.dwconv.net.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [512,1,7]
+source "vocoder:tts.ae.decoder.convnext.1.dwconv.net.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.1.norm.norm.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.1.norm.norm.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.1.pwconv1.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [2048,512,1]
+source "vocoder:tts.ae.decoder.convnext.1.pwconv1.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [2048]
+source "vocoder:tts.ae.decoder.convnext.1.pwconv2.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [512,2048,1]
+source "vocoder:tts.ae.decoder.convnext.1.pwconv2.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.1.gamma" f32,f16,bf16,q8_0,q5_0,q4_0 [1,512,1]
+source "vocoder:tts.ae.decoder.convnext.2.dwconv.net.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [512,1,7]
+source "vocoder:tts.ae.decoder.convnext.2.dwconv.net.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.2.norm.norm.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.2.norm.norm.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.2.pwconv1.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [2048,512,1]
+source "vocoder:tts.ae.decoder.convnext.2.pwconv1.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [2048]
+source "vocoder:tts.ae.decoder.convnext.2.pwconv2.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [512,2048,1]
+source "vocoder:tts.ae.decoder.convnext.2.pwconv2.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.2.gamma" f32,f16,bf16,q8_0,q5_0,q4_0 [1,512,1]
+source "vocoder:tts.ae.decoder.convnext.3.dwconv.net.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [512,1,7]
+source "vocoder:tts.ae.decoder.convnext.3.dwconv.net.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.3.norm.norm.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.3.norm.norm.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.3.pwconv1.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [2048,512,1]
+source "vocoder:tts.ae.decoder.convnext.3.pwconv1.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [2048]
+source "vocoder:tts.ae.decoder.convnext.3.pwconv2.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [512,2048,1]
+source "vocoder:tts.ae.decoder.convnext.3.pwconv2.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.3.gamma" f32,f16,bf16,q8_0,q5_0,q4_0 [1,512,1]
+source "vocoder:tts.ae.decoder.convnext.4.dwconv.net.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [512,1,7]
+source "vocoder:tts.ae.decoder.convnext.4.dwconv.net.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.4.norm.norm.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.4.norm.norm.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.4.pwconv1.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [2048,512,1]
+source "vocoder:tts.ae.decoder.convnext.4.pwconv1.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [2048]
+source "vocoder:tts.ae.decoder.convnext.4.pwconv2.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [512,2048,1]
+source "vocoder:tts.ae.decoder.convnext.4.pwconv2.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.4.gamma" f32,f16,bf16,q8_0,q5_0,q4_0 [1,512,1]
+source "vocoder:tts.ae.decoder.convnext.5.dwconv.net.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [512,1,7]
+source "vocoder:tts.ae.decoder.convnext.5.dwconv.net.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.5.norm.norm.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.5.norm.norm.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.5.pwconv1.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [2048,512,1]
+source "vocoder:tts.ae.decoder.convnext.5.pwconv1.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [2048]
+source "vocoder:tts.ae.decoder.convnext.5.pwconv2.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [512,2048,1]
+source "vocoder:tts.ae.decoder.convnext.5.pwconv2.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.5.gamma" f32,f16,bf16,q8_0,q5_0,q4_0 [1,512,1]
+source "vocoder:tts.ae.decoder.convnext.6.dwconv.net.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [512,1,7]
+source "vocoder:tts.ae.decoder.convnext.6.dwconv.net.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.6.norm.norm.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.6.norm.norm.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.6.pwconv1.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [2048,512,1]
+source "vocoder:tts.ae.decoder.convnext.6.pwconv1.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [2048]
+source "vocoder:tts.ae.decoder.convnext.6.pwconv2.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [512,2048,1]
+source "vocoder:tts.ae.decoder.convnext.6.pwconv2.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.6.gamma" f32,f16,bf16,q8_0,q5_0,q4_0 [1,512,1]
+source "vocoder:tts.ae.decoder.convnext.7.dwconv.net.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [512,1,7]
+source "vocoder:tts.ae.decoder.convnext.7.dwconv.net.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.7.norm.norm.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.7.norm.norm.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.7.pwconv1.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [2048,512,1]
+source "vocoder:tts.ae.decoder.convnext.7.pwconv1.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [2048]
+source "vocoder:tts.ae.decoder.convnext.7.pwconv2.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [512,2048,1]
+source "vocoder:tts.ae.decoder.convnext.7.pwconv2.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.7.gamma" f32,f16,bf16,q8_0,q5_0,q4_0 [1,512,1]
+source "vocoder:tts.ae.decoder.convnext.8.dwconv.net.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [512,1,7]
+source "vocoder:tts.ae.decoder.convnext.8.dwconv.net.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.8.norm.norm.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.8.norm.norm.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.8.pwconv1.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [2048,512,1]
+source "vocoder:tts.ae.decoder.convnext.8.pwconv1.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [2048]
+source "vocoder:tts.ae.decoder.convnext.8.pwconv2.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [512,2048,1]
+source "vocoder:tts.ae.decoder.convnext.8.pwconv2.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.8.gamma" f32,f16,bf16,q8_0,q5_0,q4_0 [1,512,1]
+source "vocoder:tts.ae.decoder.convnext.9.dwconv.net.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [512,1,7]
+source "vocoder:tts.ae.decoder.convnext.9.dwconv.net.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.9.norm.norm.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.9.norm.norm.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.9.pwconv1.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [2048,512,1]
+source "vocoder:tts.ae.decoder.convnext.9.pwconv1.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [2048]
+source "vocoder:tts.ae.decoder.convnext.9.pwconv2.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [512,2048,1]
+source "vocoder:tts.ae.decoder.convnext.9.pwconv2.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.convnext.9.gamma" f32,f16,bf16,q8_0,q5_0,q4_0 [1,512,1]
+source "vocoder:tts.ae.decoder.final_norm.norm.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.final_norm.norm.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.final_norm.norm.running_mean" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.final_norm.norm.running_var" f32,f16,bf16,q8_0,q5_0,q4_0 [512]
+source "vocoder:tts.ae.decoder.head.layer1.net.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [2048,512,3]
+source "vocoder:tts.ae.decoder.head.layer1.net.bias" f32,f16,bf16,q8_0,q5_0,q4_0 [2048]
+source "vocoder:tts.ae.decoder.head.layer2.weight" f32,f16,bf16,q8_0,q5_0,q4_0 [512,2048,1]
+source "vocoder:node:/decoder/head/act/PRelu#1" f32,f16,bf16,q8_0,q5_0,q4_0 [1,1]
+blob 64 fp16 24 f16(div(t("vocoder:tts.ae.latent_std"), t("vocoder:tts.ttl.normalizer.scale")))
+blob 192 fp16 24 f16(t("vocoder:tts.ae.latent_mean"))
+blob 320 fp16 86016 f16(t("vocoder:node:/decoder/embed/net/Conv#1"))
+blob 172416 fp16 512 f16(t("vocoder:node:/decoder/embed/net/Conv#2"))
+blob 173504 fp16 3584 f16(t("vocoder:tts.ae.decoder.convnext.0.dwconv.net.weight"))
+blob 180736 fp16 512 f16(t("vocoder:tts.ae.decoder.convnext.0.dwconv.net.bias"))
+blob 181824 fp16 512 f16(t("vocoder:tts.ae.decoder.convnext.0.norm.norm.weight"))
+blob 182912 fp16 512 f16(t("vocoder:tts.ae.decoder.convnext.0.norm.norm.bias"))
+blob 184000 fp16 1048576 f16(t("vocoder:tts.ae.decoder.convnext.0.pwconv1.weight"))
+blob 2281216 fp16 2048 f16(t("vocoder:tts.ae.decoder.convnext.0.pwconv1.bias"))
+blob 2285376 fp16 1048576 f16(mul(t("vocoder:tts.ae.decoder.convnext.0.pwconv2.weight"), reshape(t("vocoder:tts.ae.decoder.convnext.0.gamma"), [512,1,1])))
+blob 4382592 fp16 512 f16(mul(t("vocoder:tts.ae.decoder.convnext.0.pwconv2.bias"), reshape(t("vocoder:tts.ae.decoder.convnext.0.gamma"), [512])))
+blob 4383680 fp16 3584 f16(t("vocoder:tts.ae.decoder.convnext.1.dwconv.net.weight"))
+blob 4390912 fp16 512 f16(t("vocoder:tts.ae.decoder.convnext.1.dwconv.net.bias"))
+blob 4392000 fp16 512 f16(t("vocoder:tts.ae.decoder.convnext.1.norm.norm.weight"))
+blob 4393088 fp16 512 f16(t("vocoder:tts.ae.decoder.convnext.1.norm.norm.bias"))
+blob 4394176 fp16 1048576 f16(t("vocoder:tts.ae.decoder.convnext.1.pwconv1.weight"))
+blob 6491392 fp16 2048 f16(t("vocoder:tts.ae.decoder.convnext.1.pwconv1.bias"))
+blob 6495552 fp16 1048576 f16(mul(t("vocoder:tts.ae.decoder.convnext.1.pwconv2.weight"), reshape(t("vocoder:tts.ae.decoder.convnext.1.gamma"), [512,1,1])))
+blob 8592768 fp16 512 f16(mul(t("vocoder:tts.ae.decoder.convnext.1.pwconv2.bias"), reshape(t("vocoder:tts.ae.decoder.convnext.1.gamma"), [512])))
+blob 8593856 fp16 3584 f16(t("vocoder:tts.ae.decoder.convnext.2.dwconv.net.weight"))
+blob 8601088 fp16 512 f16(t("vocoder:tts.ae.decoder.convnext.2.dwconv.net.bias"))
+blob 8602176 fp16 512 f16(t("vocoder:tts.ae.decoder.convnext.2.norm.norm.weight"))
+blob 8603264 fp16 512 f16(t("vocoder:tts.ae.decoder.convnext.2.norm.norm.bias"))
+blob 8604352 fp16 1048576 f16(t("vocoder:tts.ae.decoder.convnext.2.pwconv1.weight"))
+blob 10701568 fp16 2048 f16(t("vocoder:tts.ae.decoder.convnext.2.pwconv1.bias"))
+blob 10705728 fp16 1048576 f16(mul(t("vocoder:tts.ae.decoder.convnext.2.pwconv2.weight"), reshape(t("vocoder:tts.ae.decoder.convnext.2.gamma"), [512,1,1])))
+blob 12802944 fp16 512 f16(mul(t("vocoder:tts.ae.decoder.convnext.2.pwconv2.bias"), reshape(t("vocoder:tts.ae.decoder.convnext.2.gamma"), [512])))
+blob 12804032 fp16 3584 f16(t("vocoder:tts.ae.decoder.convnext.3.dwconv.net.weight"))
+blob 12811264 fp16 512 f16(t("vocoder:tts.ae.decoder.convnext.3.dwconv.net.bias"))
+blob 12812352 fp16 512 f16(t("vocoder:tts.ae.decoder.convnext.3.norm.norm.weight"))
+blob 12813440 fp16 512 f16(t("vocoder:tts.ae.decoder.convnext.3.norm.norm.bias"))
+blob 12814528 fp16 1048576 f16(t("vocoder:tts.ae.decoder.convnext.3.pwconv1.weight"))
+blob 14911744 fp16 2048 f16(t("vocoder:tts.ae.decoder.convnext.3.pwconv1.bias"))
+blob 14915904 fp16 1048576 f16(mul(t("vocoder:tts.ae.decoder.convnext.3.pwconv2.weight"), reshape(t("vocoder:tts.ae.decoder.convnext.3.gamma"), [512,1,1])))
+blob 17013120 fp16 512 f16(mul(t("vocoder:tts.ae.decoder.convnext.3.pwconv2.bias"), reshape(t("vocoder:tts.ae.decoder.convnext.3.gamma"), [512])))
+blob 17014208 fp16 3584 f16(t("vocoder:tts.ae.decoder.convnext.4.dwconv.net.weight"))
+blob 17021440 fp16 512 f16(t("vocoder:tts.ae.decoder.convnext.4.dwconv.net.bias"))
+blob 17022528 fp16 512 f16(t("vocoder:tts.ae.decoder.convnext.4.norm.norm.weight"))
+blob 17023616 fp16 512 f16(t("vocoder:tts.ae.decoder.convnext.4.norm.norm.bias"))
+blob 17024704 fp16 1048576 f16(t("vocoder:tts.ae.decoder.convnext.4.pwconv1.weight"))
+blob 19121920 fp16 2048 f16(t("vocoder:tts.ae.decoder.convnext.4.pwconv1.bias"))
+blob 19126080 fp16 1048576 f16(mul(t("vocoder:tts.ae.decoder.convnext.4.pwconv2.weight"), reshape(t("vocoder:tts.ae.decoder.convnext.4.gamma"), [512,1,1])))
+blob 21223296 fp16 512 f16(mul(t("vocoder:tts.ae.decoder.convnext.4.pwconv2.bias"), reshape(t("vocoder:tts.ae.decoder.convnext.4.gamma"), [512])))
+blob 21224384 fp16 3584 f16(t("vocoder:tts.ae.decoder.convnext.5.dwconv.net.weight"))
+blob 21231616 fp16 512 f16(t("vocoder:tts.ae.decoder.convnext.5.dwconv.net.bias"))
+blob 21232704 fp16 512 f16(t("vocoder:tts.ae.decoder.convnext.5.norm.norm.weight"))
+blob 21233792 fp16 512 f16(t("vocoder:tts.ae.decoder.convnext.5.norm.norm.bias"))
+blob 21234880 fp16 1048576 f16(t("vocoder:tts.ae.decoder.convnext.5.pwconv1.weight"))
+blob 23332096 fp16 2048 f16(t("vocoder:tts.ae.decoder.convnext.5.pwconv1.bias"))
+blob 23336256 fp16 1048576 f16(mul(t("vocoder:tts.ae.decoder.convnext.5.pwconv2.weight"), reshape(t("vocoder:tts.ae.decoder.convnext.5.gamma"), [512,1,1])))
+blob 25433472 fp16 512 f16(mul(t("vocoder:tts.ae.decoder.convnext.5.pwconv2.bias"), reshape(t("vocoder:tts.ae.decoder.convnext.5.gamma"), [512])))
+blob 25434560 fp16 3584 f16(t("vocoder:tts.ae.decoder.convnext.6.dwconv.net.weight"))
+blob 25441792 fp16 512 f16(t("vocoder:tts.ae.decoder.convnext.6.dwconv.net.bias"))
+blob 25442880 fp16 512 f16(t("vocoder:tts.ae.decoder.convnext.6.norm.norm.weight"))
+blob 25443968 fp16 512 f16(t("vocoder:tts.ae.decoder.convnext.6.norm.norm.bias"))
+blob 25445056 fp16 1048576 f16(t("vocoder:tts.ae.decoder.convnext.6.pwconv1.weight"))
+blob 27542272 fp16 2048 f16(t("vocoder:tts.ae.decoder.convnext.6.pwconv1.bias"))
+blob 27546432 fp16 1048576 f16(mul(t("vocoder:tts.ae.decoder.convnext.6.pwconv2.weight"), reshape(t("vocoder:tts.ae.decoder.convnext.6.gamma"), [512,1,1])))
+blob 29643648 fp16 512 f16(mul(t("vocoder:tts.ae.decoder.convnext.6.pwconv2.bias"), reshape(t("vocoder:tts.ae.decoder.convnext.6.gamma"), [512])))
+blob 29644736 fp16 3584 f16(t("vocoder:tts.ae.decoder.convnext.7.dwconv.net.weight"))
+blob 29651968 fp16 512 f16(t("vocoder:tts.ae.decoder.convnext.7.dwconv.net.bias"))
+blob 29653056 fp16 512 f16(t("vocoder:tts.ae.decoder.convnext.7.norm.norm.weight"))
+blob 29654144 fp16 512 f16(t("vocoder:tts.ae.decoder.convnext.7.norm.norm.bias"))
+blob 29655232 fp16 1048576 f16(t("vocoder:tts.ae.decoder.convnext.7.pwconv1.weight"))
+blob 31752448 fp16 2048 f16(t("vocoder:tts.ae.decoder.convnext.7.pwconv1.bias"))
+blob 31756608 fp16 1048576 f16(mul(t("vocoder:tts.ae.decoder.convnext.7.pwconv2.weight"), reshape(t("vocoder:tts.ae.decoder.convnext.7.gamma"), [512,1,1])))
+blob 33853824 fp16 512 f16(mul(t("vocoder:tts.ae.decoder.convnext.7.pwconv2.bias"), reshape(t("vocoder:tts.ae.decoder.convnext.7.gamma"), [512])))
+blob 33854912 fp16 3584 f16(t("vocoder:tts.ae.decoder.convnext.8.dwconv.net.weight"))
+blob 33862144 fp16 512 f16(t("vocoder:tts.ae.decoder.convnext.8.dwconv.net.bias"))
+blob 33863232 fp16 512 f16(t("vocoder:tts.ae.decoder.convnext.8.norm.norm.weight"))
+blob 33864320 fp16 512 f16(t("vocoder:tts.ae.decoder.convnext.8.norm.norm.bias"))
+blob 33865408 fp16 1048576 f16(t("vocoder:tts.ae.decoder.convnext.8.pwconv1.weight"))
+blob 35962624 fp16 2048 f16(t("vocoder:tts.ae.decoder.convnext.8.pwconv1.bias"))
+blob 35966784 fp16 1048576 f16(mul(t("vocoder:tts.ae.decoder.convnext.8.pwconv2.weight"), reshape(t("vocoder:tts.ae.decoder.convnext.8.gamma"), [512,1,1])))
+blob 38064000 fp16 512 f16(mul(t("vocoder:tts.ae.decoder.convnext.8.pwconv2.bias"), reshape(t("vocoder:tts.ae.decoder.convnext.8.gamma"), [512])))
+blob 38065088 fp16 3584 f16(t("vocoder:tts.ae.decoder.convnext.9.dwconv.net.weight"))
+blob 38072320 fp16 512 f16(t("vocoder:tts.ae.decoder.convnext.9.dwconv.net.bias"))
+blob 38073408 fp16 512 f16(t("vocoder:tts.ae.decoder.convnext.9.norm.norm.weight"))
+blob 38074496 fp16 512 f16(t("vocoder:tts.ae.decoder.convnext.9.norm.norm.bias"))
+blob 38075584 fp16 1048576 f16(t("vocoder:tts.ae.decoder.convnext.9.pwconv1.weight"))
+blob 40172800 fp16 2048 f16(t("vocoder:tts.ae.decoder.convnext.9.pwconv1.bias"))
+blob 40176960 fp16 1048576 f16(mul(t("vocoder:tts.ae.decoder.convnext.9.pwconv2.weight"), reshape(t("vocoder:tts.ae.decoder.convnext.9.gamma"), [512,1,1])))
+blob 42274176 fp16 512 f16(mul(t("vocoder:tts.ae.decoder.convnext.9.pwconv2.bias"), reshape(t("vocoder:tts.ae.decoder.convnext.9.gamma"), [512])))
+# BatchNorm folded as the exporter computes it, in f32: scale = gamma / sqrt(var + 1e-5),
+# shift = beta - mean * scale
+let bn_scale = div(t("vocoder:tts.ae.decoder.final_norm.norm.weight"), sqrt(add(t("vocoder:tts.ae.decoder.final_norm.norm.running_var"), 1e-5)))
+blob 42275264 fp16 512 f16(bn_scale)
+blob 42276352 fp16 512 f16(sub(t("vocoder:tts.ae.decoder.final_norm.norm.bias"), mul(t("vocoder:tts.ae.decoder.final_norm.norm.running_mean"), bn_scale)))
+blob 42277440 fp16 3145728 f16(t("vocoder:tts.ae.decoder.head.layer1.net.weight"))
+blob 48568960 fp16 2048 f16(t("vocoder:tts.ae.decoder.head.layer1.net.bias"))
+blob 48573120 fp16 1048576 f16(t("vocoder:tts.ae.decoder.head.layer2.weight"))
+# the head's PReLU slope, a leaky_relu alpha inline in the spec (fp32)
+patch 78991 fp32 1 f32(t("vocoder:node:/decoder/head/act/PRelu#1"))
+end

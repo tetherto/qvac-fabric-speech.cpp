@@ -14,10 +14,22 @@ extern "C" {
 
 struct supertonic_coreml_vocoder_context;
 
+// Why supertonic_coreml_vocoder_init returned null.
+enum supertonic_coreml_vocoder_failure {
+    SUPERTONIC_COREML_VOCODER_OK            = 0,
+    SUPERTONIC_COREML_VOCODER_LOAD_FAILED   = 1,  // Core ML could not load the bundle
+    SUPERTONIC_COREML_VOCODER_BAD_INTERFACE = 2,  // it loaded, but its features do not match the model
+};
+
+// `compute_units`: all | cpu_and_ane | cpu_and_gpu | cpu_only (null or
+// anything else: all); the caller resolves it. `failure` (optional) receives
+// the reason when the result is null.
 struct supertonic_coreml_vocoder_context * supertonic_coreml_vocoder_init(
     const char * path_mlmodelc,
     int64_t      latent_channels,
-    int64_t      samples_per_frame);
+    int64_t      samples_per_frame,
+    const char * compute_units,
+    int        * failure);
 
 void supertonic_coreml_vocoder_free(struct supertonic_coreml_vocoder_context * ctx);
 

@@ -662,9 +662,20 @@ void require_match(const recipe::Template & t, const recipe::TensorSource & src)
     if (!m.ok) die("no_template: " + m.reason);
 }
 
+// The GGUF as the template reads it: under the template's `names`, when it
+// declares them (template_source).
+std::unique_ptr<OpenSource> open_for(const recipe::Template & t, const std::string & path) {
+    std::unique_ptr<GgufSource> raw = open_gguf(path);
+    if (!t.info().names.empty()) {
+        const recipe::RenamedSource check(*raw, t.info().names);
+        if (!check.error().empty()) die("no_template: " + check.error());
+    }
+    return template_source(t, std::move(raw));
+}
+
 int cmd_generate(const Args & a) {
     auto t = load_template(a);
-    auto src = open_gguf(a.need("--gguf"));
+    auto src = open_for(*t, a.need("--gguf"));
     require_match(*t, *src);
     digest::SourceDigest dg;
     Error e = digest::source_digest(t->recipe(), *src, dg);
@@ -691,7 +702,7 @@ int cmd_generate(const Args & a) {
 int cmd_digest(const Args & a) {
     auto t = load_template(a);
     const std::string path = a.need("--gguf");
-    auto src = open_gguf(path);
+    auto src = open_for(*t, path);
     require_match(*t, *src);
     digest::SourceDigest dg;
     Error e = digest::source_digest(t->recipe(), *src, dg);
@@ -727,7 +738,7 @@ int cmd_verify(const Args & a) {
     if (!a.get("--ours").empty()) {
         ours = read_bytes(a.get("--ours"));
     } else {
-        auto src = open_gguf(a.need("--gguf"));
+        auto src = open_for(*t, a.need("--gguf"));
         require_match(*t, *src);
         const recipe::Recipe & r = t->recipe();
         milblob::Writer w(r.blob_count, r.weight_bin_size, [&](const uint8_t * p, size_t n) -> Error {

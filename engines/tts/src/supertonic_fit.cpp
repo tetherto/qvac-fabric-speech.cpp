@@ -14,6 +14,8 @@
 #include "backend_selection.h"
 #include "backend_util.h"
 #include "fit_util.h"
+#include "coreml_fit_verdict.h"
+#include "supertonic_vocoder_coreml.h"
 #include "supertonic_internal.h"
 
 #include "ggml-backend.h"
@@ -23,6 +25,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <stdexcept>
 #include <string>
 
 namespace tts_cpp {
@@ -68,7 +71,7 @@ FitResult fit_params(const FitOptions & opts) {
         return r;
     }
     if (opts.model_gguf_path.empty() || opts.text_tokens <= 0 ||
-        !(opts.audio_seconds > 0.0f) || opts.steps < 0 || opts.vulkan_device < 0) {
+        !(opts.audio_seconds > 0.0f) || opts.steps < 0 || opts.vulkan_device < -1) {
         r.reason = "invalid-arguments";
         return r;
     }
@@ -93,13 +96,24 @@ FitResult fit_params(const FitOptions & opts) {
     if (!det::load_supertonic_gguf_metadata_only(opts.model_gguf_path, m.model,
                                                  opts.n_gpu_layers, opts.f16_weights,
                                                  precision, opts.vulkan_device,
-                                                 /*f16_weights_deny_list=*/{}, load,
+                                                 opts.f16_weights_deny_list, load,
                                                  opts.backend)) {
         r.reason = "model-unreadable";
         return r;
     }
     m.armed = true;
     r.model_variant = m.model.hparams.arch;
+
+    // The vocoder's Core ML route, never from the cache.
+    det::supertonic_vocoder_route vocoder_route;
+    try {
+        vocoder_route = det::supertonic_vocoder_plan_route(
+            opts.model_gguf_path, opts.coreml, {}, det::supertonic_vocoder_prebuilt_below_floor(m.model));
+    } catch (const std::invalid_argument &) {
+        r.reason = "invalid-arguments";
+        return r;
+    }
+    r.coreml.route = vocoder_route.route;
 
     ggml_backend_t backend = m.model.backend;
     ggml_backend_dev_t dev = backend ? ggml_backend_get_device(backend) : nullptr;
@@ -222,7 +236,20 @@ FitResult fit_params(const FitOptions & opts) {
     if (r.device_shares_host_memory) {
         required = sat_add(required, r.host_bytes);
     }
-    r.fits   = required <= r.device_free_bytes;
+    // Core ML-inclusive verdict for a generated vocoder: the ggml projection
+    // keeps its vocoder residency (the ggml vocoder serves calls until the
+    // sidecar is ready) plus the template's envelope.
+    const bool generate = vocoder_route.route == "generate";
+    if (generate) {
+        r.coreml.bytes = vocoder_route.envelope_bytes;
+        r.coreml.validated = vocoder_route.validated;
+    }
+    const ::tts_cpp::detail::coreml_fit_verdict v = ::tts_cpp::detail::decide_coreml_fit(
+        required, r.coreml.bytes, generate, r.device_free_bytes, opts.coreml.memory_budget_bytes);
+    r.coreml.ggml_only_fits = v.ggml_only_fits;
+    r.coreml.fits = v.coreml_fits;
+    if (v.degraded) r.coreml.disabled_reason = "memory";
+    r.fits   = v.fits;
     r.status = r.fits ? FitStatus::Success : FitStatus::Failure;
     r.reason = r.fits ? "fits" : "does-not-fit";
 
@@ -270,12 +297,18 @@ FitResult fit_params(const FitOptions & opts) {
         std::snprintf(line, sizeof(line), "margin:          %14s\n",
                       fmt_mib(opts.margin_bytes).c_str());
         s += line;
+        if (generate) {
+            std::snprintf(line, sizeof(line), "core ml vocoder: %14s (generated sidecar envelope%s%s)\n",
+                          fmt_mib(r.coreml.bytes).c_str(), r.coreml.validated ? ", validated" : "",
+                          v.degraded ? "; memory-degrade: ggml only" : "");
+            s += line;
+        }
         if (r.fits) {
             std::snprintf(line, sizeof(line), "verdict: FITS (headroom %s)\n",
-                          fmt_mib(r.device_free_bytes - required).c_str());
+                          fmt_mib(v.capacity - v.charged).c_str());
         } else {
             std::snprintf(line, sizeof(line), "verdict: DOES NOT FIT (short by %s)\n",
-                          fmt_mib(required - r.device_free_bytes).c_str());
+                          fmt_mib(v.charged - v.capacity).c_str());
         }
         s += line;
         r.report = std::move(s);

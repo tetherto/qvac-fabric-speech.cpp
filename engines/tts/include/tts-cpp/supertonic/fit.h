@@ -54,13 +54,26 @@
 //   * A latent length is a PREDICTION of the duration model at runtime; the
 //     audio_seconds knob sets the projected utterance length explicitly.
 //
+// Core ML (FitResult::coreml): the vocoder's route, from `coreml` and the
+// SUPERTONIC_COREML_* environment, decided without reading the cache.
+//   - A prebuilt sidecar next to the GGUF keeps today's verdict: its resident
+//     model and prediction buffers are not projected.
+//   - A generated sidecar (coreml.cache_dir set, template match, macOS 15, a
+//     device class the template does not prefer ggml on) adds the template's
+//     Core ML envelope to the projection; the verdict is the Core
+//     ML-inclusive one. With coreml.memory_budget_bytes, a budget only the
+//     ggml projection fits resolves use = off instead (memory-degrade:
+//     coreml.disabled_reason "memory", the ggml verdict).
+//
 // See tts-cpp/fit.h for the status contract and result layout.
 
+#include "tts-cpp/coreml_options.h"
 #include "tts-cpp/export.h"
 #include "tts-cpp/fit.h"
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace tts_cpp {
 namespace supertonic {
@@ -69,9 +82,11 @@ struct FitOptions {
     // Required; same role as EngineOptions::model_gguf_path.
     std::string model_gguf_path;
 
-    // Same semantics as the EngineOptions fields of the same name. The
-    // resolved dispatch must use the fused graph path (see coverage above):
-    // a validated GPU, or CPU without Accelerate/CBLAS pointwise kernels.
+    // Same semantics as the EngineOptions fields of the same name (so
+    // vulkan_device -1 selects the Vulkan adapter automatically, as the
+    // loader does). The resolved dispatch must use the fused graph path (see
+    // coverage above): a validated GPU, or CPU without Accelerate/CBLAS
+    // pointwise kernels.
     int         n_gpu_layers  = 0;
     int         vulkan_device = 0;
     std::string backend;
@@ -79,7 +94,13 @@ struct FitOptions {
     std::string precision = "auto";
     // EngineOptions::f16_weights tri-state (-1 auto / 0 off / 1 on).
     int         f16_weights = -1;
+    // Mirrors EngineOptions::f16_weights_deny_list: tensors it names keep
+    // their native storage type, which the weight projection follows.
+    std::vector<std::string> f16_weights_deny_list;
     std::string backends_dir;
+    // Mirrors EngineOptions::coreml: the vocoder's route and, for a generated
+    // sidecar, its Core ML envelope (FitResult::coreml).
+    CoremlOptions coreml;
 
     // ── Workload ──────────────────────────────────────────────────────────
     // Text length in Supertonic text tokens (Unicode code points).  The text

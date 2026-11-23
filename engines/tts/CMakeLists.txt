@@ -314,6 +314,7 @@ set(TTS_CPP_LIB_SOURCES
     src/supertonic_voice_json.cpp
     src/supertonic_chunker.cpp
     src/supertonic_coreml_path.cpp
+    src/supertonic_vocoder_coreml.cpp
     src/coreml_sidecar_path.cpp
     # CosyVoice3 (Fun-CosyVoice3-0.5B / 1.5B) — native CPU pipeline.
     # cosyvoice_pipeline.cpp is the shared graph core (LM / DiT flow / HiFT),
@@ -506,12 +507,14 @@ if (TTS_CPP_BUILD_LIBRARY)
         message(STATUS "tts-cpp: Core ML sidecars enabled (TTS_CPP_USE_COREML): Audio8 codec, Supertonic encoder/vector/vocoder, Chatterbox S3Gen stages, Pocket FlowLM step and Mimi decoder, CosyVoice3 stages, Parler DAC/optional decoder, MOSS stages, LavaSR denoiser/enhancer")
     endif()
     # Shared Core ML runtime (engines/coreml): compiled into libtts-cpp under its
-    # own namespace when TTS_CPP_COREML is on. Parler's DAC loads through it and,
-    # with TTS_CPP_COREML_GENERATE (macOS default), is generated from the GGUF
-    # with the embedded template below.
+    # own namespace when TTS_CPP_COREML is on. Parler's DAC and Supertonic's
+    # vocoder load through it and, with TTS_CPP_COREML_GENERATE (macOS default),
+    # are generated from the GGUF with the embedded templates below.
     include(${CMAKE_CURRENT_SOURCE_DIR}/../coreml/qvac_coreml.cmake)
     qvac_coreml_add_to(tts-cpp NAMESPACE tts_cpp_coreml PREFIX TTS_CPP ENABLE ${TTS_CPP_COREML}
-        TEMPLATES "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/parler-dac-w128")
+        TEMPLATES "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/parler-dac-w128"
+                  "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/supertonic-vocoder-w64"
+                  "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/supertonic-vocoder-pw2d-w64")
     target_link_libraries(tts-cpp PUBLIC ggml)
     find_package(Threads REQUIRED)
     target_link_libraries(tts-cpp PRIVATE Threads::Threads)
@@ -1954,7 +1957,7 @@ if (TTS_CPP_BUILD_TESTS)
     # written by qvac-coreml-tool; CI also runs it with --fit on a full GGUF.
     add_executable(test-parler-fit-stable test/parler/test_fit_stable.cpp)
     target_link_libraries(test-parler-fit-stable PRIVATE tts-cpp)
-    target_include_directories(test-parler-fit-stable PRIVATE src)
+    target_include_directories(test-parler-fit-stable PRIVATE src ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/test)
     if (TTS_CPP_COREML)
         # The hint cases write records where the runtime looks for them, so
         # the test uses the runtime's hint-path helper (same namespace).
@@ -2541,13 +2544,66 @@ if (TTS_CPP_BUILD_TESTS)
     # stages the fixture and runs the binary directly so a skip fails.
     add_executable(test-supertonic-coreml-parity test/test_supertonic_coreml_parity.cpp)
     target_link_libraries(test-supertonic-coreml-parity PRIVATE tts-cpp ggml)
-    target_include_directories(test-supertonic-coreml-parity PRIVATE include src test)
+    target_include_directories(test-supertonic-coreml-parity PRIVATE include src test
+                               ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/test)
     if (TTS_CPP_COREML)
         target_compile_definitions(test-supertonic-coreml-parity PRIVATE TTS_CPP_USE_COREML)
     endif()
     tts_cpp_apply_ccache(test-supertonic-coreml-parity)
     tts_cpp_register_test(test-supertonic-coreml-parity LABEL "fixture")
     set_property(TEST test-supertonic-coreml-parity PROPERTY SKIP_RETURN_CODE 77)
+
+    # The vocoder's Core ML route: device class (brand strings), template
+    # choice, the prebuilt weight floor, the templates' memory charges, and
+    # route and fit stability across the cache. --self-test needs no model;
+    # the template cases run on twins of the two templates' reference
+    # manifests (vocoder tensors only), written by qvac-coreml-tool. CI also
+    # runs it with --fit on full GGUFs.
+    add_executable(test-supertonic-coreml-route test/test_supertonic_coreml_route.cpp)
+    target_link_libraries(test-supertonic-coreml-route PRIVATE tts-cpp)
+    target_include_directories(test-supertonic-coreml-route PRIVATE src ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/test)
+    if (TTS_CPP_COREML)
+        get_target_property(_tsr_coreml_ns tts-cpp QVAC_COREML_NS)
+        target_compile_definitions(test-supertonic-coreml-route PRIVATE TTS_CPP_USE_COREML
+                                   QVAC_COREML_NS=${_tsr_coreml_ns})
+        target_include_directories(test-supertonic-coreml-route PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/include ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/src)
+    endif()
+    tts_cpp_apply_ccache(test-supertonic-coreml-route)
+    tts_cpp_register_test(test-supertonic-coreml-route-self-test EXE test-supertonic-coreml-route LABEL "unit"
+        ARGS --self-test)
+    if (TARGET qvac-coreml-tool)
+        set(_st_tpl "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates")
+        set(_st_twin_w64 "${CMAKE_CURRENT_BINARY_DIR}/supertonic-vocoder-w64-twin.gguf")
+        set(_st_twin_pw2d "${CMAKE_CURRENT_BINARY_DIR}/supertonic-vocoder-pw2d-w64-twin.gguf")
+        add_test(NAME test-supertonic-coreml-route-twins
+                 COMMAND qvac-coreml-tool twin --manifest "${_st_tpl}/supertonic-vocoder-w64/reference-gguf.json"
+                         --seed 1 --types f16 -o "${_st_twin_w64}")
+        add_test(NAME test-supertonic-coreml-route-twins-pw2d
+                 COMMAND qvac-coreml-tool twin --manifest "${_st_tpl}/supertonic-vocoder-pw2d-w64/reference-gguf.json"
+                         --seed 1 --types q8_0 -o "${_st_twin_pw2d}")
+        set_tests_properties(test-supertonic-coreml-route-twins test-supertonic-coreml-route-twins-pw2d
+                             PROPERTIES LABELS "unit" FIXTURES_SETUP supertonic-vocoder-twins)
+        add_test(NAME test-supertonic-coreml-route
+                 COMMAND test-supertonic-coreml-route --gguf "${_st_twin_w64}" --template supertonic-vocoder-w64
+                         --gguf "${_st_twin_pw2d}" --template supertonic-vocoder-pw2d-w64)
+        set_tests_properties(test-supertonic-coreml-route PROPERTIES LABELS "unit"
+                             FIXTURES_REQUIRED supertonic-vocoder-twins)
+    endif()
+    # Fit needs a whole model: route and fit stability on a staged Supertonic 2
+    # GGUF (the converter stores its pointwise convolutions as [OC, IC, 1]).
+    tts_cpp_register_test(test-supertonic-coreml-route-fit EXE test-supertonic-coreml-route LABEL "fixture"
+        ARGS --gguf "${_tcb_super2_gguf}" --template supertonic-vocoder-w64 --fit
+        REQUIRES "${_tcb_super2_gguf}")
+
+    add_executable(test-supertonic-vocoder-handoff test/test_supertonic_vocoder_handoff.cpp)
+    target_link_libraries(test-supertonic-vocoder-handoff PRIVATE tts-cpp ggml)
+    target_include_directories(test-supertonic-vocoder-handoff PRIVATE include src)
+    if (TTS_CPP_COREML)
+        target_compile_definitions(test-supertonic-vocoder-handoff PRIVATE TTS_CPP_USE_COREML)
+    endif()
+    tts_cpp_apply_ccache(test-supertonic-vocoder-handoff)
+    tts_cpp_register_test(test-supertonic-vocoder-handoff LABEL "unit")
 
     add_executable(test-supertonic-coreml-encoder test/test_supertonic_coreml_encoder.cpp)
     target_link_libraries(test-supertonic-coreml-encoder PRIVATE tts-cpp ggml)
