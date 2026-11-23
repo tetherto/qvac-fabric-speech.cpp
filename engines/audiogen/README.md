@@ -26,6 +26,12 @@ existing behavior. See [backend selection](docs/backends.md#backends).
 Apple builds can optionally use a Core ML sidecar for the ACE-Step VAE decoder.
 Export, placement and fallback contracts are in
 [docs/backends.md](docs/backends.md#core-ml-vae-decoder-sidecar).
+Process exit with Core ML: a process that exits while a sidecar is still compiling or loading in the
+background waits for that load (by default at most 15 s on macOS, 2 s on iOS) when its main thread is armed.
+The main thread is armed automatically when it makes the engine; a host that makes engines on another thread
+(as the qvac addons do) calls `coreml_arm_exit_guard()` on its main thread, or the terminal
+`coreml_shutdown_for_exit()` right before the process exits (`audiogen-cpp/coreml_exit.h`). See
+[the runtime's README](../coreml/README.md#process-exit).
 MiniMax-Music3 can explicitly use a [Core ML conditioner projection](docs/backends.md#minimax-core-ml-conditioner)
 with its remaining stages on the configured native backend. MiniMax is unavailable on mobile.
 
