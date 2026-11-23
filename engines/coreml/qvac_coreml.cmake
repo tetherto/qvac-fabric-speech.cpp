@@ -415,6 +415,29 @@ function(qvac_coreml_add_tests)
         message(STATUS "qvac-coreml-tool and the GGUF cases of the generator tests: not built (no ggml target)")
     endif()
 
+    if (with_objc)
+        # A process that ends while a real Core ML load is in flight exits
+        # cleanly. Needs a compiled model (QVAC_COREML_TEST_EXIT_MODEL, an
+        # .mlmodelc whose cold load takes long enough to exit during it, such
+        # as a vocoder with dilated convolutions); without one it registers
+        # DISABLED.
+        set(QVAC_COREML_TEST_EXIT_MODEL "" CACHE PATH
+            "qvac-coreml: compiled model (.mlmodelc) for test-coreml-exit-load")
+        add_executable(test-coreml-exit-load "${dir}/test/test_exit_load.mm")
+        target_compile_definitions(test-coreml-exit-load PRIVATE QVAC_COREML_NS=qvac_coreml_test)
+        target_include_directories(test-coreml-exit-load PRIVATE "${dir}/include" "${dir}/src")
+        target_compile_features(test-coreml-exit-load PRIVATE cxx_std_17)
+        target_compile_options(test-coreml-exit-load PRIVATE -fobjc-arc)
+        _qvac_coreml_apple_frameworks(exit_fws ON)
+        target_link_libraries(test-coreml-exit-load PRIVATE qvac-coreml-test-runtime ${exit_fws})
+        add_test(NAME test-coreml-exit-load
+                 COMMAND test-coreml-exit-load --model "${QVAC_COREML_TEST_EXIT_MODEL}")
+        set_tests_properties(test-coreml-exit-load PROPERTIES LABELS "fixture" TIMEOUT 1200)
+        if (NOT QVAC_COREML_TEST_EXIT_MODEL OR NOT EXISTS "${QVAC_COREML_TEST_EXIT_MODEL}")
+            set_property(TEST test-coreml-exit-load PROPERTY DISABLED TRUE)
+        endif()
+    endif()
+
     if (APPLE)
         # Over the budget, configure fails (a project that embeds a toy
         # template under QVAC_COREML_TEMPLATE_BUDGET_MB=0).

@@ -361,6 +361,7 @@ set(TTS_CPP_LIB_SOURCES
     src/parler/dac_accel.cpp
     src/parler/dac_coreml.cpp
     src/parler/dac_source.cpp
+    src/coreml_exit.cpp
     src/parler/engine.cpp
     # Audio8 engine (DualAR semantic LM + DAC-style codec with in-process cloning).
     src/audio8/unicode.cpp
@@ -1576,7 +1577,8 @@ if (TTS_CPP_BUILD_TESTS)
     # Chatterbox S3Gen Core ML sidecars: policy/naming/windows/fit refusal
     # always; per-stage parity against ggml with CHATTERBOX_COREML_TEST_S3GEN,
     # the Engine sentence overlap with CHATTERBOX_COREML_TEST_T3 as well, and
-    # the feature-shape checks with CHATTERBOX_COREML_TEST_SHAPES (written by
+    # the feature-shape and background-loading checks with
+    # CHATTERBOX_COREML_TEST_SHAPES (written by
     # test/prepare_chatterbox_coreml_shape_fixture.py).
     add_executable(test-chatterbox-coreml test/test_chatterbox_coreml.cpp)
     target_link_libraries(test-chatterbox-coreml PRIVATE tts-cpp)
@@ -1586,13 +1588,29 @@ if (TTS_CPP_BUILD_TESTS)
     endif()
     tts_cpp_apply_ccache(test-chatterbox-coreml)
     tts_cpp_register_test(test-chatterbox-coreml LABEL "unit")
+    if (TARGET tts-cli)
+        # The hermetic run also checks tts-cli's Core ML argument validation.
+        set_property(TEST test-chatterbox-coreml APPEND PROPERTY
+                     ENVIRONMENT "CHATTERBOX_COREML_TEST_CLI=$<TARGET_FILE:tts-cli>")
+    endif()
     tts_cpp_register_test(test-chatterbox-coreml-stages
         EXE test-chatterbox-coreml LABEL "fixture" ARGS "--stages-fixture")
     tts_cpp_register_test(test-chatterbox-coreml-shapes
         EXE test-chatterbox-coreml LABEL "fixture" ARGS "--shape-fixture")
+    tts_cpp_register_test(test-chatterbox-coreml-pending
+        EXE test-chatterbox-coreml LABEL "fixture" ARGS "--pending-fixture")
     tts_cpp_register_test(test-chatterbox-coreml-engine
         EXE test-chatterbox-coreml LABEL "fixture" ARGS "--engine-fixture")
-    set_tests_properties(test-chatterbox-coreml-stages test-chatterbox-coreml-shapes test-chatterbox-coreml-engine
+    # The first synthesis while every function is still loading equals a
+    # use = off run, through the Engine and tts-cli (CHATTERBOX_COREML_TEST_CLI).
+    tts_cpp_register_test(test-chatterbox-coreml-engine-slow-load
+        EXE test-chatterbox-coreml LABEL "fixture" ARGS "--engine-fixture" "--slow-load")
+    # Engine streaming while the functions load: the first chunk on ggml, the
+    # loads released between two callbacks, every later chunk on Core ML.
+    tts_cpp_register_test(test-chatterbox-coreml-streaming
+        EXE test-chatterbox-coreml LABEL "fixture" ARGS "--streaming-fixture")
+    set_tests_properties(test-chatterbox-coreml-stages test-chatterbox-coreml-shapes test-chatterbox-coreml-pending
+        test-chatterbox-coreml-engine test-chatterbox-coreml-engine-slow-load test-chatterbox-coreml-streaming
         PROPERTIES SKIP_RETURN_CODE 77)
 
     add_executable(test-cosyvoice-load test/test_cosyvoice_load.cpp ${_tcb_cosy_core_srcs})

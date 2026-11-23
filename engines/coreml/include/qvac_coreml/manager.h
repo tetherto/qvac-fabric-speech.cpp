@@ -16,10 +16,12 @@
 //  - low power: `prewarm` work is deferred unless a waited group needs it.
 //
 // "Process-wide" means per engine library image: each engine library compiles
-// its own copy of this runtime in its own namespace. instance() is leaked on
-// purpose; on its first job it pins its own image (dladdr + dlopen
-// RTLD_NOLOAD | RTLD_NODELETE) so code and callbacks outlive any dlclose, and an
-// atexit flag stops new work.
+// its own copy of this runtime in its own namespace. Manager::instance() is
+// leaked on purpose. The image pins itself (dladdr + dlopen RTLD_NOLOAD | RTLD_NODELETE)
+// so code and callbacks outlive any dlclose: at its first request for work,
+// when the main thread makes a slot that can load, or when arm_exit_guard()
+// is called on the main thread. Process exit is described with the exit hooks at the end of this
+// header and in the README ("Process exit").
 
 #include "qvac_coreml/options.h"
 #include "qvac_coreml/slot.h"
@@ -179,5 +181,69 @@ private:
     explicit Manager(std::shared_ptr<detail::Runtime> rt) : rt_(std::move(rt)) {}
     std::shared_ptr<detail::Runtime> rt_;
 };
+
+// ---- process exit -------------------------------------------------------------
+//
+// A Core ML compile or load cannot be cancelled, and exit() destroys framework
+// state that a running one still reads (some of it built lazily during the
+// first compile, so its destructors are among the first ones exit() runs).
+// Each engine library (each has its own copy of this runtime) therefore has
+// one bounded exit wait for the job its worker is running and the models it
+// is releasing. The automatic default bound is 15 s on macOS and 2 s on iOS.
+// Admission closes when the wait starts: a job not yet started never starts,
+// and a slot without a model or a running job fails with kExitingReason (a
+// strict acquisition throws, also one already waiting). The wait runs:
+//  - from the exit guard: a thread_local object of the main thread. When the
+//    main thread exits the process, its destructor runs before every static
+//    destructor and atexit handler (returning from main first destroys main's
+//    automatic objects, and thread_local objects of the main thread built
+//    after the guard are destroyed before it). It is armed automatically when
+//    the main thread makes a slot that can load or requests work, or by
+//    arm_exit_guard();
+//  - from shutdown_for_exit(), which a host calls before process
+//    finalization begins.
+// When exit starts with neither (an engine made and loaded off the main
+// thread with nothing armed, or exit() called on another thread), an atexit
+// handler only closes admission: a job still running can then crash in the
+// frameworks, as it could before. The same holds past the deadline. Nothing
+// waits after that handler ran: hosts must not drain from atexit handlers or
+// static destructors, which run after the frameworks' lazily registered
+// destructors (and some may run before this runtime's handler).
+
+// The reason of a slot that had no model and no running job when process
+// exit began (after shutdown_for_exit(), or when an armed main thread ended).
+inline constexpr const char * kExitingReason = "the process is exiting: no new Core ML work starts";
+
+// Arms this library's exit guard. Call it on the main thread (for a JS host,
+// the JS thread when that is the process's main thread), e.g. where the addon
+// instance is created; it pins this library image first. Returns true when
+// the guard is armed, now or earlier. Returns false, pinning and registering
+// nothing, on any other thread and once process finalization has begun; also
+// when the image cannot be pinned. A guard armed this way waits even after
+// set_automatic_exit_guard(false).
+bool arm_exit_guard();
+
+// Terminal: closes admission in this library for the rest of the process,
+// for every user of it (the image stays pinned, so reloading an addon does
+// not reopen it), then waits for the job a worker is running. The wait ends
+// at the earlier of now + `bound` (clamped to one hour) and the library's one
+// exit deadline, which the first call with a positive bound sets (the exit
+// guard's wait shares it). A zero or negative bound only closes admission and
+// reports, and fixes no deadline. Returns true when no job is running; false
+// on timeout, and always when called from inside a job (which does not wait
+// for itself). Call it from any thread right before the process exits, while
+// its main queue can still make progress; not on an addon unload in a process
+// that goes on, and not from an atexit handler or a static destructor (after
+// finalization began it only reports).
+bool shutdown_for_exit(std::chrono::milliseconds bound);
+
+// Per engine library. With false, an automatically armed guard does not wait,
+// whenever the call is made (a guard armed by arm_exit_guard() still does).
+// For hosts whose main thread may end with pthread_exit() while the process
+// goes on (dispatch_main() does that): on Apple platforms an armed guard then
+// runs and closes admission for the rest of the process (glibc does not run
+// the main thread's thread_local destructors there). Such hosts call
+// shutdown_for_exit() right before they exit.
+void set_automatic_exit_guard(bool on);
 
 }  // namespace QVAC_COREML_NS

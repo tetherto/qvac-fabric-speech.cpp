@@ -258,6 +258,7 @@ set(PARAKEET_LIB_SOURCES
     src/parakeet_ctc.cpp
     src/parakeet_coreml_path.cpp
     src/coreml/parakeet_coreml_shape.cpp
+    src/coreml_exit.cpp
     src/parakeet_engine.cpp
     src/parakeet_nemotron.cpp
     src/parakeet_unified.cpp

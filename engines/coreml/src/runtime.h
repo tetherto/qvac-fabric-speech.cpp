@@ -13,6 +13,7 @@
 #include "qvac_coreml/status.h"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <memory>
@@ -33,9 +34,48 @@ struct Graveyard {
     }
 };
 
-// The atexit flag: at process exit, stops new work in this image.
+// Process exit (the public hooks and the contract are in manager.h). Core ML
+// calls cannot be cancelled, and exit() destroys the frameworks' static state,
+// some of it built lazily during the first compile, so its destructors run
+// first. The wait for a running job therefore has to come before every
+// destructor: from the exit guard (a thread_local of the main thread, whose
+// destructor is the first thing exit() runs on that thread) or from
+// shutdown_for_exit(). The atexit handler, registered when the first manager
+// is created, only stops new work.
 bool exiting();
 void register_atexit_once();
+// After this image is pinned: a child of fork() starts with no job counted.
+void register_fork_handler_once();
+bool on_main_thread();
+// Arms the exit guard on the main thread; false elsewhere. The caller has
+// pinned the image (the guard's destructor is code in it).
+bool arm_exit_guard();
+// The atexit fallback ran (process finalization began).
+bool finalizing();
+// The public arm_exit_guard() armed the guard: set_automatic_exit_guard(false)
+// does not disarm it.
+void note_explicit_arm();
+// Whether the main thread is armed automatically (set_automatic_exit_guard).
+bool automatic_exit_guard();
+void set_automatic_exit_guard_flag(bool on);
+// Brackets work a worker does that may call into Core ML: a job (prepare, or
+// load and warm-up) and the release of models outside mu. enter_job() counts
+// it before it reads the exit flag, and returns false, uncounted, once the
+// process is exiting: either the exit wait sees the work, or the worker sees
+// the flag and starts nothing.
+bool enter_job();
+void leave_job();
+// The default bound of the exit wait (a test hook can replace it).
+std::chrono::milliseconds exit_wait();
+// Sets the exit flag and waits for the counted work (other than the
+// caller's own job) until the earlier of now + bound (clamped to one hour)
+// and this image's one exit deadline, which the first call with a positive
+// bound sets. A zero or negative bound, or a call after finalization began,
+// only closes admission and reports. Returns true when no job is running,
+// which is never the case for a call from inside a job.
+bool wait_for_jobs_at_exit(std::chrono::milliseconds bound);
+// Logs kExitingReason once per image, the first time a request is refused.
+void note_refused_request();
 
 struct SlotCore;
 struct PoolCore;
@@ -200,6 +240,11 @@ public:
     std::mutex mu;
     std::condition_variable state_cv;
     void request_locked(const std::shared_ptr<SlotCore> & c, Priority p, bool nd, Graveyard & gy);
+    // After exit began: fails a slot that has no model and no running job
+    // with kExitingReason (unsubscribing an unstarted job). True if it did.
+    bool refuse_after_exit_locked(const std::shared_ptr<SlotCore> & c, Graveyard & gy);
+    // Observing an unstarted queued job after admission closes also fails it.
+    void refuse_queued_after_exit_locked(const std::shared_ptr<SlotCore> & c, Graveyard & gy);
     SlotStatus status_locked(SlotCore & c, Clock::time_point now) const;
     // The resident cap denies slot `c` the instance its load job brings, right
     // now: acquisitions and groups do not wait on it. Decided at the
