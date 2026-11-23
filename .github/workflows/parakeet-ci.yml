@@ -101,6 +101,9 @@ jobs:
       - name: Test converter arguments
         run: python3 -m unittest engines/parakeet/test/test_converter_args.py
 
+      - name: Test the Core ML memory schedule checker
+        run: python3 -B -m unittest engines/parakeet/test/test_check_coreml_memory_schedule.py
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -264,7 +267,7 @@ jobs:
     needs: [runner_names, coreml_authorize]
     if: needs.coreml_authorize.outputs.allowed == 'true'
     runs-on: ${{ needs.runner_names.outputs.macos_arm64_gpu }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -293,11 +296,35 @@ jobs:
           cmake --build coreml-ggml-build -j4
           cmake --install coreml-ggml-build
 
+      # NVIDIA's Nemotron 3 Diarization q8_0 GGUF (107 MB) at a pinned
+      # revision and sha256, alone in its directory: no diarizer bundle sits
+      # beside it, so the engine generates the diarizers from the GGUF.
+      - name: Cache the Nemotron 3 Diarization q8_0 GGUF
+        id: nemotron-cache
+        uses: actions/cache@v4
+        with:
+          path: nemotron-generated
+          key: nemotron-3-diarization-q8_0-f667ed73aee57d40cc39428eb768b4fd87a0a29e
+
+      - name: Stage the Nemotron 3 Diarization q8_0 GGUF
+        if: steps.nemotron-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p nemotron-generated
+          curl -fL --retry 3 -o nemotron-generated/Nemotron-3-Diarization.q8_0.gguf \
+            https://huggingface.co/nvidia/Nemotron-3-Diarization/resolve/f667ed73aee57d40cc39428eb768b4fd87a0a29e/Nemotron-3-Diarization.q8_0.gguf
+
+      - name: Verify the Nemotron 3 Diarization q8_0 GGUF
+        run: |
+          echo "08456d9e22cd9a323c0364d98375f3746d6e68507ebb705cd46438c534c7a3a1  nemotron-generated/Nemotron-3-Diarization.q8_0.gguf" | shasum -a 256 -c -
+          if ls nemotron-generated | grep -q -- '-diarizer-'; then
+            echo "::error::a diarizer bundle sits beside the staged GGUF"; exit 1
+          fi
+
       - name: Configure (PARAKEET_COREML=ON)
         env:
           FIXTURE_ROOT: ${{ inputs.fixture_root }}
         run: |
-          fixture_options=()
+          fixture_options=("-DPARAKEET_TEST_NEMOTRON_GENERATED_GGUF=$PWD/nemotron-generated/Nemotron-3-Diarization.q8_0.gguf")
           if [ -n "$FIXTURE_ROOT" ]; then
             fixture_options+=("-DPARAKEET_TEST_MODEL_DIR=$FIXTURE_ROOT/models"
                               "-DPARAKEET_TEST_AUDIO_DIR=$FIXTURE_ROOT/audio"
@@ -309,6 +336,7 @@ jobs:
             -DCMAKE_PREFIX_PATH="$PWD/coreml-ggml-install" "${fixture_options[@]}"
 
       - name: Build (every target, Core ML harnesses included)
+        id: coreml-build
         run: cmake --build build-coreml -j4
 
       - name: Test (Core ML runtime and Parakeet routing, no skips)
@@ -319,6 +347,94 @@ jobs:
             build-coreml/coreml-runtime-results.xml \
             --require test-coreml-scheduler --require test-parakeet-coreml-route \
             --require test-coreml-encoder-owner-stub-tdt
+
+      # The generated diarizers on the device: an empty cache, the staged
+      # GGUF alone, and the Core ML / ggml parity gate on every capacity the
+      # sample covers. The test fails (never skips) unless every diarizer was
+      # generated. The fit test checks the generated charge is the same with
+      # an empty and a full cache, the memory-degrade near the budget, and the
+      # status of compute units the templates were not validated for.
+      - name: Test (generated Nemotron diarizers on the device, no skips)
+        run: |
+          ctest --test-dir build-coreml -L coreml-generated --no-tests=error \
+            --output-on-failure --timeout 1800 --output-junit coreml-generated-results.xml
+          python3 engines/parakeet/scripts/check-ctest-junit.py \
+            build-coreml/coreml-generated-results.xml \
+            --require test-nemotron-diarization-coreml-generated-parity \
+            --require test-fit-coreml-generated-diarizers \
+            --require test-nemotron-diarization-coreml-source
+
+      # Real-weights gate: for each Nemotron template, the unchanged exporter on
+      # the staged GGUF dequantised by ggml against the C++ generator on the
+      # GGUF itself, weight.bin blob by blob and the spec.
+      - name: Install the pinned coremltools venv
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          coreml_python="$(command -v python3.11 || command -v python3)"
+          "$coreml_python" -m venv .venv-coreml-templates
+          .venv-coreml-templates/bin/python -m pip install -r engines/parakeet/scripts/requirements-coreml.txt
+
+      - name: Real-weights gate (Nemotron templates on the staged q8_0)
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          .venv-coreml-templates/bin/python -B engines/coreml/python/coreml_template.py \
+            --tool build-coreml/qvac-coreml-tool real \
+            --gguf nemotron-generated/Nemotron-3-Diarization.q8_0.gguf \
+            --template-dir engines/parakeet/coreml-templates/nemotron-diar-f358 \
+            --template-dir engines/parakeet/coreml-templates/nemotron-diar-f745 \
+            --template-dir engines/parakeet/coreml-templates/nemotron-diar-f1125 \
+            --json nemotron-real-gate.json
+
+      # The memory validation behind the Nemotron templates' memory envelope,
+      # on this runner's chip: diarizer passes run while the engine generates,
+      # compiles, loads and warms every capacity in the background (prewarm
+      # all), from a re-signed copy of the tool and an empty cache each run, so
+      # every Neural Engine load is cold. The checker prints the per-run table
+      # and fails when the peak footprint increment over a ggml-only run of the
+      # same passes exceeds what fit charges, when a prepare, a load, a
+      # capacity's resident step or ANECompilerService's growth during the
+      # loads exceeds the constant the templates record, or when a capacity
+      # shows no generate or load phase. Runs whenever the build succeeded, so
+      # an earlier test failure does not hide it.
+      - name: Memory schedule (generated Nemotron diarizers, overlapped, this runner)
+        id: nemotron-memory
+        if: ${{ !cancelled() && steps.coreml-build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          sw_vers
+          sysctl -n machdep.cpu.brand_string hw.memsize
+          tool=build-coreml/nemotron-diarization-coreml-memory
+          gguf=nemotron-generated/Nemotron-3-Diarization.q8_0.gguf
+          wav=engines/parakeet/test/samples/diarization-sample-16k.wav
+          rm -rf nemotron-memory
+          mkdir -p nemotron-memory
+          "$tool" --ggml-only --gguf "$gguf" --wav "$wav" --ggml-passes 60 --json nemotron-memory/ggml.json
+          base=$(python3 -c "import json; print(json.load(open('nemotron-memory/ggml.json'))['peak_footprint'])")
+          status=0
+          for i in 1 2; do
+            id="qvac-memory-$(uuidgen)"
+            cp "$tool" "nemotron-memory/$id"
+            codesign -s - -f -i "$id" "nemotron-memory/$id"
+            "nemotron-memory/$id" --gguf "$gguf" --wav "$wav" --cache-dir "$PWD/nemotron-memory/cache-$i" \
+              --baseline-bytes "$base" --json "nemotron-memory/run-$i.json" || status=1
+            rm -rf "nemotron-memory/cache-$i" "nemotron-memory/$id" "$HOME/Library/Caches/$id"
+          done
+          python3 engines/parakeet/scripts/check-coreml-memory-schedule.py \
+            --template-dir engines/parakeet/coreml-templates/nemotron-diar-f358 \
+            --template-dir engines/parakeet/coreml-templates/nemotron-diar-f745 \
+            --template-dir engines/parakeet/coreml-templates/nemotron-diar-f1125 \
+            nemotron-memory/run-*.json || status=1
+          exit "$status"
+
+      - name: Upload the memory schedule reports
+        if: ${{ !cancelled() && steps.nemotron-memory.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: nemotron-memory-schedule
+          path: nemotron-memory/*.json
+          if-no-files-found: warn
 
       - name: Test (background sidecars on the device, no skips)
         if: inputs.fixture_root != ''

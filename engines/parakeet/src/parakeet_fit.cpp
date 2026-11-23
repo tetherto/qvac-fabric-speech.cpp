@@ -261,6 +261,56 @@ CoremlCharge coreml_diarizer_charge(const std::string & gguf_path, std::vector<C
     return charge;
 }
 
+// The Nemotron diarizers' Core ML charge: every capacity of the model in one
+// ordered list (adjacent prebuilt bundles, and the template capacities the
+// engine would generate, chosen by the same diarizer_capacities() + plan()
+// as discovery; the others status-only), charged by coreml_diarizers_charge
+// for the calls in `ranges` and the construction prewarm. Never reads the
+// cache's contents.
+CoremlDiarizersCharge coreml_nemotron_diarizers_charge(const FitOptions & opts,
+                                                       const std::vector<CoremlFrameRange> & ranges) {
+#ifdef PARAKEET_USE_COREML
+    const auto resolved = resolve_parakeet_coreml(opts.coreml);
+    if (coreml_diarizers_disabled() || !resolved.enabled()) return {};
+    CoremlSidecars sidecars(opts.coreml);
+    std::vector<int> template_frames;
+    std::vector<std::string> template_ids;
+    for (const CoremlDiarizerTemplate & t : nemotron_diarizer_templates()) {
+        template_frames.push_back(t.frames);
+        template_ids.emplace_back(t.template_id);
+    }
+    const std::vector<CoremlDiarizerBundle> bundles = list_coreml_diarizer_bundles(opts.model_gguf_path);
+    std::vector<int> prebuilt;
+    for (const CoremlDiarizerBundle & b : bundles) prebuilt.push_back(b.capacity);
+    // Without generation every template capacity is status-only (the probe
+    // would be wasted).
+    std::vector<pcm::generation::Candidate> probed;
+    if (sidecars.generation_status().supported) {
+        probed = probe_diarizer_templates(sidecars, opts.model_gguf_path, template_ids);
+    } else {
+        probed.resize(template_ids.size());
+        for (size_t i = 0; i < template_ids.size(); ++i) probed[i].template_id = template_ids[i];
+    }
+    std::vector<CoremlDiarizerCharge> charges = diarizer_fit_charges(
+        sidecars, opts.model_gguf_path, diarizer_capacities(prebuilt, template_frames, probed));
+    for (CoremlDiarizerCharge & c : charges) {
+        for (const CoremlDiarizerBundle & b : bundles) {
+            if (c.prebuilt && b.capacity == c.frames) c.weights_bytes = b.weights_bytes;
+        }
+    }
+    const CoremlDiarizerPrewarm prewarm =
+        resolved.prewarm == pcm::Prewarm::all ? CoremlDiarizerPrewarm::all
+        : resolved.prewarm == pcm::Prewarm::none ? CoremlDiarizerPrewarm::none
+                                                 : CoremlDiarizerPrewarm::minimal;
+    return coreml_diarizers_charge(charges, ranges, prewarm,
+                                   fit_units(resolved.units_or(pcm::ComputeUnits::cpu_and_ane)));
+#else
+    (void) opts;
+    (void) ranges;
+    return {};
+#endif
+}
+
 // Core ML enablement for the projection: resolved from FitOptions::coreml
 // exactly as an Engine would (PARAKEET_COREML_DISABLE, use = off, ...).
 bool coreml_fit_enabled(const FitOptions & opts, std::string & disabled_reason) {
@@ -541,9 +591,18 @@ void project_nemotron_diarization(const ParakeetCtcModel & model, const GgufLoad
     const uint64_t required = apply_fit_verdict(r, opts.margin_bytes);
     std::string disabled_reason;
     const bool enabled = coreml_fit_enabled(opts, disabled_reason);
+    // The instance also serves shorter calls than this workload, and keeps the
+    // capacities they load: any input up to the single-pass graph (the
+    // long-form window past the long-form threshold) runs as one pass, so the
+    // charge covers single passes from 1 frame up to it as well.
+    std::vector<CoremlFrameRange> demand = long_form_charge_ranges(ranges, long_form);
+    demand.push_back(CoremlFrameRange{1, graphs.single_pass.frames});
+    const CoremlDiarizersCharge diarizers = coreml_nemotron_diarizers_charge(opts, demand);
+    // A charge holding a prebuilt bundle is today's estimate, not a validated
+    // envelope; one of generated capacities alone is.
     apply_coreml_verdicts(r, required, enabled, disabled_reason,
-                          coreml_diarizer_charge(opts.model_gguf_path, long_form_charge_ranges(ranges, long_form), opts),
-                          /*encoder_prebuilt=*/false, CoremlCharge{});
+                          diarizers.prebuilt ? diarizers.charge : CoremlCharge{}, /*encoder_prebuilt=*/false,
+                          CoremlCharge{}, diarizers.prebuilt ? CoremlCharge{} : diarizers.charge);
     r.report = model_device_report(r) + nemotron_diarization_report(graphs, long_form) +
                device_projection_report(r, opts.margin_bytes, required,
                                         "every diarization graph shares one buffer") +

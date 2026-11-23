@@ -123,8 +123,14 @@ void check_workloads(const std::string & gguf,
                      const std::vector<parakeet::CoremlDiarizerBundle> & bundles) {
     const parakeet::FitResult offline = project(gguf, kShortSeconds, kDefaultMargin);
     check(offline.coreml_bytes == legacy({bundles.front()}), "short input: today's charge is the smallest bundle");
-    check(offline.coreml.bytes == charge({bundles.front()}),
-          "short input: the Core ML charge is the smallest bundle and its transient");
+    // Nemotron: if the smallest bundle fails to load, its calls go to a larger
+    // one, which is then resident in its place, one at a time; the Core ML
+    // charge is the largest such bundle alone. Sortformer: the smallest bundle.
+    uint64_t worst_single = 0;
+    for (const auto & b : bundles) worst_single = std::max(worst_single, charge({b}));
+    const bool reaches_larger = offline.model_type == kNemotronType;
+    check(offline.coreml.bytes == (reaches_larger ? worst_single : charge({bundles.front()})),
+          "short input: the Core ML charge is the bundle its calls can reach that costs most, and its transient");
     check(reports_sidecars(offline), "report lists the sidecar charge");
     check_cli_json(gguf, offline.coreml_bytes);
     const parakeet::FitResult long_input = project(gguf, kLongSeconds, kDefaultMargin);

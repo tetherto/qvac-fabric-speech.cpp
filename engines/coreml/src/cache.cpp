@@ -519,6 +519,34 @@ KeyLock::Result quarantine(const Layout & l, const std::string & template_id, co
     return KeyLock::Result::ok;
 }
 
+bool artifact_identity(const Layout & l, const std::string & template_id, const std::string & key32, uint64_t & dev,
+                       uint64_t & ino) {
+    struct stat st{};
+    if (::stat(l.artifact_dir(template_id, key32).c_str(), &st) != 0) return false;
+    dev = static_cast<uint64_t>(st.st_dev);
+    ino = static_cast<uint64_t>(st.st_ino);
+    return true;
+}
+
+KeyLock::Result quarantine_if(const Layout & l, const std::string & template_id, const std::string & key32,
+                              uint64_t dev, uint64_t ino, bool * replaced, Error * err) {
+    if (replaced) *replaced = false;
+    KeyLock ex;
+    const KeyLock::Result r = KeyLock::take(l, key32, KeyLock::Mode::exclusive, ex, err);
+    if (r != KeyLock::Result::ok) return r;
+    uint64_t now_dev = 0, now_ino = 0;
+    if (!artifact_identity(l, template_id, key32, now_dev, now_ino) || now_dev != dev || now_ino != ino) {
+        if (replaced) *replaced = true;
+        return KeyLock::Result::ok;
+    }
+    Error e = quarantine_locked(l, template_id, key32);
+    if (!e.ok()) {
+        if (err) *err = e;
+        return KeyLock::Result::error;
+    }
+    return KeyLock::Result::ok;
+}
+
 std::string prune_trash_path(const Layout & l, const std::string & artifact_name) {
     return l.quarantine + "/" + artifact_name + "." + std::to_string(::getpid()) + ".prune." + rand_hex();
 }
@@ -580,8 +608,9 @@ Error write_package(const recipe::Template & t, recipe::TensorSource & src, cons
     // GGUF); a template without patch lines is written as it is.
     const recipe::TemplateFile * spec = t.file("model.mlmodel");
     std::vector<uint8_t> patched;
+    recipe::EvalStats patch_stats;
     if (t.recipe().patch_count() > 0) {
-        Error pe = recipe::patched_spec(t.recipe(), src, spec->data, spec->size, patched, observer);
+        Error pe = recipe::patched_spec(t.recipe(), src, spec->data, spec->size, patched, observer, &patch_stats);
         if (!pe.ok()) return pe;
     }
     for (const auto & [name, dst] : {std::pair<const char *, std::string>{"Manifest.json", pkg + "/Manifest.json"},
@@ -600,6 +629,7 @@ Error write_package(const recipe::Template & t, recipe::TensorSource & src, cons
         ::close(fd);
         if (!e.ok()) return e;
     }
+    std::vector<uint8_t>().swap(patched);  // written: the blob pass never holds the spec
     const std::string wb = data + "/weights/weight.bin";
     const int fd = ::open(wb.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     if (fd < 0) return io_error("create " + wb, errno);
@@ -629,6 +659,11 @@ Error write_package(const recipe::Template & t, recipe::TensorSource & src, cons
                               b.data, b.bytes);
             },
             stats, observer);
+    }
+    if (stats) {
+        // The two passes run one after the other: the larger peak is the generator's.
+        stats->peak_bytes = std::max(stats->peak_bytes, patch_stats.peak_bytes);
+        stats->tensors_read += patch_stats.tensors_read;
     }
     if (e.ok()) e = w.finish();
     if (e.ok()) e = flush();
