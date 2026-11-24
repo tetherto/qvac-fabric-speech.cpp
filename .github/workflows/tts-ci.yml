@@ -799,7 +799,7 @@ jobs:
       # service's size sums every instance on the Mac, and a pull request
       # starts several build-test-macos jobs at once (tts, audiogen), so a job
       # on a co-hosted runner that compiles for the Neural Engine during this
-      # load counts too: a run above 821.6 MiB fails the 1,027 MiB reserve and,
+      # load counts too: a run above 1116.8 MiB fails the 1,396 MiB reserve and,
       # by the rule above, raises it.
       - name: Memory schedule (generated Parler DAC, overlapped, this runner)
         if: >-

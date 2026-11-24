@@ -326,23 +326,23 @@ clean, so no isolated measurement compares the two placements, and the
 reserve is 1.25 times the largest absolute size while loading on any host:
 a conservative basis. In CI, where a pull request starts several macOS jobs
 at once, another job compiling for the Neural Engine during the load counts
-too; a run above 821.6 MiB fails the reserve and, by the rule above, raises
+too; a run above 1116.8 MiB fails the reserve and, by the rule above, raises
 it.
 
 Each run prints a per-phase table and a one-line JSON report. Each constant
 is 1.25 times the largest value measured over every run on every validated
 host, rounded up to 1 MiB (`memory.measured` in `template.json`), and the
-envelope applies no further margin. Figures in MiB, over 82 run reports:
+envelope applies no further margin. Figures in MiB, over 100 run reports:
 
-| Phase | M2, macOS 27.2.1 (37 runs) | M4 Max, macOS 26.7.2 (CI, 45 runs) | Charged |
+| Phase | M2, macOS 27.2.1 (37 runs) | M4 Max, macOS 26.7.2 (CI, 63 runs) | Charged |
 |---|--:|--:|--:|
-| prepare: generation and compile | 435.6-442.0 | 268.6-438.5 | 553 (1.25 x 442.0): `compile_peak_bytes` 329 on top of `generation_peak_bytes` 216 + 8 |
-| load and warm-up | 16.3-25.2 | 148.5-326.4 (warm-up 134.4-308.2) | 409 (1.25 x 326.4): `load_peak_bytes.all` |
-| steady state, over the footprint before the load | 0 (32 runs) | 150.1-326.7 (42 runs) | 409 (1.25 x 326.7): the weights 103.3, I/O 0.8 and `workspace_bytes` 305.0 |
-| whole run, over the warm ggml baseline | 453.0-466.3 | 577.7-759.2 | 962.6: the envelope, with the quantizer copy 0.6 |
+| prepare: generation and compile | 435.6-442.0 | 268.6-443.0 | 554 (1.25 x 443.0): `compile_peak_bytes` 330 on top of `generation_peak_bytes` 216 + 8 |
+| load and warm-up | 16.3-25.2 | 148.5-328.3 (warm-up 134.4-308.2) | 411 (1.25 x 328.3): `load_peak_bytes.all` |
+| steady state, over the footprint before the load | 0 (32 runs) | 150.1-328.5 | 411 (1.25 x 328.5): the weights 103.3, I/O 0.8 and `workspace_bytes` 307.0 |
+| whole run, over the warm ggml baseline | 453.0-466.3 | 577.7-759.2 | 965.6: the envelope, with the quantizer copy 0.6 |
 | `ANECompilerService` before the load | 2.9-393.8 (24 runs, one clean) | 123.3-485.8 (36 runs, none clean) | |
 | `ANECompilerService` growth during the load | 104.3-330.0 (24 runs) | 0.8-3.1 (36 runs) | reported |
-| `ANECompilerService` size while loading | 332.9-518.7 | 124.7-821.2 | 1,027 (1.25 x 821.2): `ane_compile_reserve_bytes` |
+| `ANECompilerService` size while loading | 332.9-518.7 | 124.7-1116.4 | 1,396 (1.25 x 1116.4): `ane_compile_reserve_bytes` |
 
 The runs without a figure in a row predate its measurement. The M4 Max
 figures come from four CI runners of the same model, whose load and warm-up
@@ -359,26 +359,24 @@ ranged from about 150 MiB in some jobs to 326 MiB in others.
   in `validated_for`.
 - **M4 Max.** `all` runs most of the program on the GPU (below), and only
   the output stage on the Neural Engine, so `ANECompilerService` barely
-  grows (at most 3.1 MiB in every run that recorded its baseline). Its size
-  there comes mostly from other jobs' compiles on the runner's Mac, earlier
-  or concurrent. The largest reading, 821.2 MiB, came from a run that
-  recorded no baseline; the next two runs of the same job read 494 MiB. It
-  sets the reserve all the same, since no clean measurement shows what a
-  cold compile of this placement needs. The first prediction adds 134-308
+  can reuse hundreds of MiB held by earlier compiles. In the stacked CI
+  runs it reached 1116.4 MiB with a 531.2 MiB baseline while other Core ML
+  workflows were running on the same host. The reserve includes that
+  observed peak. The first prediction adds 134-308
   MiB, which stays resident: the prediction workspace. The whole schedule
   takes 3.5 s there, so the process still holds the generation's memory
   when the load starts (the M2 has returned it by the time the sidecar is
   ready). Its whole run is therefore the prepare plus the resident, which
   is the sum the envelope charges.
 
-The envelope is 1,009,356,800 bytes (962.6 MiB), up from 475.4 MiB. With the
+The envelope is 1,012,502,528 bytes (965.6 MiB), up from 475.4 MiB. With the
 M2's values alone (the template's weights and I/O as the resident part) it
-would be 657.6 MiB: the macOS 27 generation peak (442 MiB, against the
+would be 658.6 MiB: the macOS 27 generation peak (442 MiB, against the
 216 MiB of the template's generation estimate) causes most of the rise, and
-the M4 Max's GPU resident adds the remaining 305.0 MiB, its
+the M4 Max's GPU resident adds the remaining 307.0 MiB, its
 `workspace_bytes`. `validated_for` is matched on the compute units only, so every
 chip is charged the larger figure. A cold Neural Engine load starts only
-while 1,027 MiB are available; until then the DAC stays on ggml (state
+while 1,396 MiB are available; until then the DAC stays on ggml (state
 `deferred(memory)`). Phones are not affected today: the runtime generates
 sidecars on macOS only, so on iOS the route is none and fit charges no Core
 ML envelope. Matching validation on the chip class, as well as the compute
