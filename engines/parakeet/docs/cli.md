@@ -99,7 +99,9 @@ backend options, and finalize tail audio on Ctrl-C.
 available right now, **without loading any weights**: it reads only GGUF
 metadata, drives the same loader/graph builders as a real run through ggml's
 size-only allocator APIs, and compares the projection against the device's
-free memory. Library API in `<parakeet/fit.h>` (`parakeet::fit_params`);
+free memory (`FitOptions::device_free_bytes`, when set, replaces that reading,
+for example with a memory budget the host enforces). Library API in
+`<parakeet/fit.h>` (`parakeet::fit_params`);
 status semantics follow the SDK's `@qvac/model-fit` contract
 (0 = fits, 1 = does not fit, 2 = error — also the exit code).
 

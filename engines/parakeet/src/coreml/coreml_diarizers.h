@@ -5,6 +5,7 @@
 #include "coreml/parakeet-diarizer.h"
 #include "coreml/parakeet_coreml_sidecars.h"
 #include "parakeet_coreml_path.h"
+#include "parakeet_model_type.h"
 
 #include <memory>
 #include <string>
@@ -87,6 +88,16 @@ struct CoremlDiarizerTemplate {
 
 // The Nemotron 3 Diarization templates (capacities 358, 745 and 1125).
 const std::vector<CoremlDiarizerTemplate> & nemotron_diarizer_templates();
+
+// The Sortformer v2.1 diarizer template (capacity 410: the default AOSC step
+// and batch inputs up to 32.8 s).
+const std::vector<CoremlDiarizerTemplate> & sortformer_diarizer_templates();
+
+// The diarizer templates of a model: Nemotron 3 Diarization's, or the
+// Sortformer v2.1 AOSC variant's; none for every other model. Discovery and
+// fit both choose the templates here.
+const std::vector<CoremlDiarizerTemplate> & diarizer_templates_for(ParakeetModelType type,
+                                                                   const std::string & variant);
 
 // The diarizer capacities of a model: every adjacent prebuilt bundle, plus
 // every template in `templates` with no adjacent bundle (diarizer_capacities):

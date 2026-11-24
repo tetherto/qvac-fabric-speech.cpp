@@ -258,6 +258,7 @@ set(PARAKEET_LIB_SOURCES
     src/parakeet_ctc.cpp
     src/parakeet_coreml_path.cpp
     src/coreml/parakeet_coreml_shape.cpp
+    src/coreml_exit.cpp
     src/parakeet_engine.cpp
     src/parakeet_nemotron.cpp
     src/parakeet_unified.cpp
@@ -474,7 +475,8 @@ if (PARAKEET_BUILD_LIBRARY)
     set(PARAKEET_COREML_TEMPLATE_DIRS
         ${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/nemotron-diar-f358
         ${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/nemotron-diar-f745
-        ${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/nemotron-diar-f1125)
+        ${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/nemotron-diar-f1125
+        ${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/sortformer-diar-f410)
     qvac_coreml_add_to(qvac-parakeet NAMESPACE ${PARAKEET_COREML_RUNTIME_NS} PREFIX PARAKEET ENABLE ${PARAKEET_COREML}
                        TEMPLATES ${PARAKEET_COREML_TEMPLATE_DIRS})
 
@@ -653,6 +655,24 @@ if (PARAKEET_BUILD_TESTS)
         # it has no skip path (any non-zero exit fails).
         set_tests_properties(test-parakeet-coreml-route PROPERTIES
             LABELS "unit;coreml-runtime" TIMEOUT 120)
+    endif()
+
+    # The Sortformer diarizer template refuses GGUFs whose encoder metadata
+    # the exporter refuses (causal or chunked convolution, chunked attention,
+    # causal downsampling), on twins of the shipped GGUF's metadata; with the
+    # staged GGUF, that file matches. No skip path.
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if (TARGET qvac-coreml-tool AND Python3_Interpreter_FOUND)
+        set(_qvp_sf_match_args --tool $<TARGET_FILE:qvac-coreml-tool>
+            --template-dir "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/sortformer-diar-f410")
+        if (PARAKEET_TEST_SORTFORMER_GENERATED_GGUF)
+            list(APPEND _qvp_sf_match_args --gguf "${PARAKEET_TEST_SORTFORMER_GENERATED_GGUF}")
+        endif()
+        add_test(NAME test-sortformer-diarizer-template-match
+            COMMAND ${Python3_EXECUTABLE} -B "${CMAKE_CURRENT_SOURCE_DIR}/test/test_sortformer_diarizer_template_match.py"
+                    ${_qvp_sf_match_args})
+        set_tests_properties(test-sortformer-diarizer-template-match PROPERTIES
+            LABELS "unit;coreml-runtime" TIMEOUT 300)
     endif()
 
     # Helper: register a built test target with CTest. Same shape as
@@ -2038,15 +2058,15 @@ if (PARAKEET_BUILD_TESTS)
             LABELS "fixture;coreml;coreml-generated" TIMEOUT 1800)
     endif()
     if (PARAKEET_COREML)
-        # The memory validation behind the Nemotron templates'
+        # The memory validation behind the Nemotron and Sortformer templates'
         # memory.validated_for (docs/backends.md, generated diarizers): diarizer
         # passes overlapped with background prepares and loads, footprint and
         # ANECompilerService sampled. A measurement tool, not a ctest: it needs
         # a cold ANE and minutes per run.
-        add_executable(nemotron-diarization-coreml-memory test/nemotron_diarization_coreml_memory.cpp)
-        target_link_libraries(nemotron-diarization-coreml-memory PRIVATE qvac-parakeet)
-        target_include_directories(nemotron-diarization-coreml-memory PRIVATE include src ggml/include)
-        parakeet_apply_ccache(nemotron-diarization-coreml-memory)
+        add_executable(diarizer-coreml-memory test/diarizer_coreml_memory.cpp)
+        target_link_libraries(diarizer-coreml-memory PRIVATE qvac-parakeet)
+        target_include_directories(diarizer-coreml-memory PRIVATE include src ggml/include)
+        parakeet_apply_ccache(diarizer-coreml-memory)
     endif()
 
     add_executable(test-sortformer-diarizer-coreml-parity
@@ -2077,6 +2097,75 @@ if (PARAKEET_BUILD_TESTS)
                  "${CMAKE_CURRENT_SOURCE_DIR}/test/samples/diarization-sample-16k.wav"
         REQUIRES "${_qvp_sfsv21_f16_gguf}")
     set_property(TEST test-sortformer-diarizer-coreml-parity PROPERTY SKIP_RETURN_CODE 77)
+    # The same gate on the diarizer generated from the GGUF alone: the fixture
+    # directory holds only the GGUF, the cache starts empty, and the test fails
+    # (never skips) unless the capacity was generated. The fit test checks the
+    # generated charge, fit-stability, memory-degrade and the status of
+    # compute units the template was not validated for, as for Nemotron.
+    set(PARAKEET_TEST_SORTFORMER_GENERATED_GGUF "" CACHE FILEPATH
+        "Sortformer v2.1 q8_0 GGUF in a directory with no diarizer bundle (generated Core ML diarizer)")
+    if (PARAKEET_COREML AND PARAKEET_TEST_SORTFORMER_GENERATED_GGUF)
+        set(_qvp_sf_gen_cache "${CMAKE_CURRENT_BINARY_DIR}/coreml-generated-sortformer-cache")
+        add_test(NAME test-sortformer-diarizer-coreml-generated-parity
+            COMMAND /bin/sh -c "rm -rf '${_qvp_sf_gen_cache}' && exec \"$0\" \"$@\""
+                    $<TARGET_FILE:test-sortformer-diarizer-coreml-parity>
+                    "${PARAKEET_TEST_SORTFORMER_GENERATED_GGUF}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/test/samples/diarization-sample-16k.wav"
+                    --cache-dir "${_qvp_sf_gen_cache}")
+        set_tests_properties(test-sortformer-diarizer-coreml-generated-parity PROPERTIES
+            LABELS "fixture;coreml;coreml-generated" TIMEOUT 1800)
+        if (NOT TARGET test-fit-coreml-generated-diarizers)
+            add_executable(test-fit-coreml-generated-diarizers test/test_fit_coreml_generated_diarizers.cpp)
+            target_link_libraries(test-fit-coreml-generated-diarizers PRIVATE qvac-parakeet)
+            target_include_directories(test-fit-coreml-generated-diarizers PRIVATE include
+                ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/third_party)
+            target_compile_definitions(test-fit-coreml-generated-diarizers PRIVATE
+                PARAKEET_TEST_TEMPLATE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates")
+            parakeet_apply_ccache(test-fit-coreml-generated-diarizers)
+        endif()
+        add_test(NAME test-fit-coreml-generated-sortformer-diarizer
+            COMMAND test-fit-coreml-generated-diarizers "${PARAKEET_TEST_SORTFORMER_GENERATED_GGUF}"
+                    "${CMAKE_CURRENT_BINARY_DIR}/coreml-generated-sortformer-fit-cache" sortformer-diar-f410)
+        set_tests_properties(test-fit-coreml-generated-sortformer-diarizer PROPERTIES
+            LABELS "fixture;coreml;coreml-generated" TIMEOUT 1800)
+        # use = require with no cache directory: an offline pass the
+        # status-only template capacity covers throws unsupported(no_cache_dir).
+        add_executable(test-sortformer-diarizer-coreml-require test/test_sortformer_diarizer_coreml_require.cpp)
+        target_link_libraries(test-sortformer-diarizer-coreml-require PRIVATE qvac-parakeet)
+        target_include_directories(test-sortformer-diarizer-coreml-require PRIVATE include)
+        parakeet_apply_ccache(test-sortformer-diarizer-coreml-require)
+        add_test(NAME test-sortformer-diarizer-coreml-require
+            COMMAND test-sortformer-diarizer-coreml-require "${PARAKEET_TEST_SORTFORMER_GENERATED_GGUF}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/test/samples/diarization-sample-16k.wav")
+        set_tests_properties(test-sortformer-diarizer-coreml-require PROPERTIES
+            LABELS "fixture;coreml;coreml-generated" TIMEOUT 1800)
+        # The Sortformer diarizer is generated only from the file whose weights
+        # the model loaded, as for Nemotron (same test, Sortformer GGUF).
+        if (NOT TARGET test-nemotron-diarization-coreml-source)
+            add_executable(test-nemotron-diarization-coreml-source
+                test/test_nemotron_diarization_coreml_source.cpp
+                src/parakeet_ctc.cpp
+                src/parakeet_diarization_v3.cpp
+                src/parakeet_coreml_path.cpp
+                src/coreml/parakeet_coreml_shape.cpp
+                src/parakeet_log.cpp
+                src/mel_preprocess.cpp
+                src/sentencepiece_bpe.cpp
+                ${PARAKEET_COREML_OBJC_SOURCES})
+            target_link_libraries(test-nemotron-diarization-coreml-source PRIVATE ggml parakeet-backend-defs
+                ${PARAKEET_FOUNDATION_FRAMEWORK} ${PARAKEET_COREML_FRAMEWORK})
+            target_include_directories(test-nemotron-diarization-coreml-source PRIVATE include src ggml/include)
+            target_compile_definitions(test-nemotron-diarization-coreml-source PRIVATE PARAKEET_USE_COREML)
+            parakeet_apply_backend_defs(test-nemotron-diarization-coreml-source)
+            parakeet_apply_ccache(test-nemotron-diarization-coreml-source)
+            parakeet_test_use_coreml_runtime(test-nemotron-diarization-coreml-source)
+        endif()
+        add_test(NAME test-sortformer-diarizer-coreml-source
+            COMMAND test-nemotron-diarization-coreml-source "${PARAKEET_TEST_SORTFORMER_GENERATED_GGUF}"
+                    "${CMAKE_CURRENT_BINARY_DIR}/coreml-source-swap-sortformer" sortformer-diar-f410)
+        set_tests_properties(test-sortformer-diarizer-coreml-source PROPERTIES
+            LABELS "fixture;coreml;coreml-generated" TIMEOUT 1800)
+    endif()
 
     # Diarizer failure handling: a bundle that fails to load or to run is
     # quarantined, its calls run on the next capacity or on ggml (under

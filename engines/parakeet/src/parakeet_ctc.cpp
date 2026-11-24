@@ -2114,11 +2114,11 @@ static void maybe_init_coreml_diarizers(const std::string & gguf_path,
                                         ParakeetCtcModel  & model,
                                         bool                verbose) {
     if (std::getenv(kCoremlDiarizerDisableEnv) != nullptr) return;
-    // Nemotron 3 Diarization capacities without an adjacent bundle are
-    // generated from the library's templates (when this instance can).
-    static const std::vector<CoremlDiarizerTemplate> kNoTemplates;
+    // Nemotron 3 Diarization and Sortformer v2.1 capacities without an
+    // adjacent bundle are generated from the library's templates (when this
+    // instance can).
     const std::vector<CoremlDiarizerTemplate> & templates =
-        model.model_type == ParakeetModelType::NEMOTRON_DIARIZATION ? nemotron_diarizer_templates() : kNoTemplates;
+        diarizer_templates_for(model.model_type, model.model_variant);
     // Without the descriptor's identity nothing is generated (source_changed).
     pcm::SourceStat loaded = model.impl->source;
     loaded.changed = loaded.changed || !model.impl->source_ok;
@@ -2290,10 +2290,12 @@ static void maybe_init_coreml_encoder(const std::string & gguf_path,
                           model.impl->coreml->resolved().disabled_reason.c_str());
     }
 
-    // A diarizer sidecar is the Sortformer minimal set; otherwise the
-    // encoder is.
+    // A diarizer capacity that can serve a pass is the Sortformer minimal
+    // set; otherwise (no diarizer, or only status-only template capacities)
+    // the encoders are.
     if (supported_sortformer) maybe_init_coreml_diarizers(gguf_path, model, verbose);
-    const bool encoder_minimal = model.impl->coreml_diarizers == nullptr;
+    const bool encoder_minimal = encoder_sidecars_minimal(
+        model.impl->coreml_diarizers ? model.impl->coreml_diarizers->capacities() : std::vector<int>());
 
     const std::string path = coreml_encoder_sidecar_path(gguf_path);
     model.impl->encoder_slot = model.impl->coreml->add(
