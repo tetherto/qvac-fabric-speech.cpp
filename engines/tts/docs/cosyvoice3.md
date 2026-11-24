@@ -194,25 +194,27 @@ the largest value measured over every run on every validated host (shared
 rule: `engines/coreml/README.md`, "Measured memory constants"); the hosts are
 listed in each template's `memory.validated_for`. They are, under `cpu_and_ane`:
 
-| Stage | Template | `weight.bin` | Prepare (largest measured) | Load and warm-up | `ANECompilerService` while loading |
+| Stage | Template | `weight.bin` | Prepare (largest measured) | Load and warm-up | Compiler reserve (stage’s measured peak) |
 |---|---|---|---|---|---|
 | Flow front-end | `cosyvoice3-frontend-f1024` | 2.1 MiB fp16 | 15.0 MiB (11.5) | 3.0 MiB (2.1) | 968 MiB (773.6, M4 Max) |
-| F0 predictor | `cosyvoice3-hift-f0-m512` | 6.6 MiB | 12.5 MiB (7.8) | 9.0 MiB (6.8) | 684 MiB (546.5, M4 Max) |
-| HiFT decoder | `cosyvoice3-hift-m512` | 66.6 MiB fp32 | 58.0 MiB (46.0) | 156.0 MiB (124.5) | 684 MiB (546.5, M4 Max) |
+| F0 predictor | `cosyvoice3-hift-f0-m512` | 6.6 MiB | 12.5 MiB (7.8) | 9.0 MiB (6.8) | 968 MiB (573.5, M4 Max) |
+| HiFT decoder | `cosyvoice3-hift-m512` | 66.6 MiB fp32 | 58.0 MiB (46.0) | 156.0 MiB (124.5) | 968 MiB (573.5, M4 Max) |
 
 The resident parts (weights, twice the I/O, and 161.5 MiB of prediction
 workspace held by the HiFT stage) total 255.0 MiB, 1.25 times the largest
 steady state with the three stages ready (203.8 MiB over the warm ggml
 baseline), and the envelope is 411.0 MiB (430,964,736 bytes). Measured on
-an M2 (macOS 27.2.1, seven runs) and an M4 Max (macOS 26.7.2, six CI runs).
+an M2 (macOS 27.2.1, seven runs) and an M4 Max (macOS 26.7.2, nine CI runs).
 
 The process keeps part of what the three generations allocated (about
 65 MiB on an M2) while the stages run, so the resident parts cover the
 steady state over the warm ggml baseline, not over the footprint just
 before the first load.
-`ANECompilerService` is measured by its absolute size while each stage
-loads, including the service’s existing footprint on a shared runner. The HiFT decoder runs in fp32 and Core ML places most of it on the
-CPU under `cpu_and_ane`; its load and warm-up is the largest one-off charge.
+All three stages share a 968 MiB cold-load compiler reserve, based on the
+largest absolute `ANECompilerService` footprint during any of their loads
+(773.6 MiB). Each measurement includes memory already held by the service
+on the shared runner. Under `cpu_and_ane`, Core ML places most of the fp32
+HiFT decoder on the CPU. Its load and warm-up is the largest one-off charge.
 
 `test-cosyvoice-coreml --generated DIR CACHE` checks the generated route on a
 model directory with the flow and HiFT GGUFs, `voice.gguf`, the tokenizer

@@ -82,17 +82,18 @@ constexpr const char * TEMPLATE_IDS[COSYVOICE_STAGE_COUNT] = {
 //   prepare   generation_peak_bytes + 8 MiB + compile_peak_bytes (largest
 //             prepares 11.5, 7.8 and 45.8 MiB, M2);
 //   load      load_peak_bytes.cpu_and_ane (2.1 and 6.8 MiB on M2, 124.5 MiB on M4 Max);
-//   reserve   ane_compile_reserve_bytes, ANECompilerService's absolute size
-//             while the stage loads (773.6, 546.5 and 546.5 MiB, M4 Max).
+//   reserve   ane_compile_reserve_bytes, shared across stages. The absolute
+//             compiler peak during any stage load was 773.6 MiB on M4 Max.
 // The envelope is the resident parts summed plus the largest one-off charge
 // (HiFT's load). A change of a template's memory changes these on purpose.
 struct stage_charges {
     uint64_t resident, prepare, load, reserve;
 };
+constexpr uint64_t ANE_COMPILER_RESERVE = 968 * (1ull << 20);
 [[maybe_unused]] constexpr stage_charges CHARGES[COSYVOICE_STAGE_COUNT] = {
-    {2896032, 15728640, 3145728, 968 * (1ull << 20)},
-    {7287552, 13107200, 9437184, 684 * (1ull << 20)},
-    {257203296, 60817408, 163577856, 684 * (1ull << 20)},
+    {2896032, 15728640, 3145728, ANE_COMPILER_RESERVE},
+    {7287552, 13107200, 9437184, ANE_COMPILER_RESERVE},
+    {257203296, 60817408, 163577856, ANE_COMPILER_RESERVE},
 };
 [[maybe_unused]] constexpr uint64_t ENVELOPE = 2896032 + 7287552 + 257203296 + 163577856;  // 411 MiB
 

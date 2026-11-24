@@ -34,7 +34,7 @@
     "runtime_weight_bytes": 6955776,
     "workspace_bytes": 0,
     "compile_peak_bytes": 0,
-    "ane_compile_reserve_bytes": 717225984,
+    "ane_compile_reserve_bytes": 1015021568,
     "load_peak_bytes": {
       "cpu_and_ane": 9437184,
       "all": null,
@@ -57,9 +57,9 @@
     ],
     "measured": {
       "margin": 1.25,
-      "runs": 13,
+      "runs": 16,
       "resident_bytes": 7287552,
-      "basis": "Each constant is 1.25 x the largest value measured over every overlapped generated-schedule run of the three CosyVoice3 stages on the validated_for hosts (13 run reports: 7 on M2, 6 on the CI runner’s M4 Max), rounded up to 1 MiB, so the envelope's own margin is 1.0: the prepare charge (generation_peak_bytes + 8 MiB + compile_peak_bytes) covers this stage's prepare, from the start of its generation to the end of its compile (7.8 MiB); load_peak_bytes.cpu_and_ane its load and warm-up (6.8 MiB); ane_compile_reserve_bytes ANECompilerService's largest absolute size while it loads (546.5 MiB, M4 Max). The three stages' resident parts (runtime_weight_bytes + 2 x I/O + workspace_bytes, the workspace held by the HiFT stage) cover the steady state with every stage ready over the warm ggml baseline (203.8 MiB), which includes what Core ML keeps after the first generation in a process"
+      "basis": "Each constant is 1.25 x the largest value measured over every overlapped generated-schedule run of the three CosyVoice3 stages on the validated_for hosts (16 run reports: 7 on M2, 9 on the CI runner’s M4 Max), rounded up to 1 MiB, so the envelope's own margin is 1.0: the prepare charge (generation_peak_bytes + 8 MiB + compile_peak_bytes) covers this stage's prepare, from the start of its generation to the end of its compile (7.8 MiB); load_peak_bytes.cpu_and_ane its load and warm-up (6.8 MiB); ane_compile_reserve_bytes covers ANECompilerService's largest absolute size during the load of any of the three stages (773.6 MiB, M4 Max). The stages share the compiler service, including memory retained between stage loads. The three stages' resident parts (runtime_weight_bytes + 2 x I/O + workspace_bytes, the workspace held by the HiFT stage) cover the steady state with every stage ready over the warm ggml baseline (203.8 MiB), which includes what Core ML keeps after the first generation in a process"
     }
   },
   "patches": [
