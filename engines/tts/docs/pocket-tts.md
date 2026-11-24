@@ -567,18 +567,18 @@ sampled a phase fails. Each constant is 1.25 times the largest value over
 every run on every validated host (`template.json` `memory`), rounded up to
 1 MiB, so a run that sets a new maximum fails until the constants are
 recomputed. Validated on an Apple M2 (macOS 27.2.1, 27 runs) and the CI
-runners' Apple M4 Max (macOS 26.7.2, 30 runs),
+runners' Apple M4 Max (macOS 26.7.2, 36 runs),
 MiB:
 
 | Phase | M2 | M4 Max | Charged |
 |---|---|---|---|
-| step prepare (generate + compile) | 57.8–80.5 | 57.3–82.5 | 104 |
-| step load + warm-up (`cpu_and_gpu`) | 30.3–95.7 | 207.0–448.5 | 561 |
-| Mimi prepare | 21.1–62.5 | 7.1–60.2 | 79 |
+| step prepare (generate + compile) | 57.8–80.5 | 55.9–82.5 | 104 |
+| step load + warm-up (`cpu_and_gpu`) | 30.3–95.7 | 204.2–448.5 | 561 |
+| Mimi prepare | 21.1–62.5 | 0.1–60.2 | 79 |
 | Mimi load + warm-up (`cpu_and_ane`) | 0.8–49.9 | 1.2–50.4 | 64 |
-| steady, both running | 48.0–103.3 | 250.5–458.5 | 574 (both resident parts, with the step's `workspace_bytes` 361.1) |
+| steady, both running | 48.0–103.3 | 213.9–458.5 | 574 (both resident parts, with the step's `workspace_bytes` 361.1) |
 | whole run | 139.8–152.2 | 308.1–341.0 | envelope 1135.0 |
-| ANECompilerService while Mimi loads (absolute) | 83.3–400.2 | 312.0–704.4 | reserve 881 |
+| ANECompilerService while Mimi loads (absolute) | 83.3–400.2 | 312.0–930.4 | reserve 1164 |
 
 On the M4 Max the step on `cpu_and_gpu` holds GPU working memory the M2 does
 not, so every device is charged that larger footprint (the envelope is the
@@ -590,7 +590,7 @@ modes in the same jobs), so the constants cover the larger. The compiler's
 absolute size includes whatever else compiled for the Neural Engine on the
 same Mac (no run found the service clean; on the CI runners the size before
 Mimi's load ranged from 309.6 to 637.0 MiB depending on the jobs before it,
-and its growth while Mimi loaded was 0.4–232.1 on the M4 Max and 19.8–41.6 on
+and its growth while Mimi loaded was 0.3–323.6 on the M4 Max and 19.8–41.6 on
 the M2), so the reserve is conservative; it only gates when a cold Neural
 Engine load may start, and is not part of fit. The CI macOS runner runs the
 schedule three times on every pull request (`tts-ci.yml`).
