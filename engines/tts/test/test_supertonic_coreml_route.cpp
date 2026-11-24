@@ -155,7 +155,7 @@ constexpr uint64_t VOCODER_RESIDENT = 63 * MIB;  // 1.25 x 49.8 MiB of steady st
 constexpr uint64_t VOCODER_ANE_RESERVE = 824 * MIB;
 const std::map<std::string, uint64_t> TEMPLATE_PREPARE = {
     {SUPERTONIC_VOCODER_TEMPLATE_W64, 34 * MIB},       // 1.25 x 27.0 MiB (an M4 Max run)
-    {SUPERTONIC_VOCODER_TEMPLATE_PW2D_W64, 52 * MIB},  // 1.25 x 41.5 MiB (dequantising the pointwise weights)
+    {SUPERTONIC_VOCODER_TEMPLATE_PW2D_W64, 53 * MIB},  // 1.25 x 42.2 MiB (dequantising the pointwise weights)
 };
 
 void template_charges(const supertonic_vocoder_route & r) {

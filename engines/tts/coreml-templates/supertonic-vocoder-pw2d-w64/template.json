@@ -109,7 +109,7 @@
   "memory": {
     "runtime_weight_bytes": 50670336,
     "workspace_bytes": 14566656,
-    "compile_peak_bytes": 27262976,
+    "compile_peak_bytes": 28311552,
     "ane_compile_reserve_bytes": 864026624,
     "load_peak_bytes": {
       "cpu_and_ane": null,
@@ -133,9 +133,9 @@
     ],
     "measured": {
       "margin": 1.25,
-      "runs": 22,
+      "runs": 25,
       "resident_bytes": 66060288,
-      "basis": "Each constant is 1.25 x the largest value measured over every overlapped generated-schedule run on the validated_for hosts (7 per template on the M2, 15 per template on the M4 Max CI runner), rounded up to 1 MiB, so the envelope's own margin is 1.0. The prepare charge (generation_peak_bytes + 8 MiB + compile_peak_bytes) covers this template's prepare, from the start of generation to the end of the compile (largest 41.5 MiB, an M4 Max run; the M2's largest is 37.7 MiB). The two Supertonic vocoder templates compile the same program with the same weights, so load_peak_bytes.all, the resident part and the compiler reserve are taken over both templates' runs: load_peak_bytes.all covers the load and warm-up increment (largest 49.4 MiB, an M4 Max run; 9 of the 30 M4 Max runs held a weight-sized copy in the process, 32-49 MiB, while the M2 runs stay under 10 MiB); the resident part (weight.bin's size, twice the I/O and workspace_bytes) covers the steady state from the load start (largest 49.8 MiB, the same run); and ane_compile_reserve_bytes is 1.25 x ANECompilerService's largest absolute size while loading on any validated host (659.1 MiB, on the M4 Max; the M2's largest is 297.9 MiB). No run found the service clean (it held 74-244 MiB before every M2 load and 168-622 MiB before every M4 Max load, depending on the compiles of other jobs on that Mac), so its growth (at most 53.0 MiB) would understate a cold compile on a clean host, and its absolute size is the conservative basis."
+      "basis": "Each constant is 1.25 x the largest value measured over every overlapped generated-schedule run on the validated_for hosts (7 per template on the M2, 18 per template on the M4 Max CI runner), rounded up to 1 MiB, so the envelope's own margin is 1.0. The prepare charge (generation_peak_bytes + 8 MiB + compile_peak_bytes) covers this template's prepare, from the start of generation to the end of the compile (largest 42.2 MiB, an M4 Max run; the M2's largest is 37.7 MiB). The two Supertonic vocoder templates compile the same program with the same weights, so load_peak_bytes.all, the resident part and the compiler reserve are taken over both templates' runs: load_peak_bytes.all covers the load and warm-up increment (largest 49.4 MiB, an M4 Max run; 9 of the 30 M4 Max runs held a weight-sized copy in the process, 32-49 MiB, while the M2 runs stay under 10 MiB); the resident part (weight.bin's size, twice the I/O and workspace_bytes) covers the steady state from the load start (largest 49.8 MiB, the same run); and ane_compile_reserve_bytes is 1.25 x ANECompilerService's largest absolute size while loading on any validated host (659.1 MiB, on the M4 Max; the M2's largest is 297.9 MiB). No run found the service clean (it held 74-244 MiB before every M2 load and 168-622 MiB before every M4 Max load, depending on the compiles of other jobs on that Mac), so its growth (at most 53.0 MiB) would understate a cold compile on a clean host, and its absolute size is the conservative basis."
     }
   },
   "generation_peak_bytes": 18874368

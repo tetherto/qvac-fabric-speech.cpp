@@ -387,14 +387,14 @@ load 0.9-1.0 s, warm-up 5 ms).
 the sidecar is generated, compiled, loaded and warmed in the background) on
 every validated host, rounded up to 1 MiB, with no further envelope margin.
 Hosts: an M2 (macOS 27.2.1, 14 runs) and the M4 Max CI runner (macOS 26.7.2,
-30 runs). Both templates compile the same program with the same weights, so
+36 runs). Both templates compile the same program with the same weights, so
 the load, resident and compiler-reserve charges are taken over both
 templates' runs; the prepare is each template's own.
 
 | Largest measured (MiB) | M2 | M4 Max | charged |
 |---|---:|---:|---:|
 | prepare, `supertonic-vocoder-w64` | 23.3 | 27.0 | 34 |
-| prepare, `supertonic-vocoder-pw2d-w64` | 37.7 | 41.5 | 52 |
+| prepare, `supertonic-vocoder-pw2d-w64` | 37.7 | 42.2 | 53 |
 | load and warm-up | 6.1 | 49.4 | 62 |
 | steady state from the load start | 6.5 | 49.8 | 63 (resident) |
 | `ANECompilerService` while loading (absolute) | 297.9 | 659.1 | 824 (reserve) |
