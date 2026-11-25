@@ -335,6 +335,9 @@ v2.1, every capacity up to the full AOSC step slab of a default stream, 409
 frames, since the slab grows with the speaker cache and FIFO, together with
 any adjacent prebuilt bundles on the way); see
 [docs/backends.md](docs/backends.md#generated-diarizers).
+The generated Sortformer v2.1 capacity's measured envelope is 259 MiB: 137 MiB
+resident plus a 122 MiB preparation allowance. Its stage constants retain the
+25% measurement margin, including the latest M4 Max CI runs.
 
 ## Backend selection
 

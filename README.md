@@ -166,6 +166,9 @@ the `parakeet` CLI (which defaults to
 `~/Library/Application Support/qvac-speech/coreml`). See
 [Generated sidecars](engines/parakeet/README.md#generated-sidecars) for the
 setup, options and memory.
+The generated Sortformer v2.1 capacity is charged at 259 MiB after calibration
+against the latest overlapped Core ML preparation measurements, retaining the
+required 25% safety margin.
 
 TranscribePsy conversion uses 60-second windows with 25% overlap for full EU
 and records its Apache-2.0 provenance. For EU-sub Core ML deployment, the
