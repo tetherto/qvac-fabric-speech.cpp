@@ -1,4 +1,5 @@
 #pragma once
+#include "tts-cpp/coreml_options.h"
 #include "tts-cpp/export.h"
 #include <cstdint>
 #include <functional>
@@ -14,6 +15,7 @@ struct SoundEffectOptions {
     bool use_gpu = false;
     std::string backends_dir;
     std::string backend;
+    CoremlOptions coreml;
 };
 
 struct SoundEffectRequest {
@@ -52,6 +54,7 @@ public:
     const char * backend_name() const noexcept;
     bool dit_on_coreml() const noexcept;
     bool vae_on_coreml() const noexcept;
+    std::string vae_coreml_status_json() const;
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

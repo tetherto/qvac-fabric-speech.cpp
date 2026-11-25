@@ -1,0 +1,498 @@
+mlrecipe 1
+template moss-speech-tokenizer-30s
+spec_sha256 f878ec5c7d36d767732c9a38229bbab397dec767d4918b8dfa222654d53937ce
+weight_bin_size 648814144
+blobs 247
+source "whispervq.conv1.bias" f32,f16,bf16 [1280,1]
+source "whispervq.conv1.weight" f32,f16,bf16 [1280,128,3]
+source "whispervq.conv2.bias" f32,f16,bf16 [1280,1]
+source "whispervq.conv2.weight" f32,f16,bf16 [1280,1280,3]
+source "whispervq.pos_embd" f32,f16,bf16,q8_0,q4_0 [1500,1280]
+source "whispervq.blk.0.ffn_up.bias" f32,f16,bf16,q8_0,q4_0 [5120]
+source "whispervq.blk.0.ffn_up.weight" f32,f16,bf16,q8_0,q4_0 [5120,1280]
+source "whispervq.blk.0.ffn_down.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.0.ffn_down.weight" f32,f16,bf16,q8_0,q4_0 [1280,5120]
+source "whispervq.blk.0.ffn_norm.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.0.ffn_norm.weight" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.0.attn_k.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.0.attn_output.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.0.attn_output.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.0.attn_q.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.0.attn_q.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.0.attn_v.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.0.attn_v.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.0.attn_norm.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.0.attn_norm.weight" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.1.ffn_up.bias" f32,f16,bf16,q8_0,q4_0 [5120]
+source "whispervq.blk.1.ffn_up.weight" f32,f16,bf16,q8_0,q4_0 [5120,1280]
+source "whispervq.blk.1.ffn_down.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.1.ffn_down.weight" f32,f16,bf16,q8_0,q4_0 [1280,5120]
+source "whispervq.blk.1.ffn_norm.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.1.ffn_norm.weight" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.1.attn_k.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.1.attn_output.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.1.attn_output.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.1.attn_q.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.1.attn_q.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.1.attn_v.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.1.attn_v.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.1.attn_norm.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.1.attn_norm.weight" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.10.ffn_up.bias" f32,f16,bf16,q8_0,q4_0 [5120]
+source "whispervq.blk.10.ffn_up.weight" f32,f16,bf16,q8_0,q4_0 [5120,1280]
+source "whispervq.blk.10.ffn_down.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.10.ffn_down.weight" f32,f16,bf16,q8_0,q4_0 [1280,5120]
+source "whispervq.blk.10.ffn_norm.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.10.ffn_norm.weight" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.10.attn_k.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.10.attn_output.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.10.attn_output.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.10.attn_q.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.10.attn_q.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.10.attn_v.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.10.attn_v.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.10.attn_norm.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.10.attn_norm.weight" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.11.ffn_up.bias" f32,f16,bf16,q8_0,q4_0 [5120]
+source "whispervq.blk.11.ffn_up.weight" f32,f16,bf16,q8_0,q4_0 [5120,1280]
+source "whispervq.blk.11.ffn_down.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.11.ffn_down.weight" f32,f16,bf16,q8_0,q4_0 [1280,5120]
+source "whispervq.blk.11.ffn_norm.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.11.ffn_norm.weight" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.11.attn_k.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.11.attn_output.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.11.attn_output.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.11.attn_q.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.11.attn_q.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.11.attn_v.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.11.attn_v.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.11.attn_norm.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.11.attn_norm.weight" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.12.ffn_up.bias" f32,f16,bf16,q8_0,q4_0 [5120]
+source "whispervq.blk.12.ffn_up.weight" f32,f16,bf16,q8_0,q4_0 [5120,1280]
+source "whispervq.blk.12.ffn_down.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.12.ffn_down.weight" f32,f16,bf16,q8_0,q4_0 [1280,5120]
+source "whispervq.blk.12.ffn_norm.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.12.ffn_norm.weight" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.12.attn_k.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.12.attn_output.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.12.attn_output.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.12.attn_q.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.12.attn_q.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.12.attn_v.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.12.attn_v.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.12.attn_norm.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.12.attn_norm.weight" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.13.ffn_up.bias" f32,f16,bf16,q8_0,q4_0 [5120]
+source "whispervq.blk.13.ffn_up.weight" f32,f16,bf16,q8_0,q4_0 [5120,1280]
+source "whispervq.blk.13.ffn_down.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.13.ffn_down.weight" f32,f16,bf16,q8_0,q4_0 [1280,5120]
+source "whispervq.blk.13.ffn_norm.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.13.ffn_norm.weight" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.13.attn_k.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.13.attn_output.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.13.attn_output.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.13.attn_q.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.13.attn_q.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.13.attn_v.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.13.attn_v.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.13.attn_norm.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.13.attn_norm.weight" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.14.ffn_up.bias" f32,f16,bf16,q8_0,q4_0 [5120]
+source "whispervq.blk.14.ffn_up.weight" f32,f16,bf16,q8_0,q4_0 [5120,1280]
+source "whispervq.blk.14.ffn_down.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.14.ffn_down.weight" f32,f16,bf16,q8_0,q4_0 [1280,5120]
+source "whispervq.blk.14.ffn_norm.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.14.ffn_norm.weight" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.14.attn_k.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.14.attn_output.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.14.attn_output.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.14.attn_q.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.14.attn_q.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.14.attn_v.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.14.attn_v.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.14.attn_norm.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.14.attn_norm.weight" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.15.ffn_up.bias" f32,f16,bf16,q8_0,q4_0 [5120]
+source "whispervq.blk.15.ffn_up.weight" f32,f16,bf16,q8_0,q4_0 [5120,1280]
+source "whispervq.blk.15.ffn_down.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.15.ffn_down.weight" f32,f16,bf16,q8_0,q4_0 [1280,5120]
+source "whispervq.blk.15.ffn_norm.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.15.ffn_norm.weight" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.15.attn_k.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.15.attn_output.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.15.attn_output.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.15.attn_q.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.15.attn_q.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.15.attn_v.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.15.attn_v.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.15.attn_norm.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.15.attn_norm.weight" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.2.ffn_up.bias" f32,f16,bf16,q8_0,q4_0 [5120]
+source "whispervq.blk.2.ffn_up.weight" f32,f16,bf16,q8_0,q4_0 [5120,1280]
+source "whispervq.blk.2.ffn_down.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.2.ffn_down.weight" f32,f16,bf16,q8_0,q4_0 [1280,5120]
+source "whispervq.blk.2.ffn_norm.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.2.ffn_norm.weight" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.2.attn_k.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.2.attn_output.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.2.attn_output.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.2.attn_q.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.2.attn_q.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.2.attn_v.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.2.attn_v.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.2.attn_norm.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.2.attn_norm.weight" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.3.ffn_up.bias" f32,f16,bf16,q8_0,q4_0 [5120]
+source "whispervq.blk.3.ffn_up.weight" f32,f16,bf16,q8_0,q4_0 [5120,1280]
+source "whispervq.blk.3.ffn_down.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.3.ffn_down.weight" f32,f16,bf16,q8_0,q4_0 [1280,5120]
+source "whispervq.blk.3.ffn_norm.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.3.ffn_norm.weight" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.3.attn_k.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.3.attn_output.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.3.attn_output.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.3.attn_q.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.3.attn_q.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.3.attn_v.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.3.attn_v.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.3.attn_norm.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.3.attn_norm.weight" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.4.ffn_up.bias" f32,f16,bf16,q8_0,q4_0 [5120]
+source "whispervq.blk.4.ffn_up.weight" f32,f16,bf16,q8_0,q4_0 [5120,1280]
+source "whispervq.blk.4.ffn_down.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.4.ffn_down.weight" f32,f16,bf16,q8_0,q4_0 [1280,5120]
+source "whispervq.blk.4.ffn_norm.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.4.ffn_norm.weight" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.4.attn_k.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.4.attn_output.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.4.attn_output.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.4.attn_q.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.4.attn_q.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.4.attn_v.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.4.attn_v.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.4.attn_norm.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.4.attn_norm.weight" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.5.ffn_up.bias" f32,f16,bf16,q8_0,q4_0 [5120]
+source "whispervq.blk.5.ffn_up.weight" f32,f16,bf16,q8_0,q4_0 [5120,1280]
+source "whispervq.blk.5.ffn_down.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.5.ffn_down.weight" f32,f16,bf16,q8_0,q4_0 [1280,5120]
+source "whispervq.blk.5.ffn_norm.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.5.ffn_norm.weight" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.5.attn_k.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.5.attn_output.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.5.attn_output.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.5.attn_q.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.5.attn_q.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.5.attn_v.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.5.attn_v.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.5.attn_norm.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.5.attn_norm.weight" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.6.ffn_up.bias" f32,f16,bf16,q8_0,q4_0 [5120]
+source "whispervq.blk.6.ffn_up.weight" f32,f16,bf16,q8_0,q4_0 [5120,1280]
+source "whispervq.blk.6.ffn_down.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.6.ffn_down.weight" f32,f16,bf16,q8_0,q4_0 [1280,5120]
+source "whispervq.blk.6.ffn_norm.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.6.ffn_norm.weight" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.6.attn_k.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.6.attn_output.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.6.attn_output.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.6.attn_q.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.6.attn_q.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.6.attn_v.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.6.attn_v.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.6.attn_norm.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.6.attn_norm.weight" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.7.ffn_up.bias" f32,f16,bf16,q8_0,q4_0 [5120]
+source "whispervq.blk.7.ffn_up.weight" f32,f16,bf16,q8_0,q4_0 [5120,1280]
+source "whispervq.blk.7.ffn_down.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.7.ffn_down.weight" f32,f16,bf16,q8_0,q4_0 [1280,5120]
+source "whispervq.blk.7.ffn_norm.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.7.ffn_norm.weight" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.7.attn_k.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.7.attn_output.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.7.attn_output.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.7.attn_q.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.7.attn_q.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.7.attn_v.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.7.attn_v.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.7.attn_norm.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.7.attn_norm.weight" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.8.ffn_up.bias" f32,f16,bf16,q8_0,q4_0 [5120]
+source "whispervq.blk.8.ffn_up.weight" f32,f16,bf16,q8_0,q4_0 [5120,1280]
+source "whispervq.blk.8.ffn_down.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.8.ffn_down.weight" f32,f16,bf16,q8_0,q4_0 [1280,5120]
+source "whispervq.blk.8.ffn_norm.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.8.ffn_norm.weight" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.8.attn_k.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.8.attn_output.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.8.attn_output.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.8.attn_q.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.8.attn_q.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.8.attn_v.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.8.attn_v.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.8.attn_norm.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.8.attn_norm.weight" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.9.ffn_up.bias" f32,f16,bf16,q8_0,q4_0 [5120]
+source "whispervq.blk.9.ffn_up.weight" f32,f16,bf16,q8_0,q4_0 [5120,1280]
+source "whispervq.blk.9.ffn_down.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.9.ffn_down.weight" f32,f16,bf16,q8_0,q4_0 [1280,5120]
+source "whispervq.blk.9.ffn_norm.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.9.ffn_norm.weight" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.9.attn_k.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.9.attn_output.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.9.attn_output.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.9.attn_q.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.9.attn_q.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.9.attn_v.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.9.attn_v.weight" f32,f16,bf16,q8_0,q4_0 [1280,1280]
+source "whispervq.blk.9.attn_norm.bias" f32,f16,bf16,q8_0,q4_0 [1280]
+source "whispervq.blk.9.attn_norm.weight" f32,f16,bf16,q8_0,q4_0 [1280]
+blob 64 fp16 491520 f16(t("whispervq.conv1.weight"))
+blob 983168 fp16 1280 f16(t("whispervq.conv1.bias"))
+blob 985792 fp16 4915200 f16(t("whispervq.conv2.weight"))
+blob 10816256 fp16 1280 f16(t("whispervq.conv2.bias"))
+blob 10818880 fp16 1920000 f16(slice(t("whispervq.pos_embd"), 0, 0, 1500))
+blob 14658944 fp16 1280 f16(t("whispervq.blk.0.attn_norm.weight"))
+blob 14661568 fp16 1280 f16(t("whispervq.blk.0.attn_norm.bias"))
+blob 14664192 fp16 1638400 f16(t("whispervq.blk.0.attn_q.weight"))
+blob 17941056 fp16 1280 f16(t("whispervq.blk.0.attn_q.bias"))
+blob 17943680 fp16 1638400 f16(t("whispervq.blk.0.attn_k.weight"))
+blob 21220544 fp16 1280 f16(zeros([1280]))
+blob 21223168 fp16 1638400 f16(t("whispervq.blk.0.attn_v.weight"))
+blob 24500032 fp16 1280 f16(t("whispervq.blk.0.attn_v.bias"))
+blob 24502656 fp16 2250000 f16(lit("causal-mask"))
+blob 29002752 fp16 1638400 f16(t("whispervq.blk.0.attn_output.weight"))
+blob 32279616 fp16 1280 f16(t("whispervq.blk.0.attn_output.bias"))
+blob 32282240 fp16 1280 f16(t("whispervq.blk.0.ffn_norm.weight"))
+blob 32284864 fp16 1280 f16(t("whispervq.blk.0.ffn_norm.bias"))
+blob 32287488 fp16 6553600 f16(t("whispervq.blk.0.ffn_up.weight"))
+blob 45394752 fp16 5120 f16(t("whispervq.blk.0.ffn_up.bias"))
+blob 45405056 fp16 6553600 f16(t("whispervq.blk.0.ffn_down.weight"))
+blob 58512320 fp16 1280 f16(t("whispervq.blk.0.ffn_down.bias"))
+blob 58514944 fp16 1280 f16(t("whispervq.blk.1.attn_norm.weight"))
+blob 58517568 fp16 1280 f16(t("whispervq.blk.1.attn_norm.bias"))
+blob 58520192 fp16 1638400 f16(t("whispervq.blk.1.attn_q.weight"))
+blob 61797056 fp16 1280 f16(t("whispervq.blk.1.attn_q.bias"))
+blob 61799680 fp16 1638400 f16(t("whispervq.blk.1.attn_k.weight"))
+blob 65076544 fp16 1638400 f16(t("whispervq.blk.1.attn_v.weight"))
+blob 68353408 fp16 1280 f16(t("whispervq.blk.1.attn_v.bias"))
+blob 68356032 fp16 1638400 f16(t("whispervq.blk.1.attn_output.weight"))
+blob 71632896 fp16 1280 f16(t("whispervq.blk.1.attn_output.bias"))
+blob 71635520 fp16 1280 f16(t("whispervq.blk.1.ffn_norm.weight"))
+blob 71638144 fp16 1280 f16(t("whispervq.blk.1.ffn_norm.bias"))
+blob 71640768 fp16 6553600 f16(t("whispervq.blk.1.ffn_up.weight"))
+blob 84748032 fp16 5120 f16(t("whispervq.blk.1.ffn_up.bias"))
+blob 84758336 fp16 6553600 f16(t("whispervq.blk.1.ffn_down.weight"))
+blob 97865600 fp16 1280 f16(t("whispervq.blk.1.ffn_down.bias"))
+blob 97868224 fp16 1280 f16(t("whispervq.blk.2.attn_norm.weight"))
+blob 97870848 fp16 1280 f16(t("whispervq.blk.2.attn_norm.bias"))
+blob 97873472 fp16 1638400 f16(t("whispervq.blk.2.attn_q.weight"))
+blob 101150336 fp16 1280 f16(t("whispervq.blk.2.attn_q.bias"))
+blob 101152960 fp16 1638400 f16(t("whispervq.blk.2.attn_k.weight"))
+blob 104429824 fp16 1638400 f16(t("whispervq.blk.2.attn_v.weight"))
+blob 107706688 fp16 1280 f16(t("whispervq.blk.2.attn_v.bias"))
+blob 107709312 fp16 1638400 f16(t("whispervq.blk.2.attn_output.weight"))
+blob 110986176 fp16 1280 f16(t("whispervq.blk.2.attn_output.bias"))
+blob 110988800 fp16 1280 f16(t("whispervq.blk.2.ffn_norm.weight"))
+blob 110991424 fp16 1280 f16(t("whispervq.blk.2.ffn_norm.bias"))
+blob 110994048 fp16 6553600 f16(t("whispervq.blk.2.ffn_up.weight"))
+blob 124101312 fp16 5120 f16(t("whispervq.blk.2.ffn_up.bias"))
+blob 124111616 fp16 6553600 f16(t("whispervq.blk.2.ffn_down.weight"))
+blob 137218880 fp16 1280 f16(t("whispervq.blk.2.ffn_down.bias"))
+blob 137221504 fp16 1280 f16(t("whispervq.blk.3.attn_norm.weight"))
+blob 137224128 fp16 1280 f16(t("whispervq.blk.3.attn_norm.bias"))
+blob 137226752 fp16 1638400 f16(t("whispervq.blk.3.attn_q.weight"))
+blob 140503616 fp16 1280 f16(t("whispervq.blk.3.attn_q.bias"))
+blob 140506240 fp16 1638400 f16(t("whispervq.blk.3.attn_k.weight"))
+blob 143783104 fp16 1638400 f16(t("whispervq.blk.3.attn_v.weight"))
+blob 147059968 fp16 1280 f16(t("whispervq.blk.3.attn_v.bias"))
+blob 147062592 fp16 1638400 f16(t("whispervq.blk.3.attn_output.weight"))
+blob 150339456 fp16 1280 f16(t("whispervq.blk.3.attn_output.bias"))
+blob 150342080 fp16 1280 f16(t("whispervq.blk.3.ffn_norm.weight"))
+blob 150344704 fp16 1280 f16(t("whispervq.blk.3.ffn_norm.bias"))
+blob 150347328 fp16 6553600 f16(t("whispervq.blk.3.ffn_up.weight"))
+blob 163454592 fp16 5120 f16(t("whispervq.blk.3.ffn_up.bias"))
+blob 163464896 fp16 6553600 f16(t("whispervq.blk.3.ffn_down.weight"))
+blob 176572160 fp16 1280 f16(t("whispervq.blk.3.ffn_down.bias"))
+blob 176574784 fp16 1280 f16(t("whispervq.blk.4.attn_norm.weight"))
+blob 176577408 fp16 1280 f16(t("whispervq.blk.4.attn_norm.bias"))
+blob 176580032 fp16 1638400 f16(t("whispervq.blk.4.attn_q.weight"))
+blob 179856896 fp16 1280 f16(t("whispervq.blk.4.attn_q.bias"))
+blob 179859520 fp16 1638400 f16(t("whispervq.blk.4.attn_k.weight"))
+blob 183136384 fp16 1638400 f16(t("whispervq.blk.4.attn_v.weight"))
+blob 186413248 fp16 1280 f16(t("whispervq.blk.4.attn_v.bias"))
+blob 186415872 fp16 1638400 f16(t("whispervq.blk.4.attn_output.weight"))
+blob 189692736 fp16 1280 f16(t("whispervq.blk.4.attn_output.bias"))
+blob 189695360 fp16 1280 f16(t("whispervq.blk.4.ffn_norm.weight"))
+blob 189697984 fp16 1280 f16(t("whispervq.blk.4.ffn_norm.bias"))
+blob 189700608 fp16 6553600 f16(t("whispervq.blk.4.ffn_up.weight"))
+blob 202807872 fp16 5120 f16(t("whispervq.blk.4.ffn_up.bias"))
+blob 202818176 fp16 6553600 f16(t("whispervq.blk.4.ffn_down.weight"))
+blob 215925440 fp16 1280 f16(t("whispervq.blk.4.ffn_down.bias"))
+blob 215928064 fp16 1280 f16(t("whispervq.blk.5.attn_norm.weight"))
+blob 215930688 fp16 1280 f16(t("whispervq.blk.5.attn_norm.bias"))
+blob 215933312 fp16 1638400 f16(t("whispervq.blk.5.attn_q.weight"))
+blob 219210176 fp16 1280 f16(t("whispervq.blk.5.attn_q.bias"))
+blob 219212800 fp16 1638400 f16(t("whispervq.blk.5.attn_k.weight"))
+blob 222489664 fp16 1638400 f16(t("whispervq.blk.5.attn_v.weight"))
+blob 225766528 fp16 1280 f16(t("whispervq.blk.5.attn_v.bias"))
+blob 225769152 fp16 1638400 f16(t("whispervq.blk.5.attn_output.weight"))
+blob 229046016 fp16 1280 f16(t("whispervq.blk.5.attn_output.bias"))
+blob 229048640 fp16 1280 f16(t("whispervq.blk.5.ffn_norm.weight"))
+blob 229051264 fp16 1280 f16(t("whispervq.blk.5.ffn_norm.bias"))
+blob 229053888 fp16 6553600 f16(t("whispervq.blk.5.ffn_up.weight"))
+blob 242161152 fp16 5120 f16(t("whispervq.blk.5.ffn_up.bias"))
+blob 242171456 fp16 6553600 f16(t("whispervq.blk.5.ffn_down.weight"))
+blob 255278720 fp16 1280 f16(t("whispervq.blk.5.ffn_down.bias"))
+blob 255281344 fp16 1280 f16(t("whispervq.blk.6.attn_norm.weight"))
+blob 255283968 fp16 1280 f16(t("whispervq.blk.6.attn_norm.bias"))
+blob 255286592 fp16 1638400 f16(t("whispervq.blk.6.attn_q.weight"))
+blob 258563456 fp16 1280 f16(t("whispervq.blk.6.attn_q.bias"))
+blob 258566080 fp16 1638400 f16(t("whispervq.blk.6.attn_k.weight"))
+blob 261842944 fp16 1638400 f16(t("whispervq.blk.6.attn_v.weight"))
+blob 265119808 fp16 1280 f16(t("whispervq.blk.6.attn_v.bias"))
+blob 265122432 fp16 1638400 f16(t("whispervq.blk.6.attn_output.weight"))
+blob 268399296 fp16 1280 f16(t("whispervq.blk.6.attn_output.bias"))
+blob 268401920 fp16 1280 f16(t("whispervq.blk.6.ffn_norm.weight"))
+blob 268404544 fp16 1280 f16(t("whispervq.blk.6.ffn_norm.bias"))
+blob 268407168 fp16 6553600 f16(t("whispervq.blk.6.ffn_up.weight"))
+blob 281514432 fp16 5120 f16(t("whispervq.blk.6.ffn_up.bias"))
+blob 281524736 fp16 6553600 f16(t("whispervq.blk.6.ffn_down.weight"))
+blob 294632000 fp16 1280 f16(t("whispervq.blk.6.ffn_down.bias"))
+blob 294634624 fp16 1280 f16(t("whispervq.blk.7.attn_norm.weight"))
+blob 294637248 fp16 1280 f16(t("whispervq.blk.7.attn_norm.bias"))
+blob 294639872 fp16 1638400 f16(t("whispervq.blk.7.attn_q.weight"))
+blob 297916736 fp16 1280 f16(t("whispervq.blk.7.attn_q.bias"))
+blob 297919360 fp16 1638400 f16(t("whispervq.blk.7.attn_k.weight"))
+blob 301196224 fp16 1638400 f16(t("whispervq.blk.7.attn_v.weight"))
+blob 304473088 fp16 1280 f16(t("whispervq.blk.7.attn_v.bias"))
+blob 304475712 fp16 1638400 f16(t("whispervq.blk.7.attn_output.weight"))
+blob 307752576 fp16 1280 f16(t("whispervq.blk.7.attn_output.bias"))
+blob 307755200 fp16 1280 f16(t("whispervq.blk.7.ffn_norm.weight"))
+blob 307757824 fp16 1280 f16(t("whispervq.blk.7.ffn_norm.bias"))
+blob 307760448 fp16 6553600 f16(t("whispervq.blk.7.ffn_up.weight"))
+blob 320867712 fp16 5120 f16(t("whispervq.blk.7.ffn_up.bias"))
+blob 320878016 fp16 6553600 f16(t("whispervq.blk.7.ffn_down.weight"))
+blob 333985280 fp16 1280 f16(t("whispervq.blk.7.ffn_down.bias"))
+blob 333987904 fp16 1280 f16(t("whispervq.blk.8.attn_norm.weight"))
+blob 333990528 fp16 1280 f16(t("whispervq.blk.8.attn_norm.bias"))
+blob 333993152 fp16 1638400 f16(t("whispervq.blk.8.attn_q.weight"))
+blob 337270016 fp16 1280 f16(t("whispervq.blk.8.attn_q.bias"))
+blob 337272640 fp16 1638400 f16(t("whispervq.blk.8.attn_k.weight"))
+blob 340549504 fp16 1638400 f16(t("whispervq.blk.8.attn_v.weight"))
+blob 343826368 fp16 1280 f16(t("whispervq.blk.8.attn_v.bias"))
+blob 343828992 fp16 1638400 f16(t("whispervq.blk.8.attn_output.weight"))
+blob 347105856 fp16 1280 f16(t("whispervq.blk.8.attn_output.bias"))
+blob 347108480 fp16 1280 f16(t("whispervq.blk.8.ffn_norm.weight"))
+blob 347111104 fp16 1280 f16(t("whispervq.blk.8.ffn_norm.bias"))
+blob 347113728 fp16 6553600 f16(t("whispervq.blk.8.ffn_up.weight"))
+blob 360220992 fp16 5120 f16(t("whispervq.blk.8.ffn_up.bias"))
+blob 360231296 fp16 6553600 f16(t("whispervq.blk.8.ffn_down.weight"))
+blob 373338560 fp16 1280 f16(t("whispervq.blk.8.ffn_down.bias"))
+blob 373341184 fp16 1280 f16(t("whispervq.blk.9.attn_norm.weight"))
+blob 373343808 fp16 1280 f16(t("whispervq.blk.9.attn_norm.bias"))
+blob 373346432 fp16 1638400 f16(t("whispervq.blk.9.attn_q.weight"))
+blob 376623296 fp16 1280 f16(t("whispervq.blk.9.attn_q.bias"))
+blob 376625920 fp16 1638400 f16(t("whispervq.blk.9.attn_k.weight"))
+blob 379902784 fp16 1638400 f16(t("whispervq.blk.9.attn_v.weight"))
+blob 383179648 fp16 1280 f16(t("whispervq.blk.9.attn_v.bias"))
+blob 383182272 fp16 1638400 f16(t("whispervq.blk.9.attn_output.weight"))
+blob 386459136 fp16 1280 f16(t("whispervq.blk.9.attn_output.bias"))
+blob 386461760 fp16 1280 f16(t("whispervq.blk.9.ffn_norm.weight"))
+blob 386464384 fp16 1280 f16(t("whispervq.blk.9.ffn_norm.bias"))
+blob 386467008 fp16 6553600 f16(t("whispervq.blk.9.ffn_up.weight"))
+blob 399574272 fp16 5120 f16(t("whispervq.blk.9.ffn_up.bias"))
+blob 399584576 fp16 6553600 f16(t("whispervq.blk.9.ffn_down.weight"))
+blob 412691840 fp16 1280 f16(t("whispervq.blk.9.ffn_down.bias"))
+blob 412694464 fp16 1280 f16(t("whispervq.blk.10.attn_norm.weight"))
+blob 412697088 fp16 1280 f16(t("whispervq.blk.10.attn_norm.bias"))
+blob 412699712 fp16 1638400 f16(t("whispervq.blk.10.attn_q.weight"))
+blob 415976576 fp16 1280 f16(t("whispervq.blk.10.attn_q.bias"))
+blob 415979200 fp16 1638400 f16(t("whispervq.blk.10.attn_k.weight"))
+blob 419256064 fp16 1638400 f16(t("whispervq.blk.10.attn_v.weight"))
+blob 422532928 fp16 1280 f16(t("whispervq.blk.10.attn_v.bias"))
+blob 422535552 fp16 1638400 f16(t("whispervq.blk.10.attn_output.weight"))
+blob 425812416 fp16 1280 f16(t("whispervq.blk.10.attn_output.bias"))
+blob 425815040 fp16 1280 f16(t("whispervq.blk.10.ffn_norm.weight"))
+blob 425817664 fp16 1280 f16(t("whispervq.blk.10.ffn_norm.bias"))
+blob 425820288 fp16 6553600 f16(t("whispervq.blk.10.ffn_up.weight"))
+blob 438927552 fp16 5120 f16(t("whispervq.blk.10.ffn_up.bias"))
+blob 438937856 fp16 6553600 f16(t("whispervq.blk.10.ffn_down.weight"))
+blob 452045120 fp16 1280 f16(t("whispervq.blk.10.ffn_down.bias"))
+blob 452047744 fp16 1280 f16(t("whispervq.blk.11.attn_norm.weight"))
+blob 452050368 fp16 1280 f16(t("whispervq.blk.11.attn_norm.bias"))
+blob 452052992 fp16 1638400 f16(t("whispervq.blk.11.attn_q.weight"))
+blob 455329856 fp16 1280 f16(t("whispervq.blk.11.attn_q.bias"))
+blob 455332480 fp16 1638400 f16(t("whispervq.blk.11.attn_k.weight"))
+blob 458609344 fp16 1638400 f16(t("whispervq.blk.11.attn_v.weight"))
+blob 461886208 fp16 1280 f16(t("whispervq.blk.11.attn_v.bias"))
+blob 461888832 fp16 1638400 f16(t("whispervq.blk.11.attn_output.weight"))
+blob 465165696 fp16 1280 f16(t("whispervq.blk.11.attn_output.bias"))
+blob 465168320 fp16 1280 f16(t("whispervq.blk.11.ffn_norm.weight"))
+blob 465170944 fp16 1280 f16(t("whispervq.blk.11.ffn_norm.bias"))
+blob 465173568 fp16 6553600 f16(t("whispervq.blk.11.ffn_up.weight"))
+blob 478280832 fp16 5120 f16(t("whispervq.blk.11.ffn_up.bias"))
+blob 478291136 fp16 6553600 f16(t("whispervq.blk.11.ffn_down.weight"))
+blob 491398400 fp16 1280 f16(t("whispervq.blk.11.ffn_down.bias"))
+blob 491401024 fp16 1280 f16(t("whispervq.blk.12.attn_norm.weight"))
+blob 491403648 fp16 1280 f16(t("whispervq.blk.12.attn_norm.bias"))
+blob 491406272 fp16 1638400 f16(t("whispervq.blk.12.attn_q.weight"))
+blob 494683136 fp16 1280 f16(t("whispervq.blk.12.attn_q.bias"))
+blob 494685760 fp16 1638400 f16(t("whispervq.blk.12.attn_k.weight"))
+blob 497962624 fp16 1638400 f16(t("whispervq.blk.12.attn_v.weight"))
+blob 501239488 fp16 1280 f16(t("whispervq.blk.12.attn_v.bias"))
+blob 501242112 fp16 1638400 f16(t("whispervq.blk.12.attn_output.weight"))
+blob 504518976 fp16 1280 f16(t("whispervq.blk.12.attn_output.bias"))
+blob 504521600 fp16 1280 f16(t("whispervq.blk.12.ffn_norm.weight"))
+blob 504524224 fp16 1280 f16(t("whispervq.blk.12.ffn_norm.bias"))
+blob 504526848 fp16 6553600 f16(t("whispervq.blk.12.ffn_up.weight"))
+blob 517634112 fp16 5120 f16(t("whispervq.blk.12.ffn_up.bias"))
+blob 517644416 fp16 6553600 f16(t("whispervq.blk.12.ffn_down.weight"))
+blob 530751680 fp16 1280 f16(t("whispervq.blk.12.ffn_down.bias"))
+blob 530754304 fp16 1280 f16(t("whispervq.blk.13.attn_norm.weight"))
+blob 530756928 fp16 1280 f16(t("whispervq.blk.13.attn_norm.bias"))
+blob 530759552 fp16 1638400 f16(t("whispervq.blk.13.attn_q.weight"))
+blob 534036416 fp16 1280 f16(t("whispervq.blk.13.attn_q.bias"))
+blob 534039040 fp16 1638400 f16(t("whispervq.blk.13.attn_k.weight"))
+blob 537315904 fp16 1638400 f16(t("whispervq.blk.13.attn_v.weight"))
+blob 540592768 fp16 1280 f16(t("whispervq.blk.13.attn_v.bias"))
+blob 540595392 fp16 1638400 f16(t("whispervq.blk.13.attn_output.weight"))
+blob 543872256 fp16 1280 f16(t("whispervq.blk.13.attn_output.bias"))
+blob 543874880 fp16 1280 f16(t("whispervq.blk.13.ffn_norm.weight"))
+blob 543877504 fp16 1280 f16(t("whispervq.blk.13.ffn_norm.bias"))
+blob 543880128 fp16 6553600 f16(t("whispervq.blk.13.ffn_up.weight"))
+blob 556987392 fp16 5120 f16(t("whispervq.blk.13.ffn_up.bias"))
+blob 556997696 fp16 6553600 f16(t("whispervq.blk.13.ffn_down.weight"))
+blob 570104960 fp16 1280 f16(t("whispervq.blk.13.ffn_down.bias"))
+blob 570107584 fp16 1280 f16(t("whispervq.blk.14.attn_norm.weight"))
+blob 570110208 fp16 1280 f16(t("whispervq.blk.14.attn_norm.bias"))
+blob 570112832 fp16 1638400 f16(t("whispervq.blk.14.attn_q.weight"))
+blob 573389696 fp16 1280 f16(t("whispervq.blk.14.attn_q.bias"))
+blob 573392320 fp16 1638400 f16(t("whispervq.blk.14.attn_k.weight"))
+blob 576669184 fp16 1638400 f16(t("whispervq.blk.14.attn_v.weight"))
+blob 579946048 fp16 1280 f16(t("whispervq.blk.14.attn_v.bias"))
+blob 579948672 fp16 1638400 f16(t("whispervq.blk.14.attn_output.weight"))
+blob 583225536 fp16 1280 f16(t("whispervq.blk.14.attn_output.bias"))
+blob 583228160 fp16 1280 f16(t("whispervq.blk.14.ffn_norm.weight"))
+blob 583230784 fp16 1280 f16(t("whispervq.blk.14.ffn_norm.bias"))
+blob 583233408 fp16 6553600 f16(t("whispervq.blk.14.ffn_up.weight"))
+blob 596340672 fp16 5120 f16(t("whispervq.blk.14.ffn_up.bias"))
+blob 596350976 fp16 6553600 f16(t("whispervq.blk.14.ffn_down.weight"))
+blob 609458240 fp16 1280 f16(t("whispervq.blk.14.ffn_down.bias"))
+blob 609460864 fp16 1280 f16(t("whispervq.blk.15.attn_norm.weight"))
+blob 609463488 fp16 1280 f16(t("whispervq.blk.15.attn_norm.bias"))
+blob 609466112 fp16 1638400 f16(t("whispervq.blk.15.attn_q.weight"))
+blob 612742976 fp16 1280 f16(t("whispervq.blk.15.attn_q.bias"))
+blob 612745600 fp16 1638400 f16(t("whispervq.blk.15.attn_k.weight"))
+blob 616022464 fp16 1638400 f16(t("whispervq.blk.15.attn_v.weight"))
+blob 619299328 fp16 1280 f16(t("whispervq.blk.15.attn_v.bias"))
+blob 619301952 fp16 1638400 f16(t("whispervq.blk.15.attn_output.weight"))
+blob 622578816 fp16 1280 f16(t("whispervq.blk.15.attn_output.bias"))
+blob 622581440 fp16 1280 f16(t("whispervq.blk.15.ffn_norm.weight"))
+blob 622584064 fp16 1280 f16(t("whispervq.blk.15.ffn_norm.bias"))
+blob 622586688 fp16 6553600 f16(t("whispervq.blk.15.ffn_up.weight"))
+blob 635693952 fp16 5120 f16(t("whispervq.blk.15.ffn_up.bias"))
+blob 635704256 fp16 6553600 f16(t("whispervq.blk.15.ffn_down.weight"))
+blob 648811520 fp16 1280 f16(t("whispervq.blk.15.ffn_down.bias"))
+end

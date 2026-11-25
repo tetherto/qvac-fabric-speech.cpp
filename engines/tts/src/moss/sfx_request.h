@@ -16,5 +16,7 @@ struct ResolvedRequest {
 
 ResolvedRequest resolve_sfx_request(const SfxConfig & config, const SoundEffectRequest & request);
 inline constexpr int SFX_DECODE_WINDOW_FRAMES = 256;
+inline constexpr int SFX_MAX_STEPS = 1000;
 
+uint64_t sfx_ggml_budget_baseline(const SoundEffectOptions & options);
 }

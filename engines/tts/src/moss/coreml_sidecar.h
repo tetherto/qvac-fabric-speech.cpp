@@ -20,6 +20,7 @@ constexpr const char * COREML_DEFAULT_UNITS = "cpu_and_gpu";
 struct CoremlPolicy {
     bool disabled = false;
     bool strict = false;
+    std::string units;
 };
 
 CoremlPolicy read_coreml_policy();
@@ -59,6 +60,7 @@ public:
     std::vector<int64_t> dims(const std::string & name) const;
     bool stateful() const;
     bool reset_state();
+    bool warm();
     bool predict(const std::vector<CoremlTensor> & inputs, const std::vector<const float *> & input_data,
                  const std::vector<CoremlTensor> & outputs, const std::vector<float *> & output_data);
     const char * label() const;

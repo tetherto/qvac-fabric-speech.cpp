@@ -1,0 +1,122 @@
+{
+  "family": "moss",
+  "stage": "sfx-vae",
+  "export_kind": "moss-sfx-vae-fp16",
+  "exporter": {
+    "path": "engines/tts/scripts/export-moss-sfx-coreml.py",
+    "sha256": "22558583a9e6b2f48fe0a120f42480f0f953db1d8c73371d4303b34f4f266612",
+    "args": [
+      "--gguf",
+      "{gguf}",
+      "--out",
+      "{out}/model.mlpackage",
+      "--stage",
+      "vae",
+      "--window",
+      "320"
+    ]
+  },
+  "twin_quant_types": "q8_0,q4_0",
+  "min_os": {
+    "macos": "15.0"
+  },
+  "multifunction_ane": false,
+  "default_compute_units": "cpu_and_gpu",
+  "shareable": true,
+  "pad_safe": false,
+  "state_bytes": 0,
+  "memory": {
+    "runtime_weight_bytes": 151002880,
+    "workspace_bytes": 1217396736,
+    "compile_peak_bytes": 265289728,
+    "ane_compile_reserve_bytes": null,
+    "load_peak_bytes": {
+      "cpu_and_ane": null,
+      "all": null,
+      "cpu_and_gpu": 1321205760,
+      "cpu_only": null
+    },
+    "margin": 1.0,
+    "coreml_bound": "measured",
+    "validated_for": [
+      {
+        "units": "cpu_and_gpu",
+        "os": "27.2.1",
+        "chip": "M2"
+      },
+      {
+        "units": "cpu_and_gpu",
+        "os": "26.7.2",
+        "chip": "M4 Max"
+      }
+    ],
+    "measured": {
+      "margin": 1.25,
+      "runs": 24,
+      "basis": "Each charge covers 1.25 x the largest observed phase, rounded up to 1 MiB, with no additional envelope margin. The source measurements are twelve Apple M2 runs on macOS 27.2.1 and twelve Apple M4 Max CI runs on macOS 26.7.2, all in cpu_and_gpu. Largest increments: prepare 413.0 MiB, load and warm-up 1007.7 MiB, steady state over the footprint before load 1044.5 MiB, and whole run over the warm ggml baseline 1235.3 MiB. Resident charge counts the fp16 weights, twice the function I/O, and measured workspace. The GPU route needs no compiler reserve. CI rechecks these charges with the synchronized sampler."
+    }
+  },
+  "prefer_ggml_on": [],
+  "match": {
+    "architecture": "moss-sfx",
+    "metadata": {
+      "moss-sfx.vae.latent_dim": 128,
+      "moss-sfx.vae.decoder_dim": 2048,
+      "moss-sfx.vae.decoder_rates": [
+        8,
+        5,
+        4,
+        3,
+        2
+      ],
+      "moss-sfx.vae.sample_rate": 48000,
+      "moss-sfx.max_seconds": 30.0
+    }
+  },
+  "literals": [],
+  "provided": [],
+  "schema": 1,
+  "id": "moss-sfx-vae-w320",
+  "toolchain": {
+    "coremltools": "9.0",
+    "torch": "2.7.0",
+    "numpy": "1.26.4"
+  },
+  "functions": [
+    {
+      "name": "main",
+      "inputs": [
+        {
+          "name": "latents",
+          "dtype": "fp16",
+          "shape": [
+            1,
+            128,
+            320
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "pcm",
+          "dtype": "fp16",
+          "shape": [
+            1,
+            1,
+            307200
+          ]
+        }
+      ]
+    }
+  ],
+  "stateful": false,
+  "weight_bin_size": 151002880,
+  "patches": [
+    {
+      "spec_offset": 198317,
+      "len": 2,
+      "sentinel_hex": "c7d1"
+    }
+  ],
+  "generation_peak_bytes": 268435456
+}

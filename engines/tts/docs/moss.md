@@ -978,6 +978,9 @@ makes a missing or failed sidecar an error instead of a fallback, and
 Supertonic sidecars, whose default is `all`: none of these stages ran faster
 on the Neural Engine, and the reasons are below for each stage.
 
+Without a bundle next to the GGUF, the library can also generate this VAE
+from the GGUF on the device; see [MOSS on-device generation](#moss-on-device-generation).
+
 `bench-moss-coreml` against ggml on Metal (f16 GGUF, median of five after a
 warm-up, measured 2026-10-08):
 
@@ -1337,6 +1340,112 @@ whatever the audio covers, while ggml's cost follows the audio: a 5 s segment
 takes 63 ms on ggml and took 390 ms padded on the M4 sidecar, and the two
 break even only past roughly 80-90 % of a segment on both machines. That is why only full
 segments use the sidecar; typical short questions never reach it.
+
+### MOSS on-device generation
+
+With `TTS_CPP_COREML=ON` and `TTS_CPP_COREML_GENERATE=ON` (the macOS
+default), on macOS 15 or later, the library embeds weight-free templates for
+the 30 s speech tokenizer (`moss-speech-tokenizer-30s`) and the 320-frame
+SoundEffect VAE (`moss-sfx-vae-w320`). When no compiled bundle sits next to
+the GGUF and a cache directory is set, the engine builds the stage's sidecar
+from the GGUF it loaded, compiles it on the device, keeps it in the cache and
+loads it in the background; the stage runs on ggml until it is ready, and
+later runs and engines on the same cache load the cached artifact.
+
+- **Tokenizer.** The recipe dequantizes the encoder, keeps the position rows
+  of one segment and writes fp16. The generated model takes exactly one full
+  segment, as the prebuilt sidecar does (see above), and the codebook search
+  stays on ggml. A shorter segment never waits for it or starts it.
+- **VAE.** The recipe reorders the GGUF's GEMM columns into the stride-phase
+  kernels of the exporter's graph and clamps the Snake inverse at 60000
+  before the fp16 conversion. One request holds one model for its entire
+  decode; a failed prediction retires it and the whole decode runs on ggml.
+
+Both run under `cpu_and_gpu`, the MOSS default, and the loader makes one
+zero-input warm-up prediction before the stage reports ready, so the first
+real call does not pay the GPU's pipeline setup. The Neural Engine units are
+not validated (the tokenizer's codes drift on it, see above), so a request
+for `all`, `cpu_and_ane` or `cpu_only` reports `unsupported(unvalidated_units)`
+and stays on ggml unless a prebuilt bundle is present.
+
+Options (`SpeechOptions::coreml` for the tokenizer,
+`SoundEffectOptions::coreml` for the VAE, `tts-cpp/coreml_options.h`):
+
+| Field | Effect |
+|---|---|
+| `cache_dir` | Where generated sidecars are kept. Unset: `QVAC_COREML_CACHE_DIR`; neither: no generation. |
+| `use` | `off` keeps the stage on ggml; `require` makes a full segment or a VAE request that cannot run on Core ML an error (strict). |
+| `generate` | `never` uses only a prebuilt bundle. |
+| `prewarm`, `wait` | `prewarm = none` defers the build to the first request; `wait = construct` blocks construction until the stage is ready, `wait = call` blocks the first eligible call. |
+| `compute_units` | `cpu_and_gpu` (default) is the only validated policy for generation. |
+| `memory_budget_bytes` | The budget fit assessed; see below. |
+
+`MOSS_COREML_DISABLE`, `MOSS_COREML_STRICT` and `MOSS_COREML_COMPUTE_UNITS`
+apply as before; the explicit fields take precedence. The other MOSS stages
+keep using only the environment variables. `SpeechEngine::tokenizer_coreml_status_json()`
+and `SoundEffectEngine::vae_coreml_status_json()` report each stage's state,
+route (`prebuilt`, `generated`, `cached` or `none`), units, label and timings;
+`tokenizer_on_coreml()` and `vae_on_coreml()` turn true once the generated
+model is ready, and the result backend labels say where each request ran.
+
+**Fit.** SoundEffect `fit_params` decides the VAE's route the same way before
+and after a generation (it never reads the cache) and, for a generated VAE,
+adds the template's Core ML envelope to the ggml estimate, which keeps the
+ggml VAE weights charged. With `coreml.memory_budget_bytes` set, a budget that
+the ggml estimate fits but the Core ML-inclusive one does not reports
+`coreml.disabled_reason = "memory"` and keeps the ggml verdict; the engine
+then resolves `use = off` for the VAE (strict included), checking the
+envelope against the ggml estimate of the longest request the model accepts.
+A prebuilt VAE bundle keeps today's fit. SpeechEngine has no fit estimate, so
+a memory budget keeps its tokenizer on ggml.
+
+**Memory envelope.** Each charge covers 1.25 times the largest observed
+phase of the overlapped schedule, rounded up to 1 MiB. The schedule runs
+ggml calls while the sidecar is generated, compiled, loaded and warmed
+in the background. The envelope adds the resident charge to the larger
+of the prepare and load charges, with no additional margin.
+
+| Template | Prepare | Load and warm-up | Resident | Envelope |
+|---|---:|---:|---:|---:|
+| `moss-speech-tokenizer-30s` | 117 MiB (93.3) | 965 MiB (771.6) | 953 MiB (762.4) | 1,918 MiB |
+| `moss-sfx-vae-w320` | 517 MiB (413.0) | 1,260 MiB (1007.7) | 1,306 MiB (1044.5) | 2,566 MiB |
+
+Parentheses show the largest measurement in MiB across twelve Apple M2 runs
+(macOS 27.2.1) and Apple M4 Max CI runs (macOS 26.7.2) in `cpu_and_gpu`.
+The M4 Max results include twelve runs for each template.
+The largest whole-run increases above the warm ggml footprint were 861 MiB
+for the tokenizer and 1,235 MiB for the VAE. Both resident charges include
+fp16 weights, twice the function I/O, and workspace to cover the observed
+steady state. Neither GPU route needs a compiler reserve. CI rechecks the
+phases and envelope with three fresh runs per stage on the M4 Max.
+
+**Tests.** `test-moss-coreml-generated --tokenizer GGUF --vae GGUF
+--cache-dir DIR --require-coreml` generates both stages into an empty cache
+and checks them against ggml on the same weights (tokenizer codes on one full
+segment agree at 95 % or more, the VAE waveform at cosine 0.999 or more),
+plus the routes, status, strict mode, the cached second slot, fit and
+memory-degrade; `--memory-schedule DIR` runs the memory schedule instead.
+`test-moss-fit-stable` checks that the routes and the VAE fit are the same
+with an empty cache, a populated one and stale or fresh warm hints; ctest
+runs it on twins of the templates' reference manifests. The real-weights
+inputs are stage-only GGUFs written by the converters:
+
+```sh
+python scripts/convert-moss-speech-codec-to-gguf.py MOSS-Speech-Codec \
+    --tokenizer-only --outfile moss-speech-tokenizer-f16.gguf
+python scripts/convert-moss-sfx-to-gguf.py MOSS-SoundEffect-v2.0 \
+    --vae-only --outfile moss-sfx-vae-f16.gguf
+```
+
+The SoundEffect directory needs `model_index.json`, the text encoder,
+transformer, scheduler and VAE configs and `vae/`; the codec directory needs
+`config.json`, `preprocessor_config.json` and `model.safetensors`. The
+exporters convert without loading the model in coremltools
+(`skip_model_load`), so the template gates do not wait for a Neural Engine
+compile, and the tokenizer and VAE traces skip `torch.jit.trace`'s re-run
+check. To run the model-free tokenizer and SoundEffect exporter tests with
+the pinned requirements instead of skipping, configure the test build with
+`-DTTS_CPP_MOSS_EXPORTER_PYTHON=/path/to/venv/bin/python` (CI does).
 
 ### Hexagon NPU speech-to-speech
 

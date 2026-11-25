@@ -116,7 +116,9 @@ std::unique_ptr<CoremlModel> CoremlModel::open(const std::string & path, const C
     if (policy.disabled || !std::filesystem::is_directory(path)) {
         return nullptr;
     }
-    moss_coreml_model * model = moss_coreml_load(path.c_str(), requested_coreml_units().c_str());
+    const std::string units =
+        policy.units.empty() ? requested_coreml_units() : policy.units;
+    moss_coreml_model * model = moss_coreml_load(path.c_str(), units.c_str());
     return model != nullptr ? std::unique_ptr<CoremlModel>(new CoremlModel(model)) : nullptr;
 }
 
@@ -141,6 +143,8 @@ bool CoremlModel::stateful() const {
 bool CoremlModel::reset_state() {
     return moss_coreml_reset_state(model_) == 0;
 }
+
+bool CoremlModel::warm() { return moss_coreml_warm(model_) == 0; }
 
 bool CoremlModel::predict(const std::vector<CoremlTensor> & inputs, const std::vector<const float *> & input_data,
                           const std::vector<CoremlTensor> & outputs, const std::vector<float *> & output_data) {
@@ -175,6 +179,8 @@ bool CoremlModel::stateful() const {
 bool CoremlModel::reset_state() {
     return false;
 }
+
+bool CoremlModel::warm() { return false; }
 
 bool CoremlModel::predict(const std::vector<CoremlTensor> &, const std::vector<const float *> &,
                           const std::vector<CoremlTensor> &, const std::vector<float *> &) {

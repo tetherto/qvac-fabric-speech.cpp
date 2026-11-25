@@ -73,6 +73,26 @@ private:
     int window_;
 };
 
+class GeneratedSfxVae final : public SfxVaeSidecar {
+  public:
+    explicit GeneratedSfxVae(std::unique_ptr<GeneratedModel> model)
+        : model_(std::move(model)) {}
+
+    int window() const override { return GENERATED_VAE_WINDOW; }
+    const char * label() const override { return model_->label(); }
+
+    bool decode(const std::vector<float> & latents,
+                std::vector<float> & pcm) override {
+        if (model_->predict(latents, pcm))
+            return true;
+        model_->retire();
+        return false;
+    }
+
+  private:
+    std::unique_ptr<GeneratedModel> model_;
+};
+
 std::vector<CoremlTensor> dit_inputs(const SfxConfig & config) {
     return {{"latents", {SINGLE_BATCH, config.dit.in_channels, config.latent_frames()}},
             {"timestep", {SINGLE_BATCH, config.dit.freq_dim}},
@@ -132,6 +152,14 @@ std::unique_ptr<SfxVaeSidecar> open_sfx_vae_sidecar(const std::string & model_pa
         return nullptr;
     }
     return std::make_unique<CoremlSfxVae>(std::move(model), std::move(input), std::move(output), window);
+}
+
+std::unique_ptr<SfxVaeSidecar>
+acquire_sfx_vae_sidecar(MossCoremlGeneration & generation,
+                        const std::atomic<bool> * cancel) {
+    auto model = generation.acquire(cancel);
+    return model ? std::make_unique<GeneratedSfxVae>(std::move(model))
+                 : nullptr;
 }
 
 SfxDitRunner::SfxDitRunner(SfxModel & model, int frames, std::unique_ptr<SfxDitSidecar> & sidecar, bool strict,

@@ -1,0 +1,122 @@
+{
+  "family": "moss",
+  "stage": "speech-tokenizer",
+  "export_kind": "moss-speech-tokenizer-fp16",
+  "exporter": {
+    "path": "engines/tts/scripts/export-moss-speech-tokenizer-coreml.py",
+    "sha256": "9e366b78f807e3ab6b062d1933ac270e5228b274005f1099e4b9541f733e695d",
+    "args": [
+      "--gguf",
+      "{gguf}",
+      "--out",
+      "{out}/model.mlpackage"
+    ]
+  },
+  "twin_quant_types": "q8_0,q4_0",
+  "min_os": {
+    "macos": "15.0"
+  },
+  "multifunction_ane": false,
+  "default_compute_units": "cpu_and_gpu",
+  "shareable": true,
+  "pad_safe": false,
+  "state_bytes": 0,
+  "memory": {
+    "runtime_weight_bytes": 648814144,
+    "workspace_bytes": 347078656,
+    "compile_peak_bytes": 74973184,
+    "ane_compile_reserve_bytes": null,
+    "load_peak_bytes": {
+      "cpu_and_ane": null,
+      "all": null,
+      "cpu_and_gpu": 1011875840,
+      "cpu_only": null
+    },
+    "margin": 1.0,
+    "coreml_bound": "measured",
+    "validated_for": [
+      {
+        "units": "cpu_and_gpu",
+        "os": "27.2.1",
+        "chip": "M2"
+      },
+      {
+        "units": "cpu_and_gpu",
+        "os": "26.7.2",
+        "chip": "M4 Max"
+      }
+    ],
+    "measured": {
+      "margin": 1.25,
+      "runs": 24,
+      "basis": "Each charge covers 1.25 x the largest observed phase, rounded up to 1 MiB, with no additional envelope margin. The source measurements are twelve Apple M2 runs on macOS 27.2.1 and twelve Apple M4 Max CI runs on macOS 26.7.2, all in cpu_and_gpu. Largest increments: prepare 93.3 MiB, load and warm-up 771.6 MiB, steady state over the footprint before load 762.4 MiB, and whole run over the warm ggml baseline 860.7 MiB. Resident charge counts the fp16 weights, twice the function I/O, and measured workspace. The GPU route needs no compiler reserve. CI rechecks these charges with the synchronized sampler."
+    }
+  },
+  "prefer_ggml_on": [],
+  "match": {
+    "architecture": "moss-speech-codec",
+    "metadata": {
+      "moss-speech-codec.vq.sample_rate": 16000,
+      "moss-speech-codec.vq.hop_length": 160,
+      "moss-speech-codec.vq.n_mels": 128,
+      "moss-speech-codec.vq.chunk_samples": 480000,
+      "moss-speech-codec.vq.block_count": 16,
+      "moss-speech-codec.vq.embedding_length": 1280,
+      "moss-speech-codec.vq.feed_forward_length": 5120,
+      "moss-speech-codec.vq.attention.head_count": 20,
+      "moss-speech-codec.vq.context_length": 1500,
+      "moss-speech-codec.vq.pooling_kernel": 4
+    }
+  },
+  "literals": [
+    {
+      "id": "causal-mask",
+      "dtype": "fp16",
+      "shape": [
+        1500,
+        1500
+      ],
+      "exporter_blob": 24502656,
+      "offset": 0
+    }
+  ],
+  "provided": [],
+  "schema": 1,
+  "id": "moss-speech-tokenizer-30s",
+  "toolchain": {
+    "coremltools": "9.0",
+    "torch": "2.7.0",
+    "numpy": "1.26.4"
+  },
+  "functions": [
+    {
+      "name": "main",
+      "inputs": [
+        {
+          "name": "mel",
+          "dtype": "fp16",
+          "shape": [
+            1,
+            128,
+            3000
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "states",
+          "dtype": "fp16",
+          "shape": [
+            1,
+            375,
+            1280
+          ]
+        }
+      ]
+    }
+  ],
+  "stateful": false,
+  "weight_bin_size": 648814144,
+  "patches": [],
+  "generation_peak_bytes": 39321600
+}

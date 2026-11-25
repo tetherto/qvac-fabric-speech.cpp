@@ -501,6 +501,34 @@ int moss_coreml_predict(struct moss_coreml_model * model,
     }
 }
 
+int moss_coreml_warm(struct moss_coreml_model * model) {
+    if (model == nullptr || model->stateful)
+        return 1;
+    @autoreleasepool {
+        std::lock_guard<std::mutex> lock(model->mutex);
+        for (const Feature & input : model->inputs) {
+            MLMultiArray * array = (__bridge MLMultiArray *)input.array;
+            [array getMutableBytesWithHandler:^(void * bytes, NSInteger size,
+                                                NSArray<NSNumber *> *) {
+              std::memset(bytes, 0, (size_t)size);
+            }];
+        }
+        NSError * error = nil;
+        id<MLFeatureProvider> result = run_prediction(model, &error);
+        if (result == nil || error != nil)
+            return 2;
+        for (const Feature & output : model->outputs) {
+            NSString * name =
+                [NSString stringWithUTF8String:output.name.c_str()];
+            MLMultiArray * array =
+                [result featureValueForName:name].multiArrayValue;
+            if (array == nil || dims_of(array.shape) != output.dims)
+                return 3;
+        }
+        return 0;
+    }
+}
+
 int moss_coreml_predict_batch(struct moss_coreml_model * model,
                               const char * const * input_names, const float * const * inputs, int n_inputs,
                               const char * const * output_names, float * const * outputs, int n_outputs,

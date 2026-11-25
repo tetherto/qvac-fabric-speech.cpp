@@ -484,7 +484,7 @@ def convert_coreml(model, stage, hp, window, precision):
     inputs, output = stage_io(stage, hp, window)
     examples = tuple(torch.zeros(shape) for _, shape in inputs)
     with torch.no_grad():
-        traced = torch.jit.trace(model, examples)
+        traced = torch.jit.trace(model, examples, check_trace=stage != "vae")
     half = precision == "float16"
     io_dtype = np.float16 if half else np.float32
     return ct.convert(
@@ -495,6 +495,7 @@ def convert_coreml(model, stage, hp, window, precision):
         compute_precision=ct.precision.FLOAT16 if half else ct.precision.FLOAT32,
         compute_units=ct.ComputeUnit.ALL,
         convert_to="mlprogram",
+        skip_model_load=stage == "vae",
     )
 
 

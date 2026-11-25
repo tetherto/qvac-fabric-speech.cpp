@@ -170,7 +170,8 @@ struct SpeechEngine::Impl {
         }
         const detail::BackendRequest request = detail::backend_request(options);
         lm = std::make_unique<SpeechLM>(options.model_path, request, options.n_threads);
-        codec = std::make_unique<SpeechCodec>(options.codec_path, request, options.n_threads);
+        codec = std::make_unique<SpeechCodec>(
+            options.codec_path, request, options.n_threads, options.coreml);
         tokenizer = std::make_unique<SpeechTextTokenizer>(lm->tokenizer_tokens(), lm->tokenizer_merges(),
                 lm->tokenizer_types());
         hold_stages_together();
@@ -401,6 +402,10 @@ const char * SpeechEngine::backend_name() const noexcept {
 
 bool SpeechEngine::tokenizer_on_coreml() const noexcept {
     return impl_->codec->tokenizer().on_coreml();
+}
+
+std::string SpeechEngine::tokenizer_coreml_status_json() const {
+    return impl_->codec->tokenizer().coreml_status_json();
 }
 
 } // namespace tts_cpp::moss

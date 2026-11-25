@@ -5,6 +5,12 @@ moss-sfx GGUF that the tts-cpp MOSS sound-effect engine loads.
 
 usage: convert-moss-sfx-to-gguf.py <hf_checkpoint_dir> [--outtype f16|bf16|f32|q8_0|q4_0]
            [--text-block-outtype TYPE] [--dit-block-outtype TYPE] [--outfile out.gguf]
+       convert-moss-sfx-to-gguf.py <hf_checkpoint_dir> --vae-only [--outfile out.gguf]
+
+--vae-only writes the model metadata and the VAE decoder weights only. It
+reads model_index.json, the text encoder, transformer and scheduler configs
+and vae/, but not the text encoder, DiT or tokenizer files. The VAE's Core ML
+generation tests use it.
 """
 from __future__ import annotations
 
@@ -542,6 +548,28 @@ def write_gguf(writer: gguf.GGUFWriter) -> None:
     writer.write_tensors_to_file(progress=True)
 
 
+def convert_vae_only(model_dir: Path, outfile: Path) -> None:
+    vae_weights, vae = load_vae_weights(model_dir / "vae")
+    writer = gguf.GGUFWriter(path=outfile, arch=ARCH)
+    try:
+        writer.add_type("model")
+        writer.add_name(model_dir.name)
+        add_text_metadata(writer, read_json(model_dir / "text_encoder" / "config.json"))
+        add_dit_metadata(writer, read_json(model_dir / "transformer" / "config.json"))
+        add_vae_metadata(writer, vae)
+        add_generation_metadata(writer, read_json(model_dir / "model_index.json"),
+                                read_json(model_dir / "scheduler" / "scheduler_config.json"))
+        emitter = Emitter(writer, MatrixTypes("f16", "f16", "f16"))
+        emit_vae(emitter, vae_weights, [int(rate) for rate in vae["decoder_rates"]])
+        expected = vae_tensor_count(len(vae["decoder_rates"]))
+        if len(emitter.names) != expected:
+            raise RuntimeError(f"emitted {len(emitter.names)} VAE tensors but the decoder needs {expected}")
+        write_gguf(writer)
+        print(f"{ARCH}: wrote {outfile} (VAE only)")
+    finally:
+        writer.close()
+
+
 def convert(model_dir: Path, outfile: Path, types: MatrixTypes) -> None:
     checkpoint = read_checkpoint(model_dir)
     writer = gguf.GGUFWriter(path=outfile, arch=ARCH)
@@ -564,9 +592,14 @@ def main() -> None:
     parser.add_argument("--dit-block-outtype", choices=tuple(OUTTYPES), default=None,
                         help="type of the DiT block linear weights (dit.blk.*); defaults to --outtype")
     parser.add_argument("--outfile", type=Path, default=None)
+    parser.add_argument("--vae-only", action="store_true",
+                        help="write the metadata and the VAE decoder only (Core ML generation tests)")
     args = parser.parse_args()
 
     model_dir = args.model_dir.resolve()
+    if args.vae_only:
+        convert_vae_only(model_dir, args.outfile or model_dir / f"{model_dir.name}-vae.gguf")
+        return
     types = MatrixTypes(args.outtype, args.text_block_outtype or args.outtype, args.dit_block_outtype or args.outtype)
     outfile = args.outfile or model_dir / f"{model_dir.name}-{types.tag()}.gguf"
     convert(model_dir, outfile, types)

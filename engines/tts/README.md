@@ -183,6 +183,14 @@ for the entire synthesis or stream. Its embedded 64-frame generation template
 requires a validated compute-unit policy. See the
 [Audio8 codec options and status](docs/audio8.md#generated-sidecar-and-background-loading).
 
+The [MOSS-Speech speech tokenizer and the MOSS-SoundEffect VAE](docs/moss.md#moss-on-device-generation)
+are generated the same way (`SpeechOptions::coreml`, `SoundEffectOptions::coreml`,
+with a cache directory): with no bundle next to the GGUF, the engine builds
+the sidecar from an embedded template, compiles it for the GPU
+(`cpu_and_gpu`) and loads it in the background, and the stage runs on ggml
+until it is ready. SoundEffect `fit_params` adds the VAE's measured Core ML
+envelope and drops Core ML near a memory budget.
+
 CosyVoice3 HiFT sidecars use FP32 for waveform parity. With enabled Chatterbox,
 CosyVoice3 or prebuilt Parler-TTS or Pocket TTS sidecars present, `fit_params` returns `Error` with
 `coreml-memory-estimate-unavailable`; it cannot project Core ML resident memory.

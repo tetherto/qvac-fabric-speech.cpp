@@ -220,7 +220,7 @@ def convert_coreml(model, hp, precision):
 
     example = torch.zeros(1, hp["n_mels"], hp["mel_frames"])
     with torch.no_grad():
-        traced = torch.jit.trace(model, example)
+        traced = torch.jit.trace(model, example, check_trace=False)
     half = precision == "float16"
     io_dtype = np.float16 if half else np.float32
     return ct.convert(
@@ -231,6 +231,7 @@ def convert_coreml(model, hp, precision):
         compute_precision=ct.precision.FLOAT16 if half else ct.precision.FLOAT32,
         compute_units=ct.ComputeUnit.ALL,
         convert_to="mlprogram",
+        skip_model_load=True,
     )
 
 

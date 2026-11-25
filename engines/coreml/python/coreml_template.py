@@ -1196,7 +1196,7 @@ def check_template(tool, tdir, python=None, root=None, quant_types=None, work=No
     if not exporter:
         raise TemplateError(f"{tdir}: template.json has no exporter")
     results = []
-    types_q = quant_types if quant_types is not None else tj.get("report_quant_types", "q8_0")
+    types_q = quant_types if quant_types is not None else tj.get("report_quant_types", tj.get("twin_quant_types", "q8_0"))
     cases = [("A", SEED_A, "f32"), ("B", SEED_B, "f32"), ("Q", SEED_Q, types_q)]
     # Each twin also gets its own value of every GGUF string the recipe
     # declares (as `extract` does for A and B), so a template that baked one
@@ -1368,7 +1368,7 @@ def build_parser():
     r.add_argument("--template-dir", action="append", help="repeatable")
     r.add_argument("--all", action="store_true", help="every engines/*/coreml-templates/* under --root")
     r.add_argument("--allow-empty", action="store_true", help="succeed when there is no template")
-    r.add_argument("--quant-types", help="twin Q types (overrides the template default of q8_0 or report_quant_types)")
+    r.add_argument("--quant-types", help="override twin Q block types (template setting or q8_0)")
     r.add_argument("--json", help="also write the results as JSON")
     r.set_defaults(fn=cmd_report)
 

@@ -1,4 +1,5 @@
 #include "tts-cpp/moss/sound_effect_fit.h"
+#include "moss/coreml_generation.h"
 #include "moss/sfx_model.h"
 #include "moss/sfx_networks.h"
 #include "moss/sfx_request.h"
@@ -70,9 +71,17 @@ detail::SfxMemory measure_audio(detail::SfxModel & model, const detail::Resolved
 }
 
 void measure_workload(FitResult & result, detail::SfxModel & model,
-                      const detail::ResolvedRequest & request) {
+                      const detail::ResolvedRequest & request,
+                      bool upper_bound = false) {
     detail::SfxTokenizer tokenizer(model);
-    const auto text = measure_texts(model, tokenizer, request);
+    detail::SfxMemory text;
+    if (upper_bound) {
+        const size_t tokens = (size_t)model.config().text.max_tokens;
+        text = detail::measure_text(model, std::vector<int32_t>(tokens, 0));
+        text.host_bytes = sat_add(text.host_bytes, text_payload(model, tokens));
+    } else {
+        text = measure_texts(model, tokenizer, request);
+    }
     const auto dit = measure_dit(model, request);
     const auto audio = measure_audio(model, request);
     const auto text_peak = sat_add(dit.persistent_device_bytes, text.device_bytes);
@@ -88,12 +97,23 @@ void measure_workload(FitResult & result, detail::SfxModel & model,
     result.host_bytes = sat_add(result.host_bytes, sat_add(tokenizer.storage_bytes(), sat_add(contexts, peak)));
 }
 
-void finish(FitResult & result, uint64_t margin_bytes) {
+uint64_t ggml_required(FitResult & result, uint64_t margin_bytes) {
     result.device.total_bytes = sat_add(result.device.weights_bytes,
         sat_add(result.device.lm_compute_bytes, result.device.codec_compute_bytes));
     uint64_t required = sat_add(result.device.total_bytes, margin_bytes);
     if (result.device_shares_host_memory) required = sat_add(required, result.host_bytes);
-    result.fits = required != std::numeric_limits<uint64_t>::max() && required <= result.device_free_bytes;
+    return required;
+}
+
+void finish(FitResult & result, uint64_t margin_bytes,
+            const SoundEffectOptions & options) {
+    const uint64_t required = ggml_required(result, margin_bytes);
+    const bool ggml_fits = required != std::numeric_limits<uint64_t>::max() &&
+                           required <= result.device_free_bytes;
+    result.coreml =
+        detail::sfx_vae_coreml_fit(options.model_path, options.coreml, required,
+                                   result.device_free_bytes, ggml_fits);
+    result.fits = result.coreml.fits || !result.coreml.disabled_reason.empty();
     result.status = result.fits ? FitStatus::Success : FitStatus::Failure;
     result.reason = result.fits ? "fits" : "does-not-fit";
     std::ostringstream report;
@@ -105,7 +125,18 @@ void finish(FitResult & result, uint64_t margin_bytes) {
            << " bytes\nverdict: " << result.reason << '\n';
     result.report = report.str();
 }
+}
 
+uint64_t detail::sfx_ggml_budget_baseline(const SoundEffectOptions & options) {
+    detail::SfxModel model(options.model_path, detail::backend_request(options),
+                           options.n_threads, true);
+    detail::ResolvedRequest worst_case;
+    worst_case.tenths = (int)(model.config().max_seconds * TENTHS_PER_SECOND);
+    worst_case.steps = detail::SFX_MAX_STEPS;
+    worst_case.guidance = 4.0f;
+    auto result = model.measure_weights();
+    measure_workload(result, model, worst_case, true);
+    return ggml_required(result, 0);
 }
 
 FitResult fit_params(const SoundEffectOptions & options, const SoundEffectRequest & request,
@@ -133,7 +164,7 @@ FitResult fit_params(const SoundEffectOptions & options, const SoundEffectReques
         result = model.measure_weights();
         result.model_variant = "moss-sfx";
         measure_workload(result, model, resolved);
-        finish(result, margin_bytes);
+        finish(result, margin_bytes, options);
     } catch (const std::exception & error) {
         const std::string message = error.what();
         result.reason = message.find("no compute backend") != std::string::npos ? "no-backend-device"

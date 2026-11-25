@@ -1,6 +1,7 @@
 #pragma once
 
 #include "moss/coreml_sidecar.h"
+#include "moss/coreml_generation.h"
 #include "moss/sfx_model.h"
 #include "moss/sfx_networks.h"
 
@@ -9,6 +10,8 @@
 #include <vector>
 
 namespace tts_cpp::moss::detail {
+
+inline constexpr int GENERATED_VAE_WINDOW = 320;
 
 class SfxDitSidecar {
 public:
@@ -32,6 +35,9 @@ std::unique_ptr<SfxDitSidecar> open_sfx_dit_sidecar(const std::string & model_pa
                                                     const CoremlPolicy & policy);
 std::unique_ptr<SfxVaeSidecar> open_sfx_vae_sidecar(const std::string & model_path, const SfxConfig & config,
                                                     const CoremlPolicy & policy);
+std::unique_ptr<SfxVaeSidecar>
+acquire_sfx_vae_sidecar(MossCoremlGeneration & generation,
+                        const std::atomic<bool> * cancel);
 
 class SfxDitRunner {
 public:

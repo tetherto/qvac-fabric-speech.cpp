@@ -1,4 +1,5 @@
 #pragma once
+#include "tts-cpp/coreml_options.h"
 #include "tts-cpp/export.h"
 #include <cstdint>
 #include <functional>
@@ -15,6 +16,7 @@ struct SpeechOptions {
     bool use_gpu = false;
     std::string backends_dir;
     std::string backend;
+    CoremlOptions coreml;
 };
 
 enum class SpeechRole { System, User, Assistant };
@@ -70,6 +72,7 @@ public:
     float tokens_per_second() const noexcept;
     const char * backend_name() const noexcept;
     bool tokenizer_on_coreml() const noexcept;
+    std::string tokenizer_coreml_status_json() const;
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
