@@ -18,6 +18,7 @@ constexpr int synthesis_seed = 42;
 constexpr int split_chunk_size = 40;
 constexpr int unsplit_chunk_size = 10000;
 constexpr auto continuation_text = "Each participant checks the record,";
+constexpr auto unpunctuated_continuation_text = "Each participant checks the record";
 constexpr auto batch_text = "The next request can use the same voice.";
 constexpr auto streaming_text =
     "A clear voice reads the first sentence to the listener. "
@@ -88,12 +89,12 @@ void test_cancelled_request_reuse(const std::string & model) {
     require_same_audio(batch, engine.synthesize(batch_text), "A new batch request did not clear pre-existing cancellation");
 }
 
-SynthesisResult test_preserved_segment(Engine & engine) {
-    const auto reference = engine.synthesize(continuation_text,
+SynthesisResult test_preserved_segment(Engine & engine, const std::string & text) {
+    const auto reference = engine.synthesize(text,
         [](const float *, std::size_t, int, bool) {});
     int callbacks = 0;
     std::vector<float> received;
-    const auto segment = engine.synthesize_segment(continuation_text,
+    const auto segment = engine.synthesize_segment(text,
         [&](const float * pcm, std::size_t count, int index, bool last) {
             require(index == 0 && last, "A caller-selected segment was split internally");
             ++callbacks;
@@ -102,7 +103,7 @@ SynthesisResult test_preserved_segment(Engine & engine) {
     require(callbacks == 1 && received == segment.pcm, "The whole-segment callback changed the returned PCM");
     require_same_audio(reference, segment, "Whole-segment synthesis changed continuation or resampling behavior");
     engine.cancel();
-    require_same_audio(reference, engine.synthesize_segment(continuation_text),
+    require_same_audio(reference, engine.synthesize_segment(text),
                        "Optional-callback segment synthesis retained cancellation");
     return reference;
 }
@@ -150,7 +151,11 @@ void test_worker_cache_release(Engine & engine, const SynthesisResult & referenc
 
 void test_segment_and_cache_lifecycle(const std::string & model) {
     Engine engine(make_options(model, unsplit_chunk_size));
-    const auto reference = test_preserved_segment(engine);
+    const auto reference = test_preserved_segment(engine, continuation_text);
+    const auto unfinished = test_preserved_segment(engine, unpunctuated_continuation_text);
+    const auto terminated = engine.synthesize(unpunctuated_continuation_text);
+    require(unfinished.pcm != terminated.pcm,
+            "The word-ended fixture did not distinguish continuation from an implicitly appended period");
     engine.release_thread_resources();
     engine.release_thread_resources();
     require_same_audio(reference, engine.synthesize_segment(continuation_text),
