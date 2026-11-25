@@ -1185,7 +1185,7 @@ def cmd_extract(a):
     return 0
 
 
-def check_template(tool, tdir, python=None, root=None, quant_types="q8_0", work=None):
+def check_template(tool, tdir, python=None, root=None, quant_types=None, work=None):
     """The extraction (A) and cross-seed (B, Q) gates for one template. Returns result dicts."""
     tdir = Path(tdir)
     for f in REQUIRED_FILES + ("reference-gguf.json",):
@@ -1196,7 +1196,8 @@ def check_template(tool, tdir, python=None, root=None, quant_types="q8_0", work=
     if not exporter:
         raise TemplateError(f"{tdir}: template.json has no exporter")
     results = []
-    cases = [("A", SEED_A, "f32"), ("B", SEED_B, "f32"), ("Q", SEED_Q, quant_types)]
+    types_q = quant_types if quant_types is not None else tj.get("report_quant_types", "q8_0")
+    cases = [("A", SEED_A, "f32"), ("B", SEED_B, "f32"), ("Q", SEED_Q, types_q)]
     # Each twin also gets its own value of every GGUF string the recipe
     # declares (as `extract` does for A and B), so a template that baked one
     # checkpoint's string into its spec instead of patching it fails B and Q.
@@ -1206,7 +1207,7 @@ def check_template(tool, tdir, python=None, root=None, quant_types="q8_0", work=
     manifest = load_manifest(tdir / "reference-gguf.json")
     # Twin Q holds the lower precisions the recipe accepts; the exporter sees
     # its f32 expansion.
-    q_types = q_twin_tensor_types(manifest, recipe_source_types(recipe_text), quant_types)
+    q_types = q_twin_tensor_types(manifest, recipe_source_types(recipe_text), types_q)
     owned = work is None
     work = Path(work or tempfile.mkdtemp(prefix="qvac-coreml-report-"))
     try:
@@ -1367,7 +1368,7 @@ def build_parser():
     r.add_argument("--template-dir", action="append", help="repeatable")
     r.add_argument("--all", action="store_true", help="every engines/*/coreml-templates/* under --root")
     r.add_argument("--allow-empty", action="store_true", help="succeed when there is no template")
-    r.add_argument("--quant-types", default="q8_0", help="twin Q block types (default q8_0)")
+    r.add_argument("--quant-types", help="twin Q types (overrides the template default of q8_0 or report_quant_types)")
     r.add_argument("--json", help="also write the results as JSON")
     r.set_defaults(fn=cmd_report)
 

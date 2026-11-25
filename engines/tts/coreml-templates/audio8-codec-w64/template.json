@@ -1,0 +1,105 @@
+{
+  "schema": 1,
+  "id": "audio8-codec-w64",
+  "family": "audio8",
+  "stage": "codec_synthesis",
+  "report_quant_types": "f16",
+  "export_kind": "audio8-codec-synthesis-v1",
+  "exporter": {
+    "path": "engines/tts/scripts/export-audio8-codec-coreml.py",
+    "sha256": "21f43b543a7383064e19125f6056e7fd580311315c737375f5742032cde8641b",
+    "args": [
+      "--gguf",
+      "{gguf}",
+      "--out",
+      "{out}/audio8-codec.mlpackage",
+      "--window",
+      "64"
+    ]
+  },
+  "min_os": {
+    "macos": "15.0"
+  },
+  "multifunction_ane": false,
+  "default_compute_units": "all",
+  "shareable": true,
+  "pad_safe": false,
+  "state_bytes": 0,
+  "expected_warm_load_ms": {
+    "main": 0
+  },
+  "memory": {
+    "load_peak_bytes": {
+      "all": 536870912
+    },
+    "margin": 1.25,
+    "validated_for": []
+  },
+  "patches": [
+    {
+      "spec_offset": 199482,
+      "len": 2,
+      "sentinel_hex": "66e3"
+    }
+  ],
+  "prefer_ggml_on": [],
+  "match": {
+    "architecture": "audio8-codec",
+    "metadata": {
+      "audio8.codec.sample_rate": 44100,
+      "audio8.codec.frame_size": 2048,
+      "audio8.codec.latent_dim": 1024,
+      "audio8.codec.convnext_norm_eps": 9.999999974752427e-07,
+      "audio8.codec.snake_epsilon": 9.999999717180685e-10,
+      "audio8.codec.decoder_strides": [
+        8,
+        8,
+        4,
+        2
+      ],
+      "audio8.codec.residual_dilations": [
+        1,
+        3,
+        9
+      ],
+      "audio8.codec.part": "decoder"
+    }
+  },
+  "literals": [],
+  "provided": [],
+  "toolchain": {
+    "coremltools": "9.0",
+    "torch": "2.7.0",
+    "numpy": "1.26.4"
+  },
+  "functions": [
+    {
+      "name": "main",
+      "inputs": [
+        {
+          "name": "post",
+          "dtype": "fp16",
+          "shape": [
+            1,
+            1024,
+            64
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "pcm",
+          "dtype": "fp16",
+          "shape": [
+            1,
+            1,
+            131072
+          ]
+        }
+      ]
+    }
+  ],
+  "stateful": false,
+  "weight_bin_size": 161254656,
+  "generation_peak_bytes": 150994944
+}

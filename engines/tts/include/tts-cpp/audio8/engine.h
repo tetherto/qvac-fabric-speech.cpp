@@ -17,6 +17,7 @@
 // compared to the same F32 reference rather than to the other.
 
 #include "tts-cpp/backend.h"
+#include "tts-cpp/coreml_options.h"
 #include "tts-cpp/export.h"
 
 #include <cstddef>
@@ -81,6 +82,12 @@ struct EngineOptions {
     // Print the per-stage timing breakdown of every synthesize() to stderr.
     // The same numbers are always available in SynthesisResult::timings.
     bool verbose = false;
+
+    CoremlOptions coreml;
+    // Match the workload and margin used by fit_params when setting a budget.
+    int fit_prompt_tokens = 128;
+    float fit_reference_seconds = 10.0f;
+    uint64_t fit_margin_bytes = 256ull * 1024 * 1024;
 };
 
 // Wall time of each synthesize() stage, in milliseconds. The stages are
@@ -125,11 +132,12 @@ struct SynthesisResult {
     // makes this the sharpest way to compare backends or quantisation tiers.
     std::vector<int> codes;
 
-    // Where this synthesis's codec synthesis stack actually ran: "ggml" (on
-    // backend_name()) or the Core ML sidecar's compute label ("coreml-all",
-    // "coreml-gpu", ...). Unlike Engine::codec_on_coreml(), this is per call:
-    // a loaded sidecar that cannot serve a call falls back to ggml here.
+    // "ggml" or the sidecar's "coreml-all", "coreml-ane", "coreml-gpu",
+    // or "coreml-cpu". Each call uses one backend. Hosts aggregating calls
+    // can report "mixed" when their labels differ.
     std::string codec_synthesis_backend = "ggml";
+    bool coreml_pending =
+        false; // This call used ggml while Core ML was pending.
 };
 
 using AudioCallback = std::function<bool(const float *, size_t, int)>;
@@ -167,16 +175,21 @@ public:
     std::string backend_name() const;
     BackendDevice backend_device() const;
 
-    // True while an Apple Core ML sidecar for the codec's synthesis stack is
-    // attached (a TTS_CPP_COREML build with a compiled model next to the decoder
-    // GGUF). A sidecar whose first use fails is retired and later calls go
-    // straight to ggml, after which this returns false.
-    // SynthesisResult::codec_synthesis_backend reports where each call actually
-    // ran. The language model and the codec's post transformer always run on
-    // the backend backend_name() reports.
+    // Reports codec sidecar readiness. SynthesisResult reports the route
+    // actually used by a particular call.
     bool codec_on_coreml() const;
 
-private:
+    // Shared status JSON (schema 1), or "{}" without Core ML support.
+    std::string coreml_status() const;
+    // Shared request-group JSON for the construction request or a new prewarm.
+    // Passing wait=true waits for the group or cancellation from another thread.
+    std::string coreml_construction_json() const;
+    std::string coreml_prewarm(CoremlOptions::Prewarm scope, bool wait);
+    // Poll with zero, or wait for ready, a terminal/idle/deferred state, the
+    // timeout (< 0 means unlimited), or cancellation from another thread.
+    bool coreml_wait(int64_t timeout_ms = -1) const;
+
+  private:
     struct Impl;
     std::unique_ptr<Impl> pimpl_;
 };

@@ -1143,6 +1143,7 @@ void Runtime::run_load(const std::shared_ptr<Job> & j) {
         return;
     }
     if (!r.error.ok() || !r.model) {
+        r.model.reset();
         if (r.lease_fd >= 0) ::close(r.lease_fd);
         fail(j, r.error.ok() ? Error::deterministic("LoadFn returned no model") : r.error);
         return;
@@ -1150,10 +1151,15 @@ void Runtime::run_load(const std::shared_ptr<Job> & j) {
     const Clock::time_point t1 = Clock::now();
     if (j->warm_fn) {
         set_phase(j, SlotState::warming);
-        Error e = j->warm_fn(r.model.get(), j->load);
+        Error e;
+        try {
+            e = j->warm_fn(r.model.get(), j->load);
+        } catch (...) {
+            e = Error::transient("warm-up threw");
+        }
         if (!e.ok()) {
-            if (r.lease_fd >= 0) ::close(r.lease_fd);
             r.model.reset();
+            if (r.lease_fd >= 0) ::close(r.lease_fd);
             fail(j, e);
             return;
         }

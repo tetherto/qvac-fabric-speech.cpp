@@ -367,6 +367,17 @@ PrewarmResult Group::result() const {
 }
 
 PrewarmResult Group::wait(std::optional<Clock::duration> timeout, const std::atomic<bool> * cancel) {
+    return wait_impl(timeout, cancel, nullptr, 0);
+}
+
+PrewarmResult Group::wait(std::optional<Clock::duration> timeout,
+                          const std::atomic<uint64_t> & cancel_epoch, uint64_t observed_epoch) {
+    return wait_impl(timeout, nullptr, &cancel_epoch, observed_epoch);
+}
+
+PrewarmResult Group::wait_impl(std::optional<Clock::duration> timeout,
+                               const std::atomic<bool> * cancel,
+                               const std::atomic<uint64_t> * cancel_epoch, uint64_t observed_epoch) {
     const Clock::time_point deadline = timeout ? Clock::now() + *timeout : Clock::time_point::max();
     for (;;) {
         detail::Graveyard gy;  // released each round, after the lock
@@ -374,7 +385,8 @@ PrewarmResult Group::wait(std::optional<Clock::duration> timeout, const std::ato
         bool fin = false;
         PrewarmResult r = collect(fin, gy);
         if (fin || detail::exiting()) return r;
-        if (cancel && cancel->load()) return r;
+        if ((cancel && cancel->load()) ||
+            (cancel_epoch && cancel_epoch->load(std::memory_order_relaxed) != observed_epoch)) return r;
         const Clock::time_point now = Clock::now();
         if (now >= deadline) return r;
         rt_->state_cv.wait_until(lk, std::min(deadline, now + rt_->cfg.wait_poll));
@@ -449,6 +461,10 @@ std::shared_ptr<Group> Manager::issue_group(GroupKind kind, const std::vector<Gr
     g->kind_ = kind;
     g->rt_ = rt_;
     g->skipped_ = std::move(skipped_route_none);
+    if (std::none_of(requests.begin(), requests.end(),
+                     [](const GroupRequest & req) { return bool(req.slot); })) {
+        return g;
+    }
     rt_->pin_for_work();
     detail::Graveyard gy;
     std::lock_guard<std::mutex> lk(rt_->mu);

@@ -64,4 +64,6 @@ the [Parler-TTS DAC decoder](parler.md#generated-sidecar-and-background-loading)
 the [Supertonic vocoder](supertonic.md#generated-vocoder-sidecar) (Supertonic
 1, 2 and 3, every quantisation tier), and the
 [Pocket TTS FlowLM step and Mimi decoder](pocket-tts.md#generated-sidecars-and-background-loading)
-are generated; the other families load only prebuilt sidecars.
+and the [Audio8 codec](audio8.md#generated-sidecar-and-background-loading)
+can generate under their validated policies. Audio8 generation is gated on
+memory validation.

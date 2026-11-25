@@ -30,6 +30,8 @@ struct tiny_lm {
     // test can see a row land in the wrong place; matrices whose rows are whole
     // q8_0 blocks can also be stored in q8_0.
     bool varied = false;
+    bool ascii_tokenizer =
+        false; // Enough vocabulary to build an actual text prompt.
     bool q8_matrices = false;
     // Keeps every wk in f32 while the other matrices go to q8_0, so q, k and v
     // cannot be stacked.
@@ -159,8 +161,20 @@ inline std::string write_tiny_lm_gguf(const tiny_lm & p, const std::string & pat
     b("fast_qkv_bias", false);
 
     if (with_vocab) {
-        const char * toks[] = {"<pad>", "a", "b", "c"};
-        gguf_set_arr_str(g, "tokenizer.ggml.tokens", toks, 4);
+        if (p.ascii_tokenizer) {
+            // Byte-level BPE uses GPT-2's mapped symbols for space and newline.
+            std::vector<std::string> tokens{"<pad>", "Ġ", "Ċ", "ab"};
+            for (char ch = '!'; ch <= '~'; ++ch)
+                tokens.emplace_back(1, ch);
+            std::vector<const char *> text;
+            for (const auto & token : tokens)
+                text.push_back(token.c_str());
+            gguf_set_arr_str(g, "tokenizer.ggml.tokens", text.data(),
+                             text.size());
+        } else {
+            const char * tokens[] = {"<pad>", "a", "b", "c"};
+            gguf_set_arr_str(g, "tokenizer.ggml.tokens", tokens, 4);
+        }
         const char * merges[] = {"a b"};
         gguf_set_arr_str(g, "tokenizer.ggml.merges", merges, 1);
         const int32_t added[] = {0};
