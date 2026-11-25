@@ -2,9 +2,11 @@
 
 #include <cstdint>
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cmath>
 #include <map>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -26,6 +28,10 @@ struct supertonic_coreml_encoder_context;
 struct supertonic_coreml_vector_context;
 
 namespace tts_cpp::supertonic::detail {
+
+// The vocoder stage on the shared Core ML runtime (supertonic_vocoder_coreml.h).
+class supertonic_vocoder_pending;
+struct supertonic_vocoder_source;
 
 // round 4 — multi-dtype K/V flash-attention dispatch.
 //
@@ -588,6 +594,14 @@ struct supertonic_model {
     // GGUF", on a real load it means the sidecar initialised.
     ::supertonic_coreml_vocoder_context * coreml_vocoder = nullptr;
     bool vocoder_on_coreml = false;
+    // Set before load_supertonic_gguf by the Engine, which runs the vocoder
+    // sidecar on the shared Core ML runtime: the loader then attaches no
+    // vocoder sidecar, and each vocoder call acquires its backend from
+    // `vocoder_pending` (supertonic_vocoder_coreml.h).
+    bool vocoder_coreml_managed = false;
+    std::shared_ptr<supertonic_vocoder_pending> vocoder_pending;
+    // The file the weights were loaded from (supertonic_vocoder_source_record).
+    std::shared_ptr<supertonic_vocoder_source> vocoder_source;
     ::supertonic_coreml_encoder_context * coreml_encoder = nullptr;
     bool encoder_on_coreml = false;
     ::supertonic_coreml_vector_context * coreml_vector = nullptr;
@@ -860,13 +874,19 @@ bool supertonic_vocoder_forward_cpu(const supertonic_model & model,
                                     std::string * error = nullptr);
 
 // `backend_used` (optional) reports which path produced the waveform: the
-// sidecar's compute-unit label (e.g. "coreml-all") or "ggml".
+// sidecar's compute-unit label (e.g. "coreml-all") or "ggml". With the
+// vocoder on the shared Core ML runtime (model.vocoder_pending) the call
+// takes its backend once, at entry: `pending` (optional) is set when it ran
+// on ggml only because the sidecar was not ready yet, and `cancel` (optional)
+// ends a wait for the sidecar early.
 bool supertonic_vocoder_forward_ggml(const supertonic_model & model,
                                      const float * latent,
                                      int latent_len,
                                      std::vector<float> & wav_out,
                                      std::string * error = nullptr,
-                                     std::string * backend_used = nullptr);
+                                     std::string * backend_used = nullptr,
+                                     bool * pending = nullptr,
+                                     const std::atomic<bool> * cancel = nullptr);
 
 // Latent frames of causal left context a Core ML vocoder window must carry so
 // every kept output frame matches the full-utterance ggml graph: the vocoder

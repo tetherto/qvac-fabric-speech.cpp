@@ -6,6 +6,8 @@
 #include "supertonic_internal.h"
 #include "supertonic_pace.h"
 #include "supertonic_voice_json.h"
+#include "supertonic_vocoder_coreml.h"
+#include "tts-cpp/supertonic/fit.h"
 #include "npy.h"
 #include "voice_features.h"  // resample_for_output / validate_output_sample_rate
 // Vulkan adapter description in `backend_name()` is now resolved
@@ -157,7 +159,12 @@ bool chunk_ends_with_sentence_term(const std::string & s) {
 struct Engine::Impl {
     EngineOptions    opts;
     supertonic_model model;
+    std::shared_ptr<supertonic_vocoder_coreml> vocoder_coreml;  // the vocoder on the shared Core ML runtime
     std::atomic<bool> cancel_flag{false};
+    // Counts Engine::cancel() calls. A blocking coreml_wait() ends when it
+    // moves past the count read when that wait started, so a wait never
+    // swallows a cancel meant for another wait, or for a synthesis.
+    std::atomic<uint64_t> wait_cancels{0};
     // round 7 — voice ttl/dp host cache. Populated
     // lazily on first `synthesize()` call per voice; subsequent
     // calls hit the cache and skip the GPU→host download (2 sync
@@ -216,6 +223,59 @@ struct Engine::Impl {
         // config typo guard); the throw propagates up to the
         // caller (no model loaded yet, no cleanup needed).
         apply_vulkan_env_overrides(opts.vulkan_env_overrides);
+#ifdef TTS_CPP_USE_COREML
+        // Fit's memory-degrade: with a budget, Core ML is dropped when only
+        // the ggml verdict fits. Decided before the weights load, so it reads
+        // the same free memory fit_params reports, with the allocation inputs
+        // this engine loads and runs with (precision, steps, F16 weight
+        // storage and its deny list) and the workload
+        // and headroom the caller's fit assessed, so it reaches the verdict
+        // fit_params gave the caller for the same options.
+        bool coreml_degrade = false;
+        if (opts.coreml.memory_budget_bytes) {
+            FitOptions fit;
+            fit.model_gguf_path = opts.model_gguf_path;
+            fit.n_gpu_layers = opts.n_gpu_layers;
+            fit.vulkan_device = opts.vulkan_device;
+            fit.backend = opts.backend;
+            switch (opts.precision) {
+                case Precision::F32:  fit.precision = "f32";  break;
+                case Precision::F16:  fit.precision = "f16";  break;
+                case Precision::Q8_0: fit.precision = "q8_0"; break;
+                case Precision::Auto: fit.precision = "auto"; break;
+            }
+            fit.steps = opts.steps;
+            fit.text_tokens = opts.fit_text_tokens;
+            fit.audio_seconds = opts.fit_audio_seconds;
+            fit.margin_bytes = opts.fit_margin_bytes;
+            fit.f16_weights = opts.f16_weights;
+            fit.f16_weights_deny_list = opts.f16_weights_deny_list;
+            fit.backends_dir = opts.backends_dir;
+            fit.coreml = opts.coreml;
+            const FitResult assessed = fit_params(fit);
+            if (assessed.status != FitStatus::Error) {
+                coreml_degrade = assessed.coreml.disabled_reason == "memory";
+            } else if (assessed.reason == "invalid-arguments") {
+                throw std::invalid_argument(
+                    "Supertonic Engine: coreml.memory_budget_bytes needs a fit assessment, which "
+                    "rejected these options (fit workload, margin or adapter index)");
+            } else if (assessed.coreml.route != "prebuilt") {
+                // No projection, so nothing shows a generated sidecar fits the
+                // budget: the vocoder stays on ggml. A prebuilt sidecar keeps
+                // today's behaviour, which a budget does not change.
+                coreml_degrade = true;
+                std::fprintf(stderr,
+                             "supertonic: the memory budget cannot be assessed (%s); "
+                             "the vocoder stays on ggml\n",
+                             assessed.reason.c_str());
+            }
+        }
+        // The vocoder sidecar loads through the shared Core ML runtime below,
+        // not with the weights.
+        model.vocoder_coreml_managed = true;
+#else
+        supertonic_vocoder_plan_route(opts.model_gguf_path, opts.coreml);  // validates the options
+#endif
         if (!load_supertonic_gguf(opts.model_gguf_path, model,
                                   opts.n_gpu_layers, /*verbose=*/false,
                                   opts.f16_weights, internal_precision,
@@ -227,6 +287,10 @@ struct Engine::Impl {
         }
         try {
             supertonic_set_n_threads(model, opts.n_threads);
+#ifdef TTS_CPP_USE_COREML
+            vocoder_coreml =
+                supertonic_vocoder_coreml::create(model, opts.model_gguf_path, opts.coreml, coreml_degrade);
+#endif
 
             // F16 K/V attention dispatch: auto-enable on GPU backends,
             // disable on CPU; user can override either way.  Captured
@@ -566,13 +630,18 @@ struct Engine::Impl {
 
         std::vector<float> wav_full;
         std::string vocoder_backend;
+        bool vocoder_pending = false;
         if (!supertonic_vocoder_forward_ggml(model, latent.data(), latent_len, wav_full, &error,
-                                             &vocoder_backend)) {
+                                             &vocoder_backend, &vocoder_pending, &cancel_flag)) {
+            if (cancel_flag.load(std::memory_order_acquire)) {
+                throw std::runtime_error("Supertonic Engine: cancelled in the vocoder");
+            }
             throw std::runtime_error("Supertonic Engine: vocoder failed: " + error);
         }
 
         SynthesisResult result;
         result.duration_s  = duration_s;
+        result.coreml_pending = vocoder_pending;
         result.vocoder_synthesis_backend = std::move(vocoder_backend);
         result.text_encoder_synthesis_backend = std::move(encoder_backend);
         result.vector_estimator_synthesis_backend = std::move(vector_backend);
@@ -745,23 +814,25 @@ struct Engine::Impl {
             if (k == 0) full.text_encoder_synthesis_backend = std::move(chunk_res.text_encoder_synthesis_backend);
             else if (full.text_encoder_synthesis_backend != chunk_res.text_encoder_synthesis_backend)
                 full.text_encoder_synthesis_backend = "mixed";
-            if (k == 0) {
-                full.vocoder_synthesis_backend =
-                    std::move(chunk_res.vocoder_synthesis_backend);
-            } else if (full.vocoder_synthesis_backend != chunk_res.vocoder_synthesis_backend) {
-                full.vocoder_synthesis_backend = "mixed";
-            }
+            full.vocoder_synthesis_backend = supertonic_merge_vocoder_backend(
+                k == 0 ? std::string() : full.vocoder_synthesis_backend, chunk_res.vocoder_synthesis_backend);
+            full.coreml_pending = full.coreml_pending || chunk_res.coreml_pending;
         }
 
         return full;
     }
 
     bool vocoder_on_coreml() const {
-        return model.vocoder_on_coreml;
+        return model.vocoder_on_coreml || (vocoder_coreml && vocoder_coreml->wait(0));
     }
 
+    // A vocoder stage with a route warms too while its sidecar is not ready
+    // yet: the warm-up's vocoder call requests it (prewarm none leaves the
+    // slot idle until a call does).
     bool wants_warm_up() const {
-        return !model.backend_is_cpu || model.vocoder_on_coreml || model.encoder_on_coreml || model.vector_on_coreml;
+        return !model.backend_is_cpu || vocoder_on_coreml() ||
+               (vocoder_coreml && vocoder_coreml->route().route != "none") || model.encoder_on_coreml ||
+               model.vector_on_coreml;
     }
 
     std::string backend_name() const {
@@ -812,6 +883,7 @@ SynthesisResult Engine::synthesize(const std::string & text,
 
 void Engine::cancel() {
     pimpl_->cancel_flag.store(true, std::memory_order_release);
+    pimpl_->wait_cancels.fetch_add(1);
 }
 
 // follow-up — explicit first-synth pre-warm.
@@ -860,6 +932,31 @@ bool Engine::encoder_on_coreml() const {
 
 bool Engine::vector_estimator_on_coreml() const {
     return pimpl_ && pimpl_->model.vector_on_coreml;
+}
+
+std::string Engine::coreml_status() const {
+    return pimpl_ && pimpl_->vocoder_coreml ? pimpl_->vocoder_coreml->status_json() : std::string("{}");
+}
+
+bool Engine::coreml_wait(int64_t timeout_ms) const {
+    if (!pimpl_ || !pimpl_->vocoder_coreml) return false;
+    // A readiness poll has nothing to cancel and touches no flag.
+    if (timeout_ms == 0) return pimpl_->vocoder_coreml->wait(0);
+    // A blocking wait ends early on any Engine::cancel() made after it
+    // started; waits on other threads and a synthesis each keep the cancels
+    // meant for them.
+    return pimpl_->vocoder_coreml->wait(timeout_ms, &pimpl_->wait_cancels, pimpl_->wait_cancels.load());
+}
+
+std::string Engine::coreml_construction() const {
+    return pimpl_ && pimpl_->vocoder_coreml ? pimpl_->vocoder_coreml->construction_json() : std::string("{}");
+}
+
+std::string Engine::coreml_prewarm(CoremlOptions::Prewarm scope, bool wait) const {
+    if (!pimpl_ || !pimpl_->vocoder_coreml) return "{}";
+    // A waited prewarm ends early on any Engine::cancel() made after it
+    // started, as a blocking coreml_wait() does.
+    return pimpl_->vocoder_coreml->prewarm(scope, wait, &pimpl_->wait_cancels, pimpl_->wait_cancels.load());
 }
 
 // Convenience one-shot wrapper.  Pays the full GGUF load + free per

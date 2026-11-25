@@ -37,6 +37,11 @@ bool stat_path(const std::string & path, SourceStat & out);  // follows symlinks
 bool stat_fd(int fd, SourceStat & out);
 bool same_identity(const SourceStat & a, const SourceStat & b);  // size, mtime_ns, ino, dev
 
+// The source a template reads: `base` itself, or `base` read under the
+// template's `names` (recipe::RenamedSource) when it declares them. Null in,
+// null out. Every place that reads a GGUF for a template goes through it.
+std::unique_ptr<OpenSource> template_source(const recipe::Template & t, std::unique_ptr<OpenSource> base);
+
 class GgufSource final : public OpenSource {
 public:
     // Errors: ENOENT / EACCES / short header -> transient I/O; a file that is

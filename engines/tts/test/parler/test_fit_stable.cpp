@@ -28,6 +28,7 @@
 #include "tts-cpp/parler/fit.h"
 #include "parler/internal.h"
 #include "../test_env_portable.h"
+#include "fit_stable_cache.h"
 
 #ifdef TTS_CPP_USE_COREML
 #include "hints.h"
@@ -71,88 +72,33 @@ std::string describe(const tts_cpp::FitResult & f) {
            (f.coreml.validated ? "validated" : "unvalidated") + "|" + f.coreml.disabled_reason;
 }
 
-void write_file(const fs::path & p, const std::string & text) {
-    fs::create_directories(p.parent_path());
-    std::ofstream(p) << text;
-}
-
-std::vector<fs::path> artifact_dirs(const fs::path & cache) {
-    std::vector<fs::path> out;
-    std::error_code ec;
-    for (const auto & e : fs::directory_iterator(cache / "qvac-coreml-v1" / "artifacts", ec)) {
-        if (e.is_directory()) out.push_back(e.path());
-    }
-    return out;
-}
-
+// Cache fixtures shared with the other engines' fit-stable tests.
+using qvac_coreml_fit_stable::artifact_dirs;
+using qvac_coreml_fit_stable::write_file;
 #ifdef TTS_CPP_USE_COREML
 namespace pcm = QVAC_COREML_NS;
-
-// The hint record the runtime reads for the model of `artifact_dir`, in this
-// process or (`host_id`) in another program: the runtime's host id is the
-// program's name.
-std::string runtime_hint_path(const fs::path & cache, const fs::path & artifact_dir, const std::string & units,
-                              const std::string & host_id = {}) {
-    const auto m = pcm::Manager::instance();
-    return pcm::detail::hint_path_for(cache.string(), host_id.empty() ? m->host_id() : host_id,
-                                      (artifact_dir / "model.mlmodelc").string(), "main", units, m->os_build());
-}
-
-std::optional<int64_t> stale_until(bool stale) {
-    if (!stale) return std::nullopt;
-    return pcm::detail::unix_now_s() + 365LL * 24 * 3600;
-}
-
-// Rewrites every hint record under `cache` with `stale` and writes one at the
-// runtime's id for every artifact; returns how many read back at a runtime id.
-int write_hints(const fs::path & cache, const std::string & units, bool stale) {
-    std::error_code ec;
-    for (const auto & e : fs::directory_iterator(cache / "qvac-coreml-v1" / "hints", ec)) {
-        if (e.path().extension() != ".json") continue;
-        std::optional<pcm::detail::HintRecord> rec = pcm::detail::read_hint(e.path().string());
-        if (!rec) continue;
-        rec->stale_until_s = stale_until(stale);
-        pcm::detail::write_hint(e.path().string(), *rec);
-    }
-    int at_runtime_id = 0;
-    for (const fs::path & art : artifact_dirs(cache)) {
-        const std::string path = runtime_hint_path(cache, art, units);
-        pcm::detail::HintRecord rec;
-        rec.warm_load_ms = 120;
-        rec.cold_load_ms = 8000;
-        rec.last_ok = pcm::detail::iso8601_utc(pcm::detail::unix_now_s());
-        rec.stale_until_s = stale_until(stale);
-        rec.artifact = (art / "model.mlmodelc").string();
-        fs::create_directories(fs::path(path).parent_path());
-        const std::optional<pcm::detail::HintRecord> back =
-            pcm::detail::write_hint(path, rec) ? pcm::detail::read_hint(path) : std::nullopt;
-        if (back && back->stale_until_s.has_value() == stale) ++at_runtime_id;
-    }
-    return at_runtime_id;
-}
+using qvac_coreml_fit_stable::runtime_hint_path;
+using qvac_coreml_fit_stable::write_hints;
 #endif
 
 // The parler-dac-w128 template's memory charges under `all` (the default),
 // before the margin, and the envelope fit charges without the host quantizer
 // copy. Each charge is 1.25 x the largest value measured over every
 // overlapped generated-schedule run on the validated hosts, rounded up to
-// 1 MiB, so the envelope's own margin is 1.0 (template.json memory.measured):
-// prepare 1.25 x 442.0 MiB (M2, macOS 27.2.1); the compiler reserve 1.25 x
-// 821.2 MiB, the largest absolute size of ANECompilerService while loading on
-// any host (M4 Max; no run found the service clean, so its growth would
-// understate a clean host); load and warm-up 1.25 x 326.4 MiB and the resident part
-// (weights, 2 x I/O and workspace) 1.25 x 326.7 MiB of steady state (M4 Max,
-// macOS 26.7.2, where `all` runs on the GPU). A change of the template's
-// memory changes these on purpose.
+// 1 MiB, so the envelope's own margin is 1.0 (template.json memory.measured).
+// The M4 Max CI maxima were 443.0 MiB for prepare, 328.3 MiB for load and
+// warm-up, 328.5 MiB for the resident part and 1116.4 MiB for the compiler's
+// absolute size during loading. The compiler reserve gates admission
+// separately from the fit envelope.
 constexpr uint64_t MIB = 1ull << 20;
 constexpr uint64_t DAC_WEIGHTS = 108316032;                    // weight.bin
 constexpr uint64_t DAC_IO = 2 * 393472;                        // latent, valid and pcm, twice
-constexpr uint64_t DAC_PREPARE = 553 * MIB;                    // generation_peak 216 + 8 + compile_peak 329
-constexpr uint64_t DAC_LOAD = 409 * MIB;                       // load_peak_bytes.all
-constexpr uint64_t DAC_RESIDENT = 409 * MIB;                   // runtime weights + 2 x I/O + workspace
+constexpr uint64_t DAC_PREPARE = 554 * MIB;                    // generation_peak 216 + 8 + compile_peak 330
+constexpr uint64_t DAC_LOAD = 411 * MIB;                       // load_peak_bytes.all
+constexpr uint64_t DAC_RESIDENT = 411 * MIB;                   // runtime weights + 2 x I/O + workspace
 constexpr uint64_t DAC_WORKSPACE = DAC_RESIDENT - DAC_WEIGHTS - DAC_IO;
-constexpr uint64_t DAC_ANE_RESERVE = 1027 * MIB;               // ane_compile_reserve_bytes
-constexpr uint64_t DAC_ENVELOPE = DAC_RESIDENT + DAC_PREPARE;  // margin 1.0: 962 MiB
+constexpr uint64_t DAC_ANE_RESERVE = 1396 * MIB;               // ane_compile_reserve_bytes
+constexpr uint64_t DAC_ENVELOPE = DAC_RESIDENT + DAC_PREPARE;  // margin 1.0: 965 MiB
 
 void template_charges(const parler_dac_route & r) {
 #if defined(TTS_CPP_USE_COREML) && defined(__APPLE__) && TARGET_OS_OSX
@@ -252,15 +198,7 @@ int main(int argc, char ** argv) {
     if (given_cache.empty()) {
         // What a generation leaves: the artifact, its memo, the used marker.
         cache = scratch / "cache";
-        const std::string key = "0123456789abcdef0123456789abcdef";
-        const fs::path root = cache / "qvac-coreml-v1";
-        const fs::path art = root / "artifacts" / ("parler-dac-w128." + key);
-        write_file(art / "model.mlmodelc" / "model.mil", "program(1.0)\n");
-        write_file(art / "artifact.json",
-                   "{\"schema\":1,\"complete\":true,\"artifact_key\":\"" + key +
-                       "\",\"inventory\":[{\"path\":\"model.mlmodelc/model.mil\",\"bytes\":13}]}\n");
-        write_file(root / "sources" / ("fedcba9876543210fedcba9876543210." + key + ".json"), "{\"schema\":1}\n");
-        write_file(root / "used" / key, "");
+        qvac_coreml_fit_stable::simulate_generation(cache, "parler-dac-w128");
         same(cache, "after a generation (artifact, memo)");
     } else {
         // The populated cache as it is, then a copy for the hint cases.

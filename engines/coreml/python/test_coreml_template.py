@@ -426,10 +426,44 @@ class TwinTest(unittest.TestCase):
                 ctpl.check_twins_differ(a, b, "extract")
 
 
-# Templates whose patch lines read GGUF tensors by name directly, with those
-# names. Other templates' patches may read metadata or resolve logical names,
-# so they are not listed here.
-PATCH_INPUT_TENSORS = {"parler-dac-w128": ["dac.dec.conv_out.bias"]}
+def stored_tensor_name(template, gguf_path, name):
+    """The GGUF tensor a recipe name reads: through the template's `names`
+    table (map, aliases, fallbacks; as the runtime's RenamedSource resolves
+    them) when it declares one, else the name itself."""
+    import gguf
+
+    spec = template.get("names")
+    if not spec:
+        return name
+    r = gguf.GGUFReader(str(gguf_path))
+
+    def strings(key):
+        f = r.fields.get(key)
+        return None if f is None else [bytes(f.parts[i]).decode() for i in f.data]
+
+    frm, to = (strings(k) for k in spec["map"])
+    stored = dict(zip(frm, to))
+    if "aliases" in spec:
+        af, at = (strings(k) for k in spec["aliases"])
+        if af is not None and at is not None:
+            for a, t in zip(af, at):
+                if t in stored and a not in stored:
+                    stored[a] = stored[t]
+    for n, other in spec.get("fallbacks", []):
+        if n not in stored and other in stored:
+            stored[n] = stored[other]
+    return stored.get(name, name)
+
+
+# Templates whose patch lines read GGUF tensors by name, with those names (a
+# logical name resolves through the template's `names` table,
+# stored_tensor_name). Other templates' patches may read metadata only, so
+# they are not listed here.
+PATCH_INPUT_TENSORS = {
+    "parler-dac-w128": ["dac.dec.conv_out.bias"],
+    "supertonic-vocoder-w64": ["vocoder:node:/decoder/head/act/PRelu#1"],
+    "supertonic-vocoder-pw2d-w64": ["vocoder:node:/decoder/head/act/PRelu#1"],
+}
 
 
 class RepoTemplatePatchTest(unittest.TestCase):
@@ -451,7 +485,8 @@ class RepoTemplatePatchTest(unittest.TestCase):
         for tid, names in PATCH_INPUT_TENSORS.items():
             self.assertIn(tid, by_id, f"template {tid} is not in the repository")
             tdir = by_id[tid]
-            patches = json.loads((tdir / "template.json").read_text()).get("patches", [])
+            template = json.loads((tdir / "template.json").read_text())
+            patches = template.get("patches", [])
             self.assertTrue(patches, f"{tid}: no patch sites")
             lines = [l for l in (tdir / "recipe.txt").read_text().splitlines() if l.startswith("patch ")]
             for name in names:
@@ -466,13 +501,14 @@ class RepoTemplatePatchTest(unittest.TestCase):
                 self.run_tool("generate", "--template", tdir, "--gguf", a, "-o", tmp / "a.mlpackage")
                 spec_a = ctpl.package_parts(tmp / "a.mlpackage")["spec"].read_bytes()
                 for name in names:
+                    stored = stored_tensor_name(template, a, name)
                     b = tmp / "b.gguf"
                     shutil.copyfile(a, b)
                     r = gguf.GGUFReader(str(b), "r+")
-                    t = next(x for x in r.tensors if x.name == name)
+                    t = next(x for x in r.tensors if x.name == stored)
                     t.data[...] = np.asarray(t.data) * -1.5 - 0.125
                     del t, r
-                    others = sorted(set(ctpl.gguf_tensors(a)) - {name})
+                    others = sorted(set(ctpl.gguf_tensors(a)) - {stored})
                     self.assertEqual(ctpl.coinciding_tensors(a, b), others)  # only `name` differs
                     key_b = json.loads(self.run_tool("digest", "--template", tdir, "--gguf", b))["artifact_key"]
                     self.assertNotEqual(key_a, key_b, f"{tdir.name}: {name} is not in the artifact key")

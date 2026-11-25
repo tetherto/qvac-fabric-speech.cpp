@@ -3,6 +3,7 @@
 #include "coreml_windows.h"
 #include "fit_price.h"
 #include "ggml-alloc.h"
+#include "supertonic_vocoder_coreml.h"
 
 #ifdef TTS_CPP_USE_COREML
 #include "supertonic_coreml_vocoder.h"
@@ -978,21 +979,58 @@ int supertonic_coreml_vocoder_context_frames(const supertonic_model & model) {
     return (int) ((receptive + factor - 1) / factor);
 }
 
-#ifdef TTS_CPP_USE_COREML
 namespace {
 
-// Test-only: fail instead of falling back to ggml.
+#ifdef TTS_CPP_USE_COREML
+// Test-only, for the sidecar attached at load: fail instead of falling back
+// to ggml. The Engine's Core ML runtime resolves its policy once, at
+// construction (model.vocoder_pending), and builds without Core ML ignore
+// the variable.
 bool coreml_vocoder_strict() {
     return std::getenv("SUPERTONIC_COREML_STRICT") != nullptr;
 }
+#endif
+
+// The sidecar attached at load (load_supertonic_gguf without the Engine's
+// Core ML runtime), as a supertonic_vocoder_sidecar.
+class attached_sidecar final : public supertonic_vocoder_sidecar {
+public:
+    explicit attached_sidecar(::supertonic_coreml_vocoder_context * ctx) : ctx_(ctx) {}
+    int window() const override {
+#ifdef TTS_CPP_USE_COREML
+        return (int) supertonic_coreml_vocoder_window_frames(ctx_);
+#else
+        return 0;
+#endif
+    }
+    const char * label() const override {
+#ifdef TTS_CPP_USE_COREML
+        return supertonic_coreml_vocoder_backend_label(ctx_);
+#else
+        return "coreml";
+#endif
+    }
+    bool synthesize(const float * latent, int64_t latent_len, int64_t begin, int64_t filled, int64_t skip,
+                    int64_t keep, float * wav) override {
+#ifdef TTS_CPP_USE_COREML
+        return supertonic_coreml_vocoder_synthesize(ctx_, latent, latent_len, begin, filled, skip, keep, wav) == 0;
+#else
+        (void) latent; (void) latent_len; (void) begin; (void) filled; (void) skip; (void) keep; (void) wav;
+        return false;
+#endif
+    }
+
+private:
+    ::supertonic_coreml_vocoder_context * ctx_;
+};
 
 // Leaves wav_out empty on failure so the caller falls back to the ggml graph.
 // The sidecar gathers each window straight from the channel-major host latent
 // and decodes only the kept slice straight into wav_out (no staging buffers).
-bool run_vocoder_coreml(const supertonic_model & model, const float * latent,
+bool run_vocoder_coreml(const supertonic_model & model, supertonic_vocoder_sidecar & sidecar, const float * latent,
                         int latent_len, std::vector<float> & wav_out) {
     wav_out.clear();
-    const int window = (int) supertonic_coreml_vocoder_window_frames(model.coreml_vocoder);
+    const int window = sidecar.window();
     const int context = supertonic_coreml_vocoder_context_frames(model);
     if (context <= 0) return false;
     const std::vector<::tts_cpp::detail::coreml_window> plan =
@@ -1003,10 +1041,9 @@ bool run_vocoder_coreml(const supertonic_model & model, const float * latent,
         (size_t) model.hparams.base_chunk_size * model.hparams.ttl_chunk_compress_factor;
     wav_out.resize((size_t) latent_len * samples_per_frame);
     for (const ::tts_cpp::detail::coreml_window & span : plan) {
-        if (supertonic_coreml_vocoder_synthesize(
-                model.coreml_vocoder, latent, latent_len, span.begin, span.filled,
-                span.core_begin - span.begin, span.core_end - span.core_begin,
-                wav_out.data() + (size_t) span.core_begin * samples_per_frame) != 0) {
+        if (!sidecar.synthesize(latent, latent_len, span.begin, span.filled, span.core_begin - span.begin,
+                                span.core_end - span.core_begin,
+                                wav_out.data() + (size_t) span.core_begin * samples_per_frame)) {
             wav_out.clear();
             return false;
         }
@@ -1015,31 +1052,68 @@ bool run_vocoder_coreml(const supertonic_model & model, const float * latent,
 }
 
 }  // namespace
-#endif
 
 bool supertonic_vocoder_forward_ggml(const supertonic_model & model,
                                      const float * latent,
                                      int latent_len,
                                      std::vector<float> & wav_out,
                                      std::string * error,
-                                     std::string * backend_used) {
+                                     std::string * backend_used,
+                                     bool * pending,
+                                     const std::atomic<bool> * cancel) {
     if (backend_used) *backend_used = "ggml";
-#ifdef TTS_CPP_USE_COREML
+    if (pending) *pending = false;
+    // The call's backend, taken once: the sidecar attached at load, or the
+    // one the Engine's Core ML runtime hands out (none while it is not ready).
+    supertonic_vocoder_call call;
+    bool strict = false;
     if (model.coreml_vocoder) {
+        call.sidecar = std::make_shared<attached_sidecar>(model.coreml_vocoder);
+#ifdef TTS_CPP_USE_COREML
+        strict = coreml_vocoder_strict();
+#endif
+    } else if (model.vocoder_pending) {
+        strict = model.vocoder_pending->strict();
+        try {
+            call = model.vocoder_pending->acquire(latent_len, cancel);
+        } catch (const std::exception & e) {
+            if (error) *error = e.what();
+            return false;
+        }
+        if (pending) *pending = call.pending;
+        // A wait for the sidecar ended by cancellation hands back no sidecar;
+        // the call is cancelled, not redone on ggml.
+        if (cancel && cancel->load()) {
+            if (error) *error = "cancelled";
+            return false;
+        }
+    }
+#ifdef TTS_CPP_USE_COREML
+    else if (!model.vocoder_coreml_managed && coreml_vocoder_strict()) {
+        if (error) {
+            *error = "supertonic: no Core ML vocoder sidecar loaded and "
+                     "SUPERTONIC_COREML_STRICT is set";
+        }
+        return false;
+    }
+#endif
+    if (call.sidecar) {
         auto profile_coreml = std::chrono::steady_clock::now();
-        if (latent_len > 0 && run_vocoder_coreml(model, latent, latent_len, wav_out)) {
+        if (latent_len > 0 && run_vocoder_coreml(model, *call.sidecar, latent, latent_len, wav_out)) {
             profile_vocoder_checkpoint("coreml", profile_coreml);
-            if (backend_used) {
-                *backend_used = supertonic_coreml_vocoder_backend_label(model.coreml_vocoder);
-            }
+            if (backend_used) *backend_used = call.sidecar->label();
             if (error) error->clear();
             return true;
         }
-        if (coreml_vocoder_strict()) {
+        // A failed prediction retires the runtime's sidecar for every engine
+        // on it; the whole call is then redone on ggml (a vocoder call holds
+        // no state between windows), or fails under strict.
+        if (latent_len > 0 && call.retire) call.retire("prediction failed");
+        if (strict) {
             if (error) {
                 *error = "supertonic: Core ML vocoder unavailable for " +
                          std::to_string(latent_len) +
-                         " latent frames and SUPERTONIC_COREML_STRICT is set; failing "
+                         " latent frames and the Core ML strict policy is set; failing "
                          "instead of the ggml fallback";
             }
             return false;
@@ -1049,14 +1123,7 @@ bool supertonic_vocoder_forward_ggml(const supertonic_model & model,
                          "supertonic: Core ML vocoder failed for %d latent frames; "
                          "falling back to the ggml graph\n", latent_len);
         }
-    } else if (coreml_vocoder_strict()) {
-        if (error) {
-            *error = "supertonic: no Core ML vocoder sidecar loaded and "
-                     "SUPERTONIC_COREML_STRICT is set";
-        }
-        return false;
     }
-#endif
     // Sets thread_local CPU-custom-op + F16-attn flags for the duration
     // of this call so the graph-build helpers below pick the backend-
     // appropriate dispatch path; RAII teardown handles exceptions.
