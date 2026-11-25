@@ -532,24 +532,14 @@ struct Engine::Impl {
 
         std::vector<float> latent_mask((size_t) latent_len, 1.0f);
 
-        // Master's CFM loop unrolling (Phase A1+A2) replaced the
-        // round-7 per-step `supertonic_vector_step_ggml` loop with
-        // a single `supertonic_vector_loop_ggml` call below.  The
-        // per-step cancellation hook from round 7 collapses into
-        // this single pre-synth check (cancel granularity moves
-        // from per-step to per-synth on the GPU path; the CPU
-        // path's per-step fallback inside `supertonic_vector_loop_ggml`
-        // retains finer cancellation if needed).
+        // The estimator receives no cancellation flag, including its CPU
+        // fallback. Cancellation is checked around the entire call.
         if (cancel_flag.load(std::memory_order_acquire)) {
             throw std::runtime_error("Supertonic Engine: cancelled before vector estimator");
         }
-        // Phase A1+A2: run all CFM steps as ONE ggml graph on non-CPU
-        // backends.  Latent flows step-to-step in GPU memory; on CPU this
-        // falls back to a per-step loop over `supertonic_vector_step_ggml`.
-        // Override via SUPERTONIC_DISABLE_LOOP_GRAPH=1.
-        // NOTE: cancellation granularity is now per-synth on the GPU path
-        // (worst-case cancel latency = whole CFM loop).  CPU keeps per-step
-        // cancellation via the fallback.
+        // Non-CPU backends run all CFM steps in one graph; CPU uses per-step
+        // graphs. SUPERTONIC_DISABLE_LOOP_GRAPH=1 also selects per-step graphs,
+        // without adding cancellation checks between them.
         std::vector<float> final_latent;
         std::string vector_backend;
         if (!supertonic_vector_loop_ggml(model, latent.data(), latent_len,

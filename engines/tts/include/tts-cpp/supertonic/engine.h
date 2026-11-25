@@ -440,9 +440,9 @@ public:
                                       const StreamCallback & on_chunk = {});
 
     // Best-effort cancel of an in-flight synthesize() call on another
-    // thread.  Setting the flag is all this does; actual termination
-    // happens at the next cancellation check inside the vector-
-    // estimator loop (one step is the worst-case cancel latency).
+    // thread. The flag is checked at synthesis stage and chunk boundaries.
+    // An active vector-estimator loop can run to completion before the next
+    // check; cancellation is not checked between its individual steps.
     // A subsequent synthesize() starts a new request with cancellation cleared.
     void cancel();
 

@@ -40,6 +40,8 @@ Supertonic cancellation applies to the in-flight synthesis request. Starting a
 subsequent batch or streaming `Engine::synthesize()` clears the prior cancellation
 state, so voice applications can interrupt playback and reuse the loaded engine
 for the next reply.
+Cancellation is checked between synthesis stages and chunks; an active vector
+estimator can finish its entire loop before cancellation is observed.
 
 Supertonic also exposes `Engine::synthesize_segment()` for callers that already
 select sentence or clause boundaries. It synthesizes the entire supplied segment

@@ -23,6 +23,7 @@ models. `Engine::synthesize_segment()` preserves caller-selected sentence or
 clause boundaries, and `Engine::release_thread_resources()` releases a worker's
 inference caches before that thread exits. See the
 [TTS guide](engines/tts/README.md) for the lifecycle contract.
+Cancellation can wait for an active vector-estimator loop to finish.
 
 The engine guides own model formats, quantization, backend validation, and input
 requirements. An available ggml backend does not imply every model has been

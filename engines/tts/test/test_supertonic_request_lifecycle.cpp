@@ -107,6 +107,28 @@ SynthesisResult test_preserved_segment(Engine & engine) {
     return reference;
 }
 
+void test_segment_bypasses_configured_chunker(const std::string & model) {
+    Engine reference_engine(make_options(model, unsplit_chunk_size));
+    int reference_callbacks = 0;
+    const auto reference = reference_engine.synthesize(streaming_text,
+        [&](const float *, std::size_t, int, bool) { ++reference_callbacks; });
+    require(reference_callbacks == 1, "Reference synthesis must remain unsplit");
+
+    Engine chunked_engine(make_options(model, split_chunk_size));
+    collect_stream(chunked_engine);
+    int callbacks = 0;
+    std::vector<float> received;
+    const auto segment = chunked_engine.synthesize_segment(streaming_text,
+        [&](const float * pcm, std::size_t count, int index, bool last) {
+            require(index == 0 && last, "Whole-segment synthesis used the configured text chunker");
+            ++callbacks;
+            received.insert(received.end(), pcm, pcm + count);
+        });
+    require(callbacks == 1 && received == segment.pcm,
+            "Whole-segment synthesis did not deliver exactly one complete PCM callback");
+    require_same_audio(reference, segment, "Bypassing the configured chunker changed unsplit synthesis PCM");
+}
+
 void test_worker_cache_release(Engine & engine, const SynthesisResult & reference) {
     std::exception_ptr failure;
     std::thread worker([&] {
@@ -141,6 +163,7 @@ int main(int argc, char ** argv) {
     try {
         require(argc == 2, "Usage: test-supertonic-request-lifecycle MODEL.gguf");
         test_cancelled_request_reuse(argv[1]);
+        test_segment_bypasses_configured_chunker(argv[1]);
         test_segment_and_cache_lifecycle(argv[1]);
         std::printf("Supertonic request cancellation, segment, resampling, and worker-cache regressions passed\n");
         return 0;
