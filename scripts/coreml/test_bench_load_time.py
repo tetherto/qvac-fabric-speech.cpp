@@ -399,6 +399,43 @@ class ReportMergeTest(unittest.TestCase):
             self.assertIn(kept, merged)
         self.assertIn("Not measured yet.", merged)
 
+    def test_refresh_adds_the_power_block_to_a_report_written_without_it(self):
+        # A report written before the power block existed: refreshing it adds
+        # the block in front of the setup block and keeps the hand-written text.
+        committed = (blt.REPO / "docs" / "COREML-LOAD-TIME.md").read_text()
+        old = re.sub(r"<!-- report:power -->\n.*?<!-- /report:power -->\n\n", "", committed, flags=re.S)
+        self.assertNotIn("report:power", old)
+        merged = blt.merge_report(old, blt.render(blt.summarize([])) + "\n")
+        self.assertIn("<!-- /report:power -->\n\n<!-- report:setup -->", merged)
+        self.assertEqual(merged.count("<!-- report:power -->"), 1)
+        for kept in ("## Reading the numbers", "Limits of this run", "on battery from 12:35 to 14:41"):
+            self.assertIn(kept, merged)
+        # Any other missing block still needs the markers added by hand.
+        no_sizes = re.sub(r"<!-- report:sizes -->\n.*?<!-- /report:sizes -->\n\n", "", old, flags=re.S)
+        with self.assertRaisesRegex(blt.ReportError, r"missing \['power', 'sizes'\]"):
+            blt.merge_report(no_sizes, blt.render(blt.summarize([])) + "\n")
+
+    def test_refresh_refuses_a_power_block_that_lost_a_marker(self):
+        # A damaged pair is not a report written before the block existed:
+        # refusing leaves the file as it was instead of inserting a second
+        # block whose closing marker would swallow the text in between.
+        committed = (blt.REPO / "docs" / "COREML-LOAD-TIME.md").read_text()
+        self.assertEqual(committed.count("<!-- /report:power -->\n"), 1)
+        for damaged in (committed.replace("<!-- /report:power -->\n", ""),
+                        committed.replace("<!-- report:power -->\n", "")):
+            with tempfile.TemporaryDirectory() as d:
+                a = self.results(Path(d) / "a", 12000.0)
+                doc = Path(d) / "doc.md"
+                doc.write_bytes(damaged.encode())
+                rc, err = self.report("--results", a, "--out", doc)
+                self.assertEqual(rc, 1)
+                self.assertIn("unpaired or nested markers for the generated sections ['power']", err)
+                self.assertEqual(doc.read_bytes(), damaged.encode())
+        nested = committed.replace("<!-- /report:power -->\n", "<!-- report:power -->\n<!-- /report:power -->\n"
+                                   "<!-- /report:power -->\n")
+        with self.assertRaisesRegex(blt.ReportError, r"unpaired or nested markers"):
+            blt.merge_report(nested, blt.render(blt.summarize([])) + "\n")
+
 
 class DriverSourceTest(unittest.TestCase):
     """The ttr readings the driver emits go through bench_ttr::with_readings
@@ -443,6 +480,27 @@ class TtrSummaryTest(unittest.TestCase):
         self.assertFalse(blt.Runner._ttr_summary(self.run_record(-1, 3))["all_ready"])
 
 
+AC = {"source": "ac", "low_power": False}
+BATTERY = {"source": "battery", "low_power": False}
+AC_LOW_POWER = {"source": "ac", "low_power": True}
+UNREADABLE = {"source": "unknown", "low_power": None}  # what read_power gives when pmset fails
+
+PMSET_BATT_AC = """Now drawing from 'AC Power'
+ -InternalBattery-0 (id=36438115)\t100%; charged; 0:00 remaining present: true
+"""
+PMSET_BATT_BATTERY = """Now drawing from 'Battery Power'
+ -InternalBattery-0 (id=36438115)\t88%; discharging; 10:21 remaining present: true
+"""
+PMSET_SETTINGS = """System-wide power settings:
+Currently in use:
+ standby              1
+ sleep                1 (sleep prevented by powerd, caffeinate, sharingd)
+ hibernatemode        3
+ lowpowermode         {lpm}
+ womp                 0
+"""
+
+
 @contextlib.contextmanager
 def chdir(path: Path):
     old = os.getcwd()
@@ -479,6 +537,14 @@ class RunnerFixture:
         self.identities = []  # [{"id", "binary", "open"}]
         self.calls = []       # driver calls: {"cmd", "identity", "artifacts"}
         self.ready = lambda call: True
+        # pmset readings, consumed one per read; the last one repeats.
+        self.power = [AC]
+        self.power_reads = 0
+
+    def read_power(self):
+        p = self.power[min(self.power_reads, len(self.power) - 1)]
+        self.power_reads += 1
+        return dict(p)
 
     @contextlib.contextmanager
     def fresh_identity(self, binary, hosts_dir):
@@ -491,6 +557,13 @@ class RunnerFixture:
 
     def run_json(self, cmd, env=None, timeout=3600, ok_codes=(0,)):
         cmd = [str(c) for c in cmd]
+        if cmd[1:] == ["identity"]:
+            return {"os_build": "24G419", "os_version": "15.7.3", "host_id": "host"}
+        if cmd[1] == "load":  # one process loads every --function and predicts once
+            self.calls.append({"cmd": cmd, "identity": self.identities[-1]["id"], "power_reads": self.power_reads})
+            fns = [cmd[i + 1] for i, c in enumerate(cmd) if c == "--function"]
+            return {"functions": [{"function": f, "load_ms": 1.0, "predict_ms": 1.0} for f in fns],
+                    "footprint_max": 1}
         arts = [cmd[i + 1] for i, c in enumerate(cmd) if c == "--artifact"]
         parsed = []
         for a in arts:
@@ -510,7 +583,7 @@ class RunnerFixture:
 
     def runner(self):
         with chdir(self.root):
-            return blt.Runner(self.args, MANIFEST)
+            return blt.Runner(self.args, MANIFEST, power_reader=self.read_power)
 
     def records(self, runner, kind=None):
         recs = blt.read_results(self.root / runner.results)
@@ -646,6 +719,393 @@ class SynthesisRunnerTest(unittest.TestCase):
             want = {"name": "chatterbox-s3gen-q8_0.gguf", "coreml": True, "readable": True, "beside_sidecars": True}
             self.assertEqual(seen, [want, want])
             self.assertEqual(len(fx.records(r, "synthesis")), 1)
+
+
+class PowerParseTest(unittest.TestCase):
+    def test_power_source(self):
+        self.assertEqual(blt.parse_power_source(PMSET_BATT_AC), "ac")
+        self.assertEqual(blt.parse_power_source(PMSET_BATT_BATTERY), "battery")
+        self.assertEqual(blt.parse_power_source("Now drawing from 'UPS Power'\n"), "ups")
+        self.assertEqual(blt.parse_power_source(""), "unknown")
+
+    def test_low_power_mode(self):
+        self.assertIs(blt.parse_low_power(PMSET_SETTINGS.format(lpm=0)), False)
+        self.assertIs(blt.parse_low_power(PMSET_SETTINGS.format(lpm=1)), True)
+        # Macs with High Power Mode: 0 automatic, 1 low, 2 high.
+        self.assertIs(blt.parse_low_power(" powermode           1\n"), True)
+        self.assertIs(blt.parse_low_power(" powermode           2\n"), False)
+        self.assertIsNone(blt.parse_low_power(" standby 1\n"))
+
+    def test_read_power_through_a_fake_pmset(self):
+        calls = []
+
+        def pmset(*args):
+            calls.append(args)
+            return PMSET_BATT_BATTERY if args == ("-g", "batt") else PMSET_SETTINGS.format(lpm=1)
+
+        self.assertEqual(blt.read_power(pmset), {"source": "battery", "low_power": True})
+        self.assertEqual(sorted(calls), [("-g",), ("-g", "batt")])
+        self.assertEqual(blt.read_power(lambda *a: ""), {"source": "unknown", "low_power": None})
+
+    def test_pmset_missing_reads_empty(self):
+        with mock.patch.object(blt.subprocess, "run", side_effect=FileNotFoundError("pmset")):
+            self.assertEqual(blt.pmset("-g", "batt"), "")
+
+    def test_pmset_output_that_is_not_utf8_still_reads(self):
+        # A device name in MacRoman (byte 0x8e is "é"): a strict decode would
+        # raise UnicodeDecodeError and stop the run.
+        with tempfile.TemporaryDirectory() as d:
+            fake = Path(d) / "pmset"
+            fake.write_bytes(b"#!/bin/sh\nprintf \"Now drawing from 'AC Power'\\n -caf\\216 UPS\\t100%%\\n\"\n")
+            fake.chmod(0o755)
+            with mock.patch.dict(os.environ, {"PATH": d + os.pathsep + os.environ.get("PATH", "")}):
+                out = blt.pmset("-g", "batt")
+        self.assertIn("�", out)
+        self.assertEqual(blt.parse_power_source(out), "ac")
+
+    def test_labels(self):
+        self.assertEqual(blt.power_label(AC), "AC")
+        self.assertEqual(blt.power_label(AC_LOW_POWER), "AC, Low Power Mode")
+        self.assertEqual(blt.power_label({"source": "unknown", "low_power": None}),
+                         "unknown, Low Power Mode unknown")
+        self.assertEqual(blt.power_label(None), "not recorded")
+
+
+class PowerRunnerTest(unittest.TestCase):
+    """Power read per row through a fake pmset reader: start, then one reading
+    per recorded row. The time-to-ready config records 7 rows: ttr run 0, two
+    cached startups, ttr run 1, two cached startups, the generate run."""
+
+    def run_ttr(self, readings, allow_battery=False):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        fx = RunnerFixture(Path(d.name))
+        fx.power = readings
+        fx.args.allow_battery = allow_battery
+        r = fx.runner()
+        real_run = subprocess.run
+
+        def run(cmd, *a, **k):  # no host sysctl readings in a hermetic test
+            if cmd[0] == "sysctl":
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            return real_run(cmd, *a, **k)
+
+        err = io.StringIO()
+        with fx.patched(), contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            with mock.patch.object(blt.subprocess, "run", run):
+                r.environment()
+            r.ttr(TtrRunnerTest.CFG)
+        return fx, r, err.getvalue()
+
+    @staticmethod
+    def rows(fx, r):
+        return [x for x in fx.records(r) if x["kind"] != "env"]
+
+    def test_every_row_records_the_power(self):
+        fx, r, err = self.run_ttr([AC])
+        env = fx.records(r, "env")[0]
+        self.assertEqual(env["power"], AC)
+        self.assertTrue(env["ac_power"])
+        rows = self.rows(fx, r)
+        self.assertEqual([x["kind"] for x in rows], ["ttr", "ttr_cached", "ttr_cached", "ttr", "ttr_cached",
+                                                     "ttr_cached", "ttr"])
+        self.assertTrue(all(x["power"] == AC and x["power_changed"] is False and x["power_uncertain"] is False
+                            for x in rows), rows)
+        self.assertEqual(fx.power_reads, 1 + len(rows))
+        self.assertIsNone(r.power_warning())
+        self.assertEqual(err, "")
+        doc = blt.render(blt.summarize(fx.records(r)))
+        self.assertIn("Power at the start of the run: AC.", doc)
+        self.assertIn("| ttr | 3 | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |", doc)
+        self.assertNotIn("Warning", doc)
+
+    def test_a_change_mid_run_flags_the_rows_and_continues(self):
+        # Battery for rows 1 and 2, back on AC from row 3: rows 1-2 read
+        # battery and row 3 was measured while the power came back.
+        fx, r, err = self.run_ttr([AC, AC, BATTERY, BATTERY, AC])
+        rows = self.rows(fx, r)
+        self.assertEqual(len(rows), 7, "the run continues after the change")
+        self.assertEqual([x["power"]["source"] for x in rows], ["ac", "battery", "battery", "ac", "ac", "ac", "ac"])
+        self.assertEqual([x["power_changed"] for x in rows], [False, True, True, True, False, False, False])
+        self.assertEqual(err.count("power changed from AC to battery"), 1, err)
+        warning = r.power_warning()
+        self.assertIn("3 rows are flagged power_changed (ttr_cached 2, ttr 1)", warning)
+        self.assertIn("started on AC", warning)
+        doc = blt.render(blt.summarize(fx.records(r)))
+        self.assertIn("**Warning: the power source or Low Power Mode changed during the run.** 3 of 7 rows are "
+                      "flagged changed (ttr, ttr_cached)", doc)
+        self.assertIn("| ttr | 3 | 3 | 0 | 0 | 0 | 0 | 0 | 1 | 0 |", doc)
+        self.assertIn("| ttr_cached | 4 | 2 | 2 | 0 | 0 | 0 | 0 | 2 | 0 |", doc)
+        self.assertIsNone(TASK_ID.search(doc), TASK_ID.search(doc))
+
+    def test_a_failed_read_on_steady_ac_is_uncertain_not_a_change(self):
+        # pmset failed once (row 2) on a run that stayed on AC: rows 2 and 3
+        # are uncertain, nothing is a change, and the report counts the
+        # failed sample as unavailable, not as another source.
+        fx, r, err = self.run_ttr([AC, AC, UNREADABLE, AC])
+        rows = self.rows(fx, r)
+        self.assertEqual([x["power_changed"] for x in rows], [False] * 7)
+        self.assertEqual([x["power_uncertain"] for x in rows], [False, True, True, False, False, False, False])
+        self.assertNotIn("power changed", err)
+        self.assertEqual(err.count("could not read the power source or Low Power Mode"), 1, err)
+        warning = r.power_warning()
+        self.assertNotIn("power_changed", warning)
+        self.assertIn("2 rows are flagged power_uncertain (ttr_cached 2)", warning)
+        doc = blt.render(blt.summarize(fx.records(r)))
+        self.assertNotIn("changed during the run", doc)
+        self.assertIn("**Warning: `pmset` could not be read for some samples.** 2 of 7 rows are flagged uncertain "
+                      "(ttr_cached)", doc)
+        self.assertIn("| ttr_cached | 4 | 3 | 0 | 0 | 1 | 0 | 0 | 0 | 2 |", doc)
+        self.assertIn("| ttr | 3 | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |", doc)
+
+    def test_a_known_field_confirms_a_change_when_the_other_is_unavailable(self):
+        # `pmset -g` failed but `pmset -g batt` says battery: a change.
+        fx, r, err = self.run_ttr([AC, AC, {"source": "battery", "low_power": None}, AC])
+        rows = self.rows(fx, r)
+        self.assertEqual([x["power_changed"] for x in rows], [False, True, True, False, False, False, False])
+        self.assertEqual([x["power_uncertain"] for x in rows], [False] * 7)
+        self.assertIn("power changed from AC to battery, Low Power Mode unknown", err)
+        self.assertNotIn("power_uncertain", r.power_warning())
+
+    def test_two_known_samples_confirm_a_change_the_start_could_not_read(self):
+        # AC throughout; Low Power Mode unreadable at the start, then off,
+        # then on: the two known readings prove a toggle, so the row whose
+        # sample turned it on is changed, not uncertain. The rows before and
+        # after it cannot be compared with the start and stay uncertain.
+        start = {"source": "ac", "low_power": None}
+        fx, r, err = self.run_ttr([start, AC, AC_LOW_POWER])
+        rows = self.rows(fx, r)
+        self.assertEqual([x["power"]["low_power"] for x in rows], [False] + [True] * 6)
+        self.assertEqual([x["power_changed"] for x in rows], [False, True, False, False, False, False, False])
+        self.assertEqual([x["power_uncertain"] for x in rows], [True, False, True, True, True, True, True])
+        self.assertIn("power changed from AC to AC, Low Power Mode;", err)
+        warning = r.power_warning()
+        self.assertIn("1 rows are flagged power_changed (ttr_cached 1)", warning)
+        self.assertIn("6 rows are flagged power_uncertain", warning)
+        self.assertIn("| ttr_cached | 4 | 4 | 0 | 0 | 0 | 0 | 4 | 1 | 3 |", blt.render(blt.summarize(fx.records(r))))
+
+    def test_power_compare_field_by_field(self):
+        self.assertEqual(blt.power_compare(AC, AC), (False, False))
+        self.assertEqual(blt.power_compare(AC, BATTERY), (True, False))
+        self.assertEqual(blt.power_compare(AC, AC_LOW_POWER), (True, False))
+        self.assertEqual(blt.power_compare(AC, UNREADABLE), (False, True))
+        self.assertEqual(blt.power_compare(UNREADABLE, AC), (False, True))
+        self.assertEqual(blt.power_compare(AC, {"source": "ac", "low_power": None}), (False, True))
+
+    def test_the_flag_is_described_as_an_adjacent_sample_test(self):
+        # Row 3 reads AC again yet is flagged: the sample before it was
+        # battery. The report must say what the flag can and cannot tell.
+        fx, r, _ = self.run_ttr([AC, AC, BATTERY, AC])
+        rows = self.rows(fx, r)
+        self.assertEqual(rows[2]["power"], AC)
+        self.assertTrue(rows[2]["power_changed"])
+        doc = blt.render(blt.summarize(fx.records(r)))
+        self.assertIn("A row's `power` in `results.jsonl` is the sample taken after it was measured", doc)
+        self.assertIn("`power_changed` is a conservative flag from adjacent samples", doc)
+        self.assertIn("or when the two differ from each other in a field both read", doc)
+        self.assertIn("It can flag a row measured wholly on the start's power", doc)
+        self.assertIn("misses a change that reverts between two samples", doc)
+        self.assertIn("flags each row whose own sample or the one before it differs from the start's", doc)
+        self.assertNotIn("measured while the power differed", doc)
+
+    def test_cold_load_rows_of_one_process_share_its_reading(self):
+        # A cold load runs one process per stage and records a row per
+        # function. The power went to battery during the encoder process and
+        # came back during the cfm one: every row of both is flagged, hift's
+        # are not, and each process is read once.
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        fx = RunnerFixture(Path(d.name))
+        fx.power = [AC, BATTERY, AC]
+        r = fx.runner()
+        r.power_start = r.power_last = fx.read_power()  # what environment() reads
+        with fx.patched(), contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            r.load({"sets": ["w3"], "warm_runs": 0, "predictions": 1, "sharing_runs": 0})
+        rows = self.rows(fx, r)
+        self.assertEqual([(x["stage"], x["function"]) for x in rows],
+                         [("encoder", "tokens_256"), ("encoder", "tokens_512"), ("encoder", "tokens_768"),
+                          ("cfm", "frames_512"), ("cfm", "frames_1024"), ("cfm", "frames_1536"), ("hift", "main")])
+        self.assertEqual([x["power"]["source"] for x in rows], ["battery"] * 3 + ["ac"] * 4)
+        self.assertEqual([x["power_changed"] for x in rows], [True] * 6 + [False])
+        # Each process sees only the readings taken before it ran: the start's
+        # and one after each earlier process, never one taken just before it.
+        self.assertEqual([c["power_reads"] for c in fx.calls], [1, 2, 3])
+        self.assertEqual(fx.power_reads, 1 + len(fx.calls))
+        self.assertIn("6 rows are flagged power_changed (load_cold 6)", r.power_warning())
+
+    def test_a_change_before_the_first_row_flags_every_row(self):
+        fx, r, _ = self.run_ttr([AC, BATTERY])
+        rows = self.rows(fx, r)
+        self.assertTrue(all(x["power"] == BATTERY and x["power_changed"] for x in rows), rows)
+        self.assertIn("7 rows are flagged", r.power_warning())
+
+    def test_low_power_mode_counts_as_a_change(self):
+        fx, r, _ = self.run_ttr([AC, AC, AC_LOW_POWER, AC])
+        rows = self.rows(fx, r)
+        self.assertEqual([x["power"]["low_power"] for x in rows], [False, True, False, False, False, False, False])
+        self.assertEqual([x["power_changed"] for x in rows], [False, True, True, False, False, False, False])
+        self.assertIn("| ttr_cached | 4 | 4 | 0 | 0 | 0 | 0 | 1 | 2 | 0 |", blt.render(blt.summarize(fx.records(r))))
+
+    def test_steady_battery_run_is_labelled_not_flagged(self):
+        fx, r, _ = self.run_ttr([BATTERY], allow_battery=True)
+        self.assertFalse(fx.records(r, "env")[0]["ac_power"])
+        rows = self.rows(fx, r)
+        self.assertTrue(all(x["power"] == BATTERY and not x["power_changed"] for x in rows))
+        self.assertIsNone(r.power_warning())
+        doc = blt.render(blt.summarize(fx.records(r)))
+        self.assertIn("Power at the start of the run: battery.", doc)
+        self.assertIn("| ttr | 3 | 0 | 3 | 0 | 0 | 0 | 0 | 0 | 0 |", doc)
+
+    def test_battery_at_the_start_still_refuses(self):
+        with self.assertRaises(SystemExit) as cm:
+            self.run_ttr([BATTERY])
+        self.assertIn("need AC power (pmset reports battery)", str(cm.exception))
+
+    def test_an_attempt_refused_on_battery_is_not_a_run_of_the_report(self):
+        # A completed AC run, then an attempt on battery into the same output
+        # directory: the attempt writes its env row before refusing, but it
+        # measured nothing, so the report has one run that started on AC.
+        fx, r, _ = self.run_ttr([AC])
+        fx.power, fx.power_reads = [BATTERY], 0
+        again = fx.runner()
+        self.assertEqual(again.results, r.results)
+
+        def run(cmd, *a, **k):
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with fx.patched(), contextlib.redirect_stdout(io.StringIO()), mock.patch.object(blt.subprocess, "run", run):
+            with self.assertRaises(SystemExit) as cm:
+                again.environment()
+        self.assertIn("need AC power (pmset reports battery)", str(cm.exception))
+        recs = fx.records(r)
+        self.assertEqual([x["power"]["source"] for x in recs if x["kind"] == "env"], ["ac", "battery"])
+        s = blt.summarize(recs)
+        self.assertEqual(len(s["runs"]), 1)
+        self.assertIs(s["env"], s["runs"][0])
+        block = self.power_block(blt.render(s))
+        self.assertIn("Power at the start of the run: AC.", block)
+        self.assertNotIn("battery", block.split("| Measurement |")[0].split("misses a change")[1])
+
+    def run_cmd(self, readings, ready=lambda call: True):
+        """`run ttr` through cmd_run on the fixture: (exit code or exception, stderr)."""
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        fx = RunnerFixture(Path(d.name))
+        fx.power, fx.ready = readings, ready
+        args = argparse.Namespace(**vars(fx.args), measurements=["ttr"], dry_run=False)
+        m = copy.deepcopy(MANIFEST)
+        m["measurements"]["ttr"] = TtrRunnerTest.CFG
+        runner = fx.runner()
+        real_run = subprocess.run
+
+        def run(cmd, *a, **k):  # no sysctl or fresh-host.sh clean-up in a hermetic test
+            if cmd[0] in ("sysctl", "bash"):
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            return real_run(cmd, *a, **k)
+
+        err = io.StringIO()
+        with fx.patched(), contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()), \
+                mock.patch.object(blt, "validate", lambda *a, **k: []), \
+                mock.patch.object(blt, "Runner", lambda a, mm: runner), \
+                mock.patch.object(blt.subprocess, "run", run):
+            try:
+                out = blt.cmd_run(args, m)
+            except RuntimeError as e:
+                out = e
+        return out, err.getvalue()
+
+    def test_cmd_run_prints_the_power_warning_at_the_end(self):
+        rc, err = self.run_cmd([AC, AC, BATTERY, AC])
+        self.assertEqual(rc, 0)
+        last = err.rstrip("\n").splitlines()[-1]
+        self.assertIn("changed during the run (started on AC); 2 rows are flagged power_changed", last)
+        rc, err = self.run_cmd([AC])
+        self.assertEqual(rc, 0)
+        self.assertNotIn("warning", err)
+
+    def test_cmd_run_prints_the_power_warning_when_a_measurement_fails(self):
+        def ready(call):  # the second time-to-ready run fails
+            if call["identity"] == "qvac-bench-00000001":
+                raise RuntimeError("driver failed")
+            return True
+
+        out, err = self.run_cmd([AC, BATTERY], ready)
+        self.assertIsInstance(out, RuntimeError)
+        self.assertIn("rows are flagged power_changed", err.rstrip("\n").splitlines()[-1])
+
+    def test_report_on_rows_without_a_power_reading(self):
+        recs = [{"kind": "env", "ac_power": True},
+                {"kind": "load_cold", "variant": "turbo", "set": "w7", "stage": "cfm", "function": "frames_512",
+                 "load_ms": 1.0, "identity": "id-a"}]
+        doc = blt.render(blt.summarize(recs))
+        self.assertIn("None of the 1 rows carries a power reading", doc)
+        self.assertIn("The run recorded only whether it started on AC power: it started on AC power; the power "
+                      "during the run was not recorded.", doc)
+        self.assertNotIn("header", doc.split("<!-- report:power -->")[1].split("<!-- /report:power -->")[0])
+        # Without a run record the block names no start and points nowhere.
+        block = blt.render(blt.summarize(recs[1:])).split("<!-- report:power -->")[1].split("<!-- /report:power")[0]
+        self.assertNotIn("start", block.split("misses a change")[1])
+        self.assertIn("None of the 1 rows carries a power reading: they were recorded before `run` read the power "
+                      "source per row.\n", block)
+        self.assertIn("Not measured yet.", blt.render(blt.summarize([])).split("<!-- /report:power -->")[0])
+
+    ROW = {"kind": "ttr_cached", "variant": "turbo", "config": "c", "set": "w3", "run": 0, "rep": 0,
+           "time_to_ready_ms": 1.0, "all_ready": True, "power_changed": False, "power_uncertain": False}
+
+    @staticmethod
+    def power_block(doc: str) -> str:
+        return doc.split("<!-- report:power -->")[1].split("<!-- /report:power -->")[0]
+
+    def test_power_block_summarises_the_starting_power_of_every_appended_run(self):
+        # Two runs appended to one results.jsonl: the report must not present
+        # the latest run's start as the start of every row in the tables.
+        def block(*starts):
+            recs = []
+            for p in starts:
+                recs += [{"kind": "env", "ac_power": p["source"] == "ac", "power": p}, dict(self.ROW, power=p)]
+            doc = blt.render(blt.summarize(recs))
+            self.assertNotIn("start", doc.split("<!-- report:power -->")[0], "no power claim outside the block")
+            return self.power_block(doc)
+
+        self.assertIn("Power at the start of the run: AC.", block(AC))
+        self.assertIn("Power at the start of each of the 2 runs: AC.", block(AC, AC))
+        mixed = block(AC, BATTERY)
+        self.assertIn("Power at the start of the 2 runs: AC (1), battery (1); the latest started on battery.", mixed)
+        self.assertNotIn("start of the run: battery", mixed)
+        # A run recorded before the power was read per row keeps its AC flag.
+        legacy = [{"kind": "env", "ac_power": True, "power": AC}, dict(self.ROW, power=AC),
+                  {"kind": "env", "ac_power": False}, dict(self.ROW)]
+        self.assertIn("Power at the start of the 2 runs: AC (1), not AC (1)",
+                      self.power_block(blt.render(blt.summarize(legacy))))
+
+    def test_refreshing_a_report_after_an_appended_run_updates_its_starting_power(self):
+        # A report written for a steady AC run, then a steady battery run
+        # appended to the same results and the same report refreshed: the
+        # starting power follows the tables, as a fresh render of the results
+        # does, and the hand-written host notes stay.
+        with tempfile.TemporaryDirectory() as d:
+            res = Path(d) / "out"
+            res.mkdir()
+            results, doc = res / "results.jsonl", Path(d) / "doc.md"
+
+            def append(p):
+                with results.open("a") as f:
+                    for r in ({"kind": "env", "ac_power": p["source"] == "ac", "power": p, "chip": "Apple M2"},
+                              dict(self.ROW, power=p)):
+                        f.write(json.dumps(r) + "\n")
+
+            append(AC)
+            self.assertEqual(ReportMergeTest.report("--results", res, "--out", doc)[0], 0)
+            doc.write_text(doc.read_text().replace("- Host: Apple M2", "- Host: Apple M2 (written by hand)"))
+            append(BATTERY)
+            self.assertEqual(ReportMergeTest.report("--results", res, "--out", doc)[0], 0)
+            refreshed = doc.read_text()
+            fresh = blt.render(blt.summarize(blt.read_results(res))) + "\n"
+            self.assertEqual(self.power_block(refreshed), self.power_block(fresh))
+            self.assertIn("Power at the start of the 2 runs: AC (1), battery (1); the latest started on battery.",
+                          self.power_block(refreshed))
+            self.assertIn("- Host: Apple M2 (written by hand)", refreshed)
+            self.assertNotIn("power at the start", refreshed.lower().split("<!-- report:power -->")[0])
 
 
 class NativeTest(unittest.TestCase):
