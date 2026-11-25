@@ -14,6 +14,16 @@ On-device speech and audio AI in C++17 on [ggml](https://github.com/tetherto/qva
 
 ## Supported models
 
+Parakeet mel preprocessing keeps FFT twiddle tables in worker or stream scope,
+avoiding a reproduced MinGW heap crash during dynamic thread-local cleanup while
+preserving parallel execution and serial/threaded numerical parity.
+
+Supertonic engines can be reused after cancellation without reloading their
+models. `Engine::synthesize_segment()` preserves caller-selected sentence or
+clause boundaries, and `Engine::release_thread_resources()` releases a worker's
+inference caches before that thread exits. See the
+[TTS guide](engines/tts/README.md) for the lifecycle contract.
+
 The engine guides own model formats, quantization, backend validation, and input
 requirements. An available ggml backend does not imply every model has been
 validated on it. AudioGen automatic GPU selection requires F32 matrix

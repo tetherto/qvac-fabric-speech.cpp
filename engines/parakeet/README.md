@@ -21,6 +21,13 @@ The MOSS CPU audio encoder uses fused attention to avoid materializing full
 attention score matrices. The GPU encoder layouts are unchanged; the decoder
 changes only its Metal single-token graph (see above).
 
+Mel preprocessing keeps FFT twiddle tables in each worker's scope and in the
+incremental stream state. This avoids concurrent destruction of dynamic
+thread-local caches, which reproduced a heap-corruption crash with the local
+MinGW runtime. FFT workers remain parallel. `test-mel-threads` exercises repeated
+worker lifetimes across FFT sizes 256, 512, and 1024 with identical serial and
+threaded results; `test-mel-fft-parity` also covers incremental and offline parity.
+
 ## Supported checkpoints
 
 | HF repository | Decoder/task | Mel | `d_model × layers` | Vocab | Parameters | GGUF size | Recorded RTF | Languages and notes |
