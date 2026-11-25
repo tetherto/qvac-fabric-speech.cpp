@@ -1196,6 +1196,12 @@ if (PARAKEET_BUILD_TESTS)
         ARGS     "--model" "${_qvp_sf_q8_gguf}" "--wav" "${_qvp_diar_wav}"
         REQUIRES "${_qvp_sf_q8_gguf}" "${_qvp_diar_wav}")
 
+    find_package(Threads REQUIRED)
+    add_executable(test-coreml-compile-wait test/test_coreml_compile_wait.cpp)
+    target_compile_features(test-coreml-compile-wait PRIVATE cxx_std_17)
+    target_link_libraries(test-coreml-compile-wait PRIVATE Threads::Threads)
+    parakeet_register_test(test-coreml-compile-wait LABEL "unit")
+
     # Internal regression gate for the round-2 mel preprocess sweep
     # (real-FFT, MelState reuse). Pure unit test -- no GGUF needed.
     add_executable(test-mel-fft-parity

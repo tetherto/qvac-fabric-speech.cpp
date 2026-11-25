@@ -4392,6 +4392,19 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-supertonic-api)
     tts_cpp_register_test(test-supertonic-api LABEL "unit")
 
+    add_executable(test-supertonic-request-lifecycle test/test_supertonic_request_lifecycle.cpp)
+    target_link_libraries(test-supertonic-request-lifecycle PRIVATE tts-cpp Threads::Threads)
+    tts_cpp_apply_ccache(test-supertonic-request-lifecycle)
+    tts_cpp_register_test(test-supertonic-request-lifecycle
+        LABEL    "fixture"
+        ARGS     "${_tcb_super_gguf}"
+        REQUIRES "${_tcb_super_gguf}")
+    tts_cpp_register_test(test-supertonic-request-lifecycle-v3
+        EXE      test-supertonic-request-lifecycle
+        LABEL    "fixture"
+        ARGS     "${_tcb_super3_gguf}"
+        REQUIRES "${_tcb_super3_gguf}")
+
     # round 3 — multi-device Vulkan auto-pick policy
     # (--vulkan-device -1 → pick device with most free VRAM).
     # CPU-only TDD test for the pure-logic helper; the Vulkan-only

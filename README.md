@@ -14,6 +14,17 @@ On-device speech and audio AI in C++17 on [ggml](https://github.com/tetherto/qva
 
 ## Supported models
 
+Parakeet mel preprocessing keeps FFT twiddle tables in worker or stream scope,
+avoiding a reproduced MinGW heap crash during dynamic thread-local cleanup while
+preserving parallel execution and serial/threaded numerical parity.
+
+Supertonic engines can be reused after cancellation without reloading their
+models. `Engine::synthesize_segment()` preserves caller-selected sentence or
+clause boundaries, and `Engine::release_thread_resources()` releases a worker's
+inference caches before that thread exits. See the
+[TTS guide](engines/tts/README.md) for the lifecycle contract.
+Cancellation can wait for an active vector-estimator loop to finish.
+
 The engine guides own model formats, quantization, backend validation, and input
 requirements. An available ggml backend does not imply every model has been
 validated on it. AudioGen automatic GPU selection requires F32 matrix
@@ -155,6 +166,9 @@ the `parakeet` CLI (which defaults to
 `~/Library/Application Support/qvac-speech/coreml`). See
 [Generated sidecars](engines/parakeet/README.md#generated-sidecars) for the
 setup, options and memory.
+The generated Sortformer v2.1 capacity is charged at 259 MiB after calibration
+against the latest overlapped Core ML preparation measurements, retaining the
+required 25% safety margin.
 
 TranscribePsy conversion uses 60-second windows with 25% overlap for full EU
 and records its Apache-2.0 provenance. For EU-sub Core ML deployment, the
