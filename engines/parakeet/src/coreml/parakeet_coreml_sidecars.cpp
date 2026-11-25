@@ -16,7 +16,6 @@ namespace parakeet {
 namespace {
 
 constexpr const char * kEngine = "parakeet";
-constexpr const char * kEnvPrefix = "PARAKEET";
 constexpr const char * kWeightsFile = "/weights/weight.bin";
 // Default ane_compile_reserve_bytes: ANECompilerService peaked at about
 // 1.6x the weights compiling a 199 MB model.
@@ -84,8 +83,8 @@ pcm::Options to_runtime_options(const CoremlOptions & o) {
     return r;
 }
 
-pcm::Resolved resolve_parakeet_coreml(const CoremlOptions & opts) {
-    return pcm::resolve_coreml(to_runtime_options(opts), kEnvPrefix);
+pcm::Resolved resolve_parakeet_coreml(const CoremlOptions & opts, const char * env_prefix) {
+    return pcm::resolve_coreml(to_runtime_options(opts), env_prefix);
 }
 
 pcm::Prewarm to_runtime_prewarm(CoremlOptions::Prewarm scope) {
@@ -133,8 +132,8 @@ uint64_t ane_compile_reserve_bytes(const std::string & mlmodelc, pcm::ComputeUni
 }
 
 CoremlSidecars::CoremlSidecars(const CoremlOptions & opts, std::shared_ptr<pcm::Manager> manager,
-                               bool memory_degraded)
-    : resolved_(resolve_parakeet_coreml(opts)),
+                               bool memory_degraded, const char * env_prefix)
+    : resolved_(resolve_parakeet_coreml(opts, env_prefix)),
       manager_(manager ? std::move(manager) : pcm::Manager::instance()) {
     if (memory_degraded) {
         pcm::FitVerdict verdict;

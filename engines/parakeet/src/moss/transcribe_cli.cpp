@@ -2,6 +2,7 @@
 
 #include "moss/transcribe_text.h"
 
+#include "coreml_cli_options.h"
 #include "mel_preprocess.h"
 #include "parakeet/cli.h"
 
@@ -81,14 +82,39 @@ bool save_transcript(const std::string & path, const TranscribeResult & result) 
 
 void report_timings(const TranscribeResult & result, size_t samples, int sample_rate) {
     std::fprintf(stderr,
-        "[%s] %.1fs audio, %d audio tokens, %d generated (encode %.0f ms on %s, prefill %.0f ms, decode %.0f ms)\n",
+        "[%s] %.1fs audio, %d audio tokens, %d generated (encode %.0f ms on %s%s, prefill %.0f ms, decode %.0f ms)\n",
         PROGRAM, (double) samples / sample_rate, result.audio_tokens, result.generated_tokens,
-        result.encode_ms, result.encoder_backend.c_str(), result.prefill_ms, result.decode_ms);
+        result.encode_ms, result.encoder_backend.c_str(),
+        result.coreml_pending ? ", Core ML encoder still loading" : "", result.prefill_ms, result.decode_ms);
 }
 
+// Where the encoder runs when the model has loaded. The Core ML sidecar
+// loads in the background, so the first windows can run on ggml.
 const char * encoder_placement(const TranscribeEngine & engine) {
-    return engine.encoder_on_coreml() ? "Core ML sidecar" : "ggml";
+    return engine.encoder_on_coreml() ? "Core ML sidecar" : "ggml (until a Core ML sidecar is ready)";
 }
+
+bool write_status(const std::string & path, const std::string & json) {
+    if (path == "-") {
+        std::printf("%s\n", json.c_str());
+        return true;
+    }
+    std::ofstream output(path, std::ios::binary);
+    output << json << "\n";
+    return (bool) output;
+}
+
+// Writes the Core ML status once the run has finished, also after a failed
+// or cancelled run.
+struct StatusOnExit {
+    const TranscribeEngine & engine;
+    const std::string & path;
+    ~StatusOnExit() {
+        if (!path.empty() && !write_status(path, engine.coreml_status_json())) {
+            std::fprintf(stderr, "[%s] cannot write --coreml-status-json %s\n", PROGRAM, path.c_str());
+        }
+    }
+};
 
 int transcribe_file(const TranscribeCliArgs & args) {
     std::vector<float> pcm;
@@ -97,7 +123,10 @@ int transcribe_file(const TranscribeCliArgs & args) {
         std::fprintf(stderr, "[%s] cannot read WAV: %s\n", PROGRAM, args.audio_path.c_str());
         return 1;
     }
-    TranscribeEngine engine(args.options);
+    TranscribeOptions options = args.options;
+    apply_cli_coreml_defaults(options.coreml);
+    TranscribeEngine engine(options);
+    const StatusOnExit status{engine, args.coreml_status_json_path};
     std::fprintf(stderr, "[%s] backend: %s, audio encoder: %s\n", PROGRAM, engine.backend_name(),
             encoder_placement(engine));
     const TranscribeResult result = engine.transcribe(pcm.data(), pcm.size(), sample_rate, args.request);
@@ -132,6 +161,10 @@ void print_usage() {
         "usage: %s --model moss-transcribe.gguf --audio speech.wav [--out transcript.json]\n"
         "       [--prompt \"...\" | --hotwords \"QVAC,vcpkg,Parakeet\"] [--max-new-tokens N]\n"
         "       [--threads 4] [--gpu] [--backend auto|cpu|cuda|vulkan|metal|hexagon|CUDA0] [--backends-dir dir]\n"
+        "       [--coreml-use auto|off|require] [--coreml-wait none|construct|call]\n"
+        "       [--coreml-generate background|never] [--coreml-prewarm none|minimal|predicted|all]\n"
+        "       [--coreml-compute-units all|cpu_and_ane|cpu_and_gpu|cpu_only] [--coreml-cache-dir dir]\n"
+        "       [--coreml-status-json path|-]\n"
         "           16 kHz WAV in; prints one [start-end] Sxx: text line per segment\n", PROGRAM);
 }
 
@@ -154,7 +187,21 @@ bool parse_args(int argc, const char * const * argv, TranscribeCliArgs & args) {
         else if (flag == "--gpu")            args.options.use_gpu = true;
         else if (flag == "--backend")        args.options.backend = next();
         else if (flag == "--backends-dir")   args.options.backends_dir = next();
-        else {
+        else if (flag == "--coreml-use") {
+            if (!parse_coreml_use(next(), args.options.coreml.use)) return false;
+        } else if (flag == "--coreml-wait") {
+            if (!parse_coreml_wait(next(), args.options.coreml.wait)) return false;
+        } else if (flag == "--coreml-generate") {
+            if (!parse_coreml_generate(next(), args.options.coreml.generate)) return false;
+        } else if (flag == "--coreml-prewarm") {
+            if (!parse_coreml_prewarm(next(), args.options.coreml.prewarm)) return false;
+        } else if (flag == "--coreml-compute-units") {
+            args.options.coreml.compute_units = next();
+        } else if (flag == "--coreml-cache-dir") {
+            args.options.coreml.cache_dir = next();
+        } else if (flag == "--coreml-status-json") {
+            args.coreml_status_json_path = next();
+        } else {
             std::fprintf(stderr, "unknown flag: %s\n", flag.c_str());
             return false;
         }
@@ -179,6 +226,7 @@ std::string transcript_json(const TranscribeResult & result) {
            ",\n  \"generated_tokens\": " + std::to_string(result.generated_tokens) +
            ",\n  \"encode_ms\": " + number(result.encode_ms) +
            ",\n  \"encoder_backend\": " + quoted(result.encoder_backend) +
+           ",\n  \"coreml_pending\": " + (result.coreml_pending ? "true" : "false") +
            ",\n  \"prefill_ms\": " + number(result.prefill_ms) +
            ",\n  \"decode_ms\": " + number(result.decode_ms) + "\n}";
 }

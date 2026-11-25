@@ -320,6 +320,47 @@ jobs:
             echo "::error::a diarizer bundle sits beside the staged GGUF"; exit 1
           fi
 
+      # The MOSS-Transcribe-Diarize q8_0 GGUF (980 MB), converted from the
+      # Hugging Face checkpoint at a pinned revision (checkpoint sha256
+      # checked) in a directory named after that revision, which gives the
+      # model registry's GGUF byte for byte (sha256 checked). It sits alone in
+      # its directory: no encoder bundle beside it, so the engine generates
+      # the encoder from the GGUF.
+      - name: Cache the MOSS-Transcribe q8_0 GGUF
+        id: moss-cache
+        uses: actions/cache@v4
+        with:
+          path: moss-generated
+          key: moss-transcribe-diarize-q8_0-c55e9e912a5e934f7fb9dc74e0d8b0e495c5fe6737bcffe0f325759417c4432c
+
+      - name: Stage the MOSS-Transcribe q8_0 GGUF
+        if: steps.moss-cache.outputs.cache-hit != 'true'
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          set -euo pipefail
+          revision=704aa4a9c304e8520be88901e0d1960158ef5b15
+          checkpoint="$RUNNER_TEMP/moss-hf/$revision"
+          mkdir -p "$checkpoint" moss-generated
+          for f in config.json generation_config.json preprocessor_config.json processor_config.json \
+                   tokenizer.json model-00000-of-00001.safetensors; do
+            curl -fsL --retry 3 -o "$checkpoint/$f" \
+              "https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize/resolve/$revision/$f"
+          done
+          echo "9a0ceb4ab7330357db3ff583dba8d83625d5b733b00e1d55d6970e11b07026c4  $checkpoint/model-00000-of-00001.safetensors" | shasum -a 256 -c -
+          python3 -m venv "$RUNNER_TEMP/moss-convert"
+          "$RUNNER_TEMP/moss-convert/bin/python" -m pip install --quiet numpy==1.26.4 gguf==0.19.0 tokenizers==0.23.2
+          "$RUNNER_TEMP/moss-convert/bin/python" engines/parakeet/scripts/convert-moss-transcribe-to-gguf.py \
+            "$checkpoint" --outtype q8_0 --outfile moss-generated/moss-transcribe-diarize-q8_0.gguf
+          rm -rf "$RUNNER_TEMP/moss-hf" "$RUNNER_TEMP/moss-convert"
+
+      - name: Verify the MOSS-Transcribe q8_0 GGUF
+        run: |
+          echo "c55e9e912a5e934f7fb9dc74e0d8b0e495c5fe6737bcffe0f325759417c4432c  moss-generated/moss-transcribe-diarize-q8_0.gguf" | shasum -a 256 -c -
+          if ls moss-generated | grep -q -- '-encoder'; then
+            echo "::error::an encoder bundle sits beside the staged GGUF"; exit 1
+          fi
+
       # The Sortformer v2.1 q8_0 GGUF (141 MB) the SDK stages, from the QVAC
       # model registry at a pinned key and sha256, alone in its directory, so
       # the engine generates the diarizer from the GGUF.
@@ -354,6 +395,7 @@ jobs:
           FIXTURE_ROOT: ${{ inputs.fixture_root }}
         run: |
           fixture_options=("-DPARAKEET_TEST_NEMOTRON_GENERATED_GGUF=$PWD/nemotron-generated/Nemotron-3-Diarization.q8_0.gguf"
+                           "-DPARAKEET_TEST_MOSS_GENERATED_GGUF=$PWD/moss-generated/moss-transcribe-diarize-q8_0.gguf"
                            "-DPARAKEET_TEST_SORTFORMER_GENERATED_GGUF=$PWD/sortformer-generated/diar_streaming_sortformer_4spk-v2.1.q8_0.gguf")
           if [ -n "$FIXTURE_ROOT" ]; then
             fixture_options+=("-DPARAKEET_TEST_MODEL_DIR=$FIXTURE_ROOT/models"
@@ -379,14 +421,14 @@ jobs:
             --require test-coreml-encoder-owner-stub-tdt \
             --require test-sortformer-diarizer-template-match
 
-      # The generated diarizers on the device (Nemotron 3 Diarization and
+      # The generated diarizers and MOSS-Transcribe encoder on the device (Nemotron 3 Diarization and
       # Sortformer v2.1): an empty cache, the staged GGUF alone, and the
       # Core ML / ggml parity gate on every capacity the sample covers. Each
       # test fails (never skips) unless every diarizer was generated. The fit
       # tests check the generated charge is the same with an empty and a full
       # cache, the memory-degrade near the budget, and the status of compute
       # units the templates were not validated for.
-      - name: Test (generated diarizers on the device, no skips)
+      - name: Test (generated diarizers and MOSS-Transcribe encoder on the device, no skips)
         run: |
           ctest --test-dir build-coreml -L coreml-generated --no-tests=error \
             --output-on-failure --timeout 1800 --output-junit coreml-generated-results.xml
@@ -394,6 +436,7 @@ jobs:
             build-coreml/coreml-generated-results.xml \
             --require test-nemotron-diarization-coreml-generated-parity \
             --require test-fit-coreml-generated-diarizers \
+            --require test-moss-transcribe-coreml-generated \
             --require test-nemotron-diarization-coreml-source \
             --require test-sortformer-diarizer-coreml-generated-parity \
             --require test-fit-coreml-generated-sortformer-diarizer \
@@ -437,6 +480,16 @@ jobs:
             --gguf sortformer-generated/diar_streaming_sortformer_4spk-v2.1.q8_0.gguf \
             --template-dir engines/parakeet/coreml-templates/sortformer-diar-f410 \
             --json sortformer-real-gate.json
+
+      - name: Real-weights gate (MOSS-Transcribe encoder template on the staged q8_0)
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          .venv-coreml-templates/bin/python -B engines/coreml/python/coreml_template.py \
+            --tool build-coreml/qvac-coreml-tool real \
+            --gguf moss-generated/moss-transcribe-diarize-q8_0.gguf \
+            --template-dir engines/parakeet/coreml-templates/moss-transcribe-enc-f3000 \
+            --json moss-real-gate.json
 
       # The memory validation behind the Nemotron templates' memory envelope,
       # on this runner's chip: diarizer passes run while the engine generates,
@@ -526,6 +579,47 @@ jobs:
         with:
           name: sortformer-memory-schedule
           path: sortformer-memory/*.json
+          if-no-files-found: warn
+
+      # The same validation behind the MOSS-Transcribe encoder template's
+      # memory envelope, on this runner's chip: one-window transcriptions run
+      # while the engine generates, compiles, loads and warms the encoder in
+      # the background, from a re-signed copy of the tool and an empty cache
+      # each run, so the Neural Engine load is cold.
+      - name: Memory schedule (generated MOSS-Transcribe encoder, overlapped, this runner)
+        id: moss-memory
+        if: ${{ !cancelled() && steps.coreml-build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          sw_vers
+          sysctl -n machdep.cpu.brand_string hw.memsize
+          tool=build-coreml/moss-transcribe-coreml-memory
+          gguf=moss-generated/moss-transcribe-diarize-q8_0.gguf
+          wav=engines/parakeet/test/samples/diarization-sample-16k.wav
+          rm -rf moss-memory
+          mkdir -p moss-memory
+          "$tool" --ggml-only --gguf "$gguf" --wav "$wav" --ggml-passes 20 --json moss-memory/ggml.json
+          base=$(python3 -c "import json; print(json.load(open('moss-memory/ggml.json'))['peak_footprint'])")
+          status=0
+          for i in 1 2; do
+            id="qvac-memory-$(uuidgen)"
+            cp "$tool" "moss-memory/$id"
+            codesign -s - -f -i "$id" "moss-memory/$id"
+            "moss-memory/$id" --gguf "$gguf" --wav "$wav" --cache-dir "$PWD/moss-memory/cache-$i" \
+              --baseline-bytes "$base" --json "moss-memory/run-$i.json" || status=1
+            rm -rf "moss-memory/cache-$i" "moss-memory/$id" "$HOME/Library/Caches/$id"
+          done
+          python3 engines/parakeet/scripts/check-coreml-memory-schedule.py \
+            --template-dir engines/parakeet/coreml-templates/moss-transcribe-enc-f3000 \
+            moss-memory/run-*.json || status=1
+          exit "$status"
+
+      - name: Upload the MOSS-Transcribe memory schedule reports
+        if: ${{ !cancelled() && steps.moss-memory.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: moss-memory-schedule
+          path: moss-memory/*.json
           if-no-files-found: warn
 
       - name: Test (background sidecars on the device, no skips)

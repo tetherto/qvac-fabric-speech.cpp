@@ -58,4 +58,12 @@ struct CoremlOptions {
     std::optional<int64_t>     memory_budget_bytes; // bytes fit was assessed against; unset -> no memory-degrade
 };
 
+// The totals of a memory-fit projection (FitResult::ggml_required_bytes and
+// FitResult::coreml.bytes from parakeet::fit_params or
+// parakeet::moss::fit_params).
+struct CoremlFitTotals {
+    uint64_t ggml_required_bytes = 0;
+    uint64_t coreml_bytes = 0;
+};
+
 }  // namespace parakeet

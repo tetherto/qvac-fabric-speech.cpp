@@ -77,11 +77,18 @@
 //   diarizer-loaded-source generated capacities prepare only from the
 //                         identity the load passes (a file renamed over the
 //                         path after the load: source_changed)
+//   transcribe-encoder    MOSS-Transcribe's encoder slot: the MOSS_COREML_*
+//                         environment (not PARAKEET_COREML_*) resolves its
+//                         options; the request (adjacent bundle, loader kind
+//                         and window as geometry, stage default units); the
+//                         fit charge per route (disabled, none, prebuilt at
+//                         the expanded fp16 floor with the 1.25 margin)
 
 #include "coreml/parakeet_coreml_sidecars.h"
 #include "coreml_fit.h"
 #include "encoder_route.h"
 #include "long_form.h"
+#include "moss/transcribe_coreml_slot.h"
 #include "qvac_coreml/generation.h"
 
 #if defined(QVAC_COREML_HAVE_GGML)
@@ -1952,6 +1959,96 @@ void case_diarizer_loaded_source() {
 }
 #endif
 
+void case_transcribe_encoder() {
+    namespace moss = parakeet::moss::detail;
+    const fs::path dir = make_temp_dir("transcribe");
+    const fs::path gguf = dir / "moss-transcribe-diarize-q8_0.gguf";
+    write_text(gguf, "not a gguf");
+    const moss::TranscribeEncoderWindow window{80, 3000, 375, 1024};
+
+    moss::TranscribeEncoderWindow back;
+    CHECK(moss::transcribe_encoder_window_of(moss::transcribe_encoder_geometry(window), back) &&
+              back.n_mels == 80 && back.frames == 3000 && back.tokens == 375 && back.width == 1024,
+          "the window round-trips through the slot geometry");
+    CHECK(!moss::transcribe_encoder_window_of(sidecar_geometry(SidecarLoader::encoder, {80, 3000, 375, 1024}), back),
+          "another loader's geometry is not a MOSS-Transcribe window");
+    CHECK(moss::transcribe_encoder_io_bytes(window) == (80ull * 3000 + 375ull * 1024) * 4, "window I/O bytes");
+
+    pcm::Config cfg = fast_config();
+    cfg.platform = pcm::Platform::macos;
+    cfg.os = pcm::OsVersion{15, 7, 0};
+    auto m = pcm::Manager::create(cfg);
+    CoremlOptions opts;
+
+    ::setenv("PARAKEET_COREML_DISABLE", "1", 1);
+    CHECK(CoremlSidecars(opts, m, false, moss::TRANSCRIBE_COREML_ENV_PREFIX).resolved().enabled(),
+          "PARAKEET_COREML_DISABLE leaves MOSS-Transcribe's encoder enabled");
+    ::unsetenv("PARAKEET_COREML_DISABLE");
+    ::setenv("MOSS_COREML_DISABLE", "1", 1);
+    {
+        CoremlSidecars disabled(opts, m, false, moss::TRANSCRIBE_COREML_ENV_PREFIX);
+        CHECK(!disabled.resolved().enabled() && disabled.resolved().disabled_reason == "MOSS_COREML_DISABLE",
+              "MOSS_COREML_DISABLE turns MOSS-Transcribe's encoder off");
+        const moss::TranscribeEncoderFit fit = moss::transcribe_encoder_fit(disabled, gguf.string(), window, 1000);
+        CHECK(!fit.enabled && fit.disabled_reason == "MOSS_COREML_DISABLE" && fit.route == pcm::Route::none &&
+                  fit.charge.resident == 0 && fit.charge.transient == 0,
+              "a disabled encoder charges nothing and reports why");
+        CHECK(!moss::probe_transcribe_encoder_template(disabled, gguf.string()).available,
+              "a disabled instance probes no template");
+    }
+    ::unsetenv("MOSS_COREML_DISABLE");
+    ::setenv("MOSS_COREML_STRICT", "1", 1);
+    CHECK(CoremlSidecars(opts, m, false, moss::TRANSCRIBE_COREML_ENV_PREFIX).resolved().strict(),
+          "MOSS_COREML_STRICT resolves use = require");
+    ::unsetenv("MOSS_COREML_STRICT");
+    ::setenv("MOSS_COREML_COMPUTE_UNITS", "cpu_and_gpu", 1);
+    CHECK(CoremlSidecars(opts, m, false, moss::TRANSCRIBE_COREML_ENV_PREFIX)
+                  .resolved()
+                  .units_or(pcm::ComputeUnits::all) == pcm::ComputeUnits::cpu_and_gpu,
+          "MOSS_COREML_COMPUTE_UNITS sets the compute units");
+    ::unsetenv("MOSS_COREML_COMPUTE_UNITS");
+
+    CoremlSidecars sidecars(opts, m, false, moss::TRANSCRIBE_COREML_ENV_PREFIX);
+    const SidecarRequest absent = moss::transcribe_encoder_request(gguf.string(), window, nullptr, nullptr, {});
+    CHECK(absent.stage == "encoder" && !absent.present && absent.minimal &&
+              absent.path == (dir / "moss-transcribe-diarize-encoder.mlmodelc").string() &&
+              absent.stage_default == pcm::ComputeUnits::all &&
+              absent.geometry == moss::transcribe_encoder_geometry(window),
+          "the request: the adjacent bundle without the quantization tag, the window, default units all");
+    pcm::generation::Candidate templated;
+    templated.available = true;
+    templated.matched = true;
+    templated.default_units = pcm::ComputeUnits::cpu_and_ane;
+    CHECK(moss::transcribe_encoder_request(gguf.string(), window, &templated, nullptr, {}).stage_default ==
+              pcm::ComputeUnits::cpu_and_ane,
+          "with no bundle, the template's default units are the stage's");
+    const moss::TranscribeEncoderFit none = moss::transcribe_encoder_fit(sidecars, gguf.string(), window, 1000);
+    CHECK(none.enabled && none.route == pcm::Route::none && none.charge.resident == 0 && none.charge.transient == 0,
+          "no bundle and no matching template: route none, nothing charged");
+
+    const fs::path bundle = dir / "moss-transcribe-diarize-encoder.mlmodelc";
+    const uint64_t weight_file = 4096;
+    write_text(bundle / "weights" / "weight.bin", std::string(weight_file, 'w'));
+    const SidecarRequest present = moss::transcribe_encoder_request(gguf.string(), window, &templated, nullptr, {});
+    CHECK(present.present && present.stage_default == pcm::ComputeUnits::all,
+          "an adjacent bundle is present and keeps the default units all");
+    CHECK(sidecars.plan(present).route == pcm::Route::prebuilt, "an adjacent bundle plans route prebuilt");
+    const uint64_t parameters = 1000000;
+    const moss::TranscribeEncoderFit prebuilt = moss::transcribe_encoder_fit(sidecars, gguf.string(), window, parameters);
+    CoremlFitProgram program;
+    program.weight_file_bytes = weight_file;
+    program.runtime_floor_bytes = 2 * parameters;
+    program.io_bytes = moss::transcribe_encoder_io_bytes(window);
+    program.units = CoremlFitUnits::all;
+    const CoremlCharge expected = coreml_programs_charge({program});
+    CHECK(prebuilt.route == pcm::Route::prebuilt && !prebuilt.validated &&
+              prebuilt.charge.resident == expected.resident && prebuilt.charge.transient == expected.transient,
+          "a prebuilt bundle is charged at its expanded fp16 geometry with the 1.25 margin");
+    CHECK(prebuilt.charge.resident == (2 * parameters + 2 * program.io_bytes) * 5 / 4,
+          "the resident part: 2 bytes per encoder parameter and twice the I/O, x1.25");
+    fs::remove_all(dir);
+}
+
 int main() {
     case_null_route_plan();
     case_tdt_plan_needs_validated_seams();
@@ -1972,6 +2069,7 @@ int main() {
     case_generated_diarizer_envelope();
     case_sortformer_aosc_diarizer_charge();
     case_coreml_verdicts_validated();
+    case_transcribe_encoder();
 #if defined(QVAC_COREML_HAVE_GGML)
     case_generated_sidecar();
     case_diarizer_capacities();

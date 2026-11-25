@@ -144,7 +144,7 @@ struct FitCoreml {
     uint64_t    bytes = 0;            // Core ML envelope charged on top of ggml_required_bytes
     bool        validated = false;    // the envelope was measured (memory.validated_for)
     std::string disabled_reason;      // "" when Core ML is enabled; "build", "use=off", PARAKEET_COREML_DISABLE, ...
-    std::string encoder_route;        // "prebuilt" | "none"
+    std::string encoder_route;        // "prebuilt" | "generate" (MOSS-Transcribe's generated encoder) | "none"
 };
 
 // Projected bytes on the resolved compute device.

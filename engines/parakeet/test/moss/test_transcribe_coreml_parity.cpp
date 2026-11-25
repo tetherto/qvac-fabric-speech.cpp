@@ -1,23 +1,25 @@
-#include "moss/transcribe_audio.h"
+// The prebuilt Core ML encoder sidecar on the device: a GGUF with its
+// -encoder.mlmodelc beside it (MOSS_TRANSCRIBE_COREML_MODEL), loaded through
+// the engine's runtime path. Window parity against the ggml encoder, a
+// transcription on the sidecar against the ggml one, use = require without a
+// sidecar, and an invalid sidecar.
+
 #include "moss/transcribe_coreml.h"
 #include "moss/transcribe_model.h"
-#include "moss/transcribe_networks.h"
 #include "moss/transcribe_text.h"
+#include "transcribe_coreml_window.h"
 
-#include "mel_preprocess.h"
 #include "parakeet/moss_transcribe.h"
 
-#include <algorithm>
 #include <chrono>
-#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
-#include <stdexcept>
 #include <string>
 #include <vector>
 
 using namespace parakeet::moss::detail;
+using namespace moss_transcribe_coreml;
 
 namespace {
 
@@ -55,42 +57,6 @@ void clear_env(const char * name) {
 #endif
 }
 
-double cosine(const float * a, const float * b, size_t n) {
-    double dot = 0.0, na = 0.0, nb = 0.0;
-    for (size_t i = 0; i < n; ++i) {
-        dot += (double) a[i] * b[i];
-        na += (double) a[i] * a[i];
-        nb += (double) b[i] * b[i];
-    }
-    return dot / (std::sqrt(na) * std::sqrt(nb) + 1e-30);
-}
-
-double worst_token_cosine(const std::vector<float> & a, const std::vector<float> & b, int width) {
-    double worst = 1.0;
-    for (size_t row = 0; row * width < a.size(); ++row) {
-        worst = std::min(worst, cosine(a.data() + row * width, b.data() + row * width, (size_t) width));
-    }
-    return worst;
-}
-
-double token_agreement(const std::vector<int32_t> & a, const std::vector<int32_t> & b) {
-    const size_t count = std::min(a.size(), b.size());
-    size_t same = 0;
-    while (same < count && a[same] == b[same]) {
-        same++;
-    }
-    return (double) same / (double) std::max<size_t>(std::max(a.size(), b.size()), 1);
-}
-
-std::vector<float> read_wav(const std::string & path) {
-    std::vector<float> pcm;
-    int rate = 0;
-    if (parakeet::load_wav_mono_f32(path, pcm, rate) != 0) {
-        throw std::runtime_error("cannot read " + path);
-    }
-    return pcm;
-}
-
 std::filesystem::path scratch_dir(const char * tag) {
     const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
     const auto dir = std::filesystem::temp_directory_path() /
@@ -105,43 +71,40 @@ std::filesystem::path linked_model(const std::filesystem::path & dir, const std:
     return link;
 }
 
+// Core ML waits for the sidecar at construction; nothing is generated.
 parakeet::moss::TranscribeOptions engine_options(const std::string & model_path) {
     parakeet::moss::TranscribeOptions options;
     options.model_path = model_path;
     options.n_threads = PARITY_THREADS;
     options.use_gpu = std::getenv(GPU_ENV) != nullptr;
+    options.coreml.wait = parakeet::CoremlOptions::Wait::construct;
+    options.coreml.generate = parakeet::CoremlOptions::Generate::never;
     return options;
 }
 
-void compare_window(TranscribeModel & model, TranscribeEncoderSidecar & sidecar, const std::vector<float> & audio,
-                    size_t samples, const std::string & label) {
-    const TranscribeConfig & config = model.config();
-    const TranscribeMel mel(config.audio, read_mel_filters(model));
-    const size_t count = std::min(samples, audio.size());
-    const std::vector<float> window = mel.chunk(audio.data(), count);
-    const int tokens = transcribe_chunk_tokens(config, count);
-    const std::vector<float> ggml = encode_audio_chunk(model, window, tokens, false).embeddings;
-    std::vector<float> rows;
-    check(sidecar.encode(window, rows), label + ": the sidecar predicts");
-    rows.resize(ggml.size());
-    const double whole = cosine(rows.data(), ggml.data(), ggml.size());
-    const double worst = worst_token_cosine(rows, ggml, config.text.n_embd);
-    std::printf("%s: %d tokens, cosine %.6f, worst token %.6f\n", label.c_str(), tokens, whole, worst);
-    check(whole >= WINDOW_COSINE, label + ": embeddings match the ggml encoder");
-    check(worst >= TOKEN_COSINE, label + ": every token matches the ggml encoder");
+void check_window(TranscribeModel & model, const parakeet::EncoderRoute & route, const std::vector<float> & audio,
+                  size_t samples, const std::string & label) {
+    const WindowParity parity = compare_window(model, route, audio, samples);
+    check(parity.predicted, label + ": the sidecar predicts");
+    std::printf("%s: %d tokens, cosine %.6f, worst token %.6f\n", label.c_str(), parity.tokens, parity.whole,
+                parity.worst);
+    check(parity.whole >= WINDOW_COSINE, label + ": embeddings match the ggml encoder");
+    check(parity.worst >= TOKEN_COSINE, label + ": every token matches the ggml encoder");
 }
 
 void test_windows(const std::string & model_path, const std::vector<float> & audio) {
     TranscribeModel model(model_path, std::getenv(GPU_ENV) != nullptr, PARITY_THREADS);
-    auto sidecar = open_transcribe_encoder_sidecar(model_path, model.config(), {});
-    check(sidecar != nullptr, "the staged sidecar loads and matches the model window");
-    if (!sidecar) {
+    const auto sidecar = ready_encoder(model_path, model.config());
+    const parakeet::EncoderRoute route = sidecar->acquire();
+    check(route.holds() && sidecar->status_json().find("\"route\":\"prebuilt\"") != std::string::npos,
+          "the staged sidecar loads on the runtime and matches the model window");
+    if (!route.holds()) {
         return;
     }
     const auto & audio_config = model.config().audio;
-    compare_window(model, *sidecar, audio, (size_t) audio_config.chunk_samples, "first window");
-    compare_window(model, *sidecar, audio, (size_t) (SHORT_WINDOW_SECONDS * audio_config.sample_rate),
-                   "zero-padded window");
+    check_window(model, route, audio, (size_t) audio_config.chunk_samples, "first window");
+    check_window(model, route, audio, (size_t) (SHORT_WINDOW_SECONDS * audio_config.sample_rate),
+                 "zero-padded window");
 }
 
 parakeet::moss::TranscribeResult transcribe(parakeet::moss::TranscribeEngine & engine,
@@ -150,15 +113,16 @@ parakeet::moss::TranscribeResult transcribe(parakeet::moss::TranscribeEngine & e
 }
 
 void test_transcripts(const std::string & model_path, const std::vector<float> & audio) {
-    set_env(COREML_STRICT_ENV, "1");
-    parakeet::moss::TranscribeEngine coreml(engine_options(model_path));
+    auto options = engine_options(model_path);
+    options.coreml.use = parakeet::CoremlOptions::Use::require;
+    parakeet::moss::TranscribeEngine coreml(options);
     const auto accelerated = transcribe(coreml, audio);
-    clear_env(COREML_STRICT_ENV);
     set_env(COREML_DISABLE_ENV, "1");
     parakeet::moss::TranscribeEngine ggml(engine_options(model_path));
     const auto reference = transcribe(ggml, audio);
     clear_env(COREML_DISABLE_ENV);
-    check(coreml.encoder_on_coreml() && accelerated.encoder_backend.rfind("coreml", 0) == 0,
+    check(coreml.encoder_on_coreml() && accelerated.encoder_backend.rfind("coreml", 0) == 0 &&
+              !accelerated.coreml_pending,
           "the engine encodes on the sidecar and reports its label (" + accelerated.encoder_backend + ")");
     check(!ggml.encoder_on_coreml() && reference.encoder_backend == GGML_ENCODER_BACKEND,
           "MOSS_COREML_DISABLE keeps the ggml encoder");
@@ -179,11 +143,12 @@ void test_strict_without_sidecar(const std::string & model_path, const std::vect
     try {
         parakeet::moss::TranscribeEngine engine(engine_options(bare.string()));
         transcribe(engine, audio);
-    } catch (const std::exception & e) {
-        failed = std::string(e.what()).find(COREML_STRICT_ENV) != std::string::npos;
+    } catch (const std::runtime_error & e) {
+        std::printf("refused: %s\n", e.what());
+        failed = true;
     }
     clear_env(COREML_STRICT_ENV);
-    check(failed, "MOSS_COREML_STRICT fails a transcription without a sidecar");
+    check(failed, "MOSS_COREML_STRICT (use = require) fails a transcription without a sidecar");
     std::filesystem::remove_all(dir);
 }
 
@@ -193,6 +158,8 @@ void test_invalid_sidecar(const std::string & model_path, const std::vector<floa
     std::filesystem::create_directories(transcribe_encoder_sidecar_path(staged.string()));
     parakeet::moss::TranscribeEngine engine(engine_options(staged.string()));
     check(!engine.encoder_on_coreml(), "a sidecar directory that is not a model is not attached");
+    check(engine.coreml_status_json().find("\"state\":\"failed") != std::string::npos,
+          "the status reports the sidecar failed");
     check(transcribe(engine, audio).encoder_backend == GGML_ENCODER_BACKEND,
           "an engine with an invalid sidecar transcribes on ggml");
     std::filesystem::remove_all(dir);

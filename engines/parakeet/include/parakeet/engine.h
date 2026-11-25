@@ -79,13 +79,6 @@
 
 namespace parakeet {
 
-// The totals of a memory-fit projection (FitResult::ggml_required_bytes and
-// FitResult::coreml.bytes from parakeet::fit_params).
-struct CoremlFitTotals {
-    uint64_t ggml_required_bytes = 0;
-    uint64_t coreml_bytes = 0;
-};
-
 struct EngineOptions {
     std::string model_gguf_path;
 

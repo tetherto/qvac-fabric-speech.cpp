@@ -6,6 +6,12 @@
 #include "parakeet/moss_transcribe_fit.h"
 #include "parakeet_ctc.h"
 
+#ifdef PARAKEET_USE_COREML
+#include "moss/transcribe_coreml_slot.h"
+#else
+#include "coreml_fit.h"
+#endif
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -146,6 +152,46 @@ void measure_workload(FitResult & result, detail::TranscribeModel & model,
     result.host_bytes = sat_add(result.host_bytes, resident);
 }
 
+// The ggml-only verdict's charge: the device buffers and the margin, plus
+// the host memory when the device shares it.
+uint64_t required_bytes(const FitResult & result, uint64_t margin) {
+    uint64_t required = sat_add(result.device.total_bytes, margin);
+    if (result.device_shares_host_memory) required = sat_add(required, result.host_bytes);
+    return required;
+}
+
+// The two verdicts (parakeet/fit.h FitCoreml): the ggml-only one, and the
+// Core ML-inclusive one that adds the encoder sidecar's envelope to it for
+// the route the engine would take (an adjacent bundle, the generated
+// encoder, or none). The route never depends on the Core ML cache, so the
+// projection is the same before and after the first load. The top-level
+// verdict stays the ggml one.
+void apply_coreml(FitResult & result, const TranscribeOptions & options, const detail::TranscribeModel & model,
+                  uint64_t margin) {
+    const uint64_t required = required_bytes(result, margin);
+#ifdef PARAKEET_USE_COREML
+    const CoremlSidecars sidecars(options.coreml, nullptr, false, detail::TRANSCRIBE_COREML_ENV_PREFIX);
+    const auto & config = model.config();
+    const detail::TranscribeEncoderWindow window{config.audio.n_mels, config.audio.chunk_frames,
+                                                 config.encoder.n_ctx / config.merge_size, config.text.n_embd};
+    const detail::TranscribeEncoderFit fit =
+        detail::transcribe_encoder_fit(sidecars, options.model_path, window, model.encoder_parameters());
+    const bool prebuilt = fit.route == pcm::Route::prebuilt;
+    const bool generated = fit.route == pcm::Route::generate;
+    apply_coreml_verdicts(result, required, fit.enabled, fit.disabled_reason, {}, prebuilt,
+                          prebuilt ? fit.charge : CoremlCharge{}, generated ? fit.charge : CoremlCharge{});
+    if (generated) result.coreml.encoder_route = "generate";
+#else
+    (void) options;
+    (void) model;
+    apply_coreml_verdicts(result, required, false, "build", {}, false, {});
+#endif
+    result.report += "core ml: " + (result.coreml.disabled_reason.empty() ? std::string("enabled")
+                                                                         : result.coreml.disabled_reason) +
+                     ", encoder " + result.coreml.encoder_route + ", " + std::to_string(result.coreml.bytes) +
+                     " bytes, verdict " + (result.coreml.fits ? "fits" : "does-not-fit") + "\n";
+}
+
 } // namespace
 
 void detail::finish_transcribe_fit(FitResult &result, uint64_t margin) {
@@ -154,9 +200,7 @@ void detail::finish_transcribe_fit(FitResult &result, uint64_t margin) {
               sat_add(result.device.decoder_state_bytes,
                       sat_add(result.device.encoder_compute_bytes,
                               result.device.decoder_compute_bytes)));
-  uint64_t required = sat_add(result.device.total_bytes, margin);
-  if (result.device_shares_host_memory)
-    required = sat_add(required, result.host_bytes);
+  const uint64_t required = required_bytes(result, margin);
   result.fits = required != std::numeric_limits<uint64_t>::max() &&
                 required <= result.device_free_bytes;
   result.status = result.fits ? FitStatus::Success : FitStatus::Failure;
@@ -202,6 +246,7 @@ FitResult fit_params(const TranscribeOptions & options, const TranscribeRequest 
         result.model_type = "moss-transcribe";
         measure_workload(result, model, tokenizer, workload);
         detail::finish_transcribe_fit(result, margin_bytes);
+        apply_coreml(result, options, model, margin_bytes);
     } catch (const std::exception & error) {
         const std::string message = error.what();
         result.reason = message.find("no compute backend") != std::string::npos ? "no-backend-device"
