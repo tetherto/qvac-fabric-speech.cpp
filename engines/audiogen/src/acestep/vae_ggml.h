@@ -24,7 +24,11 @@ struct AcestepStageMeasure;  // fit_measure.h
 // Load VAE weights from `path` onto `backend` (borrowed). Loads the decoder
 // always; the encoder only when `with_encoder` (needed for the reconstruction
 // roundtrip, not for pure DiT-latent decode). Returns nullptr on failure.
-VaeModel * vae_model_load(const std::string & path, ggml_backend_t backend, bool with_encoder, bool verbose);
+// `on_read` (optional) is called once every weight has been read, with the
+// descriptor the metadata and the weights were read through (-1 where the
+// platform has none), before it is closed.
+VaeModel * vae_model_load(const std::string & path, ggml_backend_t backend, bool with_encoder, bool verbose,
+                          const std::function<void(int fd)> & on_read = {});
 void       vae_model_free(VaeModel * m);
 bool       vae_model_has_encoder(const VaeModel * m);
 size_t     vae_model_weight_bytes(const VaeModel * m);

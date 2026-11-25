@@ -792,6 +792,58 @@ void test_cancellation_scope_consumes_on_exit() {
     CHECK(!cancelled.load());
 }
 
+void test_engine_cancel_waits_and_generations() {
+    using tts_cpp::acestep::EngineCancel;
+
+    {
+        // Nothing in flight: the cancel arms the next generation, which
+        // consumes it.
+        EngineCancel c;
+        c.cancel();
+        CHECK(c.flag.load());
+        { EngineCancel::Call call(c); }
+        CHECK(!c.flag.load());
+    }
+    {
+        // A cancel that only a wait observed ends that wait and leaves the
+        // next generation to run.
+        EngineCancel c;
+        {
+            EngineCancel::Wait wait(c);
+            CHECK(!wait.stop()->load());
+            c.cancel();
+            CHECK(wait.stop()->load());
+            CHECK(!c.flag.load());
+        }
+        EngineCancel::Call call(c);
+        CHECK(!c.flag.load());
+    }
+    {
+        // A wait started after a cancel neither clears nor sees it: the
+        // earlier wait keeps its cancel and the later one runs on.
+        EngineCancel c;
+        EngineCancel::Wait first(c);
+        c.cancel();
+        EngineCancel::Wait second(c);
+        CHECK(first.stop()->load());
+        CHECK(!second.stop()->load());
+        c.cancel();
+        CHECK(second.stop()->load());
+    }
+    {
+        // A generation and a wait in flight: one cancel ends both, and the
+        // generation consumes its flag when it ends.
+        EngineCancel c;
+        EngineCancel::Wait wait(c);
+        {
+            EngineCancel::Call call(c);
+            c.cancel();
+            CHECK(c.flag.load());
+            CHECK(wait.stop()->load());
+        }
+        CHECK(!c.flag.load());
+    }
+}
 
 }  // namespace
 
@@ -822,6 +874,7 @@ int main() {
     test_audio_edit_factory_and_order();
     test_quality_score_request_policy();
     test_cancellation_scope_consumes_on_exit();
+    test_engine_cancel_waits_and_generations();
     std::fprintf(stderr, "[test-acestep-generation] %d/%d checks passed\n", g_checks - g_failures, g_checks);
     return g_failures == 0 ? 0 : 1;
 }

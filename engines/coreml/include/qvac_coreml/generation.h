@@ -12,6 +12,7 @@
 #include "qvac_coreml/slot.h"
 
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -73,6 +74,10 @@ struct Candidate {
     // its ggml stage over a generated sidecar. The engine decides the device
     // class (PlanInput::device_excluded); the runtime never reads it.
     std::vector<std::string> prefer_ggml_on;
+    // template.json expected_warm_load_ms per function (positive values only):
+    // the bounded wait's expected warm load before this host observed one
+    // (SlotSpec::expected_warm_load_ms).
+    std::map<std::string, int64_t> expected_warm_load_ms;
 };
 
 // Looks the templates up (embedded, or <resolved.template_dir>/<id> where the
@@ -115,6 +120,12 @@ PrepareRequest prepare_request(const Candidate & c, const SourceStat & source, c
 // is released when it returns; the LoadFn takes its own (begin_load). An
 // unsupported cache volume returns PrepareResult::unsupported ("cache_fs").
 PrepareResult prepare(const PrepareRequest & req, PrepareContext & ctx);
+
+// LookupFn of route `generate` (SlotSpec::lookup_fn): the complete artifact
+// the cache's memo maps this source (same file identity, template and
+// options) to. Reads only the cache: no digest, no generation, no lock kept.
+// A source marked `changed` always misses (prepare refuses it).
+bool lookup(const PrepareRequest & req, PrepareResult & out);
 
 // For LoadFns. A generated artifact (LoadRequest::tmpl set) loads under the
 // shared lease of its cache entry: begin_load takes it and returns false

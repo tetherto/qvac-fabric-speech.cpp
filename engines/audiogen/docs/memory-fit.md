@@ -39,6 +39,67 @@ projection could be made. Inspect `fits`, `reason`, and `report` before loading.
 Device naming and shared-memory semantics follow the
 [repository contract](../../../README.md#memory-fit-results).
 
+### Core ML VAE decoder
+
+`FitOptions::coreml` mirrors `EngineOptions::coreml`, and `FitResult::coreml`
+reports the decoder's route (`prebuilt`, `generate` or `none`), decided from
+the options, the `ACESTEP_COREML_*` environment, the OS, the build, the
+template match and the presence of a prebuilt sidecar, never from the cache:
+a projection is the same before and after the first generation, with or
+without warm hints (`test-acestep-vae-fit-stable`).
+
+A **generated** decoder adds the template's Core ML envelope to host memory
+(`coreml.bytes`; `coreml.validated` when it was measured for the resolved
+compute units), and `fits` is the Core ML-inclusive verdict; the ggml VAE
+stays charged too, since it decodes until the sidecar is ready. The envelope
+has two parts with their own residency:
+
+- the **transient** (generation and on-device compile, or the load and
+  warm-up, whichever is larger) is charged in every phase, because a load
+  started in the VAE phase can finish during the next phase or the next
+  `generate()`;
+- the **resident** decoder (weights, input and output buffers, prediction
+  workspace) only in the VAE decode phase, which is the only phase that holds
+  it in low-memory mode. With `keep_stages` it is charged in every phase. A
+  construction load (`coreml.prewarm = all`) is released as soon as its group
+  has finished in low-memory mode, whether or not `create()` waits for it; the
+  transient covers it while it completes.
+
+The template's constants (`coreml-templates/acestep-vae-t64/template.json`,
+`memory`) are 1.25 times the largest value measured by the overlapped memory
+schedule (`test-acestep-vae-coreml --memory-schedule`, early and late
+completion) on every host in `validated_for` (an M2 on macOS 27.2.1 and the
+CI runner's M4 Max on macOS 26.7.2), so the envelope adds no margin of its own.
+The largest values came from the M2: the generation and compile 242.6 MiB
+and the steady state while loaded 854.1 MiB, each over the footprint just
+before it began, and, after a late run's eviction, 1097.4 MiB over the warmed
+ggml-only baseline (preparation leftovers included, since that is what the
+transient covers outside the VAE decode phase; the load and warm-up alone
+peaked at 854.4 MiB over the footprint just before the load). The M4 Max
+stayed below each (242.4 and 555.3 MiB; at most 797.0 MiB over the baseline).
+The charges are a transient of 1372 MiB (the load; the generation charge is
+408 MiB) and a resident decoder of 1068 MiB, 2440 MiB together, while a whole
+run peaked at 1097.4 MiB over the ggml baseline: the load's plateau is the
+resident decoder's memory, which the envelope's resident + transient form
+counts twice. A cold Neural Engine compile is admitted only while 915 MiB are
+free (`ane_compile_reserve_bytes`, 1.25 times `ANECompilerService`'s largest
+absolute size while a load ran, 731.4 MiB on the M4 Max, whose service always
+held 373-454 MiB of other jobs' compiles before the load; growth over a
+service that already holds memory understates a cold compile, so the absolute
+size bounds it. On the M2 it never exceeded 466.6 MiB).
+
+With `coreml.memory_budget_bytes`, a budget that only the ggml projection
+fits resolves `use = off` instead (memory-degrade): `coreml.disabled_reason`
+is `memory`, the verdict is the ggml one, and an `Engine` created with the
+same budget and `coreml.memory_degrade = true` decodes on ggml. The budget
+caps both verdicts (`coreml.ggml_only_fits` and `coreml.fits`) before either
+is decided, so a budget neither projection fits does not fit and does not
+degrade. Without a generated route `coreml.ggml_only_fits` is today's
+verdict. A prebuilt sidecar keeps today's projection: it is not charged.
+`ANECompilerService`'s memory for a cold Neural Engine compile is not part of
+the projection: it is a separate system process, and the runtime admits a cold
+load only while enough memory is free (`ane_compile_reserve_bytes`).
+
 The [CLI reference](cli.md#acestep-fit-params) documents equivalent flags,
 JSON output, and exit codes.
 

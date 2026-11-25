@@ -321,6 +321,67 @@ void case_memo_hot_path() {
     CHECK(g_compiles == 2);
 }
 
+void case_generation_lookup() {
+    // The LookupFn of route generate: a memo-only lookup of what an earlier
+    // preparation published, without digesting; a miss for an empty cache,
+    // a changed source or an incomplete artifact.
+    Env env;
+    const std::string a = env.source("a.gguf");
+    PrepareRequest req;
+    req.tmpl = env.tpl.get();
+    req.cache_dir = env.cache;
+    req.options = digest::DEFAULT_OPTIONS;
+    CHECK(generation::source_stat(a, req.source));
+    PrepareResult r;
+    CHECK(!generation::lookup(req, r) && r.artifact_path.empty());
+    std::string model_path, key32;
+    {
+        PrepareOutcome o = env.prepare(a);
+        CHECK(ready(o));
+        model_path = o.model_path;
+        key32 = o.key32;
+    }
+    if (!generation::built()) {
+        CHECK(!generation::lookup(req, r));  // nothing to look up without the generator
+        return;
+    }
+    const int reads = g_file_raw_reads;
+    CHECK(generation::lookup(req, r));
+    CHECK(r.cache_hit && r.artifact_key == key32 && r.artifact_path == model_path);
+    CHECK(g_file_raw_reads == reads);  // no hashing
+    CHECK(g_compiles == 1);
+    // The same identity marked changed (the engine could not confirm it loaded
+    // this file): a miss, as prepare refuses it.
+    {
+        PrepareRequest marked = req;
+        marked.source.changed = true;
+        PrepareResult miss;
+        CHECK(!generation::lookup(marked, miss) && miss.artifact_path.empty());
+    }
+    // The artifact lost a file of its inventory: a miss (the preparation
+    // regenerates it).
+    {
+        const auto info = cache::read_artifact_json(env.layout().artifact_dir(env.tpl->id(), key32));
+        CHECK(info && !info->inventory.empty());
+        if (info && !info->inventory.empty()) {
+            const std::string victim = env.layout().artifact_dir(env.tpl->id(), key32) + "/" + info->inventory[0].path;
+            const std::string kept = victim + ".kept";
+            CHECK(std::rename(victim.c_str(), kept.c_str()) == 0);
+            PrepareResult miss;
+            CHECK(!generation::lookup(req, miss));
+            CHECK(std::rename(kept.c_str(), victim.c_str()) == 0);
+        }
+    }
+    // A changed source (new stat tuple) is not the file the memo names.
+    std::this_thread::sleep_for(20ms);
+    write_source_file(a, tensors(2.0f), kMeta);
+    PrepareResult changed;
+    CHECK(!generation::lookup(req, changed));
+    PrepareRequest fresh = req;
+    CHECK(generation::source_stat(a, fresh.source));
+    CHECK(!generation::lookup(fresh, changed));  // no memo for the new identity yet
+}
+
 void case_publish_race() {
     Env env;
     const std::string a = env.source("a.gguf");
@@ -1742,8 +1803,11 @@ void case_would_block_requeue() {
     s1->request(Priority::now);
     s2->request(Priority::minimal);  // lower priority: runs only because s1 yields the gate
     CHECK(wait_state(s2, SlotState::ready));
-    CHECK(s1->state() == SlotState::queued);
     CHECK(mgr->stats().requeues >= 1);
+    // The retry can already be digesting when we observe the slot. The
+    // other process still holds the key lock, so it cannot advance past that.
+    const SlotState blocked_state = s1->state();
+    CHECK(blocked_state == SlotState::queued || blocked_state == SlotState::digesting);
     go.send('g');
     CHECK(reap(kid) == 0);
     CHECK(wait_state(s1, SlotState::ready));
@@ -2101,6 +2165,7 @@ int main(int argc, char ** argv) {
                          {"generate-and-artifact-json", case_generate_and_artifact_json},
                          {"patch-pass-peak", case_patch_pass_peak},
                          {"memo-hot-path", case_memo_hot_path},
+                         {"generation-lookup", case_generation_lookup},
                          {"publish-race", case_publish_race},
                          {"recheck-under-lock", case_recheck_under_lock},
                          {"hit-adoption", case_hit_adoption},

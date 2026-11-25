@@ -228,6 +228,17 @@ route `generate`:
    apfs or hfs volume) gives `PrepareResult::unsupported = "cache_fs"`: the
    slot reports `unsupported(cache_fs)`, terminal and with no error class,
    and the stage stays on ggml.
+6. Each unit acquires its slot once with `Demand::now` and one deadline: the
+   time the unit would take on ggml on this host. With `wait = none` the
+   slot waits only on a non-stale warm hint (`<cache>/qvac-coreml-v1/hints`),
+   and only while 1.5 x the hinted warm load fits before the deadline. A wait
+   that expires while the slot's own load runs past 1.5 x its warm time marks
+   the hint stale for 24 hours; a stale hint is never waited on. The next load
+   that started on the stale hint and finishes within 1.5 x the hinted warm
+   time ends the cooldown and records its time as warm, since the plan is
+   evidently cached again. An engine that reloads at every unit (ACE-Step's
+   low-memory mode) would otherwise not wait for a day. A `stale_until`
+   written while that load ran is kept.
 
 Fit charges a generated stage with `generation::envelope_bytes(memory,
 units)`: resident (runtime weights, twice the function I/O, state,
@@ -529,6 +540,15 @@ permute take concat`, `let` bindings, and:
 | `meta_f("key")` | a numeric GGUF metadata value (`meta "key" u32\|i32\|f32\|f64\|bool`) as a weak scalar, like a numeric literal |
 | `meta_s("key")` | a GGUF metadata string (`meta "key" str`); only the value of a `patch ... str` line or a `provided()` dependency |
 | `provided("key", [deps...])` | an f32 array of the shape `template.json` `provided` declares for `key` (`{"key", "shape"}`), computed by the C++ function the engine registered under `key` (`recipe::register_provided`). `deps` lists what it reads, each `t("name")`, `meta_f("key")` or `meta_s("key")` of a declared `source` or `meta` line, so the source digest covers it; the function sees only those. A blob that uses it is `ulp` |
+| `tile(x, axis, n)` | `n` copies of `x` one after the other along `axis` (`np.tile` on that axis); on a 1-D array, torch's `x.repeat(n)`: `[a,b,c]` → `[a,b,c,a,b,c]`, not NumPy's element-wise `repeat` |
+| `exp(x)` | `exp` computed in f64 by libm, rounded to `x`'s dtype |
+| `l2norm(x, [axes...])` | `sqrt` of the sum of squares over the distinct `axes`, which are kept with size 1 (so the result broadcasts against `x`); the squares are summed in f64 in row-major order over the reduced elements and the f64 root is rounded to `x`'s dtype |
+
+A blob whose expression contains `exp`, `l2norm`, or `provided()` is compared in the `ulp`
+class (at most 1 ulp, or within 2^-10 of the blob's largest magnitude): libm
+and the exporter's own arithmetic (NumPy's `float32` `exp`, a pairwise `f32`
+sum) may round differently in the last place. Every other blob must be
+byte-equal.
 
 `patch <spec_offset> fp16|fp32 <count> <expr>` lines write `count` values
 into `model.mlmodel` at `spec_offset`, replacing the sentinel that

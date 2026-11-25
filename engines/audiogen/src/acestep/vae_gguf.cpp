@@ -14,7 +14,18 @@ namespace tts_cpp::acestep {
 bool vae_gguf_open(VaeGGUF & g, const std::string & path) {
     if (!mapped_file_open(g.file, path, "acestep-vae")) return false;
     struct gguf_init_params p = { /*no_alloc=*/true, /*ctx=*/&g.meta };
+#ifdef _WIN32
     g.ctx = gguf_init_from_file(path.c_str(), p);
+#else
+    // The metadata is parsed through the descriptor the weights are mapped
+    // from, so both come from one file even when `path` is replaced meanwhile,
+    // and fstat of that descriptor is the identity of the file loaded.
+    const int dup_fd = dup(g.file.fd);
+    FILE *    f      = dup_fd >= 0 ? fdopen(dup_fd, "rb") : nullptr;
+    if (f == nullptr && dup_fd >= 0) close(dup_fd);
+    g.ctx = f ? gguf_init_from_file_ptr(f, p) : nullptr;
+    if (f) fclose(f);
+#endif
     if (!g.ctx) {
         fprintf(stderr, "[acestep-vae] failed to parse %s\n", path.c_str());
         vae_gguf_close(g);
@@ -45,6 +56,17 @@ ggml_tensor * vae_gmeta(const VaeGGUF & g, const std::string & name) {
 
 bool vae_gguf_has(const VaeGGUF & g, const std::string & name) {
     return gguf_find_tensor(g.ctx, name.c_str()) >= 0;
+}
+
+std::string vae_gguf_type_refusal(const VaeGGUF & g, const std::string & path) {
+    const int64_t n = gguf_get_n_tensors(g.ctx);
+    for (int64_t i = 0; i < n; ++i) {
+        const ggml_type t = gguf_get_tensor_type(g.ctx, i);
+        if (t == GGML_TYPE_BF16) continue;
+        return "[acestep-vae] " + path + ": " + gguf_get_tensor_name(g.ctx, i) + " is " + ggml_type_name(t) +
+               "; the VAE loader reads BF16 weights only";
+    }
+    return "";
 }
 
 static float bf16_to_f32(uint16_t v) {
