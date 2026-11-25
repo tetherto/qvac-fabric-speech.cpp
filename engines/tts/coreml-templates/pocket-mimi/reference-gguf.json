@@ -1,0 +1,1507 @@
+{
+ "gguf_version": 3,
+ "metadata": [
+  {
+   "gguf_type": 8,
+   "key": "general.architecture",
+   "value": "pocket-tts-mimi"
+  },
+  {
+   "gguf_type": 4,
+   "key": "pocket.schema_version",
+   "value": 1
+  },
+  {
+   "gguf_type": 8,
+   "key": "pocket.mimi_config",
+   "value": "{\"dtype\":\"float32\",\"sample_rate\":24000,\"channels\":1,\"frame_rate\":12.5,\"seanet\":{\"dimension\":512,\"channels\":1,\"n_filters\":64,\"n_residual_layers\":1,\"ratios\":[6,5,4],\"kernel_size\":7,\"residual_kernel_size\":3,\"last_kernel_size\":3,\"dilation_base\":2,\"pad_mode\":\"constant\",\"compress\":2},\"transformer\":{\"d_model\":512,\"input_dimension\":512,\"output_dimensions\":[512],\"num_heads\":8,\"num_layers\":2,\"layer_scale\":0.01,\"context\":250,\"max_period\":10000.0,\"dim_feedforward\":2048},\"quantizer\":{\"dimension\":32,\"output_dimension\":512},\"weights_path\":null,\"inner_dim\":32,\"outer_dim\":512}"
+  },
+  {
+   "gguf_type": 8,
+   "key": "pocket.source_sha256",
+   "value": "be9c6b4876d3f30740a8225dfcaa2e43dc4aeb753c15272735bee16bbb4abb0a"
+  }
+ ],
+ "schema": 1,
+ "tensors": [
+  {
+   "n_dims": 3,
+   "name": "encoder.model.0.conv.weight",
+   "ne": [
+    1,
+    64,
+    7,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "encoder.model.0.conv.bias",
+   "ne": [
+    64,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "encoder.model.1.block.1.conv.weight",
+   "ne": [
+    64,
+    32,
+    3,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "encoder.model.1.block.1.conv.bias",
+   "ne": [
+    32,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "encoder.model.1.block.3.conv.weight",
+   "ne": [
+    32,
+    64,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "encoder.model.1.block.3.conv.bias",
+   "ne": [
+    64,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "encoder.model.3.conv.weight",
+   "ne": [
+    64,
+    128,
+    8,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "encoder.model.3.conv.bias",
+   "ne": [
+    128,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "encoder.model.4.block.1.conv.weight",
+   "ne": [
+    128,
+    64,
+    3,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "encoder.model.4.block.1.conv.bias",
+   "ne": [
+    64,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "encoder.model.4.block.3.conv.weight",
+   "ne": [
+    64,
+    128,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "encoder.model.4.block.3.conv.bias",
+   "ne": [
+    128,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "encoder.model.6.conv.weight",
+   "ne": [
+    128,
+    256,
+    10,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "encoder.model.6.conv.bias",
+   "ne": [
+    256,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "encoder.model.7.block.1.conv.weight",
+   "ne": [
+    256,
+    128,
+    3,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "encoder.model.7.block.1.conv.bias",
+   "ne": [
+    128,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "encoder.model.7.block.3.conv.weight",
+   "ne": [
+    128,
+    256,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "encoder.model.7.block.3.conv.bias",
+   "ne": [
+    256,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "encoder.model.9.conv.weight",
+   "ne": [
+    256,
+    512,
+    12,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "encoder.model.9.conv.bias",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "encoder.model.11.conv.weight",
+   "ne": [
+    512,
+    512,
+    3,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "encoder.model.11.conv.bias",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "decoder.model.0.conv.weight",
+   "ne": [
+    512,
+    512,
+    7,
+    1
+   ],
+   "stats": {
+    "max": 0.94140625,
+    "mean": 7.717602295758448e-05,
+    "min": -0.9609375,
+    "std": 0.060672454165092024
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "decoder.model.0.conv.bias",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.953125,
+    "mean": -0.45220281183719635,
+    "min": -2.8125,
+    "std": 0.5257229020050075
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "decoder.model.2.convtr.weight",
+   "ne": [
+    512,
+    256,
+    12,
+    1
+   ],
+   "stats": {
+    "max": 1.3203125,
+    "mean": -0.0001719491003303227,
+    "min": -1.4765625,
+    "std": 0.033583858940810354
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "decoder.model.2.convtr.bias",
+   "ne": [
+    256,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 2.4375,
+    "mean": -0.5506796836853027,
+    "min": -2.703125,
+    "std": 0.6399322088823886
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "decoder.model.3.block.1.conv.weight",
+   "ne": [
+    256,
+    128,
+    3,
+    1
+   ],
+   "stats": {
+    "max": 1.7890625,
+    "mean": -0.0005053212136753397,
+    "min": -1.703125,
+    "std": 0.08192152662688959
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "decoder.model.3.block.1.conv.bias",
+   "ne": [
+    128,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.2490234375,
+    "mean": -0.5225470066070557,
+    "min": -1.4765625,
+    "std": 0.42160520353067554
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "decoder.model.3.block.3.conv.weight",
+   "ne": [
+    128,
+    256,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 3.359375,
+    "mean": -0.004008582136748373,
+    "min": -4.875,
+    "std": 0.23657416703331444
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "decoder.model.3.block.3.conv.bias",
+   "ne": [
+    256,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 1.8359375,
+    "mean": -0.13956356048583984,
+    "min": -2.15625,
+    "std": 0.6131295181768166
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "decoder.model.5.convtr.weight",
+   "ne": [
+    256,
+    128,
+    10,
+    1
+   ],
+   "stats": {
+    "max": 0.6328125,
+    "mean": 0.0002071243366035702,
+    "min": -0.73046875,
+    "std": 0.026000676461987157
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "decoder.model.5.convtr.bias",
+   "ne": [
+    128,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.78125,
+    "mean": -0.2100614309310913,
+    "min": -1.1640625,
+    "std": 0.2769154388523424
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "decoder.model.6.block.1.conv.weight",
+   "ne": [
+    128,
+    64,
+    3,
+    1
+   ],
+   "stats": {
+    "max": 0.85546875,
+    "mean": 0.0009677023062977241,
+    "min": -0.921875,
+    "std": 0.06627418275515039
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "decoder.model.6.block.1.conv.bias",
+   "ne": [
+    64,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.19921875,
+    "mean": -0.11854726076126099,
+    "min": -0.625,
+    "std": 0.18557030470695407
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "decoder.model.6.block.3.conv.weight",
+   "ne": [
+    64,
+    128,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 3.71875,
+    "mean": 0.01108612821256827,
+    "min": -2.984375,
+    "std": 0.3088160702923762
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "decoder.model.6.block.3.conv.bias",
+   "ne": [
+    128,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.9453125,
+    "mean": 0.09923672676086426,
+    "min": -0.447265625,
+    "std": 0.2108100651547035
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "decoder.model.8.convtr.weight",
+   "ne": [
+    128,
+    64,
+    8,
+    1
+   ],
+   "stats": {
+    "max": 0.486328125,
+    "mean": 0.0008024295669315507,
+    "min": -0.43359375,
+    "std": 0.03424817222312679
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "decoder.model.8.convtr.bias",
+   "ne": [
+    64,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.490234375,
+    "mean": 0.003695249557495117,
+    "min": -0.384765625,
+    "std": 0.1695544044549347
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "decoder.model.9.block.1.conv.weight",
+   "ne": [
+    64,
+    32,
+    3,
+    1
+   ],
+   "stats": {
+    "max": 0.42578125,
+    "mean": 0.001825905972509645,
+    "min": -0.4921875,
+    "std": 0.07560229160764814
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "decoder.model.9.block.1.conv.bias",
+   "ne": [
+    32,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.421875,
+    "mean": 0.009564399719238281,
+    "min": -0.6875,
+    "std": 0.22663230283912347
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "decoder.model.9.block.3.conv.weight",
+   "ne": [
+    32,
+    64,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 1.0859375,
+    "mean": 0.01257534679461969,
+    "min": -1.171875,
+    "std": 0.19522000318351607
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "decoder.model.9.block.3.conv.bias",
+   "ne": [
+    64,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.498046875,
+    "mean": -0.004724323749542236,
+    "min": -0.5703125,
+    "std": 0.19990750842458066
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "decoder.model.11.conv.weight",
+   "ne": [
+    64,
+    1,
+    3,
+    1
+   ],
+   "stats": {
+    "max": 0.00555419921875,
+    "mean": 1.7232562337691586e-05,
+    "min": -0.005279541015625,
+    "std": 0.002746493327358299
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "decoder.model.11.conv.bias",
+   "ne": [
+    1,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.050037193298339847,
+    "mean": 3.719329833984375e-05,
+    "min": -0.04996280670166016,
+    "std": 0.02
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "enc.layers.0.self_attn.in_proj.weight",
+   "ne": [
+    512,
+    1536,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "enc.layers.0.self_attn.out_proj.weight",
+   "ne": [
+    512,
+    512,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "enc.layers.0.norm1.weight",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "enc.layers.0.norm1.bias",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "enc.layers.0.norm2.weight",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "enc.layers.0.norm2.bias",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "enc.layers.0.linear1.weight",
+   "ne": [
+    512,
+    2048,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "enc.layers.0.linear2.weight",
+   "ne": [
+    2048,
+    512,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "enc.layers.0.layer_scale_1.scale",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "enc.layers.0.layer_scale_2.scale",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "enc.layers.1.self_attn.in_proj.weight",
+   "ne": [
+    512,
+    1536,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "enc.layers.1.self_attn.out_proj.weight",
+   "ne": [
+    512,
+    512,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "enc.layers.1.norm1.weight",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "enc.layers.1.norm1.bias",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "enc.layers.1.norm2.weight",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "enc.layers.1.norm2.bias",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "enc.layers.1.linear1.weight",
+   "ne": [
+    512,
+    2048,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "enc.layers.1.linear2.weight",
+   "ne": [
+    2048,
+    512,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "enc.layers.1.layer_scale_1.scale",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "enc.layers.1.layer_scale_2.scale",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "std": 0.0
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "dec.layers.0.self_attn.in_proj.weight",
+   "ne": [
+    512,
+    1536,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 1.34375,
+    "mean": 4.230577068501754e-05,
+    "min": -1.34375,
+    "std": 0.09318911463282362
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "dec.layers.0.self_attn.out_proj.weight",
+   "ne": [
+    512,
+    512,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.578125,
+    "mean": -2.3287899807655776e-05,
+    "min": -0.515625,
+    "std": 0.0767176045106057
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "dec.layers.0.norm1.weight",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.796875,
+    "mean": 0.30482468008995056,
+    "min": -0.01153564453125,
+    "std": 0.1527272378550254
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "dec.layers.0.norm1.bias",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.1787109375,
+    "mean": 0.00880381092429161,
+    "min": -0.189453125,
+    "std": 0.04599976715219793
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "dec.layers.0.norm2.weight",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.80078125,
+    "mean": 0.4211139678955078,
+    "min": 0.1435546875,
+    "std": 0.09277177167247037
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "dec.layers.0.norm2.bias",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.345703125,
+    "mean": -0.004050886258482933,
+    "min": -0.2734375,
+    "std": 0.0694539920145187
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "dec.layers.0.linear1.weight",
+   "ne": [
+    512,
+    2048,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.6640625,
+    "mean": 0.00034616587863300907,
+    "min": -0.73828125,
+    "std": 0.08364970100956366
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "dec.layers.0.linear2.weight",
+   "ne": [
+    2048,
+    512,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.73046875,
+    "mean": -0.0003575822408816709,
+    "min": -0.83203125,
+    "std": 0.06892674895867286
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "dec.layers.0.layer_scale_1.scale",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.275390625,
+    "mean": 0.1278520906344056,
+    "min": -0.05810546875,
+    "std": 0.040949801142716076
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "dec.layers.0.layer_scale_2.scale",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.310546875,
+    "mean": 0.14879001292865723,
+    "min": -0.000553131103515625,
+    "std": 0.04422737452623502
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "dec.layers.1.self_attn.in_proj.weight",
+   "ne": [
+    512,
+    1536,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.90625,
+    "mean": 2.062125294581089e-05,
+    "min": -0.8671875,
+    "std": 0.08637550809368057
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "dec.layers.1.self_attn.out_proj.weight",
+   "ne": [
+    512,
+    512,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.4921875,
+    "mean": 7.015813402944104e-05,
+    "min": -0.482421875,
+    "std": 0.07598078477936229
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "dec.layers.1.norm1.weight",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.68359375,
+    "mean": 0.31441235542297363,
+    "min": -0.00213623046875,
+    "std": 0.08982465966751743
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "dec.layers.1.norm1.bias",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.578125,
+    "mean": -0.0009878899436444044,
+    "min": -0.57421875,
+    "std": 0.08162208084482478
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "dec.layers.1.norm2.weight",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.71875,
+    "mean": 0.41785240173339844,
+    "min": -0.041015625,
+    "std": 0.09612438105661208
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "dec.layers.1.norm2.bias",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.57421875,
+    "mean": 0.015442428644746542,
+    "min": -0.298828125,
+    "std": 0.09157030535245982
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "dec.layers.1.linear1.weight",
+   "ne": [
+    512,
+    2048,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 2.515625,
+    "mean": -0.002335796544241653,
+    "min": -2.8125,
+    "std": 0.1009573165586952
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "dec.layers.1.linear2.weight",
+   "ne": [
+    2048,
+    512,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 1.5390625,
+    "mean": 0.00044075664816389803,
+    "min": -1.3203125,
+    "std": 0.07594995776487265
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "dec.layers.1.layer_scale_1.scale",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 0.349609375,
+    "mean": 0.16997817694209516,
+    "min": -0.169921875,
+    "std": 0.06676543651618838
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 1,
+   "name": "dec.layers.1.layer_scale_2.scale",
+   "ne": [
+    512,
+    1,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 1.265625,
+    "mean": 0.409527498180978,
+    "min": -0.439453125,
+    "std": 0.2304375124179513
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "quantizer.output_proj.weight",
+   "ne": [
+    32,
+    512,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 1.46875,
+    "mean": 0.0004793418829649454,
+    "min": -1.5546875,
+    "std": 0.18111308571740586
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 3,
+   "name": "downsample.conv.conv.weight",
+   "ne": [
+    512,
+    32,
+    32,
+    1
+   ],
+   "stats": {
+    "max": 2.8125,
+    "mean": 0.0001180671705558467,
+    "min": -2.28125,
+    "std": 0.08121673839541796
+   },
+   "type": "f32"
+  },
+  {
+   "n_dims": 2,
+   "name": "upsample.convtr.convtr.weight",
+   "ne": [
+    512,
+    32,
+    1,
+    1
+   ],
+   "stats": {
+    "max": 1.0625,
+    "mean": 0.0023123303203647083,
+    "min": -1.1171875,
+    "std": 0.11719082514420849
+   },
+   "type": "f32"
+  }
+ ]
+}

@@ -60,7 +60,8 @@ cache directory (`CoremlOptions::cache_dir` in `tts-cpp/coreml_options.h`, or
 loads, using a weight-free template embedded in the library, compiles it on
 the device and keeps it in the cache; the stage runs on ggml until the sidecar
 is ready. A prebuilt sidecar next to the GGUF still takes precedence. Today
-the [Parler-TTS DAC decoder](parler.md#generated-sidecar-and-background-loading)
-and the [Supertonic vocoder](supertonic.md#generated-vocoder-sidecar) (Supertonic
-1, 2 and 3, every quantisation tier) are generated; the other families load
-only prebuilt sidecars.
+the [Parler-TTS DAC decoder](parler.md#generated-sidecar-and-background-loading),
+the [Supertonic vocoder](supertonic.md#generated-vocoder-sidecar) (Supertonic
+1, 2 and 3, every quantisation tier), and the
+[Pocket TTS FlowLM step and Mimi decoder](pocket-tts.md#generated-sidecars-and-background-loading)
+are generated; the other families load only prebuilt sidecars.

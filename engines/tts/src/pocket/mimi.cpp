@@ -5,6 +5,7 @@
 #include "backend_util.h"
 #include "pocket/backend.h"
 #include "json.hpp"
+#include "pocket/gguf_file.h"
 
 #include <climits>
 #include <map>
@@ -73,10 +74,14 @@ struct Mimi::Impl {
         conv_shape(p + ".block.3.conv", width / 2, width, 1);
     }
     void load(const std::string & path, int threads, MemoryMeasure * price = nullptr,
-              ggml_backend_dev_t device = nullptr) {
+              ggml_backend_dev_t device = nullptr, const LoadedFileRecorder & on_open = {}) {
         measure = price; n_threads = threads;
         if (threads < 1 || threads > 1024) fail("threads must be 1..1024");
-        file = gguf_init_from_file(path.c_str(), {true, &metadata});
+        // A real load reads the metadata and every weight through one
+        // descriptor; a measure reads metadata only, by path.
+        const GgufFile source(price ? std::string() : path);
+        if (on_open && source.fd >= 0) on_open(source.fd, path);
+        file = source.init(path, {true, &metadata});
         if (!file || !metadata) fail("cannot read GGUF: " + path);
         if (text("general.architecture") != "pocket-tts-mimi" ||
             gguf_get_val_u32(file, key("pocket.schema_version", GGUF_TYPE_UINT32)) != 1) fail("unsupported artifact");
@@ -154,8 +159,8 @@ struct Mimi::Impl {
         wb = ggml_backend_alloc_ctx_tensors(weights, backend);
         sb = ggml_backend_alloc_ctx_tensors(state, backend);
         if (!wb || !sb) fail("backend allocation failed");
-        ::tts_cpp::detail::gguf_stream_reader reader(file, path);
-        for (const auto & name : checked) load_float_weight(reader, ggml_get_tensor(metadata, name.c_str()), tensor(name));
+        const auto reader = source.stream(file, path);
+        for (const auto & name : checked) load_float_weight(*reader, ggml_get_tensor(metadata, name.c_str()), tensor(name));
         const auto first_encoder_weight = pocket_read(tensor("encoder.model.0.conv.weight"));
         encoder_available = std::any_of(first_encoder_weight.begin(), first_encoder_weight.end(), [](float x) { return x != 0; });
         ggml_backend_buffer_clear(sb, 0);
@@ -318,7 +323,8 @@ struct Mimi::Impl {
     }
 };
 
-Mimi::Mimi(const std::string & path, int threads, ggml_backend_dev_t device) : impl_(new Impl) { impl_->load(path, threads, nullptr, device); }
+Mimi::Mimi(const std::string & path, int threads, ggml_backend_dev_t device, const LoadedFileRecorder & on_open)
+    : impl_(new Impl) { impl_->load(path, threads, nullptr, device, on_open); }
 MemoryMeasure Mimi::measure(const std::string & path, int threads, bool include_encoder, ggml_backend_dev_t device) {
     MemoryMeasure out;
     Impl model; model.load(path, threads, &out, device);

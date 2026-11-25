@@ -21,7 +21,12 @@ compares is written by the C++ interpreter through `qvac-coreml-tool`).
             the program). Inline spec constants whose values differ
             between A and B (weights folded into the spec) become patch sites:
             model.mlmodel holds a sentinel there and template.json `patches`
-            records it; the recipe's patch lines compute the values. Literals
+            records it; the recipe's patch lines compute the values. The same
+            holds for a spec metadata string that differs between A and B: for
+            every `meta "<key>" str` line of the recipe, twins A and B carry
+            different values of that GGUF string, so a spec string the
+            exporter copies from it (a checkpoint hash) becomes a `str` patch
+            site the recipe fills with meta_s("<key>"). Literals
             declared in template.json with an `exporter_blob` offset are copied
             from that weight.bin blob into literals.bin, once A and B agree on it.
   report    The extraction and cross-seed gates: for each template, runs the
@@ -29,7 +34,9 @@ compares is written by the C++ interpreter through `qvac-coreml-tool`).
             exporter sees `qvac-coreml-tool f32 Q`), generates the package with
             the C++ generator (`qvac-coreml-tool generate`) and compares its
             weight.bin blob by blob (`qvac-coreml-tool verify`); the generated
-            spec, patches applied, must equal the exporter's.
+            spec, patches applied, must equal the exporter's. Each twin
+            carries its own value of every GGUF string the recipe declares
+            (`meta "<key>" str`), so a string baked into the spec fails B and Q.
   real      The real-weights gate on one GGUF (a production model): the
             exporter runs on `qvac-coreml-tool f32` of it, the C++ generator
             reads the GGUF itself, and the two packages are compared as in
@@ -37,9 +44,11 @@ compares is written by the C++ interpreter through `qvac-coreml-tool`).
 
 Twins come from the template's reference-gguf.json (`qvac-coreml-tool dump`
 of a real GGUF) through `qvac-coreml-tool twin`. The exporter is described by
-template.json `exporter`: {"path", "args"}; in `args`, {gguf} is replaced by
-the input GGUF and {out} by an output directory, which must then hold exactly
-one .mlpackage.
+template.json `exporter`: {"path", "args"[, "gguf_name"]}; in `args`, {gguf}
+is replaced by the input GGUF and {out} by an output directory, which must
+then hold exactly one .mlpackage. With `gguf_name`, the exporter always sees
+the input GGUF under that file name (for exporters that record it in the
+spec), so every export of the template carries the same name.
 
 Requirements: numpy, gguf (gguf-py) and coremltools, pinned by
 engines/parakeet/scripts/requirements-coreml.txt; the exporter's own
@@ -354,6 +363,206 @@ def _set_payload(attr, data, dtype):
         t.floats.values.extend(struct.unpack(f"<{len(data) // 4}f", data))
 
 
+def str_sentinel(path, n):
+    """A deterministic, path-specific ASCII string of n characters for a string patch site."""
+    out, c = "", 0
+    while len(out) < n:
+        out += hashlib.sha256(SENTINEL_TAG + b"str\0" + path.encode() + struct.pack("<I", c)).hexdigest()
+        c += 1
+    return out[:n].encode()
+
+
+# Every twin label a template's gates use: extract makes A and B, report A,
+# B and Q. The string table is built over all of them at once, so A's value
+# is the same in both.
+TWIN_LABELS = ("a", "b", "q")
+_TWIN_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+
+def _twin_candidate(key, label, n, counter):
+    """n characters from _TWIN_ALPHABET, derived from (key, label, counter)."""
+    out, block = [], 0
+    while len(out) < n:
+        digest = hashlib.sha256(b"qvac-coreml-twin-string\0" + label.encode() + b"\0" + key.encode() +
+                                struct.pack("<II", counter, block)).digest()
+        out += [_TWIN_ALPHABET[b % len(_TWIN_ALPHABET)] for b in digest]
+        block += 1
+    return "".join(out[:n])
+
+
+def twin_string_table(refs):
+    """{label: {key: value}} for the GGUF strings `refs` ({key: reference
+    value}): for each key an ASCII value of the reference's UTF-8 byte length
+    (a `patch str` site's length is in bytes) per twin label. Deterministic,
+    and never ambiguous: a key's values differ between every two labels and
+    from the reference value (so extraction sees every declared string vary,
+    and a template that baked one twin's or the reference's value fails the
+    others), and within one label no two keys share a value (so a spec string
+    maps to one key). Raises TemplateError when the length leaves too few
+    distinct values."""
+    table = {label: {} for label in TWIN_LABELS}
+    for key in sorted(refs):
+        ref = refs[key]
+        n = len(ref.encode("utf-8"))
+        taken = {ref}
+        for label in TWIN_LABELS:
+            for counter in range(4096):
+                v = _twin_candidate(key, label, n, counter)
+                if v not in taken and v not in table[label].values():
+                    break
+            else:
+                raise TemplateError(f"twin strings: no distinct {n}-byte value left for GGUF string {key} "
+                                    f"(twin {label.upper()})")
+            taken.add(v)
+            table[label][key] = v
+    return table
+
+
+def recipe_logical_lines(recipe_text):
+    """The recipe's logical lines, as the C++ parser reads them: `#` comments
+    removed (outside strings), a newline inside an open `(` or `[` is
+    whitespace, each line trimmed of spaces, tabs and CRs, blank lines dropped."""
+    out, cur, depth, in_str, in_comment = [], [], 0, False, False
+
+    def flush():
+        line = "".join(cur).strip(" \t\r")
+        if line:
+            out.append(line)
+        cur.clear()
+
+    for c in recipe_text or "":
+        if c == "\n":
+            in_comment = False
+            if depth > 0:
+                cur.append(" ")
+            else:
+                flush()
+            continue
+        if in_comment:
+            continue
+        if in_str:
+            in_str = c != '"'
+            cur.append(c)
+            continue
+        if c == "#":
+            in_comment = True
+            continue
+        if c == '"':
+            in_str = True
+        elif c in "([":
+            depth += 1
+        elif c in ")]":
+            depth = max(depth - 1, 0)
+        cur.append(c)
+    flush()
+    return out
+
+
+def recipe_str_metas(recipe_text):
+    """The keys of the recipe's `meta "<key>" str` declarations, in any
+    spacing the recipe grammar accepts (indented, tabs, a trailing comment)."""
+    keys = []
+    for line in recipe_logical_lines(recipe_text):
+        m = re.fullmatch(r'meta[ \t]+"([^"]+)"[ \t]+str', line)
+        if m:
+            keys.append(m.group(1))
+    return keys
+
+
+def recipe_source_types(recipe_text):
+    """name -> the ggml types the recipe's `source` line accepts, in order."""
+    out = {}
+    for line in recipe_logical_lines(recipe_text):
+        m = re.match(r'source[ \t]+"([^"]+)"[ \t]+([A-Za-z0-9_,]+)[ \t]*\[', line)
+        if m:
+            out[m.group(1)] = [t.lower() for t in m.group(2).split(",")]
+    return out
+
+
+# Block sizes of the types twin Q may take (elements per block along ne[0]).
+_BLOCK = {"f32": 1, "f16": 1, "bf16": 1}
+
+
+def _block_size(t):
+    if t in _BLOCK:
+        return _BLOCK[t]
+    import gguf
+
+    return gguf.GGML_QUANT_SIZES[gguf.GGMLQuantizationType[t.upper()]][0]
+
+
+def q_twin_tensor_types(manifest, source_types, quant_types):
+    """`twin --tensor-type` entries for twin Q: each tensor the reference
+    holds in f32 whose recipe source accepts a lower precision takes the first
+    of `quant_types` the recipe accepts, else the recipe's first type below
+    f32 (so a template whose sources accept f16 has its f16 conversion
+    exercised, not only f32). Tensors below f32 in the reference keep the
+    twin writer's own rotation; f32-only sources stay f32."""
+    wanted = [t.strip().lower() for t in quant_types.split(",") if t.strip()]
+    entries = {}
+    for t in manifest.get("tensors", []):
+        name, ref = t.get("name"), str(t.get("type", "")).lower()
+        allowed = source_types.get(name)
+        if ref != "f32" or not allowed:
+            continue
+        lower = [x for x in allowed if x != "f32" and t["ne"][0] % _block_size(x) == 0]
+        pick = next((x for x in wanted if x in lower), lower[0] if lower else None)
+        if pick:
+            entries[name] = pick
+    return entries
+
+
+def verified_types(path):
+    """name -> ggml type name of every tensor the GGUF at `path` holds."""
+    import gguf
+
+    return {t.name: t.tensor_type.name.lower() for t in gguf.GGUFReader(str(path)).tensors}
+
+
+def type_summary(types):
+    """'f16 x119, f32 x8' for a name -> type map."""
+    counts = {}
+    for t in types.values():
+        counts[t] = counts.get(t, 0) + 1
+    return ", ".join(f"{t} x{n}" for t, n in sorted(counts.items()))
+
+
+def twin_sets(manifest, keys, label):
+    """`twin --set` values giving each GGUF string in `keys` its value in
+    twin `label` from twin_string_table (distinct per label and per key)."""
+    ref = {m.get("key"): m.get("value") for m in manifest.get("metadata", [])}
+    refs = {}
+    for k in keys:
+        v = ref.get(k)
+        if not isinstance(v, str) or not v:
+            raise TemplateError(f"extract: the recipe reads GGUF string {k}, which the reference manifest lacks")
+        refs[k] = v
+    table = twin_string_table(refs)[label]
+    return [f"{k}={table[k]}" for k in keys]
+
+
+def differing_strings(spec_a, spec_b, strings=()):
+    """Spec user metadata strings copied from a twin GGUF string: [(path, spec key, GGUF key)].
+
+    `strings` lists (GGUF key, twin A value, twin B value) of the strings the
+    twins vary (twin_sets). A spec string that holds A's value in A and B's in
+    B becomes a site; any other difference is left to spec_diff, which fails
+    the extraction.
+    """
+    ua, ub = spec_a.description.metadata.userDefined, spec_b.description.metadata.userDefined
+    out = []
+    for k in sorted(set(ua.keys()) & set(ub.keys())):
+        if k in VOLATILE_METADATA or ua[k] == ub[k]:
+            continue
+        keys = [gguf_key for gguf_key, va, vb in strings if ua[k] == va and ub[k] == vb]
+        if len(keys) > 1:
+            raise TemplateError(f"extract: spec string {k!r} matches GGUF strings {keys} in both twins; "
+                                "the mapping is ambiguous")
+        if keys:
+            out.append((f"description.metadata.userDefined[{k!r}]", k, keys[0]))
+    return out
+
+
 def find_sites(spec_bytes, sentinels):
     """[{spec_offset, len, sentinel_hex}] for (path, sentinel) pairs; each must occur once."""
     sites = []
@@ -365,16 +574,18 @@ def find_sites(spec_bytes, sentinels):
     return sorted(sites, key=lambda p: p["spec_offset"])
 
 
-def patch_spec(spec_a, spec_b):
-    """A's spec with a sentinel at every weight-dependent inline constant.
+def patch_spec(spec_a, spec_b, strings=()):
+    """A's spec with a sentinel at every weight-dependent inline constant and metadata string.
 
-    Returns (spec message, [(path, sentinel bytes, dtype, A's payload)]). The
-    sentinel spec must equal B structurally once B gets the same sentinels;
-    otherwise the graphs differ and TemplateError is raised.
+    Returns (spec message, [(path, sentinel bytes, dtype, A's payload)]), dtype
+    'fp16', 'fp32' or 'str' (for a str site the payload is A's string bytes).
+    The sentinel spec must equal B structurally once B gets the same
+    sentinels; otherwise the graphs differ and TemplateError is raised.
     """
     from coremltools.proto import Model_pb2
 
     sites = differing_constants(spec_a, spec_b)
+    strings = differing_strings(spec_a, spec_b, strings)
     sa, sb = Model_pb2.Model(), Model_pb2.Model()
     sa.CopyFrom(spec_a)
     sb.CopyFrom(spec_b)
@@ -386,6 +597,12 @@ def patch_spec(spec_a, spec_b):
         _set_payload(ca[path], sent, dtype)
         _set_payload(cb[path], sent, dtype)
         out.append((path, sent, dtype, payload))
+    for path, key, gguf_key in strings:
+        payload = sa.description.metadata.userDefined[key].encode()
+        sent = str_sentinel(path, len(payload))
+        sa.description.metadata.userDefined[key] = sent.decode()
+        sb.description.metadata.userDefined[key] = sent.decode()
+        out.append((path, sent, "str:" + gguf_key, payload))
     diff = spec_diff(sa, sb)
     if diff:
         raise TemplateError("extract: the exporter's spec differs between twin A and twin B at\n  " +
@@ -415,10 +632,12 @@ def run(cmd, what, capture=True, env=None):
     return p.stdout if capture else ""
 
 
-def make_twin(tool, manifest, seed, types, out, sets=()):
+def make_twin(tool, manifest, seed, types, out, sets=(), tensor_types=None):
     cmd = [tool, "twin", "--manifest", manifest, "--seed", str(seed), "--types", types, "-o", out]
     for s in sets:
         cmd += ["--set", s]
+    for name, t in sorted((tensor_types or {}).items()):
+        cmd += ["--tensor-type", f"{name}={t}"]
     run(cmd, f"twin seed {seed}")
     return out
 
@@ -481,7 +700,7 @@ def expand_args(args, gguf, out):
 
 
 def run_exporter(exporter, gguf, out_dir, python=None, root=None):
-    """Runs template.json-style `exporter` {path, args} on `gguf`; returns the .mlpackage."""
+    """Runs template.json-style `exporter` {path, args[, gguf_name]} on `gguf`; returns the .mlpackage."""
     root = Path(root or repo_root())
     script = Path(exporter["path"])
     if not script.is_absolute():
@@ -490,6 +709,17 @@ def run_exporter(exporter, gguf, out_dir, python=None, root=None):
         raise TemplateError(f"exporter {script} not found")
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    name = exporter.get("gguf_name")
+    if name:
+        if Path(name).name != name or not name.endswith(".gguf"):
+            raise TemplateError(f"exporter gguf_name {name!r} must be a plain *.gguf file name")
+        feed_dir = out_dir.parent / (out_dir.name + "-input")
+        feed_dir.mkdir(parents=True, exist_ok=True)
+        feed = feed_dir / name
+        if feed.exists() or feed.is_symlink():
+            feed.unlink()
+        feed.symlink_to(Path(gguf).resolve())
+        gguf = feed
     cmd = [python or sys.executable, str(script)] + expand_args(exporter.get("args", []), gguf, out_dir)
     run(cmd, f"exporter {script.name}")
     pkgs = sorted(p for p in out_dir.rglob("*.mlpackage") if p.is_dir())
@@ -720,7 +950,10 @@ def load_manifest(path):
 
 
 def exporter_from_args(a):
-    return {"path": a.exporter, "args": list(a.exporter_arg or [])}
+    e = {"path": a.exporter, "args": list(a.exporter_arg or [])}
+    if getattr(a, "exporter_gguf_name", None):
+        e["gguf_name"] = a.exporter_gguf_name
+    return e
 
 
 def cmd_suggest(a):
@@ -740,10 +973,10 @@ def cmd_suggest(a):
     return 0
 
 
-def _export_twin(tool, tdir_manifest, exporter, seed, types, work, python, root, label, sets=()):
-    twin = make_twin(tool, tdir_manifest, seed, types, work / f"twin-{label}.gguf", sets)
+def _export_twin(tool, tdir_manifest, exporter, seed, types, work, python, root, label, sets=(), tensor_types=None):
+    twin = make_twin(tool, tdir_manifest, seed, types, work / f"twin-{label}.gguf", sets, tensor_types)
     feed = twin
-    if types != "f32":
+    if types != "f32" or tensor_types:
         feed = work / f"twin-{label}-f32.gguf"
         run([tool, "f32", twin, "-o", feed], f"f32 of twin {label}")
     pkg = run_exporter(exporter, feed, work / f"export-{label}", python, root)
@@ -793,6 +1026,10 @@ def patch_drafts(sites, patch_sites, tensors):
     drafts = []
     for path, sent, dtype, payload in sites:
         site = by_sent[sent.hex()]
+        if dtype.startswith("str:"):
+            key = dtype[4:]
+            drafts.append((site["spec_offset"], f'patch {site["spec_offset"]} str {len(payload)} meta_s("{key}")', path))
+            continue
         blob = Blob(site["spec_offset"], MIL_FP16 if dtype == "fp16" else MIL_FP32, len(payload), 0, payload)
         cands = explain_blob(blob, tensors)
         expr = cands[0] if cands else "???"
@@ -838,6 +1075,10 @@ def cmd_extract(a):
         raise TemplateError("extract: no exporter (pass --exporter or keep template.json `exporter`)")
     root = Path(a.root) if a.root else repo_root()
     template_id = a.id or existing.get("id") or out.name
+    recipe_path = out / "recipe.txt"
+    # GGUF strings the recipe reads (meta "<key>" str): twin-specific values,
+    # so a spec string copied from one of them becomes a str patch site.
+    str_keys = recipe_str_metas(recipe_path.read_text() if recipe_path.is_file() else "")
     with tempfile.TemporaryDirectory(prefix="qvac-coreml-extract-") as tmp:
         work = Path(tmp)
         # Every output is staged first: `writes` holds the files to replace,
@@ -853,14 +1094,16 @@ def cmd_extract(a):
             stage.mkdir(parents=True)
         if manifest_path.resolve() != (out / "reference-gguf.json").resolve():
             writes["reference-gguf.json"] = manifest_path.read_bytes()
-        twin_a, pkg_a = _export_twin(tool, manifest_path, exporter, SEED_A, "f32", work, a.python, root, "a")
-        twin_b, pkg_b = _export_twin(tool, manifest_path, exporter, SEED_B, "f32", work, a.python, root, "b")
+        sets_a, sets_b = twin_sets(manifest, str_keys, "a"), twin_sets(manifest, str_keys, "b")
+        twin_a, pkg_a = _export_twin(tool, manifest_path, exporter, SEED_A, "f32", work, a.python, root, "a", sets_a)
+        twin_b, pkg_b = _export_twin(tool, manifest_path, exporter, SEED_B, "f32", work, a.python, root, "b", sets_b)
+        strings = [(k, va.split("=", 1)[1], vb.split("=", 1)[1]) for k, va, vb in zip(str_keys, sets_a, sets_b)]
         check_twins_differ(twin_a, twin_b, "extract")
         pa, pb = package_parts(pkg_a), package_parts(pkg_b)
         spec_a, spec_b = load_spec(pa["spec"]), load_spec(pb["spec"])
         # Weight-dependent inline constants become patch sites (sentinels in
         # the template's spec); any other difference fails the extraction.
-        spec_a, sites = patch_spec(spec_a, spec_b)
+        spec_a, sites = patch_spec(spec_a, spec_b, strings)
         wa, wb = pa["weights"].read_bytes(), pb["weights"].read_bytes()
         blobs_a, blobs_b = read_weight_bin(wa), read_weight_bin(wb)
         la, lb = layout_of(blobs_a), layout_of(blobs_b)
@@ -895,9 +1138,10 @@ def cmd_extract(a):
         spec_sha = hashlib.sha256(spec_bytes).hexdigest()
         script = Path(exporter["path"])
         exp_abs = script if script.is_absolute() else root / script
-        computed = {"schema": SCHEMA, "id": template_id,
-                    "exporter": {"path": exporter["path"], "sha256": file_sha256(exp_abs),
-                                 "args": exporter.get("args", [])},
+        exporter_out = {"path": exporter["path"], "sha256": file_sha256(exp_abs), "args": exporter.get("args", [])}
+        if exporter.get("gguf_name"):
+            exporter_out["gguf_name"] = exporter["gguf_name"]
+        computed = {"schema": SCHEMA, "id": template_id, "exporter": exporter_out,
                     "toolchain": toolchain_versions(), "functions": functions, "stateful": stateful,
                     "weight_bin_size": len(wa), "patches": patch_sites}
         recipe = out / "recipe.txt"
@@ -953,16 +1197,37 @@ def check_template(tool, tdir, python=None, root=None, quant_types="q8_0", work=
         raise TemplateError(f"{tdir}: template.json has no exporter")
     results = []
     cases = [("A", SEED_A, "f32"), ("B", SEED_B, "f32"), ("Q", SEED_Q, quant_types)]
+    # Each twin also gets its own value of every GGUF string the recipe
+    # declares (as `extract` does for A and B), so a template that baked one
+    # checkpoint's string into its spec instead of patching it fails B and Q.
+    recipe = tdir / "recipe.txt"
+    recipe_text = recipe.read_text()
+    str_keys = recipe_str_metas(recipe_text)
+    manifest = load_manifest(tdir / "reference-gguf.json")
+    # Twin Q holds the lower precisions the recipe accepts; the exporter sees
+    # its f32 expansion.
+    q_types = q_twin_tensor_types(manifest, recipe_source_types(recipe_text), quant_types)
     owned = work is None
     work = Path(work or tempfile.mkdtemp(prefix="qvac-coreml-report-"))
     try:
         twins = {}
         for label, seed, types in cases:
             r = {"template": tj.get("id", tdir.name), "twin": label, "seed": seed, "types": types}
+            forced = q_types if label == "Q" else None
             twin, pkg = _export_twin(tool, tdir / "reference-gguf.json", exporter, seed, types, work, python, root,
-                                     label.lower())
+                                     label.lower(), twin_sets(manifest, str_keys, label.lower()), forced)
             twins[label] = twin
+            # The types the twin really holds, checked against the plan: a
+            # gate that claims a precision must have exercised it.
+            held = verified_types(twin)
+            r["verified_types"] = type_summary(held)
+            wrong = sorted(n for n, t in (forced or {}).items() if held.get(n) != t)
+            if label != "Q":
+                wrong += sorted(n for n, t in held.items() if t != "f32")
             r.update(compare_packages(tool, tdir, twin, pkg, work, label.lower()))
+            if wrong:
+                r["wrong_types"] = wrong
+                r["pass"] = False
             if label == "B":
                 # A tensor equal in twins A and B is one these gates cannot
                 # check (the exporter may fold it into the program).
@@ -1054,11 +1319,14 @@ def cmd_report(a):
         for r in res:
             ok &= r["pass"]
             status = "PASS" if r["pass"] else "FAIL"
-            extra = r.get("error") or (f"spec differs at {r['spec_diff'][:3]}" if r.get("spec_diff") else
+            extra = r.get("error") or (f"tensors not in their planned type: {r['wrong_types'][:5]}"
+                                       if r.get("wrong_types") else
+                                       f"spec differs at {r['spec_diff'][:3]}" if r.get("spec_diff") else
                                        f"tensors equal in twins A and B: {r['coinciding'][:5]}"
                                        if r.get("coinciding") else
                                        (r["verify"][-1] if r.get("verify") else r.get("verify_stderr", "")))
-            print(f"{status} {r['template']} twin {r['twin']} ({r.get('types', '-')}): {extra}")
+            held = f"; holds {r['verified_types']}" if r.get("verified_types") else ""
+            print(f"{status} {r['template']} twin {r['twin']} ({r.get('types', '-')}{held}): {extra}")
             if not r["pass"] and r.get("verify"):
                 for line in r["verify"]:
                     if "FAIL" in line or "error" in line.lower():
@@ -1081,6 +1349,7 @@ def build_parser():
     s.add_argument("--manifest", required=True, help="reference-gguf.json")
     s.add_argument("--exporter", required=True, help="exporter script")
     s.add_argument("--exporter-arg", action="append", help="one exporter argument ({gguf}, {out}); repeatable")
+    s.add_argument("--exporter-gguf-name", help="file name the exporter sees its input GGUF under")
     s.add_argument("--id", required=True, help="template id")
     s.add_argument("-o", "--output", required=True, help="draft recipe.txt")
     s.set_defaults(fn=cmd_suggest)
@@ -1090,6 +1359,7 @@ def build_parser():
     e.add_argument("--manifest", help="reference-gguf.json (default: the template directory's)")
     e.add_argument("--exporter", help="exporter script (default: template.json `exporter`)")
     e.add_argument("--exporter-arg", action="append")
+    e.add_argument("--exporter-gguf-name", help="file name the exporter sees its input GGUF under")
     e.add_argument("--id", help="template id (default: template.json `id`, then the directory name)")
     e.set_defaults(fn=cmd_extract)
 

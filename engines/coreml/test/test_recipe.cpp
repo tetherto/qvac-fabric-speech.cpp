@@ -146,8 +146,7 @@ void case_grammar_errors() {
     // Unknown and not-yet-available ops.
     expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(frob(t(\"a\")))\nend\n", "unknown op frob");
     expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(tile(t(\"a\"), 0, 1))\nend\n", "not in generator version 1 (a later version adds it)");
-    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(provided(\"k\", [t(\"a\")]))\nend\n", "a later version adds it");
-    expect_error(hdr(192, 1) + kSrcA + "patch 10 str 4 \"abcd\"\n" + blob + "end\n", "patch str lines are not");
+    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(matmul(t(\"a\"), t(\"a\")))\nend\n", "a later version adds it");
     // Bindings.
     expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(x)\nlet x = t(\"a\")\nend\n", "used before its let", 7);
     expect_error(hdr(192, 1) + kSrcA + "let x = t(\"a\")\nlet x = t(\"a\")\n" + blob + "end\n", "already defined");
@@ -1074,6 +1073,272 @@ void case_template_literals_patches() {
     }
 }
 
+// ---- meta_f, meta_s, provided() and patch str ---------------------------------------------------
+
+// A provided() implementation for the tests: out[i] = sum(a) * (i + 1) +
+// meta_f("toy.k"), reading its dependencies through the restricted source.
+Error toy_provided(recipe::TensorSource & src, const recipe::ProvidedCall & call, std::vector<float> & out) {
+    std::vector<float> a;
+    Error e = src.read_f32("a", a, nullptr);
+    if (!e.ok()) return e;
+    uint32_t type = 0;
+    std::vector<uint8_t> k;
+    if (!src.meta_canonical("toy.k", type, k) || type != recipe::GGUF_U32) {
+        return Error::deterministic("toy.k is not visible");
+    }
+    uint32_t kv = 0;
+    std::memcpy(&kv, k.data(), 4);
+    double sum = 0.0;
+    for (float v : a) sum += v;
+    size_t n = 1;
+    for (int64_t d : call.shape) n *= static_cast<size_t>(d);
+    out.resize(n);
+    for (size_t i = 0; i < n; ++i) out[i] = static_cast<float>(sum * static_cast<double>(i + 1) + kv);
+    return {};
+}
+
+// Reads a tensor it does not list as a dependency.
+Error sneaky_provided(recipe::TensorSource & src, const recipe::ProvidedCall &, std::vector<float> & out) {
+    return src.read_f32("b", out, nullptr);
+}
+
+// Returns the wrong number of values.
+Error short_provided(recipe::TensorSource &, const recipe::ProvidedCall &, std::vector<float> & out) {
+    out.assign(1, 0.0f);
+    return {};
+}
+
+recipe::ParseContext provided_ctx() {
+    recipe::ParseContext ctx;
+    ctx.provided = {recipe::ProvidedDecl{"toy.sum", {1, 3}}, recipe::ProvidedDecl{"toy.sneaky", {2}},
+                    recipe::ProvidedDecl{"toy.short", {2}}, recipe::ProvidedDecl{"toy.unregistered", {2}}};
+    return ctx;
+}
+
+void case_op_meta_provided() {
+    recipe::register_provided("toy.sum", &toy_provided);
+    recipe::register_provided("toy.sum", &toy_provided);  // the same function again: a no-op
+    recipe::register_provided("toy.sneaky", &sneaky_provided);
+    recipe::register_provided("toy.short", &short_provided);
+    try {
+        recipe::register_provided("toy.sum", &short_provided);
+        CHECK_MSG(false, "a second function registered under one key");
+    } catch (const std::logic_error & e) {
+        CHECK_MSG(std::string(e.what()).find("already registered") != std::string::npos, e.what());
+    }
+    CHECK(recipe::find_provided_fn("toy.sum") == &toy_provided);
+    CHECK(recipe::find_provided_fn("toy.unregistered") == nullptr);
+
+    const std::string decls = "source \"a\" f32 [2]\nsource \"b\" f32 [2]\nmeta \"toy.k\" u32\n"
+                              "meta \"toy.x\" f32\nmeta \"toy.name\" str\n";
+    MemSource s({TT{"a", T_F32, {2}, {1.5f, 2.5f}}, TT{"b", T_F32, {2}, {1.0f, -1.0f}}},
+                {TM{"toy.k", "u32", 7}, TM{"toy.x", "f32", 0.5f}, TM{"toy.name", "str", "abcd"}});
+    const recipe::ParseContext ctx = provided_ctx();
+
+    // meta_f: a weak scalar, in arithmetic and as an fp32 patch-free blob.
+    {
+        const std::string text = recipe_text("t", zeros64(), decls,
+                                             {blob("fp16", 2, "f16(mul(t(\"a\"), meta_f(\"toy.x\")))"),
+                                              blob("fp32", 1, "f32(add(meta_f(\"toy.k\"), 1))")});
+        Error err;
+        recipe::Recipe r = recipe::parse(text, ctx);
+        CHECK(!r.items[0].ulp && !r.items[1].ulp);  // meta_f alone is exact
+        auto out = run(text, s, &err);
+        CHECK_MSG(err.ok(), err.message);
+        if (out.size() == 2) {
+            CHECK(f16s(out[0]) == std::vector<uint16_t>({recipe::f32_to_f16(0.75f), recipe::f32_to_f16(1.25f)}));
+            CHECK(f32s(out[1]) == std::vector<float>({8.0f}));
+        }
+    }
+    // provided(): the registered function over its dependencies; `ulp`.
+    {
+        const std::string text =
+            recipe_text("t", zeros64(), decls,
+                        {blob("fp16", 3, "f16(add(provided(\"toy.sum\", [t(\"a\"), meta_f(\"toy.k\")]), 0.5))")});
+        recipe::Recipe r = recipe::parse(text, ctx);
+        CHECK(r.items[0].ulp);
+        CHECK(r.provided_keys() == std::vector<std::string>({"toy.sum"}));
+        std::vector<std::vector<uint8_t>> got;
+        std::vector<std::string> observed;
+        Error e = recipe::evaluate(
+            r, s,
+            [&](const recipe::BlobOut & b) {
+                CHECK(b.ulp);
+                got.emplace_back(b.data, b.data + b.bytes);
+                return Error{};
+            },
+            nullptr,
+            [&](const std::string & n, const std::array<uint8_t, 32> &) {
+                observed.push_back(n);
+                return Error{};
+            });
+        CHECK_MSG(e.ok(), e.message);
+        // sum(a) = 4: 4 * (i + 1) + 7 + 0.5.
+        if (got.size() == 1) {
+            CHECK(f16s(got[0]) == std::vector<uint16_t>({recipe::f32_to_f16(11.5f), recipe::f32_to_f16(15.5f),
+                                                         recipe::f32_to_f16(19.5f)}));
+        }
+        // The observer sees the provided() function's read, as for t().
+        CHECK(observed == std::vector<std::string>({"a"}));
+    }
+    // Static checks.
+    const std::string h = hdr(128, 1) + decls;
+    auto bad = [&](const std::string & expr, const std::string & needle, uint64_t count = 2) {
+        try {
+            recipe::parse(h + "blob 64 fp16 " + std::to_string(count) + " " + expr + "\nend\n", ctx);
+            CHECK_MSG(false, "parsed '" + expr + "', expected '" + needle + "'");
+        } catch (const recipe::RecipeError & e) {
+            CHECK_MSG(std::string(e.what()).find(needle) != std::string::npos,
+                      std::string("error '") + e.what() + "' lacks '" + needle + "'");
+        }
+    };
+    bad("f16(mul(t(\"a\"), meta_f(\"toy.nope\")))", "has no meta line");
+    bad("f16(mul(t(\"a\"), meta_f(\"toy.name\")))", "needs a numeric meta line");
+    bad("f16(mul(t(\"a\"), meta_f(1)))", "takes a metadata key string");
+    bad("f16(mul(t(\"a\"), meta_s(\"toy.name\")))", "only the value of a patch str line");
+    bad("f16(provided(\"toy.nope\", [t(\"a\")]))", "is not declared in template.json provided");
+    bad("f16(provided(\"toy.sneaky\", t(\"a\")))", "dependencies must be a list");
+    bad("f16(provided(\"toy.sneaky\"))", "takes a key and a list");
+    bad("f16(provided(\"toy.sneaky\", [t(\"zz\")]))", "has no source line");
+    bad("f16(provided(\"toy.sneaky\", [meta_f(\"zz\")]))", "has no meta line");
+    bad("f16(provided(\"toy.sneaky\", [add(t(\"a\"), 1)]))", "a provided() dependency is");
+    bad("f16(provided(\"toy.sneaky\", [t(\"a\"), t(\"a\")]))", "twice");
+    bad("f16(provided(\"toy.sum\", [t(\"a\")]))", "declares 2 elements", 2);
+    // Without a declaration in the context, provided() does not parse.
+    try {
+        recipe::parse(h + "blob 64 fp16 2 f16(provided(\"toy.sneaky\", [t(\"a\")]))\nend\n");
+        CHECK_MSG(false, "an undeclared provided() parsed");
+    } catch (const recipe::RecipeError & e) {
+        CHECK_MSG(std::string(e.what()).find("not declared") != std::string::npos, e.what());
+    }
+    // Evaluation errors are deterministic.
+    auto eval_error = [&](const std::string & key, const std::string & needle) {
+        const std::string text =
+            recipe_text("t", zeros64(), decls, {blob("fp16", 2, "f16(provided(\"" + key + "\", [t(\"a\")]))")});
+        recipe::Recipe r = recipe::parse(text, ctx);
+        Error e = recipe::evaluate(r, s, [](const recipe::BlobOut &) { return Error{}; });
+        CHECK_MSG(!e.ok() && e.cls == ErrorClass::deterministic && e.message.find(needle) != std::string::npos,
+                  key + ": " + e.message);
+    };
+    eval_error("toy.sneaky", "does not list as a dependency");
+    eval_error("toy.short", "returned 1 values");
+    eval_error("toy.unregistered", "has no implementation");
+    // A metadata value missing at generation time.
+    {
+        MemSource no_meta({TT{"a", T_F32, {2}, {1.5f, 2.5f}}, TT{"b", T_F32, {2}, {1.0f, -1.0f}}}, {});
+        const std::string text = recipe_text("t", zeros64(), decls, {blob("fp16", 2, "f16(mul(t(\"a\"), meta_f(\"toy.x\")))")});
+        recipe::Recipe r = recipe::parse(text, ctx);
+        Error e = recipe::evaluate(r, no_meta, [](const recipe::BlobOut &) { return Error{}; });
+        CHECK_MSG(!e.ok() && e.cls == ErrorClass::deterministic && e.message.find("toy.x") != std::string::npos,
+                  e.message);
+    }
+}
+
+// A fake spec of 64 bytes with an 8-character string sentinel at 8 and a
+// 4-byte fp16 sentinel at 32.
+std::string str_patch_spec() {
+    std::string spec(64, 'x');
+    spec.replace(8, 8, "SENTINEL");
+    spec.replace(32, 4, "\xa5\x5a\xa5\x5a", 4);
+    return spec;
+}
+
+recipe::ParseContext str_patch_ctx(const std::string & spec) {
+    recipe::ParseContext ctx;
+    ctx.spec = reinterpret_cast<const uint8_t *>(spec.data());
+    ctx.spec_size = spec.size();
+    ctx.patches = {recipe::PatchSite{8, 8, "53454e54494e454c"}, recipe::PatchSite{32, 4, "a55aa55a"}};
+    return ctx;
+}
+
+void case_patch_str() {
+    const std::string spec = str_patch_spec();
+    const recipe::ParseContext ctx = str_patch_ctx(spec);
+    const std::string decls = "source \"a\" f32 [2]\nmeta \"toy.sha\" str\nmeta \"toy.k\" u32\n";
+    const std::string text = recipe_text(
+        "t", zeros64(), decls,
+        {patch_(8, "str", 8, "meta_s(\"toy.sha\")"), patch_(32, "fp16", 2, "f16(mul(t(\"a\"), meta_f(\"toy.k\")))"),
+         blob("fp16", 2, "f16(t(\"a\"))")});
+    MemSource s({TT{"a", T_F32, {2}, {0.5f, 1.0f}}}, {TM{"toy.sha", "str", "0123abcd"}, TM{"toy.k", "u32", 2}});
+    try {
+        const recipe::Recipe r = recipe::parse(text, ctx);
+        CHECK(r.patch_count() == 2 && r.items[0].str && r.items[0].count == 8);
+        std::vector<uint8_t> out;
+        Error e = recipe::patched_spec(r, s, ctx.spec, ctx.spec_size, out);
+        CHECK_MSG(e.ok(), e.message);
+        std::string want = spec;
+        want.replace(8, 8, "0123abcd");
+        want.replace(32, 4, std::string("\x00\x3c\x00\x40", 4));  // 1.0, 2.0
+        CHECK(std::string(out.begin(), out.end()) == want);
+        // A value of another length is a deterministic failure (the GGUF stays on ggml).
+        MemSource longer({TT{"a", T_F32, {2}, {0.5f, 1.0f}}}, {TM{"toy.sha", "str", "0123abcde"}, TM{"toy.k", "u32", 2}});
+        e = recipe::patched_spec(r, longer, ctx.spec, ctx.spec_size, out);
+        CHECK_MSG(!e.ok() && e.cls == ErrorClass::deterministic && e.message.find("is 9 bytes, the patch holds 8") !=
+                                                                         std::string::npos,
+                  e.message);
+        MemSource missing({TT{"a", T_F32, {2}, {0.5f, 1.0f}}}, {TM{"toy.k", "u32", 2}});
+        e = recipe::patched_spec(r, missing, ctx.spec, ctx.spec_size, out);
+        CHECK_MSG(!e.ok() && e.cls == ErrorClass::deterministic && e.message.find("toy.sha") != std::string::npos,
+                  e.message);
+    } catch (const std::exception & e) {
+        CHECK_MSG(false, e.what());
+    }
+    // Static checks of str lines: bounds, overlaps, length and value.
+    const std::string b = "blob 64 fp16 2 f16(t(\"a\"))\n";
+    const std::string h = hdr(128, 1) + decls;
+    expect_patch_error(h + "patch 8 str 8 \"abcdefgh\"\n" + b + "end\n", {}, "a patch str line's value is meta_s");
+    expect_patch_error(h + "patch 8 str 8 meta_s(\"toy.k\")\n" + b + "end\n", {}, "needs a str meta line");
+    expect_patch_error(h + "patch 8 str 8 meta_s(\"toy.nope\")\n" + b + "end\n", {}, "has no meta line");
+    expect_patch_error(h + "patch 8 str 0 meta_s(\"toy.sha\")\n" + b + "end\n", {}, "patch str length");
+    expect_patch_error(h + "patch 8 str 8 meta_s(\"toy.sha\")\npatch 12 fp16 2 f16(t(\"a\"))\n" + b + "end\n",
+                       {}, "overlaps");
+    expect_patch_error(h + "patch 8 str 8 meta_s(\"toy.sha\")\npatch 16 fp16 2 f16(t(\"a\"))\n" + b + "end\n", ctx,
+                       "has no template.json patches entry");
+    expect_patch_error(h + "patch 8 str 9 meta_s(\"toy.sha\")\npatch 32 fp16 2 f16(t(\"a\"))\n" + b + "end\n", ctx,
+                       "writes 9 bytes, its template.json entry has len 8");
+    expect_patch_error(h + "patch 60 str 8 meta_s(\"toy.sha\")\n" + b + "end\n", ctx, "outside the 64-byte spec");
+    std::string other = spec;
+    other[9] = 'Z';
+    expect_patch_error(text, str_patch_ctx(other), "not the patch's sentinel");
+}
+
+// template.json `provided` reaches the parser, and matching needs every key
+// the recipe uses to have an implementation.
+void case_template_provided() {
+    recipe::register_provided("toy.sum", &toy_provided);
+    TempDir td;
+    TemplateSpec ts;
+    ts.id = "toy-provided";
+    ts.decls = "source \"a\" f32 [2]\nmeta \"toy.k\" u32\n";
+    ts.items = {blob("fp16", 3, "f16(provided(\"toy.sum\", [t(\"a\"), meta_f(\"toy.k\")]))")};
+    ts.extra = {{"provided", json::array({{{"key", "toy.sum"}, {"shape", {3}}}})}};
+    std::shared_ptr<const recipe::Template> t;
+    try {
+        t = make_template(td / "tpl", ts);
+    } catch (const std::exception & e) {
+        CHECK_MSG(false, e.what());
+        return;
+    }
+    MemSource s({TT{"a", T_F32, {2}, {1.0f, 2.0f}}}, {TM{"toy.k", "u32", 1}});
+    const recipe::MatchResult m = recipe::match(*t, s);
+    CHECK_MSG(m.ok, m.reason);
+    Error e = cache::write_package(*t, s, td / "out.mlpackage");
+    CHECK_MSG(e.ok(), e.message);
+    // A key with no implementation in this library: no_template, before any
+    // generation starts.
+    TemplateSpec un = ts;
+    un.id = "toy-unregistered";
+    un.items = {blob("fp16", 3, "f16(provided(\"toy.unregistered\", [t(\"a\")]))")};
+    un.extra = {{"provided", json::array({{{"key", "toy.unregistered"}, {"shape", {3}}}})}};
+    try {
+        auto tu = make_template(td / "tpl-un", un);
+        const recipe::MatchResult mu = recipe::match(*tu, s);
+        CHECK_MSG(!mu.ok && mu.reason.find("has no implementation") != std::string::npos, mu.reason);
+    } catch (const std::exception & ex) {
+        CHECK_MSG(false, ex.what());
+    }
+}
+
 // ---- templates and matching ------------------------------------------------------------------
 
 TemplateSpec toy_spec() {
@@ -1167,7 +1432,14 @@ void case_template() {
             j["provided"] = json::array({"k"});
             write_bytes(mutate_dir + "/template.json", j.dump());
         },
-        "provided is not supported");
+        "a provided entry needs key and shape");
+    rejects(
+        [] {
+            json j = json::parse(read_bytes(mutate_dir + "/template.json"));
+            j["provided"] = json::array({{{"key", "k"}, {"shape", {0}}}});
+            write_bytes(mutate_dir + "/template.json", j.dump());
+        },
+        "dims must be positive integers");
     rejects([] { fs::remove(mutate_dir + "/Manifest.json"); }, "missing Manifest.json");
 }
 
@@ -1491,6 +1763,9 @@ int main(int argc, char ** argv) {
                          {"op-sub-sqrt", case_op_sub_sqrt},
                          {"patches", case_patches},
                          {"template-literals-patches", case_template_literals_patches},
+                         {"op-meta-provided", case_op_meta_provided},
+                         {"patch-str", case_patch_str},
+                         {"template-provided", case_template_provided},
                          {"shape-overflow", case_shape_overflow},
                          {"parler-examples", case_parler_examples},
                          {"liveness-and-observer", case_liveness_and_observer},

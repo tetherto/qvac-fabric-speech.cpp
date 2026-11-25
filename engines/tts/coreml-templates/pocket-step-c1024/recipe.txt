@@ -1,0 +1,259 @@
+mlrecipe 1
+template pocket-step-c1024
+spec_sha256 884fb7ea31c671b80043ee2603556dec12f2cbe7510ec21fe1ac44e1d5534770
+weight_bin_size 169075712
+blobs 110
+# Pocket TTS FlowLM generation step, context 1024 (scripts/export-pocket-coreml.py --context 1024,
+# fp16, KV cache in Core ML state). Every weight is an fp16 cast of its GGUF tensor except: the
+# zeros blobs (the bias coremltools gives each bias-free linear; later layers share layer 0's), and
+# the flow's condition bias, which holds flow_net.cond_embed.bias plus the time embeddings of the
+# LSD step from s = 0 to t = 1 that scripts/pocket_coreml_models.py folds into a constant
+# (provided("pocket.time_bias"), engines/tts/coreml-provided/pocket.cpp). The spec records the
+# checkpoint's source hash, which the engine checks before it loads the sidecar.
+source "input_linear.weight" f32,f16 [1024,32]
+source "transformer.layers.0.norm1.weight" f32,f16 [1024]
+source "transformer.layers.0.norm1.bias" f32,f16 [1024]
+source "transformer.layers.0.self_attn.in_proj.weight" f32,f16 [3072,1024]
+source "transformer.layers.0.self_attn.out_proj.weight" f32,f16 [1024,1024]
+source "transformer.layers.0.norm2.weight" f32,f16 [1024]
+source "transformer.layers.0.norm2.bias" f32,f16 [1024]
+source "transformer.layers.0.linear1.weight" f32,f16 [4096,1024]
+source "transformer.layers.0.linear2.weight" f32,f16 [1024,4096]
+source "transformer.layers.1.norm1.weight" f32,f16 [1024]
+source "transformer.layers.1.norm1.bias" f32,f16 [1024]
+source "transformer.layers.1.self_attn.in_proj.weight" f32,f16 [3072,1024]
+source "transformer.layers.1.self_attn.out_proj.weight" f32,f16 [1024,1024]
+source "transformer.layers.1.norm2.weight" f32,f16 [1024]
+source "transformer.layers.1.norm2.bias" f32,f16 [1024]
+source "transformer.layers.1.linear1.weight" f32,f16 [4096,1024]
+source "transformer.layers.1.linear2.weight" f32,f16 [1024,4096]
+source "transformer.layers.2.norm1.weight" f32,f16 [1024]
+source "transformer.layers.2.norm1.bias" f32,f16 [1024]
+source "transformer.layers.2.self_attn.in_proj.weight" f32,f16 [3072,1024]
+source "transformer.layers.2.self_attn.out_proj.weight" f32,f16 [1024,1024]
+source "transformer.layers.2.norm2.weight" f32,f16 [1024]
+source "transformer.layers.2.norm2.bias" f32,f16 [1024]
+source "transformer.layers.2.linear1.weight" f32,f16 [4096,1024]
+source "transformer.layers.2.linear2.weight" f32,f16 [1024,4096]
+source "transformer.layers.3.norm1.weight" f32,f16 [1024]
+source "transformer.layers.3.norm1.bias" f32,f16 [1024]
+source "transformer.layers.3.self_attn.in_proj.weight" f32,f16 [3072,1024]
+source "transformer.layers.3.self_attn.out_proj.weight" f32,f16 [1024,1024]
+source "transformer.layers.3.norm2.weight" f32,f16 [1024]
+source "transformer.layers.3.norm2.bias" f32,f16 [1024]
+source "transformer.layers.3.linear1.weight" f32,f16 [4096,1024]
+source "transformer.layers.3.linear2.weight" f32,f16 [1024,4096]
+source "transformer.layers.4.norm1.weight" f32,f16 [1024]
+source "transformer.layers.4.norm1.bias" f32,f16 [1024]
+source "transformer.layers.4.self_attn.in_proj.weight" f32,f16 [3072,1024]
+source "transformer.layers.4.self_attn.out_proj.weight" f32,f16 [1024,1024]
+source "transformer.layers.4.norm2.weight" f32,f16 [1024]
+source "transformer.layers.4.norm2.bias" f32,f16 [1024]
+source "transformer.layers.4.linear1.weight" f32,f16 [4096,1024]
+source "transformer.layers.4.linear2.weight" f32,f16 [1024,4096]
+source "transformer.layers.5.norm1.weight" f32,f16 [1024]
+source "transformer.layers.5.norm1.bias" f32,f16 [1024]
+source "transformer.layers.5.self_attn.in_proj.weight" f32,f16 [3072,1024]
+source "transformer.layers.5.self_attn.out_proj.weight" f32,f16 [1024,1024]
+source "transformer.layers.5.norm2.weight" f32,f16 [1024]
+source "transformer.layers.5.norm2.bias" f32,f16 [1024]
+source "transformer.layers.5.linear1.weight" f32,f16 [4096,1024]
+source "transformer.layers.5.linear2.weight" f32,f16 [1024,4096]
+source "out_norm.weight" f32,f16 [1024]
+source "out_norm.bias" f32,f16 [1024]
+source "flow_net.cond_embed.weight" f32,f16 [512,1024]
+source "flow_net.cond_embed.bias" f32,f16 [512]
+source "flow_net.time_embed.0.freqs" f32,f16 [128]
+source "flow_net.time_embed.0.mlp.0.weight" f32,f16 [512,256]
+source "flow_net.time_embed.0.mlp.0.bias" f32,f16 [512]
+source "flow_net.time_embed.0.mlp.2.weight" f32,f16 [512,512]
+source "flow_net.time_embed.0.mlp.2.bias" f32,f16 [512]
+source "flow_net.time_embed.0.mlp.3.alpha" f32,f16 [512]
+source "flow_net.time_embed.1.freqs" f32,f16 [128]
+source "flow_net.time_embed.1.mlp.0.weight" f32,f16 [512,256]
+source "flow_net.time_embed.1.mlp.0.bias" f32,f16 [512]
+source "flow_net.time_embed.1.mlp.2.weight" f32,f16 [512,512]
+source "flow_net.time_embed.1.mlp.2.bias" f32,f16 [512]
+source "flow_net.time_embed.1.mlp.3.alpha" f32,f16 [512]
+source "flow_net.input_proj.weight" f32,f16 [512,32]
+source "flow_net.input_proj.bias" f32,f16 [512]
+source "flow_net.res_blocks.0.adaLN_modulation.1.weight" f32,f16 [1536,512]
+source "flow_net.res_blocks.0.adaLN_modulation.1.bias" f32,f16 [1536]
+source "flow_net.res_blocks.0.in_ln.weight" f32,f16 [512]
+source "flow_net.res_blocks.0.in_ln.bias" f32,f16 [512]
+source "flow_net.res_blocks.0.mlp.0.weight" f32,f16 [512,512]
+source "flow_net.res_blocks.0.mlp.0.bias" f32,f16 [512]
+source "flow_net.res_blocks.0.mlp.2.weight" f32,f16 [512,512]
+source "flow_net.res_blocks.0.mlp.2.bias" f32,f16 [512]
+source "flow_net.res_blocks.1.adaLN_modulation.1.weight" f32,f16 [1536,512]
+source "flow_net.res_blocks.1.adaLN_modulation.1.bias" f32,f16 [1536]
+source "flow_net.res_blocks.1.in_ln.weight" f32,f16 [512]
+source "flow_net.res_blocks.1.in_ln.bias" f32,f16 [512]
+source "flow_net.res_blocks.1.mlp.0.weight" f32,f16 [512,512]
+source "flow_net.res_blocks.1.mlp.0.bias" f32,f16 [512]
+source "flow_net.res_blocks.1.mlp.2.weight" f32,f16 [512,512]
+source "flow_net.res_blocks.1.mlp.2.bias" f32,f16 [512]
+source "flow_net.res_blocks.2.adaLN_modulation.1.weight" f32,f16 [1536,512]
+source "flow_net.res_blocks.2.adaLN_modulation.1.bias" f32,f16 [1536]
+source "flow_net.res_blocks.2.in_ln.weight" f32,f16 [512]
+source "flow_net.res_blocks.2.in_ln.bias" f32,f16 [512]
+source "flow_net.res_blocks.2.mlp.0.weight" f32,f16 [512,512]
+source "flow_net.res_blocks.2.mlp.0.bias" f32,f16 [512]
+source "flow_net.res_blocks.2.mlp.2.weight" f32,f16 [512,512]
+source "flow_net.res_blocks.2.mlp.2.bias" f32,f16 [512]
+source "flow_net.res_blocks.3.adaLN_modulation.1.weight" f32,f16 [1536,512]
+source "flow_net.res_blocks.3.adaLN_modulation.1.bias" f32,f16 [1536]
+source "flow_net.res_blocks.3.in_ln.weight" f32,f16 [512]
+source "flow_net.res_blocks.3.in_ln.bias" f32,f16 [512]
+source "flow_net.res_blocks.3.mlp.0.weight" f32,f16 [512,512]
+source "flow_net.res_blocks.3.mlp.0.bias" f32,f16 [512]
+source "flow_net.res_blocks.3.mlp.2.weight" f32,f16 [512,512]
+source "flow_net.res_blocks.3.mlp.2.bias" f32,f16 [512]
+source "flow_net.res_blocks.4.adaLN_modulation.1.weight" f32,f16 [1536,512]
+source "flow_net.res_blocks.4.adaLN_modulation.1.bias" f32,f16 [1536]
+source "flow_net.res_blocks.4.in_ln.weight" f32,f16 [512]
+source "flow_net.res_blocks.4.in_ln.bias" f32,f16 [512]
+source "flow_net.res_blocks.4.mlp.0.weight" f32,f16 [512,512]
+source "flow_net.res_blocks.4.mlp.0.bias" f32,f16 [512]
+source "flow_net.res_blocks.4.mlp.2.weight" f32,f16 [512,512]
+source "flow_net.res_blocks.4.mlp.2.bias" f32,f16 [512]
+source "flow_net.res_blocks.5.adaLN_modulation.1.weight" f32,f16 [1536,512]
+source "flow_net.res_blocks.5.adaLN_modulation.1.bias" f32,f16 [1536]
+source "flow_net.res_blocks.5.in_ln.weight" f32,f16 [512]
+source "flow_net.res_blocks.5.in_ln.bias" f32,f16 [512]
+source "flow_net.res_blocks.5.mlp.0.weight" f32,f16 [512,512]
+source "flow_net.res_blocks.5.mlp.0.bias" f32,f16 [512]
+source "flow_net.res_blocks.5.mlp.2.weight" f32,f16 [512,512]
+source "flow_net.res_blocks.5.mlp.2.bias" f32,f16 [512]
+source "flow_net.final_layer.adaLN_modulation.1.weight" f32,f16 [1024,512]
+source "flow_net.final_layer.adaLN_modulation.1.bias" f32,f16 [1024]
+source "flow_net.final_layer.linear.weight" f32,f16 [32,512]
+source "flow_net.final_layer.linear.bias" f32,f16 [32]
+meta "pocket.source_sha256" str
+blob 64 fp16 32768 f16(t("input_linear.weight"))
+blob 65664 fp16 1024 f16(zeros([1024]))
+blob 67776 fp16 1024 f16(t("transformer.layers.0.norm1.weight"))
+blob 69888 fp16 1024 f16(t("transformer.layers.0.norm1.bias"))
+blob 72000 fp16 3145728 f16(t("transformer.layers.0.self_attn.in_proj.weight"))
+blob 6363520 fp16 3072 f16(zeros([3072]))
+blob 6369728 fp16 1048576 f16(t("transformer.layers.0.self_attn.out_proj.weight"))
+blob 8466944 fp16 1024 f16(t("transformer.layers.0.norm2.weight"))
+blob 8469056 fp16 1024 f16(t("transformer.layers.0.norm2.bias"))
+blob 8471168 fp16 4194304 f16(t("transformer.layers.0.linear1.weight"))
+blob 16859840 fp16 4096 f16(zeros([4096]))
+blob 16868096 fp16 4194304 f16(t("transformer.layers.0.linear2.weight"))
+blob 25256768 fp16 1024 f16(t("transformer.layers.1.norm1.weight"))
+blob 25258880 fp16 1024 f16(t("transformer.layers.1.norm1.bias"))
+blob 25260992 fp16 3145728 f16(t("transformer.layers.1.self_attn.in_proj.weight"))
+blob 31552512 fp16 1048576 f16(t("transformer.layers.1.self_attn.out_proj.weight"))
+blob 33649728 fp16 1024 f16(t("transformer.layers.1.norm2.weight"))
+blob 33651840 fp16 1024 f16(t("transformer.layers.1.norm2.bias"))
+blob 33653952 fp16 4194304 f16(t("transformer.layers.1.linear1.weight"))
+blob 42042624 fp16 4194304 f16(t("transformer.layers.1.linear2.weight"))
+blob 50431296 fp16 1024 f16(t("transformer.layers.2.norm1.weight"))
+blob 50433408 fp16 1024 f16(t("transformer.layers.2.norm1.bias"))
+blob 50435520 fp16 3145728 f16(t("transformer.layers.2.self_attn.in_proj.weight"))
+blob 56727040 fp16 1048576 f16(t("transformer.layers.2.self_attn.out_proj.weight"))
+blob 58824256 fp16 1024 f16(t("transformer.layers.2.norm2.weight"))
+blob 58826368 fp16 1024 f16(t("transformer.layers.2.norm2.bias"))
+blob 58828480 fp16 4194304 f16(t("transformer.layers.2.linear1.weight"))
+blob 67217152 fp16 4194304 f16(t("transformer.layers.2.linear2.weight"))
+blob 75605824 fp16 1024 f16(t("transformer.layers.3.norm1.weight"))
+blob 75607936 fp16 1024 f16(t("transformer.layers.3.norm1.bias"))
+blob 75610048 fp16 3145728 f16(t("transformer.layers.3.self_attn.in_proj.weight"))
+blob 81901568 fp16 1048576 f16(t("transformer.layers.3.self_attn.out_proj.weight"))
+blob 83998784 fp16 1024 f16(t("transformer.layers.3.norm2.weight"))
+blob 84000896 fp16 1024 f16(t("transformer.layers.3.norm2.bias"))
+blob 84003008 fp16 4194304 f16(t("transformer.layers.3.linear1.weight"))
+blob 92391680 fp16 4194304 f16(t("transformer.layers.3.linear2.weight"))
+blob 100780352 fp16 1024 f16(t("transformer.layers.4.norm1.weight"))
+blob 100782464 fp16 1024 f16(t("transformer.layers.4.norm1.bias"))
+blob 100784576 fp16 3145728 f16(t("transformer.layers.4.self_attn.in_proj.weight"))
+blob 107076096 fp16 1048576 f16(t("transformer.layers.4.self_attn.out_proj.weight"))
+blob 109173312 fp16 1024 f16(t("transformer.layers.4.norm2.weight"))
+blob 109175424 fp16 1024 f16(t("transformer.layers.4.norm2.bias"))
+blob 109177536 fp16 4194304 f16(t("transformer.layers.4.linear1.weight"))
+blob 117566208 fp16 4194304 f16(t("transformer.layers.4.linear2.weight"))
+blob 125954880 fp16 1024 f16(t("transformer.layers.5.norm1.weight"))
+blob 125956992 fp16 1024 f16(t("transformer.layers.5.norm1.bias"))
+blob 125959104 fp16 3145728 f16(t("transformer.layers.5.self_attn.in_proj.weight"))
+blob 132250624 fp16 1048576 f16(t("transformer.layers.5.self_attn.out_proj.weight"))
+blob 134347840 fp16 1024 f16(t("transformer.layers.5.norm2.weight"))
+blob 134349952 fp16 1024 f16(t("transformer.layers.5.norm2.bias"))
+blob 134352064 fp16 4194304 f16(t("transformer.layers.5.linear1.weight"))
+blob 142740736 fp16 4194304 f16(t("transformer.layers.5.linear2.weight"))
+blob 151129408 fp16 1024 f16(t("out_norm.weight"))
+blob 151131520 fp16 1024 f16(t("out_norm.bias"))
+blob 151133632 fp16 524288 f16(t("flow_net.cond_embed.weight"))
+# The flow's condition bias with the folded time embeddings of s = 0 and t = 1:
+# cond_embed.bias + time_condition(0, 1), summed in f32 by coremltools.
+blob 152182272 fp16 512 f16(add(t("flow_net.cond_embed.bias"), provided("pocket.time_bias", [
+    t("flow_net.time_embed.0.freqs"),
+    t("flow_net.time_embed.0.mlp.0.weight"),
+    t("flow_net.time_embed.0.mlp.0.bias"),
+    t("flow_net.time_embed.0.mlp.2.weight"),
+    t("flow_net.time_embed.0.mlp.2.bias"),
+    t("flow_net.time_embed.0.mlp.3.alpha"),
+    t("flow_net.time_embed.1.freqs"),
+    t("flow_net.time_embed.1.mlp.0.weight"),
+    t("flow_net.time_embed.1.mlp.0.bias"),
+    t("flow_net.time_embed.1.mlp.2.weight"),
+    t("flow_net.time_embed.1.mlp.2.bias"),
+    t("flow_net.time_embed.1.mlp.3.alpha")])))
+blob 152183360 fp16 16384 f16(t("flow_net.input_proj.weight"))
+blob 152216192 fp16 512 f16(t("flow_net.input_proj.bias"))
+blob 152217280 fp16 786432 f16(t("flow_net.res_blocks.0.adaLN_modulation.1.weight"))
+blob 153790208 fp16 1536 f16(t("flow_net.res_blocks.0.adaLN_modulation.1.bias"))
+blob 153793344 fp16 512 f16(t("flow_net.res_blocks.0.in_ln.weight"))
+blob 153794432 fp16 512 f16(t("flow_net.res_blocks.0.in_ln.bias"))
+blob 153795520 fp16 262144 f16(t("flow_net.res_blocks.0.mlp.0.weight"))
+blob 154319872 fp16 512 f16(t("flow_net.res_blocks.0.mlp.0.bias"))
+blob 154320960 fp16 262144 f16(t("flow_net.res_blocks.0.mlp.2.weight"))
+blob 154845312 fp16 512 f16(t("flow_net.res_blocks.0.mlp.2.bias"))
+blob 154846400 fp16 786432 f16(t("flow_net.res_blocks.1.adaLN_modulation.1.weight"))
+blob 156419328 fp16 1536 f16(t("flow_net.res_blocks.1.adaLN_modulation.1.bias"))
+blob 156422464 fp16 512 f16(t("flow_net.res_blocks.1.in_ln.weight"))
+blob 156423552 fp16 512 f16(t("flow_net.res_blocks.1.in_ln.bias"))
+blob 156424640 fp16 262144 f16(t("flow_net.res_blocks.1.mlp.0.weight"))
+blob 156948992 fp16 512 f16(t("flow_net.res_blocks.1.mlp.0.bias"))
+blob 156950080 fp16 262144 f16(t("flow_net.res_blocks.1.mlp.2.weight"))
+blob 157474432 fp16 512 f16(t("flow_net.res_blocks.1.mlp.2.bias"))
+blob 157475520 fp16 786432 f16(t("flow_net.res_blocks.2.adaLN_modulation.1.weight"))
+blob 159048448 fp16 1536 f16(t("flow_net.res_blocks.2.adaLN_modulation.1.bias"))
+blob 159051584 fp16 512 f16(t("flow_net.res_blocks.2.in_ln.weight"))
+blob 159052672 fp16 512 f16(t("flow_net.res_blocks.2.in_ln.bias"))
+blob 159053760 fp16 262144 f16(t("flow_net.res_blocks.2.mlp.0.weight"))
+blob 159578112 fp16 512 f16(t("flow_net.res_blocks.2.mlp.0.bias"))
+blob 159579200 fp16 262144 f16(t("flow_net.res_blocks.2.mlp.2.weight"))
+blob 160103552 fp16 512 f16(t("flow_net.res_blocks.2.mlp.2.bias"))
+blob 160104640 fp16 786432 f16(t("flow_net.res_blocks.3.adaLN_modulation.1.weight"))
+blob 161677568 fp16 1536 f16(t("flow_net.res_blocks.3.adaLN_modulation.1.bias"))
+blob 161680704 fp16 512 f16(t("flow_net.res_blocks.3.in_ln.weight"))
+blob 161681792 fp16 512 f16(t("flow_net.res_blocks.3.in_ln.bias"))
+blob 161682880 fp16 262144 f16(t("flow_net.res_blocks.3.mlp.0.weight"))
+blob 162207232 fp16 512 f16(t("flow_net.res_blocks.3.mlp.0.bias"))
+blob 162208320 fp16 262144 f16(t("flow_net.res_blocks.3.mlp.2.weight"))
+blob 162732672 fp16 512 f16(t("flow_net.res_blocks.3.mlp.2.bias"))
+blob 162733760 fp16 786432 f16(t("flow_net.res_blocks.4.adaLN_modulation.1.weight"))
+blob 164306688 fp16 1536 f16(t("flow_net.res_blocks.4.adaLN_modulation.1.bias"))
+blob 164309824 fp16 512 f16(t("flow_net.res_blocks.4.in_ln.weight"))
+blob 164310912 fp16 512 f16(t("flow_net.res_blocks.4.in_ln.bias"))
+blob 164312000 fp16 262144 f16(t("flow_net.res_blocks.4.mlp.0.weight"))
+blob 164836352 fp16 512 f16(t("flow_net.res_blocks.4.mlp.0.bias"))
+blob 164837440 fp16 262144 f16(t("flow_net.res_blocks.4.mlp.2.weight"))
+blob 165361792 fp16 512 f16(t("flow_net.res_blocks.4.mlp.2.bias"))
+blob 165362880 fp16 786432 f16(t("flow_net.res_blocks.5.adaLN_modulation.1.weight"))
+blob 166935808 fp16 1536 f16(t("flow_net.res_blocks.5.adaLN_modulation.1.bias"))
+blob 166938944 fp16 512 f16(t("flow_net.res_blocks.5.in_ln.weight"))
+blob 166940032 fp16 512 f16(t("flow_net.res_blocks.5.in_ln.bias"))
+blob 166941120 fp16 262144 f16(t("flow_net.res_blocks.5.mlp.0.weight"))
+blob 167465472 fp16 512 f16(t("flow_net.res_blocks.5.mlp.0.bias"))
+blob 167466560 fp16 262144 f16(t("flow_net.res_blocks.5.mlp.2.weight"))
+blob 167990912 fp16 512 f16(t("flow_net.res_blocks.5.mlp.2.bias"))
+blob 167992000 fp16 524288 f16(t("flow_net.final_layer.adaLN_modulation.1.weight"))
+blob 169040640 fp16 1024 f16(t("flow_net.final_layer.adaLN_modulation.1.bias"))
+blob 169042752 fp16 16384 f16(t("flow_net.final_layer.linear.weight"))
+blob 169075584 fp16 32 f16(t("flow_net.final_layer.linear.bias"))
+# The checkpoint hash the spec's metadata records (pocket.source_sha256), which the engine checks.
+patch 592 str 64 meta_s("pocket.source_sha256")
+end

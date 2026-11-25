@@ -657,6 +657,60 @@ jobs:
           .venv-pocket-coreml/bin/python engines/tts/test/prepare_pocket_coreml_fixture.py --out pocket-coreml-shapes
           POCKET_COREML_TEST_SHAPES="$PWD/pocket-coreml-shapes" ./build/test-pocket-coreml --shape-fixture
 
+      # Pocket TTS English 2026-04, converted by the repo's converter from the
+      # pinned checkpoint, tokenizer and voice (Hugging Face revision) and the
+      # pinned upstream config (pocket-flow-requirements.txt), each download
+      # checked against its SHA-256: the real-weights inputs of the generated
+      # FlowLM step and Mimi decoder sidecars (templates pocket-step-c1024 and
+      # pocket-mimi). Cache key: checkpoint revision + converter hashes.
+      - name: Cache Pocket bundle (English 2026-04)
+        if: runner.os == 'macOS'
+        id: pocket-bundle-cache
+        uses: actions/cache@v4
+        with:
+          path: pocket-bundle
+          key: pocket-bundle-en-2026-04-d29db797-${{ hashFiles('engines/tts/scripts/convert-pocket-*.py', 'engines/tts/scripts/pocket-flow-requirements.txt') }}
+
+      - name: Stage Pocket bundle (English 2026-04)
+        if: runner.os == 'macOS' && steps.pocket-bundle-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          rev=d29db7978e464fb90cb3359ee0c69a273b9142cc
+          base="https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/resolve/$rev/languages/english_2026-04"
+          mkdir -p pocket-hf/embeddings
+          for f in model.safetensors tokenizer.model embeddings/alba.safetensors; do
+            curl -sSfL --retry 3 -o "pocket-hf/$f" "$base/$f"
+          done
+          shasum -a 256 -c - <<'SUMS'
+          be9c6b4876d3f30740a8225dfcaa2e43dc4aeb753c15272735bee16bbb4abb0a  pocket-hf/model.safetensors
+          d461765ae179566678c93091c5fa6f2984c31bbe990bf1aa62d92c64d91bc3f6  pocket-hf/tokenizer.model
+          e4a323e8e771f14fd669428d83e7af6d83b4d6d0f0e282c30122f04824f17b1c  pocket-hf/embeddings/alba.safetensors
+          SUMS
+          convert_python="$(command -v python3.12 || command -v python3.11 || command -v python3)"
+          "$convert_python" -m venv .venv-pocket-convert
+          .venv-pocket-convert/bin/python -m pip install --upgrade pip
+          .venv-pocket-convert/bin/python -m pip install -r engines/tts/scripts/pocket-flow-requirements.txt \
+            torch==2.15.0 numpy==2.5.4 safetensors==0.8.0 sentencepiece==0.2.2
+          config="$(.venv-pocket-convert/bin/python -c 'import pathlib, pocket_tts; print(pathlib.Path(pocket_tts.__file__).parent / "config" / "english_2026-04.yaml")')"
+          .venv-pocket-convert/bin/python engines/tts/scripts/convert-pocket-to-gguf.py \
+            --weights pocket-hf/model.safetensors --config "$config" --tokenizer pocket-hf/tokenizer.model \
+            --voice pocket-hf/embeddings/alba.safetensors --output pocket-bundle
+          rm -rf pocket-hf .venv-pocket-convert
+
+      # Checked on every run, whether the bundle was just converted or
+      # restored from the cache.
+      - name: Check Pocket bundle (English 2026-04)
+        id: pocket-bundle-check
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          shasum -a 256 -c - <<'SUMS'
+          11ed51882574fc1b929990a873924b733d6f6b6aeee9ddd89cab5e4e5db5a839  pocket-bundle/flow-lm.gguf
+          fa9f5d0e6b6b7b160d13f302a196b183d192ef0c0b78186a203843254c775892  pocket-bundle/mimi.gguf
+          756a6d452775550e5e33e36c883563c342720ecff098f5b65308d0340f27853a  pocket-bundle/voice.gguf
+          e1bf5c4d7384d8d1331806653753e708b3e1a0ddc38a38ada46472bb3b86a086  pocket-bundle/frontend.json
+          SUMS
+
       # Core ML Parler DAC sidecar on a tiny random-weight Parler GGUF built
       # in place (no download): the sidecar is exported by the repo's
       # exporter with rows folded at 64 samples so the tiny decoder still
@@ -822,6 +876,45 @@ jobs:
             rm -rf "parler-dac-memory/cache-$i" "parler-dac-memory/$id" "$HOME/Library/Caches/$id"
           done
           rm -rf parler-dac-memory
+          exit "$status"
+
+      # The memory validation behind both Pocket templates' memory constants,
+      # on this runner's chip, with each stage on its default placement (the
+      # FlowLM step on cpu_and_gpu, the Mimi decoder on cpu_and_ane): ggml
+      # FlowLM and Mimi run while both sidecars are generated, compiled,
+      # loaded and warmed in the background (one Core ML job at a time), three
+      # times, each from a re-signed copy of the test and an empty cache, so
+      # every Neural Engine load is cold. Each run prints its per-phase table
+      # and fails unless 1.25 x each phase it measured (each stage's prepare
+      # and load and warm-up, the steady state with both ready,
+      # ANECompilerService's absolute size while the decoder loads) fits the
+      # template constant that charges it, and the whole run fits the
+      # envelope: the constants are 1.25 x the largest value of every run on
+      # every validated host, so a run that sets a new maximum fails until
+      # they are recomputed (docs/pocket-tts.md). The service's size sums
+      # every instance on the Mac, so a co-hosted job compiling for the Neural
+      # Engine at the same time counts too, as do this job's earlier compiles
+      # (it runs after the Parler schedule, which it so leaves undisturbed).
+      # Runs whenever the bundle checked out, so an earlier failure does not
+      # hide it.
+      - name: Memory schedule (generated Pocket step and Mimi, overlapped, this runner)
+        if: >-
+          !cancelled() && runner.os == 'macOS' && steps.pocket-bundle-check.outcome == 'success'
+        run: |
+          set -euo pipefail
+          sw_vers
+          sysctl -n machdep.cpu.brand_string hw.memsize
+          rm -rf pocket-memory
+          mkdir -p pocket-memory
+          status=0
+          for i in 1 2 3; do
+            id="qvac-memory-$(uuidgen)"
+            cp build/test-pocket-coreml "pocket-memory/$id"
+            codesign -s - -f -i "$id" "pocket-memory/$id"
+            "pocket-memory/$id" --generated pocket-bundle --memory-schedule "$PWD/pocket-memory/cache-$i" || status=1
+            rm -rf "pocket-memory/cache-$i" "pocket-memory/$id" "$HOME/Library/Caches/$id"
+          done
+          rm -rf pocket-memory
           exit "$status"
 
       # fit is the same with an empty cache and with the cache the step above
