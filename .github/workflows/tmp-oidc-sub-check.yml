@@ -1,0 +1,35 @@
+name: tmp OIDC subject check
+
+# Temporary. Prints the `sub` claim of the OIDC token GitHub issues to this
+# repo for a pull_request run and for a branch push, so the AWS trust policy
+# can be written against the real value. No cloud access, no secrets.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/tmp-oidc-sub-check.yml'
+  push:
+    branches:
+      - 'tmp/oidc-sub-check'
+
+permissions: {}
+
+jobs:
+  sub:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      id-token: write
+    steps:
+      - name: Print OIDC subject claim
+        run: |
+          set -euo pipefail
+          resp=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com")
+          payload=$(printf '%s' "$resp" | jq -r '.value' | cut -d. -f2 | tr '_-' '/+')
+          case $(( ${#payload} % 4 )) in
+            2) payload="$payload==" ;;
+            3) payload="$payload=" ;;
+          esac
+          printf '%s' "$payload" | base64 -d \
+            | jq '{sub, aud, event_name, ref, repository_id, repository_owner_id}'
