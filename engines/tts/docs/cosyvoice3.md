@@ -33,7 +33,11 @@ keeps Core ML disabled. The engine discovers compiled models next to the
 corresponding GGUFs and keeps their handles across synthesis calls. The
 speech LM, flow frontend, DiT, F0 predictor and HiFT neural decoder can each
 use a sidecar. Tokenization, sampling, Euler integration, sine excitation,
-STFT and inverse STFT keep their native implementations.
+STFT and inverse STFT keep their native implementations. The flow
+front-end, the F0 predictor and the HiFT decoder can also be generated on the
+device from the GGUFs, and load in the background (see
+[Generated sidecars and background loading](#generated-sidecars-and-background-loading));
+the LM and DiT sidecars open at construction, as below.
 
 Export from the same GGUFs used by the engine with Python packages `torch`,
 `numpy`, `gguf` and `coremltools`, plus Xcode's `coremlcompiler`:
@@ -56,8 +60,10 @@ limits. The LM uses Core ML only when its context can hold the entire
 existing workload; otherwise it retains ggml. Flow capacity includes the
 voice prompt's mel frames. Frontend and flow padding exclude padded tokens
 from embeddings and attention. An incompatible or too-small sidecar retains
-ggml for that stage. An execution error after a stage starts fails synthesis.
-The optional flow prompt-cut path retains ggml for the DiT.
+ggml for that stage. An LM or DiT execution error after the stage starts
+fails synthesis; a front-end, F0 or HiFT execution error retires that
+sidecar and the stage is redone on ggml (see below). The optional flow
+prompt-cut path retains ggml for the DiT.
 
 For `cosyvoice3-llm-q8_0.gguf`, the LM sidecar is
 `cosyvoice3-llm.mlmodelc`. Flow uses `cosyvoice3-flow.mlmodelc` and
@@ -67,7 +73,7 @@ quantization tag using the same naming rule as the runtime. Do not reuse a
 sidecar for different checkpoint weights.
 
 `COSYVOICE_COREML_COMPUTE_UNITS` accepts `cpu_and_ane` (default), `cpu_only`,
-`cpu_and_gpu`, `all`, or `disabled`. CPU+ANE excludes Metal from Core ML;
+`cpu_and_gpu`, `all`, or `disabled` (the same as `COSYVOICE_COREML_DISABLE`). CPU+ANE excludes Metal from Core ML;
 Core ML decides which supported operations run on ANE. The backend label
 adds `coreml-ane` only after successful prediction. This label reports the
 requested Core ML compute policy; it does not assert that every operation
@@ -90,12 +96,13 @@ existing waveform parity gate. Under CPU+ANE this stage may execute on CPU;
 the sidecar does not guarantee ANE placement. Re-export HiFT artifacts made
 with the earlier mixed-precision policy before deployment.
 
-When Core ML is compiled in and any enabled LM, flow/frontend, HiFT or F0
-sidecar exists, `fit_params` returns `FitStatus::Error` with reason
+When Core ML is compiled in and any enabled prebuilt LM, flow/frontend, HiFT
+or F0 sidecar exists, `fit_params` returns `FitStatus::Error` with reason
 `coreml-memory-estimate-unavailable`. The native staged estimate cannot
 account for the resident Core ML models and prediction buffers. Detection
 is conservative and does not load or validate the sidecar. With Core ML
 disabled or not compiled in, the existing native estimate remains available.
+Generated front-end, F0 and HiFT sidecars are projected instead (below).
 
 Native fixture tests use `COSYVOICE_COREML_TEST_LM_GGUF` for the LM and
 `COSYVOICE_COREML_TEST_MODELS_DIR` for stage parity. The stage directory
@@ -107,6 +114,121 @@ RoPE, cache feedback and reset. `test-cosyvoice-coreml-stages` compares flow,
 F0 and a waveform with pinned F0 against ggml using the existing tier gates.
 Without staged fixtures these tests report a skip; they do not claim an
 inference pass.
+
+#### Generated sidecars and background loading
+
+The flow front-end, the F0 predictor and the HiFT decoder run on the shared
+Core ML runtime (`EngineOptions::coreml`, `tts-cpp/coreml_options.h`). Each
+stage's sidecar is either the exporter's, next to its GGUF (the names above),
+or, with `coreml.cache_dir` (or `QVAC_COREML_CACHE_DIR`) set, macOS 15 or
+later, `TTS_CPP_COREML_GENERATE=ON` (the macOS default) and no prebuilt
+sidecar, generated on the device from the GGUF the engine reads: the library
+embeds three weight-free templates, `cosyvoice3-frontend-f1024`,
+`cosyvoice3-hift-f0-m512` and `cosyvoice3-hift-m512` (the exporter's
+`--frames 1024` and `--frames 512` geometries, its precision per stage: fp16
+for the front-end, fp16 and fp32 for the F0 predictor, fp32 throughout the
+HiFT decoder), writes the weights from the GGUF, compiles the package and
+keeps it in the cache, where every later process adopts it. A prebuilt sidecar
+next to the GGUF takes precedence. The LM and DiT sidecars are not generated.
+
+Both kinds load in the background. The engine takes each stage's model once,
+at the start of the stage's unit (the front-end at the start of the flow
+call, the F0 predictor and the HiFT decoder at the start of the vocoder call)
+and holds it for that unit; a stage whose sidecar is not ready yet runs on
+ggml with exactly the ggml-only plan, and the call reports
+`SynthesisResult::coreml_pending`. `coreml.wait = construct` makes the
+constructor wait until the three are ready (`coreml_construction()` returns
+that group's result); `coreml.wait = call` makes each stage wait for its own.
+`coreml.prewarm` none loads nothing until a stage first needs it; the other
+scopes request the three at construction, in pipeline order. The result
+reports what each stage ran on (`frontend_backend`, `f0_backend`,
+`hift_backend`: `ggml`, `coreml-ane`, ...) and their merge, `coreml_backend`
+(`mixed` when they differ). `coreml_status()` returns each stage's state,
+route (`prebuilt`, `generated` or `cached`), compute units and timings;
+`coreml_wait()` waits for readiness and `coreml_prewarm()` requests the
+stages again.
+
+A stage whose prediction fails is retired for every engine on that sidecar,
+and the unit is redone on ggml from its inputs; later calls run that stage on
+ggml. With `coreml.use = require` (or `COSYVOICE_COREML_STRICT`) a missing,
+failed or too small sidecar fails the call instead. Use = off (or
+`COSYVOICE_COREML_DISABLE`, or `COSYVOICE_COREML_COMPUTE_UNITS=disabled`)
+keeps every CosyVoice3 sidecar closed, the LM and DiT included.
+
+The stages default to `cpu_and_ane`; the generated route is enabled for the
+compute units its templates' memory was validated for (`cpu_and_ane`), and
+other units keep the stage on ggml (`unsupported(unvalidated_units)`) unless a
+prebuilt sidecar sits next to the GGUF. The templates accept every tier the
+converters write (the flow front-end's weights in f32, f16, bf16, q8_0 or
+q4_0, HiFT's in f32 or f16): weights are dequantised by ggml and cast as the
+exporter does. On an M2 (macOS 27.2.1) the generated sidecars match the
+ggml stages at the existing gates: the flow mel with the generated front-end
+at cosine 1.000000 (max 0.098), F0 at cosine 1.000000 (max
+0.94 Hz) and the HiFT waveform with pinned F0 at cosine 1.000000
+(max 4.4e-5).
+
+`cosyvoice-cli` and `cosyvoice-bench` take `--coreml-cache-dir DIR` (default
+`QVAC_COREML_CACHE_DIR`, else `~/Library/Application Support/qvac-speech/coreml`),
+`--coreml-wait`, `--coreml-prewarm`, `--coreml-units`, `--coreml-status-json
+FILE` and, for measurements, `--coreml-ignore-prebuilt` (plans as if no
+sidecar sat next to the GGUFs).
+
+**Fit.** `fit_params` projects generated stages (`FitResult::coreml`): the
+verdict adds their templates' Core ML envelope to the peak phase, since the
+sidecars stay loaded while the LM, flow and HiFT phases run. The envelope is
+the three stages' resident parts (weights, twice their I/O, the prediction
+workspace) plus the largest one-off charge of a single stage (a generation
+and compile, or a load and warm-up; the runtime runs one Core ML job at a
+time): 410.0 MiB under `cpu_and_ane`. With `coreml.memory_budget_bytes`,
+a budget only the ggml projection fits reports `coreml.disabled_reason`
+`"memory"` and the ggml verdict, and an Engine given the same budget and
+fit workload (`fit_text_tokens`, `fit_speech_tokens`, `fit_margin_bytes`)
+runs the three stages on ggml. Prebuilt sidecars keep the `Error` above.
+
+The memory constants come from `test-cosyvoice-coreml --memory-schedule DIR
+CACHE`: ggml F0 calls run while the three sidecars are generated, compiled,
+loaded and warmed in the background, then every stage runs on Core ML; the
+test samples the process footprint and `ANECompilerService` and holds each
+phase to the template constant that charges it. Each constant is 1.25 times
+the largest value measured over every run on every validated host (shared
+rule: `engines/coreml/README.md`, "Measured memory constants"); the hosts are
+listed in each template's `memory.validated_for`. They are, under `cpu_and_ane`:
+
+| Stage | Template | `weight.bin` | Prepare (largest measured) | Load and warm-up | Compiler reserve (stage’s measured peak) |
+|---|---|---|---|---|---|
+| Flow front-end | `cosyvoice3-frontend-f1024` | 2.1 MiB fp16 | 15.0 MiB (11.5) | 3.0 MiB (2.1) | 968 MiB (773.6, M4 Max) |
+| F0 predictor | `cosyvoice3-hift-f0-m512` | 6.6 MiB | 12.5 MiB (7.8) | 9.0 MiB (6.8) | 968 MiB (573.5, M4 Max) |
+| HiFT decoder | `cosyvoice3-hift-m512` | 66.6 MiB fp32 | 58.0 MiB (46.0) | 156.0 MiB (124.5) | 968 MiB (573.5, M4 Max) |
+
+The resident parts (weights, twice the I/O, and 161.5 MiB of prediction
+workspace held by the HiFT stage) total 255.0 MiB, 1.25 times the largest
+steady state with the three stages ready (203.8 MiB over the warm ggml
+baseline), and the envelope is 411.0 MiB (430,964,736 bytes). Measured on
+an M2 (macOS 27.2.1, seven runs) and an M4 Max (macOS 26.7.2, nine CI runs).
+
+The process keeps part of what the three generations allocated (about
+65 MiB on an M2) while the stages run, so the resident parts cover the
+steady state over the warm ggml baseline, not over the footprint just
+before the first load.
+All three stages share a 968 MiB cold-load compiler reserve, based on the
+largest absolute `ANECompilerService` footprint during any of their loads
+(773.6 MiB). Each measurement includes memory already held by the service
+on the shared runner. Under `cpu_and_ane`, Core ML places most of the fp32
+HiFT decoder on the CPU. Its load and warm-up is the largest one-off charge.
+
+`test-cosyvoice-coreml --generated DIR CACHE` checks the generated route on a
+model directory with the flow and HiFT GGUFs, `voice.gguf`, the tokenizer
+files and `parity-tokens.txt` (the LM is not loaded): a call before the
+sidecars are ready equals the Core ML-off Engine, every stage then runs on
+its generated sidecar, the stage parity gates above hold, and a second
+instance adopts the artifacts from the cache. CI stages the f32 GGUFs from
+the pinned checkpoint, seeds the voice and the tokens
+(`test/prepare_cosyvoice_generated_fixture.py`), runs the real-weights
+template gate, these gates, three memory schedules on its M4 Max and
+`test-cosyvoice-fit-stable` on the populated cache. The unit tests check that
+a failed prediction retires the stage and the unit is redone on ggml (bit for
+bit, `test-cosyvoice-coreml-f0-redo`), and that the routes and the envelope do
+not depend on the cache (`test-cosyvoice-fit-stable`, on template twins).
 
 `test-cosyvoice-coreml-routing` runs the actual `cosyvoice_llm_generate`
 path against a tiny exported LM: Core ML selection, repeated generation

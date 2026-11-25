@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <climits>
+#include <cstdio>
 #include <stdexcept>
 
 namespace {
@@ -65,6 +66,33 @@ bool flow_interface(const cosyvoice_coreml & model, int capacity, int head_dim) 
            model.matches("mask", {1, 1, 1, capacity});
 }
 
+// A model on the shared runtime that cannot serve the input: under strict
+// (use = require) that is an error, otherwise the stage runs on ggml.
+bool cannot_serve(const std::shared_ptr<cosyvoice_coreml> & model, const char * stage, const char * why) {
+    if (model && model->strict())
+        throw std::runtime_error(std::string("cosyvoice: the Core ML ") + stage + " sidecar cannot serve this call (" +
+                                 why + "); Core ML strict policy is enabled (use = require / COSYVOICE_COREML_STRICT)");
+    return false;
+}
+
+// Runs one prediction of `stage`. A model the shared runtime holds that fails
+// is retired (for every engine on it) and the stage is redone on ggml from
+// its inputs (false), unless strict; a legacy model's failure throws.
+template <class F> bool predict_or_retire(const std::shared_ptr<cosyvoice_coreml> & model, const char * stage,
+                                          F && run) {
+    try {
+        run();
+        return true;
+    } catch (const std::exception & e) {
+        if (!model->retirable()) throw;
+        model->retire(std::string(stage) + ": " + e.what());
+        if (model->strict()) throw;
+        std::fprintf(stderr, "cosyvoice: the Core ML %s prediction failed (%s); the sidecar is retired and this "
+                             "call runs on ggml\n", stage, e.what());
+        return false;
+    }
+}
+
 void update_euler(std::vector<float> & x, const std::vector<float> & velocity, size_t batch_stride, float dt) {
     for (size_t i = 0; i < x.size(); ++i)
         x[i] += dt * ((1 + guidance) * velocity[i] - guidance * velocity[i + batch_stride]);
@@ -74,22 +102,26 @@ void update_euler(std::vector<float> & x, const std::vector<float> & velocity, s
 bool cosyvoice_coreml_frontend(const std::shared_ptr<cosyvoice_coreml> & model,
                                const std::vector<int32_t> & tokens, const std::vector<float> & speaker,
                                std::vector<float> & mu, std::vector<float> & spks) {
+    if (!model) return false;
     const int capacity = frame_capacity(model, "token_ids", 1, 2, static_cast<int>(tokens.size()));
     if (!capacity || !model->matches("token_ids", {1, capacity}) ||
         !model->matches("token_mask", {1, capacity, 1}) ||
         !model->matches("speaker", {1, static_cast<int64_t>(speaker.size())}) ||
         !model->matches("mu", {1, int64_t(capacity) * 2, mel_channels}) ||
-        !model->matches("spks", {1, mel_channels})) return false;
+        !model->matches("spks", {1, mel_channels})) return cannot_serve(model, "front-end", "too many tokens");
     std::vector<float> ids(capacity), mask(capacity), features(static_cast<size_t>(capacity) * 2 * mel_channels);
     std::copy(tokens.begin(), tokens.end(), ids.begin());
     std::fill_n(mask.begin(), tokens.size(), 1);
-    spks.resize(mel_channels);
-    model->predict({{"token_ids", ids.data(), {1, capacity}}, {"token_mask", mask.data(), {1, capacity, 1}},
-                    {"speaker", speaker.data(), {1, static_cast<int64_t>(speaker.size())}}},
-                   {{"mu", features.data(), {1, int64_t(capacity) * 2, mel_channels}},
-                    {"spks", spks.data(), {1, mel_channels}}});
+    std::vector<float> speaker_out(mel_channels);
+    if (!predict_or_retire(model, "front-end", [&] {
+            model->predict({{"token_ids", ids.data(), {1, capacity}}, {"token_mask", mask.data(), {1, capacity, 1}},
+                            {"speaker", speaker.data(), {1, static_cast<int64_t>(speaker.size())}}},
+                           {{"mu", features.data(), {1, int64_t(capacity) * 2, mel_channels}},
+                            {"spks", speaker_out.data(), {1, mel_channels}}});
+        })) return false;
     features.resize(tokens.size() * 2 * mel_channels);
     mu = std::move(features);
+    spks = std::move(speaker_out);
     return true;
 }
 
@@ -132,13 +164,16 @@ bool cosyvoice_coreml_euler(const std::shared_ptr<cosyvoice_coreml> & model, int
 
 bool cosyvoice_coreml_f0(const std::shared_ptr<cosyvoice_coreml> & model,
                         const std::vector<float> & mel, int frames, std::vector<float> & f0) {
+    if (!model) return false;
     const int capacity = frame_capacity(model, "mel", 2, 3, frames);
     if (!capacity || !model->matches("mel", {1, mel_channels, capacity}) ||
-        !model->matches("f0", {1, capacity})) return false;
+        !model->matches("f0", {1, capacity})) return cannot_serve(model, "F0", "too many mel frames");
     const auto padded = pad_channels(mel, mel_channels, frames, capacity);
     std::vector<float> output(capacity);
-    model->predict({{"mel", padded.data(), {1, mel_channels, capacity}}},
-                   {{"f0", output.data(), {1, capacity}}});
+    if (!predict_or_retire(model, "F0", [&] {
+            model->predict({{"mel", padded.data(), {1, mel_channels, capacity}}},
+                           {{"f0", output.data(), {1, capacity}}});
+        })) return false;
     output.resize(frames);
     f0 = std::move(output);
     return true;
@@ -148,18 +183,23 @@ bool cosyvoice_coreml_spectrum(const std::shared_ptr<cosyvoice_coreml> & model,
                               const std::vector<float> & mel, int frames,
                               const std::vector<float> & source, int source_frames,
                               std::vector<float> & spectrum) {
+    if (!model) return false;
     const int capacity = frame_capacity(model, "mel", 2, 3, frames);
-    if (!capacity || capacity > (INT_MAX - 1) / stft_frames_per_mel) return false;
+    if (!capacity || capacity > (INT_MAX - 1) / stft_frames_per_mel)
+        return cannot_serve(model, "HiFT", "too many mel frames");
     const int source_capacity = capacity * stft_frames_per_mel + 1;
     if (source_frames > source_capacity || !model->matches("mel", {1, mel_channels, capacity}) ||
         !model->matches("source_stft", {1, spectrum_channels, source_capacity}) ||
-        !model->matches("spec", {1, spectrum_channels, source_capacity})) return false;
+        !model->matches("spec", {1, spectrum_channels, source_capacity}))
+        return cannot_serve(model, "HiFT", "too many source frames");
     const auto padded_mel = pad_channels(mel, mel_channels, frames, capacity);
     const auto padded_source = pad_channels(source, spectrum_channels, source_frames, source_capacity);
     std::vector<float> output(static_cast<size_t>(spectrum_channels) * source_capacity);
-    model->predict({{"mel", padded_mel.data(), {1, mel_channels, capacity}},
-                    {"source_stft", padded_source.data(), {1, spectrum_channels, source_capacity}}},
-                   {{"spec", output.data(), {1, spectrum_channels, source_capacity}}});
+    if (!predict_or_retire(model, "HiFT", [&] {
+            model->predict({{"mel", padded_mel.data(), {1, mel_channels, capacity}},
+                            {"source_stft", padded_source.data(), {1, spectrum_channels, source_capacity}}},
+                           {{"spec", output.data(), {1, spectrum_channels, source_capacity}}});
+        })) return false;
     spectrum = crop_channels(output, spectrum_channels, source_frames, source_capacity);
     return true;
 }

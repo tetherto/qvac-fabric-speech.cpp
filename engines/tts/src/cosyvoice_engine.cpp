@@ -20,9 +20,11 @@
 // mode (transcript given = zero-shot, empty = cross-lingual).
 
 #include "tts-cpp/cosyvoice/engine.h"
+#include "tts-cpp/cosyvoice/fit.h"
 
 #include "backend_selection.h"
 #include "backend_util.h"
+#include "cosyvoice_coreml_stages.h"
 #include "cosyvoice_frontend.h"
 #include "cosyvoice_instruct.h"
 #include "cosyvoice_pipeline.h"
@@ -123,7 +125,12 @@ struct Engine::Impl {
 
     // llm/flow/hift are loaded on demand in run(); only their paths are kept.
     std::string llm_path_, flow_path_, hift_path_;
-    std::shared_ptr<cosyvoice_coreml> coreml_lm, coreml_flow, coreml_frontend, coreml_hift, coreml_f0;
+    // The LM and flow-DiT sidecars open synchronously next to their GGUFs;
+    // the front-end, F0 and HiFT stages run on the shared Core ML runtime.
+    std::shared_ptr<cosyvoice_coreml> coreml_lm, coreml_flow;
+    std::shared_ptr<cosyvoice_coreml_stages> coreml_stages;
+    // The stage labels of the last synthesis (backend_name()).
+    std::string last_stage_labels[COSYVOICE_STAGE_COUNT];
     QwenTokenizer tokenizer;
 
     // baked voice (from voice.gguf)
@@ -141,6 +148,9 @@ struct Engine::Impl {
     bool               cloned = false;
 
     std::atomic_bool cancel_flag{false};
+    // Counts cancel() calls: a blocking coreml_wait() or coreml_prewarm()
+    // ends once it changes, without clearing a cancel meant for a synthesis.
+    std::atomic<uint64_t> cancels{0};
 
     explicit Impl(EngineOptions o) : opts(std::move(o)) {
         detail::validate_controls(opts.default_controls);
@@ -257,11 +267,36 @@ struct Engine::Impl {
                                              : "transcript given: zero-shot mode");
         }
 
-        coreml_lm = cosyvoice_coreml::load(llm_path_);
-        coreml_flow = cosyvoice_coreml::load(flow_path_);
-        coreml_frontend = cosyvoice_coreml::load(flow_path_, "-frontend");
-        coreml_hift = cosyvoice_coreml::load(hift_path_);
-        coreml_f0 = cosyvoice_coreml::load(hift_path_, "-f0");
+        if (cosyvoice_coreml_enabled(opts.coreml)) {
+            coreml_lm = cosyvoice_coreml::load(llm_path_);
+            coreml_flow = cosyvoice_coreml::load(flow_path_);
+        }
+        // Fit's memory-degrade: with a budget, Core ML is dropped when only the
+        // ggml verdict fits, for the workload and headroom the caller's fit
+        // assessed. The other stages load per synthesis, so this reads the
+        // same free memory fit_params reports.
+        bool degrade = false;
+#ifdef TTS_CPP_USE_COREML
+        if (opts.coreml.memory_budget_bytes) {
+            FitOptions fit;
+            fit.llm_gguf_path = llm_path_;
+            fit.flow_gguf_path = flow_path_;
+            fit.hift_gguf_path = hift_path_;
+            fit.voice_gguf_path = voice_path;
+            fit.n_gpu_layers = opts.n_gpu_layers;
+            fit.vulkan_device = opts.vulkan_device;
+            fit.backend = opts.backend;
+            fit.backends_dir = opts.backends_dir;
+            fit.text_tokens = opts.fit_text_tokens;
+            fit.speech_tokens = opts.fit_speech_tokens;
+            fit.margin_bytes = opts.fit_margin_bytes;
+            fit.coreml = opts.coreml;
+            fit.coreml_ignore_prebuilt = opts.coreml_ignore_prebuilt;
+            degrade = fit_params(fit).coreml.disabled_reason == "memory";
+        }
+#endif
+        coreml_stages = cosyvoice_coreml_stages::create(flow_path_, hift_path_, opts.coreml,
+                                                        opts.coreml_ignore_prebuilt, degrade);
         backend_guard.armed = false;
     }
 
@@ -278,12 +313,35 @@ struct Engine::Impl {
 
     // Full text -> 24 kHz PCM pipeline.  `instruct` is the already-resolved
     // bare instruction ("" = zero-shot).  `tmg` / `out_tokens` are optional.
+    // One stage unit's Core ML model, acquired at the unit's start.
+    cosyvoice_stage_call acquire(cosyvoice_stage s, int frames, SynthesisResult * res) {
+        if (!coreml_stages) return {};
+        cosyvoice_stage_call call = coreml_stages->acquire(s, frames, &cancel_flag);
+        if (res && call.pending) res->coreml_pending = true;
+        return call;
+    }
+
+    // The label of a finished unit: Core ML only when its prediction ran there.
+    void record(cosyvoice_stage s, const cosyvoice_stage_call & call, SynthesisResult * res) {
+        const std::string label = call.model && call.model->predictions() > 0 ? call.model->label()
+                                                                               : std::string(COSYVOICE_GGML_LABEL);
+        last_stage_labels[static_cast<int>(s)] = label;
+        if (!res) return;
+        switch (s) {
+            case cosyvoice_stage::frontend: res->frontend_backend = label; break;
+            case cosyvoice_stage::f0: res->f0_backend = label; break;
+            case cosyvoice_stage::hift: res->hift_backend = label; break;
+        }
+    }
+
     std::vector<float> run(const std::string & text,
                            const std::string & instruct,
                            cosyvoice_timings * tmg = nullptr,
-                           std::vector<int> * out_tokens = nullptr) {
-        for (const auto & stage : {coreml_lm, coreml_flow, coreml_frontend, coreml_hift, coreml_f0})
+                           std::vector<int> * out_tokens = nullptr,
+                           SynthesisResult * res = nullptr) {
+        for (const auto & stage : {coreml_lm, coreml_flow})
             if (stage) stage->clear_predictions();
+        for (auto & label : last_stage_labels) label.clear();
         std::string prompt_text;
         std::vector<int> lm_prompt_stok;
         bool cross_lingual = false;
@@ -373,11 +431,16 @@ struct Engine::Impl {
             ModelGuard flow_guard(flow_m);
             flow_m.n_threads = opts.n_threads;
             flow_m.coreml = coreml_flow;
-            flow_m.coreml_frontend = coreml_frontend;
+            // The front-end's unit is this flow call: its model is taken once,
+            // here, and held until the call returns.
+            const cosyvoice_stage_call frontend = acquire(
+                cosyvoice_stage::frontend, (int) (voice_prompt_token.size() + speech_tokens.size()), res);
+            flow_m.coreml_frontend = frontend.model;
             mel = cosyvoice_flow_run(
                 flow_m, voice_prompt_token, speech_tokens,
                 voice_prompt_feat, voice_mel_len1, voice_embedding, mel_len, tmg,
                 opts.flow_cut_prompt ? voice_mel_len1 : 0);
+            record(cosyvoice_stage::frontend, frontend, res);
         }
 
         // Stage 3 — CausalHiFT vocoder: mel -> 24 kHz PCM.
@@ -385,9 +448,16 @@ struct Engine::Impl {
             model_ctx hift_m = cosyvoice_load_gguf(hift_path_, backend);
             ModelGuard hift_guard(hift_m);
             hift_m.n_threads = opts.n_threads;
-            hift_m.coreml = coreml_hift;
-            hift_m.coreml_f0 = coreml_f0;
-            return cosyvoice_hift_synth(hift_m, mel, mel_len, opts.seed, tmg);
+            // The F0 and HiFT units are this vocoder call: both models are
+            // taken once, here, and held until it returns.
+            const cosyvoice_stage_call f0 = acquire(cosyvoice_stage::f0, mel_len, res);
+            const cosyvoice_stage_call hift = acquire(cosyvoice_stage::hift, mel_len, res);
+            hift_m.coreml = hift.model;
+            hift_m.coreml_f0 = f0.model;
+            std::vector<float> pcm = cosyvoice_hift_synth(hift_m, mel, mel_len, opts.seed, tmg);
+            record(cosyvoice_stage::f0, f0, res);
+            record(cosyvoice_stage::hift, hift, res);
+            return pcm;
         }
     }
 };
@@ -424,12 +494,14 @@ SynthesisResult Engine::synthesize(const std::string & text,
 
     cosyvoice_timings tmg;
     std::vector<int>  tokens;
+    SynthesisResult result;
     const auto t_all = std::chrono::steady_clock::now();
-    std::vector<float> pcm = pimpl_->run(text, instruct, &tmg, &tokens);
+    std::vector<float> pcm = pimpl_->run(text, instruct, &tmg, &tokens, &result);
     const double total_ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_all).count();
+    result.coreml_backend = cosyvoice_merge_label(
+        cosyvoice_merge_label(result.frontend_backend, result.f0_backend), result.hift_backend);
 
-    SynthesisResult result;
     result.sample_rate = kNativeSampleRate;
     result.duration_s  = static_cast<float>(pcm.size()) / static_cast<float>(kNativeSampleRate);
     result.speech_tokens = std::move(tokens);
@@ -494,6 +566,7 @@ SynthesisResult Engine::synthesize(const std::string & text,
 
 void Engine::cancel() {
     pimpl_->cancel_flag.store(true, std::memory_order_relaxed);
+    pimpl_->cancels.fetch_add(1);
 }
 
 const EngineOptions & Engine::options() const { return pimpl_->opts; }
@@ -503,10 +576,13 @@ std::string Engine::backend_name() const {
     const char * n = b ? ggml_backend_name(b) : nullptr;
     std::string label = n ? std::string(n) : std::string("(none)");
     if (pimpl_) {
-        for (const auto & stage : {pimpl_->coreml_lm, pimpl_->coreml_flow, pimpl_->coreml_frontend,
-                                  pimpl_->coreml_hift, pimpl_->coreml_f0}) {
+        for (const auto & stage : {pimpl_->coreml_lm, pimpl_->coreml_flow}) {
             if (stage && stage->predictions() && label.find(stage->label()) == std::string::npos)
                 label += "+" + stage->label();
+        }
+        for (const std::string & stage : pimpl_->last_stage_labels) {
+            if (!stage.empty() && stage != COSYVOICE_GGML_LABEL && label.find(stage) == std::string::npos)
+                label += "+" + stage;
         }
     }
     return label;
@@ -518,6 +594,25 @@ BackendDevice Engine::backend_device() const {
 }
 
 bool Engine::gpu_unsupported() const { return pimpl_ && pimpl_->gpu_present_but_unused; }
+
+std::string Engine::coreml_status() const {
+    return pimpl_->coreml_stages ? pimpl_->coreml_stages->status_json() : std::string("{}");
+}
+
+bool Engine::coreml_wait(int64_t timeout_ms) const {
+    return pimpl_->coreml_stages &&
+           pimpl_->coreml_stages->wait(timeout_ms, &pimpl_->cancels, pimpl_->cancels.load());
+}
+
+std::string Engine::coreml_construction() const {
+    return pimpl_->coreml_stages ? pimpl_->coreml_stages->construction_json() : std::string("{}");
+}
+
+std::string Engine::coreml_prewarm(CoremlOptions::Prewarm scope, bool wait) {
+    return pimpl_->coreml_stages
+               ? pimpl_->coreml_stages->prewarm_json(scope, wait, &pimpl_->cancels, pimpl_->cancels.load())
+               : std::string("{}");
+}
 
 SynthesisResult synthesize(const EngineOptions & opts, const std::string & text) {
     Engine e(opts);

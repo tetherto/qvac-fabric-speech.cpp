@@ -1,0 +1,138 @@
+{
+  "schema": 1,
+  "id": "cosyvoice3-frontend-f1024",
+  "family": "cosyvoice3",
+  "stage": "frontend",
+  "export_kind": "cosyvoice3-flow-frontend-v1",
+  "exporter": {
+    "path": "engines/tts/scripts/export-cosyvoice3-coreml.py",
+    "sha256": "497ccd80463f7b2e3fc62f56bbff774f49f27e3ce4c531122ed5c702053234d0",
+    "args": [
+      "--stage",
+      "flow-frontend",
+      "--gguf",
+      "{gguf}",
+      "--frames",
+      "1024",
+      "--output",
+      "{out}"
+    ],
+    "gguf_name": "cosyvoice3-flow-f32.gguf"
+  },
+  "min_os": {
+    "macos": "15.0"
+  },
+  "multifunction_ane": false,
+  "default_compute_units": "cpu_and_ane",
+  "shareable": true,
+  "pad_safe": false,
+  "state_bytes": 0,
+  "expected_warm_load_ms": {
+    "main": 0
+  },
+  "memory": {
+    "runtime_weight_bytes": 2230304,
+    "workspace_bytes": 0,
+    "compile_peak_bytes": 4190752,
+    "ane_compile_reserve_bytes": 1015021568,
+    "load_peak_bytes": {
+      "cpu_and_ane": 3145728,
+      "all": null,
+      "cpu_and_gpu": null,
+      "cpu_only": null
+    },
+    "margin": 1.0,
+    "coreml_bound": "measured",
+    "validated_for": [
+      {
+        "units": "cpu_and_ane",
+        "os": "27.2.1",
+        "chip": "M2"
+      },
+      {
+        "units": "cpu_and_ane",
+        "os": "26.7.2",
+        "chip": "M4 Max"
+      }
+    ],
+    "measured": {
+      "margin": 1.25,
+      "runs": 16,
+      "resident_bytes": 2896032,
+      "basis": "Each constant is 1.25 x the largest value measured over every overlapped generated-schedule run of the three CosyVoice3 stages on the validated_for hosts (16 run reports: 7 on M2, 9 on the CI runner’s M4 Max), rounded up to 1 MiB, so the envelope's own margin is 1.0: the prepare charge (generation_peak_bytes + 8 MiB + compile_peak_bytes) covers this stage's prepare, from the start of its generation to the end of its compile (11.5 MiB); load_peak_bytes.cpu_and_ane its load and warm-up (2.1 MiB); ane_compile_reserve_bytes covers ANECompilerService's largest absolute size during the load of any of the three stages (773.6 MiB, M4 Max). The stages share the compiler service, including memory retained between stage loads. The three stages' resident parts (runtime_weight_bytes + 2 x I/O + workspace_bytes, the workspace held by the HiFT stage) cover the steady state with every stage ready over the warm ggml baseline (203.8 MiB), which includes what Core ML keeps after the first generation in a process"
+    }
+  },
+  "patches": [],
+  "prefer_ggml_on": [],
+  "match": {
+    "architecture": "cosyvoice3-flow",
+    "metadata": {
+      "cosyvoice3.flow.vocab_size": 6561,
+      "cosyvoice3.flow.mel_dim": 80,
+      "cosyvoice3.flow.spk_embed_dim": 192,
+      "cosyvoice3.flow.token_mel_ratio": 2,
+      "cosyvoice3.flow.pre_lookahead_len": 3
+    }
+  },
+  "literals": [],
+  "provided": [],
+  "toolchain": {
+    "coremltools": "9.0",
+    "torch": "2.7.0",
+    "numpy": "1.26.4"
+  },
+  "functions": [
+    {
+      "name": "main",
+      "inputs": [
+        {
+          "name": "token_ids",
+          "dtype": "fp32",
+          "shape": [
+            1,
+            512
+          ]
+        },
+        {
+          "name": "token_mask",
+          "dtype": "fp32",
+          "shape": [
+            1,
+            512,
+            1
+          ]
+        },
+        {
+          "name": "speaker",
+          "dtype": "fp32",
+          "shape": [
+            1,
+            192
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "mu",
+          "dtype": "fp32",
+          "shape": [
+            1,
+            1024,
+            80
+          ]
+        },
+        {
+          "name": "spks",
+          "dtype": "fp32",
+          "shape": [
+            1,
+            80
+          ]
+        }
+      ]
+    }
+  ],
+  "stateful": false,
+  "weight_bin_size": 2230304,
+  "generation_peak_bytes": 3149280
+}

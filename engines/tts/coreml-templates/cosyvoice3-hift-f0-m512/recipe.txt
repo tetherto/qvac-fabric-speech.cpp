@@ -1,0 +1,35 @@
+mlrecipe 1
+template cosyvoice3-hift-f0-m512
+spec_sha256 0c709552d97fd3b49d708cfa6ef8db421f8274a0221ab8613e8d943f261a2769
+weight_bin_size 6955776
+blobs 11
+source "hift/f0_predictor/classifier/weight" f32 [1,512]
+source "hift/f0_predictor/condnet/0/bias" f32 [512]
+source "hift/f0_predictor/condnet/0/weight" f32 [512,80,4]
+source "hift/f0_predictor/condnet/2/weight" f32 [512,512,3]
+source "hift/f0_predictor/condnet/2/bias" f32 [512]
+source "hift/f0_predictor/condnet/4/weight" f32 [512,512,3]
+source "hift/f0_predictor/condnet/4/bias" f32 [512]
+source "hift/f0_predictor/condnet/6/weight" f32 [512,512,3]
+source "hift/f0_predictor/condnet/6/bias" f32 [512]
+source "hift/f0_predictor/condnet/8/weight" f32 [512,512,3]
+source "hift/f0_predictor/condnet/8/bias" f32 [512]
+source "hift/f0_predictor/classifier/bias" f32 [1]
+# The HiFT F0 predictor at 512 mel frames. The exporter keeps the first
+# convolution and the classifier in fp32 and casts the other convolutions to
+# fp16; the classifier's one-element bias is an inline constant of the
+# program (a patch).
+blob 64 fp32 512 f32(t("hift/f0_predictor/classifier/weight"))
+blob 2176 fp32 512 f32(t("hift/f0_predictor/condnet/0/bias"))
+blob 4288 fp32 163840 f32(t("hift/f0_predictor/condnet/0/weight"))
+blob 659712 fp16 786432 f16(t("hift/f0_predictor/condnet/2/weight"))
+blob 2232640 fp16 512 f16(t("hift/f0_predictor/condnet/2/bias"))
+blob 2233728 fp16 786432 f16(t("hift/f0_predictor/condnet/4/weight"))
+blob 3806656 fp16 512 f16(t("hift/f0_predictor/condnet/4/bias"))
+blob 3807744 fp16 786432 f16(t("hift/f0_predictor/condnet/6/weight"))
+blob 5380672 fp16 512 f16(t("hift/f0_predictor/condnet/6/bias"))
+blob 5381760 fp16 786432 f16(t("hift/f0_predictor/condnet/8/weight"))
+blob 6954688 fp16 512 f16(t("hift/f0_predictor/condnet/8/bias"))
+# The classifier's bias, an inline constant of the program.
+patch 632 fp32 1 f32(t("hift/f0_predictor/classifier/bias"))
+end

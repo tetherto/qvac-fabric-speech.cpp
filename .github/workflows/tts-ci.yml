@@ -544,6 +544,138 @@ jobs:
           done
           exit "$routing_status"
 
+      # CosyVoice3 flow and HiFT f32 GGUFs, converted by the repo's converters
+      # from the pinned Fun-CosyVoice3-0.5B-2512 checkpoint revision and checked
+      # against pinned SHA-256s: the real-weights inputs of the generated
+      # front-end, F0 and HiFT sidecars (templates cosyvoice3-frontend-f1024,
+      # cosyvoice3-hift-f0-m512, cosyvoice3-hift-m512), with the tokenizer files
+      # the Engine reads. Cache key: checkpoint revision + converter hashes.
+      - name: Cache CosyVoice3 flow and HiFT f32
+        if: runner.os == 'macOS'
+        id: cosyvoice3-cache
+        uses: actions/cache@v4
+        with:
+          path: cosyvoice3-staged
+          key: cosyvoice3-f32-29e01c4e-${{ hashFiles('engines/tts/scripts/convert-cosyvoice3-flow-to-gguf.py', 'engines/tts/scripts/convert-cosyvoice3-hift-to-gguf.py') }}
+
+      - name: Stage CosyVoice3 flow and HiFT f32
+        if: runner.os == 'macOS' && steps.cosyvoice3-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          rev=29e01c4e8d000f4bcd70751be16fa94bf3d85a18
+          mkdir -p cosyvoice3-staged cosyvoice3-checkpoint
+          for f in flow.pt hift.pt cosyvoice3.yaml CosyVoice-BlankEN/vocab.json CosyVoice-BlankEN/merges.txt; do
+            curl -sSfL --retry 3 -o "cosyvoice3-checkpoint/$(basename "$f")" \
+              "https://huggingface.co/FunAudioLLM/Fun-CosyVoice3-0.5B-2512/resolve/$rev/$f"
+          done
+          printf '%s\n' \
+            "a6fab32a7825e5b0bc855ddd948f8db9370b0a786fbc249caa4595e95b608e4b  cosyvoice3-checkpoint/flow.pt" \
+            "b279d7641eb97ae55b3b540cfba4f953c26492a2df758328a89a4d007ab87a65  cosyvoice3-checkpoint/hift.pt" \
+            "f5a6b2c6f05139d0f18861a1fe506f751e787026b77c05f7e8fef9f8a4405965  cosyvoice3-checkpoint/cosyvoice3.yaml" \
+            "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910  cosyvoice3-checkpoint/vocab.json" \
+            "ac8ff86a72bee70828fbc1119bc4398c6f3a9a6e490d7b0dbe917be025478bd0  cosyvoice3-checkpoint/merges.txt" \
+            | shasum -a 256 -c -
+          py=.venv-cosyvoice-coreml/bin/python
+          "$py" engines/tts/scripts/convert-cosyvoice3-flow-to-gguf.py --flow cosyvoice3-checkpoint/flow.pt \
+            --config cosyvoice3-checkpoint/cosyvoice3.yaml --outfile cosyvoice3-staged/cosyvoice3-flow-f32.gguf --dtype f32
+          "$py" engines/tts/scripts/convert-cosyvoice3-hift-to-gguf.py --hift cosyvoice3-checkpoint/hift.pt \
+            --config cosyvoice3-checkpoint/cosyvoice3.yaml --outfile cosyvoice3-staged/cosyvoice3-hift-f32.gguf --dtype f32
+          mv cosyvoice3-checkpoint/vocab.json cosyvoice3-checkpoint/merges.txt cosyvoice3-staged/
+          rm -rf cosyvoice3-checkpoint
+
+      # Checked on every run, whether the GGUFs were just converted or restored
+      # from the cache.
+      - name: Check CosyVoice3 flow and HiFT f32
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          printf '%s\n' \
+            "8cebfc7ed6dcb275c6787bc9fea33114e5a70f9a769eaa8a7e3981c71d72dfb6  cosyvoice3-staged/cosyvoice3-flow-f32.gguf" \
+            "0b244901847385662e60baf25817afa0e7293f41d63637e45bbc3b56a9e37bd8  cosyvoice3-staged/cosyvoice3-hift-f32.gguf" \
+            | shasum -a 256 -c -
+
+      # The generated CosyVoice3 front-end, F0 and HiFT sidecars on real
+      # weights:
+      # - the real-weights gate: the C++ generator on each staged GGUF is
+      #   byte-equal to the unchanged exporter run on it, and the specs match;
+      # - generated from the GGUFs alone into an empty cache, compiled and
+      #   loaded on the device: a call before they are ready runs on ggml and
+      #   equals the Core ML-off Engine; once ready every stage runs on its
+      #   sidecar; the existing stage parity gates (F0 cosine 0.9999, HiFT
+      #   waveform 0.999, flow mel 0.998) on the generated sidecars; a second
+      #   instance adopts them from the cache. The voice and the speech tokens
+      #   are seeded (prepare_cosyvoice_generated_fixture.py); the LM is never
+      #   loaded.
+      # The binary runs directly, so a skip (77) fails the step. The cache stays
+      # for the route step below.
+      - name: Test (Core ML CosyVoice3 generated sidecars, staged f32)
+        id: cosyvoice3-generated
+        if: runner.os == 'macOS'
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          set -euo pipefail
+          sw_vers
+          py=.venv-cosyvoice-coreml/bin/python
+          "$py" engines/coreml/python/coreml_template.py --tool build/qvac-coreml-tool real \
+            --template-dir engines/tts/coreml-templates/cosyvoice3-frontend-f1024 \
+            --gguf cosyvoice3-staged/cosyvoice3-flow-f32.gguf
+          "$py" engines/coreml/python/coreml_template.py --tool build/qvac-coreml-tool real \
+            --template-dir engines/tts/coreml-templates/cosyvoice3-hift-f0-m512 \
+            --template-dir engines/tts/coreml-templates/cosyvoice3-hift-m512 \
+            --gguf cosyvoice3-staged/cosyvoice3-hift-f32.gguf
+          "$py" engines/tts/test/prepare_cosyvoice_generated_fixture.py --out cosyvoice3-staged
+          rm -rf cosyvoice3-cache
+          ./build/test-cosyvoice-coreml --generated "$PWD/cosyvoice3-staged" "$PWD/cosyvoice3-cache"
+
+      # The memory validation behind the three templates' memory constants, on
+      # this runner's chip: ggml HiFT calls run while the three sidecars are
+      # generated, compiled, loaded and warmed in the background, three times,
+      # each from a re-signed copy of the test and an empty cache, so every
+      # Neural Engine load is cold. Each run prints its per-stage table and
+      # fails unless 1.25 x each phase it measured (each stage's prepare and
+      # load and warm-up, the steady state with every stage ready,
+      # ANECompilerService's absolute size while each stage loads) fits the
+      # template constant that charges it, and the whole run fits the envelope:
+      # the constants are 1.25 x the largest value of every run on every
+      # validated host, so a run that sets a new maximum fails until they are
+      # recomputed (docs/cosyvoice3.md). Runs whenever the generated-sidecar
+      # step ran, so a parity failure does not hide it.
+      - name: Memory schedule (generated CosyVoice3 stages, overlapped, this runner)
+        if: >-
+          !cancelled() && runner.os == 'macOS' &&
+          (steps.cosyvoice3-generated.outcome == 'success' || steps.cosyvoice3-generated.outcome == 'failure')
+        run: |
+          set -euo pipefail
+          sw_vers
+          sysctl -n machdep.cpu.brand_string hw.memsize
+          rm -rf cosyvoice3-memory
+          mkdir -p cosyvoice3-memory
+          status=0
+          for i in 1 2 3; do
+            id="qvac-memory-$(uuidgen)"
+            cp build/test-cosyvoice-coreml "cosyvoice3-memory/$id"
+            codesign -s - -f -i "$id" "cosyvoice3-memory/$id"
+            "cosyvoice3-memory/$id" --memory-schedule "$PWD/cosyvoice3-staged" "$PWD/cosyvoice3-memory/cache-$i" \
+              || status=1
+            rm -rf "cosyvoice3-memory/cache-$i" "cosyvoice3-memory/$id" "$HOME/Library/Caches/$id"
+          done
+          rm -rf cosyvoice3-memory
+          exit "$status"
+
+      # The routes and the envelope are the same with an empty cache and with
+      # the cache the generated step populated, whose hints are also rewritten
+      # stale and non-stale.
+      - name: Test (CosyVoice3 Core ML routes with an empty and a populated cache)
+        if: >-
+          !cancelled() && runner.os == 'macOS' &&
+          (steps.cosyvoice3-generated.outcome == 'success' || steps.cosyvoice3-generated.outcome == 'failure')
+        run: |
+          set -euo pipefail
+          ./build/test-cosyvoice-fit-stable --flow cosyvoice3-staged/cosyvoice3-flow-f32.gguf \
+            --hift cosyvoice3-staged/cosyvoice3-hift-f32.gguf --cache-dir "$PWD/cosyvoice3-cache"
+          rm -rf cosyvoice3-cache
+
       # Chatterbox S3Gen Core ML rebuild: padding/masking equivalence, the
       # HiFT window walk against a whole decode, the Neural Engine conv and
       # Snake spellings, and a Core ML conversion of a reduced encoder, all on

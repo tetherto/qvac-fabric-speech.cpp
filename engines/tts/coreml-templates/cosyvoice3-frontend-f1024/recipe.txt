@@ -1,0 +1,23 @@
+mlrecipe 1
+template cosyvoice3-frontend-f1024
+spec_sha256 8fd757b26fe11624c37678595be7bbb0caebed261fb881a2d8faf4ac1eba49a6
+weight_bin_size 2230304
+blobs 7
+source "flow/input_embedding/weight" f32,f16 [6561,80]
+source "flow/pre_lookahead_layer/conv1/weight" f32,f16 [1024,80,4]
+source "flow/pre_lookahead_layer/conv1/bias" f32 [1024]
+source "flow/pre_lookahead_layer/conv2/weight" f32,f16 [80,1024,3]
+source "flow/pre_lookahead_layer/conv2/bias" f32 [80]
+source "flow/spk_embed_affine_layer/weight" f32,f16,bf16,q8_0,q4_0 [80,192]
+source "flow/spk_embed_affine_layer/bias" f32 [80]
+# The flow front-end (token embedding, pre-lookahead convolutions, speaker
+# projection) at 1024 mel frames (512 tokens), every weight cast to fp16 as
+# the exporter's FLOAT16 compute precision does.
+blob 64 fp16 524880 f16(t("flow/input_embedding/weight"))
+blob 1049920 fp16 327680 f16(t("flow/pre_lookahead_layer/conv1/weight"))
+blob 1705344 fp16 1024 f16(t("flow/pre_lookahead_layer/conv1/bias"))
+blob 1707456 fp16 245760 f16(t("flow/pre_lookahead_layer/conv2/weight"))
+blob 2199040 fp16 80 f16(t("flow/pre_lookahead_layer/conv2/bias"))
+blob 2199296 fp16 15360 f16(t("flow/spk_embed_affine_layer/weight"))
+blob 2230080 fp16 80 f16(t("flow/spk_embed_affine_layer/bias"))
+end

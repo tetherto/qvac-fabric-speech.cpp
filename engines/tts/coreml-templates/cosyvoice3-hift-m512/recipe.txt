@@ -1,0 +1,551 @@
+mlrecipe 1
+template cosyvoice3-hift-m512
+spec_sha256 24cfb23f3d58efa5dcbf0cc5164c58845349814a9f91f4a1bf8564acc4edbbb3
+weight_bin_size 69874240
+blobs 304
+source "hift/resblocks/8/convs2/2/bias" f32 [64]
+source "hift/resblocks/8/convs2/2/weight" f32,f16 [64,64,11]
+source "hift/resblocks/8/convs1/2/bias" f32 [64]
+source "hift/resblocks/8/convs1/2/weight" f32,f16 [64,64,11]
+source "hift/resblocks/8/convs2/1/bias" f32 [64]
+source "hift/resblocks/8/convs2/1/weight" f32,f16 [64,64,11]
+source "hift/resblocks/8/convs1/1/bias" f32 [64]
+source "hift/resblocks/8/convs1/1/weight" f32,f16 [64,64,11]
+source "hift/resblocks/8/convs2/0/bias" f32 [64]
+source "hift/resblocks/8/convs2/0/weight" f32,f16 [64,64,11]
+source "hift/resblocks/8/convs1/0/bias" f32 [64]
+source "hift/resblocks/8/convs1/0/weight" f32,f16 [64,64,11]
+source "hift/resblocks/7/convs2/2/bias" f32 [64]
+source "hift/resblocks/7/convs2/2/weight" f32,f16 [64,64,7]
+source "hift/resblocks/7/convs1/2/bias" f32 [64]
+source "hift/resblocks/7/convs1/2/weight" f32,f16 [64,64,7]
+source "hift/resblocks/7/convs2/1/bias" f32 [64]
+source "hift/resblocks/7/convs2/1/weight" f32,f16 [64,64,7]
+source "hift/resblocks/7/convs1/1/bias" f32 [64]
+source "hift/resblocks/7/convs1/1/weight" f32,f16 [64,64,7]
+source "hift/resblocks/7/convs2/0/bias" f32 [64]
+source "hift/resblocks/7/convs2/0/weight" f32,f16 [64,64,7]
+source "hift/resblocks/7/convs1/0/bias" f32 [64]
+source "hift/resblocks/7/convs1/0/weight" f32,f16 [64,64,7]
+source "hift/resblocks/6/convs2/2/bias" f32 [64]
+source "hift/resblocks/6/convs2/2/weight" f32,f16 [64,64,3]
+source "hift/resblocks/6/convs1/2/bias" f32 [64]
+source "hift/resblocks/6/convs1/2/weight" f32,f16 [64,64,3]
+source "hift/resblocks/6/convs2/1/bias" f32 [64]
+source "hift/resblocks/6/convs2/1/weight" f32,f16 [64,64,3]
+source "hift/resblocks/6/convs1/1/bias" f32 [64]
+source "hift/resblocks/6/convs1/1/weight" f32,f16 [64,64,3]
+source "hift/resblocks/6/convs2/0/bias" f32 [64]
+source "hift/resblocks/6/convs2/0/weight" f32,f16 [64,64,3]
+source "hift/resblocks/6/convs1/0/bias" f32 [64]
+source "hift/resblocks/6/convs1/0/weight" f32,f16 [64,64,3]
+source "hift/source_resblocks/2/convs2/2/bias" f32 [64]
+source "hift/source_resblocks/2/convs2/2/weight" f32,f16 [64,64,11]
+source "hift/source_resblocks/2/convs1/2/bias" f32 [64]
+source "hift/source_resblocks/2/convs1/2/weight" f32,f16 [64,64,11]
+source "hift/source_resblocks/2/convs2/1/bias" f32 [64]
+source "hift/source_resblocks/2/convs2/1/weight" f32,f16 [64,64,11]
+source "hift/source_resblocks/2/convs1/1/bias" f32 [64]
+source "hift/source_resblocks/2/convs1/1/weight" f32,f16 [64,64,11]
+source "hift/source_resblocks/2/convs2/0/bias" f32 [64]
+source "hift/source_resblocks/2/convs2/0/weight" f32,f16 [64,64,11]
+source "hift/source_resblocks/2/convs1/0/bias" f32 [64]
+source "hift/source_resblocks/2/convs1/0/weight" f32,f16 [64,64,11]
+source "hift/source_downs/2/bias" f32 [64]
+source "hift/source_downs/2/weight" f32,f16 [64,18,1]
+source "hift/ups/2/bias" f32 [64]
+source "hift/ups/2/weight" f32,f16 [64,128,7]
+source "hift/resblocks/5/convs2/2/bias" f32 [128]
+source "hift/resblocks/5/convs2/2/weight" f32,f16 [128,128,11]
+source "hift/resblocks/5/convs1/2/bias" f32 [128]
+source "hift/resblocks/5/convs1/2/weight" f32,f16 [128,128,11]
+source "hift/resblocks/5/convs2/1/bias" f32 [128]
+source "hift/resblocks/5/convs2/1/weight" f32,f16 [128,128,11]
+source "hift/resblocks/5/convs1/1/bias" f32 [128]
+source "hift/resblocks/5/convs1/1/weight" f32,f16 [128,128,11]
+source "hift/resblocks/5/convs2/0/bias" f32 [128]
+source "hift/resblocks/5/convs2/0/weight" f32,f16 [128,128,11]
+source "hift/resblocks/5/convs1/0/bias" f32 [128]
+source "hift/resblocks/5/convs1/0/weight" f32,f16 [128,128,11]
+source "hift/resblocks/4/convs2/2/bias" f32 [128]
+source "hift/resblocks/4/convs2/2/weight" f32,f16 [128,128,7]
+source "hift/resblocks/4/convs1/2/bias" f32 [128]
+source "hift/resblocks/4/convs1/2/weight" f32,f16 [128,128,7]
+source "hift/resblocks/4/convs2/1/bias" f32 [128]
+source "hift/resblocks/4/convs2/1/weight" f32,f16 [128,128,7]
+source "hift/resblocks/4/convs1/1/bias" f32 [128]
+source "hift/resblocks/4/convs1/1/weight" f32,f16 [128,128,7]
+source "hift/resblocks/4/convs2/0/bias" f32 [128]
+source "hift/resblocks/4/convs2/0/weight" f32,f16 [128,128,7]
+source "hift/resblocks/4/convs1/0/bias" f32 [128]
+source "hift/resblocks/4/convs1/0/weight" f32,f16 [128,128,7]
+source "hift/resblocks/3/convs2/2/bias" f32 [128]
+source "hift/resblocks/3/convs2/2/weight" f32,f16 [128,128,3]
+source "hift/resblocks/3/convs1/2/bias" f32 [128]
+source "hift/resblocks/3/convs1/2/weight" f32,f16 [128,128,3]
+source "hift/resblocks/3/convs2/1/bias" f32 [128]
+source "hift/resblocks/3/convs2/1/weight" f32,f16 [128,128,3]
+source "hift/resblocks/3/convs1/1/bias" f32 [128]
+source "hift/resblocks/3/convs1/1/weight" f32,f16 [128,128,3]
+source "hift/resblocks/3/convs2/0/bias" f32 [128]
+source "hift/resblocks/3/convs2/0/weight" f32,f16 [128,128,3]
+source "hift/resblocks/3/convs1/0/bias" f32 [128]
+source "hift/resblocks/3/convs1/0/weight" f32,f16 [128,128,3]
+source "hift/source_resblocks/1/convs2/2/bias" f32 [128]
+source "hift/source_resblocks/1/convs2/2/weight" f32,f16 [128,128,7]
+source "hift/source_resblocks/1/convs1/2/bias" f32 [128]
+source "hift/source_resblocks/1/convs1/2/weight" f32,f16 [128,128,7]
+source "hift/source_resblocks/1/convs2/1/bias" f32 [128]
+source "hift/source_resblocks/1/convs2/1/weight" f32,f16 [128,128,7]
+source "hift/source_resblocks/1/convs1/1/bias" f32 [128]
+source "hift/source_resblocks/1/convs1/1/weight" f32,f16 [128,128,7]
+source "hift/source_resblocks/1/convs2/0/bias" f32 [128]
+source "hift/source_resblocks/1/convs2/0/weight" f32,f16 [128,128,7]
+source "hift/source_resblocks/1/convs1/0/bias" f32 [128]
+source "hift/source_resblocks/1/convs1/0/weight" f32,f16 [128,128,7]
+source "hift/source_downs/1/bias" f32 [128]
+source "hift/source_downs/1/weight" f32,f16 [128,18,6]
+source "hift/ups/1/bias" f32 [128]
+source "hift/ups/1/weight" f32,f16 [128,256,11]
+source "hift/resblocks/2/convs2/2/bias" f32 [256]
+source "hift/resblocks/2/convs2/2/weight" f32,f16 [256,256,11]
+source "hift/resblocks/2/convs1/2/bias" f32 [256]
+source "hift/resblocks/2/convs1/2/weight" f32,f16 [256,256,11]
+source "hift/resblocks/2/convs2/1/bias" f32 [256]
+source "hift/resblocks/2/convs2/1/weight" f32,f16 [256,256,11]
+source "hift/resblocks/2/convs1/1/bias" f32 [256]
+source "hift/resblocks/2/convs1/1/weight" f32,f16 [256,256,11]
+source "hift/resblocks/2/convs2/0/bias" f32 [256]
+source "hift/resblocks/2/convs2/0/weight" f32,f16 [256,256,11]
+source "hift/resblocks/2/convs1/0/bias" f32 [256]
+source "hift/resblocks/2/convs1/0/weight" f32,f16 [256,256,11]
+source "hift/resblocks/1/convs2/2/bias" f32 [256]
+source "hift/resblocks/1/convs2/2/weight" f32,f16 [256,256,7]
+source "hift/resblocks/1/convs1/2/bias" f32 [256]
+source "hift/resblocks/1/convs1/2/weight" f32,f16 [256,256,7]
+source "hift/resblocks/1/convs2/1/bias" f32 [256]
+source "hift/resblocks/1/convs2/1/weight" f32,f16 [256,256,7]
+source "hift/resblocks/1/convs1/1/bias" f32 [256]
+source "hift/resblocks/1/convs1/1/weight" f32,f16 [256,256,7]
+source "hift/resblocks/1/convs2/0/bias" f32 [256]
+source "hift/resblocks/1/convs2/0/weight" f32,f16 [256,256,7]
+source "hift/resblocks/1/convs1/0/bias" f32 [256]
+source "hift/resblocks/1/convs1/0/weight" f32,f16 [256,256,7]
+source "hift/resblocks/0/convs2/2/bias" f32 [256]
+source "hift/resblocks/0/convs2/2/weight" f32,f16 [256,256,3]
+source "hift/resblocks/0/convs1/2/bias" f32 [256]
+source "hift/resblocks/0/convs1/2/weight" f32,f16 [256,256,3]
+source "hift/resblocks/0/convs2/1/bias" f32 [256]
+source "hift/resblocks/0/convs2/1/weight" f32,f16 [256,256,3]
+source "hift/resblocks/0/convs1/1/bias" f32 [256]
+source "hift/resblocks/0/convs1/1/weight" f32,f16 [256,256,3]
+source "hift/resblocks/0/convs2/0/bias" f32 [256]
+source "hift/resblocks/0/convs2/0/weight" f32,f16 [256,256,3]
+source "hift/resblocks/0/convs1/0/bias" f32 [256]
+source "hift/resblocks/0/convs1/0/weight" f32,f16 [256,256,3]
+source "hift/source_resblocks/0/convs2/2/bias" f32 [256]
+source "hift/source_resblocks/0/convs2/2/weight" f32,f16 [256,256,7]
+source "hift/source_resblocks/0/convs1/2/bias" f32 [256]
+source "hift/source_resblocks/0/convs1/2/weight" f32,f16 [256,256,7]
+source "hift/source_resblocks/0/convs2/1/bias" f32 [256]
+source "hift/source_resblocks/0/convs2/1/weight" f32,f16 [256,256,7]
+source "hift/source_resblocks/0/convs1/1/bias" f32 [256]
+source "hift/source_resblocks/0/convs1/1/weight" f32,f16 [256,256,7]
+source "hift/source_resblocks/0/convs2/0/bias" f32 [256]
+source "hift/source_resblocks/0/convs2/0/weight" f32,f16 [256,256,7]
+source "hift/source_resblocks/0/convs1/0/bias" f32 [256]
+source "hift/source_resblocks/0/convs1/0/weight" f32,f16 [256,256,7]
+source "hift/source_downs/0/bias" f32 [256]
+source "hift/source_downs/0/weight" f32,f16 [256,18,30]
+source "hift/ups/0/bias" f32 [256]
+source "hift/ups/0/weight" f32,f16 [256,512,16]
+source "hift/conv_pre/bias" f32 [512]
+source "hift/conv_pre/weight" f32,f16 [512,80,5]
+source "hift/source_resblocks/0/activations1/0/alpha" f32 [256]
+source "hift/source_resblocks/0/activations2/0/alpha" f32 [256]
+source "hift/source_resblocks/0/activations1/1/alpha" f32 [256]
+source "hift/source_resblocks/0/activations2/1/alpha" f32 [256]
+source "hift/source_resblocks/0/activations1/2/alpha" f32 [256]
+source "hift/source_resblocks/0/activations2/2/alpha" f32 [256]
+source "hift/resblocks/0/activations1/0/alpha" f32 [256]
+source "hift/resblocks/0/activations2/0/alpha" f32 [256]
+source "hift/resblocks/0/activations1/1/alpha" f32 [256]
+source "hift/resblocks/0/activations2/1/alpha" f32 [256]
+source "hift/resblocks/0/activations1/2/alpha" f32 [256]
+source "hift/resblocks/0/activations2/2/alpha" f32 [256]
+source "hift/resblocks/1/activations1/0/alpha" f32 [256]
+source "hift/resblocks/1/activations2/0/alpha" f32 [256]
+source "hift/resblocks/1/activations1/1/alpha" f32 [256]
+source "hift/resblocks/1/activations2/1/alpha" f32 [256]
+source "hift/resblocks/1/activations1/2/alpha" f32 [256]
+source "hift/resblocks/1/activations2/2/alpha" f32 [256]
+source "hift/resblocks/2/activations1/0/alpha" f32 [256]
+source "hift/resblocks/2/activations2/0/alpha" f32 [256]
+source "hift/resblocks/2/activations1/1/alpha" f32 [256]
+source "hift/resblocks/2/activations2/1/alpha" f32 [256]
+source "hift/resblocks/2/activations1/2/alpha" f32 [256]
+source "hift/resblocks/2/activations2/2/alpha" f32 [256]
+source "hift/source_resblocks/1/activations1/0/alpha" f32 [128]
+source "hift/source_resblocks/1/activations2/0/alpha" f32 [128]
+source "hift/source_resblocks/1/activations1/1/alpha" f32 [128]
+source "hift/source_resblocks/1/activations2/1/alpha" f32 [128]
+source "hift/source_resblocks/1/activations1/2/alpha" f32 [128]
+source "hift/source_resblocks/1/activations2/2/alpha" f32 [128]
+source "hift/resblocks/3/activations1/0/alpha" f32 [128]
+source "hift/resblocks/3/activations2/0/alpha" f32 [128]
+source "hift/resblocks/3/activations1/1/alpha" f32 [128]
+source "hift/resblocks/3/activations2/1/alpha" f32 [128]
+source "hift/resblocks/3/activations1/2/alpha" f32 [128]
+source "hift/resblocks/3/activations2/2/alpha" f32 [128]
+source "hift/resblocks/4/activations1/0/alpha" f32 [128]
+source "hift/resblocks/4/activations2/0/alpha" f32 [128]
+source "hift/resblocks/4/activations1/1/alpha" f32 [128]
+source "hift/resblocks/4/activations2/1/alpha" f32 [128]
+source "hift/resblocks/4/activations1/2/alpha" f32 [128]
+source "hift/resblocks/4/activations2/2/alpha" f32 [128]
+source "hift/resblocks/5/activations1/0/alpha" f32 [128]
+source "hift/resblocks/5/activations2/0/alpha" f32 [128]
+source "hift/resblocks/5/activations1/1/alpha" f32 [128]
+source "hift/resblocks/5/activations2/1/alpha" f32 [128]
+source "hift/resblocks/5/activations1/2/alpha" f32 [128]
+source "hift/resblocks/5/activations2/2/alpha" f32 [128]
+source "hift/source_resblocks/2/activations1/0/alpha" f32 [64]
+source "hift/source_resblocks/2/activations2/0/alpha" f32 [64]
+source "hift/source_resblocks/2/activations1/1/alpha" f32 [64]
+source "hift/source_resblocks/2/activations2/1/alpha" f32 [64]
+source "hift/source_resblocks/2/activations1/2/alpha" f32 [64]
+source "hift/source_resblocks/2/activations2/2/alpha" f32 [64]
+source "hift/resblocks/6/activations1/0/alpha" f32 [64]
+source "hift/resblocks/6/activations2/0/alpha" f32 [64]
+source "hift/resblocks/6/activations1/1/alpha" f32 [64]
+source "hift/resblocks/6/activations2/1/alpha" f32 [64]
+source "hift/resblocks/6/activations1/2/alpha" f32 [64]
+source "hift/resblocks/6/activations2/2/alpha" f32 [64]
+source "hift/resblocks/7/activations1/0/alpha" f32 [64]
+source "hift/resblocks/7/activations2/0/alpha" f32 [64]
+source "hift/resblocks/7/activations1/1/alpha" f32 [64]
+source "hift/resblocks/7/activations2/1/alpha" f32 [64]
+source "hift/resblocks/7/activations1/2/alpha" f32 [64]
+source "hift/resblocks/7/activations2/2/alpha" f32 [64]
+source "hift/resblocks/8/activations1/0/alpha" f32 [64]
+source "hift/resblocks/8/activations2/0/alpha" f32 [64]
+source "hift/resblocks/8/activations1/1/alpha" f32 [64]
+source "hift/resblocks/8/activations2/1/alpha" f32 [64]
+source "hift/resblocks/8/activations1/2/alpha" f32 [64]
+source "hift/resblocks/8/activations2/2/alpha" f32 [64]
+source "hift/conv_post/weight" f32,f16 [18,64,7]
+source "hift/conv_post/bias" f32 [18]
+# The HiFT decoder up to the spectrum at 512 mel frames, all in fp32 (the
+# exporter keeps fp32 compute so the waveform meets its parity gate).
+# conv_post is split into its magnitude and phase halves (channels 0-8 and
+# 9-17); its 9-element bias halves are inline constants (patches). Each Snake
+# activation stores alpha and the folded 1 / (alpha + 1e-9), in f32.
+blob 64 fp32 4032 f32(slice(t("hift/conv_post/weight"), 0, 9, 18))
+blob 16256 fp32 4032 f32(slice(t("hift/conv_post/weight"), 0, 0, 9))
+blob 32448 fp32 64 f32(t("hift/resblocks/8/convs2/2/bias"))
+blob 32768 fp32 45056 f32(t("hift/resblocks/8/convs2/2/weight"))
+blob 213056 fp32 64 f32(t("hift/resblocks/8/convs1/2/bias"))
+blob 213376 fp32 45056 f32(t("hift/resblocks/8/convs1/2/weight"))
+blob 393664 fp32 64 f32(t("hift/resblocks/8/convs2/1/bias"))
+blob 393984 fp32 45056 f32(t("hift/resblocks/8/convs2/1/weight"))
+blob 574272 fp32 64 f32(t("hift/resblocks/8/convs1/1/bias"))
+blob 574592 fp32 45056 f32(t("hift/resblocks/8/convs1/1/weight"))
+blob 754880 fp32 64 f32(t("hift/resblocks/8/convs2/0/bias"))
+blob 755200 fp32 45056 f32(t("hift/resblocks/8/convs2/0/weight"))
+blob 935488 fp32 64 f32(t("hift/resblocks/8/convs1/0/bias"))
+blob 935808 fp32 45056 f32(t("hift/resblocks/8/convs1/0/weight"))
+blob 1116096 fp32 64 f32(t("hift/resblocks/7/convs2/2/bias"))
+blob 1116416 fp32 28672 f32(t("hift/resblocks/7/convs2/2/weight"))
+blob 1231168 fp32 64 f32(t("hift/resblocks/7/convs1/2/bias"))
+blob 1231488 fp32 28672 f32(t("hift/resblocks/7/convs1/2/weight"))
+blob 1346240 fp32 64 f32(t("hift/resblocks/7/convs2/1/bias"))
+blob 1346560 fp32 28672 f32(t("hift/resblocks/7/convs2/1/weight"))
+blob 1461312 fp32 64 f32(t("hift/resblocks/7/convs1/1/bias"))
+blob 1461632 fp32 28672 f32(t("hift/resblocks/7/convs1/1/weight"))
+blob 1576384 fp32 64 f32(t("hift/resblocks/7/convs2/0/bias"))
+blob 1576704 fp32 28672 f32(t("hift/resblocks/7/convs2/0/weight"))
+blob 1691456 fp32 64 f32(t("hift/resblocks/7/convs1/0/bias"))
+blob 1691776 fp32 28672 f32(t("hift/resblocks/7/convs1/0/weight"))
+blob 1806528 fp32 64 f32(t("hift/resblocks/6/convs2/2/bias"))
+blob 1806848 fp32 12288 f32(t("hift/resblocks/6/convs2/2/weight"))
+blob 1856064 fp32 64 f32(t("hift/resblocks/6/convs1/2/bias"))
+blob 1856384 fp32 12288 f32(t("hift/resblocks/6/convs1/2/weight"))
+blob 1905600 fp32 64 f32(t("hift/resblocks/6/convs2/1/bias"))
+blob 1905920 fp32 12288 f32(t("hift/resblocks/6/convs2/1/weight"))
+blob 1955136 fp32 64 f32(t("hift/resblocks/6/convs1/1/bias"))
+blob 1955456 fp32 12288 f32(t("hift/resblocks/6/convs1/1/weight"))
+blob 2004672 fp32 64 f32(t("hift/resblocks/6/convs2/0/bias"))
+blob 2004992 fp32 12288 f32(t("hift/resblocks/6/convs2/0/weight"))
+blob 2054208 fp32 64 f32(t("hift/resblocks/6/convs1/0/bias"))
+blob 2054528 fp32 12288 f32(t("hift/resblocks/6/convs1/0/weight"))
+blob 2103744 fp32 64 f32(t("hift/source_resblocks/2/convs2/2/bias"))
+blob 2104064 fp32 45056 f32(t("hift/source_resblocks/2/convs2/2/weight"))
+blob 2284352 fp32 64 f32(t("hift/source_resblocks/2/convs1/2/bias"))
+blob 2284672 fp32 45056 f32(t("hift/source_resblocks/2/convs1/2/weight"))
+blob 2464960 fp32 64 f32(t("hift/source_resblocks/2/convs2/1/bias"))
+blob 2465280 fp32 45056 f32(t("hift/source_resblocks/2/convs2/1/weight"))
+blob 2645568 fp32 64 f32(t("hift/source_resblocks/2/convs1/1/bias"))
+blob 2645888 fp32 45056 f32(t("hift/source_resblocks/2/convs1/1/weight"))
+blob 2826176 fp32 64 f32(t("hift/source_resblocks/2/convs2/0/bias"))
+blob 2826496 fp32 45056 f32(t("hift/source_resblocks/2/convs2/0/weight"))
+blob 3006784 fp32 64 f32(t("hift/source_resblocks/2/convs1/0/bias"))
+blob 3007104 fp32 45056 f32(t("hift/source_resblocks/2/convs1/0/weight"))
+blob 3187392 fp32 64 f32(t("hift/source_downs/2/bias"))
+blob 3187712 fp32 1152 f32(t("hift/source_downs/2/weight"))
+blob 3192384 fp32 64 f32(t("hift/ups/2/bias"))
+blob 3192704 fp32 57344 f32(t("hift/ups/2/weight"))
+blob 3422144 fp32 128 f32(t("hift/resblocks/5/convs2/2/bias"))
+blob 3422720 fp32 180224 f32(t("hift/resblocks/5/convs2/2/weight"))
+blob 4143680 fp32 128 f32(t("hift/resblocks/5/convs1/2/bias"))
+blob 4144256 fp32 180224 f32(t("hift/resblocks/5/convs1/2/weight"))
+blob 4865216 fp32 128 f32(t("hift/resblocks/5/convs2/1/bias"))
+blob 4865792 fp32 180224 f32(t("hift/resblocks/5/convs2/1/weight"))
+blob 5586752 fp32 128 f32(t("hift/resblocks/5/convs1/1/bias"))
+blob 5587328 fp32 180224 f32(t("hift/resblocks/5/convs1/1/weight"))
+blob 6308288 fp32 128 f32(t("hift/resblocks/5/convs2/0/bias"))
+blob 6308864 fp32 180224 f32(t("hift/resblocks/5/convs2/0/weight"))
+blob 7029824 fp32 128 f32(t("hift/resblocks/5/convs1/0/bias"))
+blob 7030400 fp32 180224 f32(t("hift/resblocks/5/convs1/0/weight"))
+blob 7751360 fp32 128 f32(t("hift/resblocks/4/convs2/2/bias"))
+blob 7751936 fp32 114688 f32(t("hift/resblocks/4/convs2/2/weight"))
+blob 8210752 fp32 128 f32(t("hift/resblocks/4/convs1/2/bias"))
+blob 8211328 fp32 114688 f32(t("hift/resblocks/4/convs1/2/weight"))
+blob 8670144 fp32 128 f32(t("hift/resblocks/4/convs2/1/bias"))
+blob 8670720 fp32 114688 f32(t("hift/resblocks/4/convs2/1/weight"))
+blob 9129536 fp32 128 f32(t("hift/resblocks/4/convs1/1/bias"))
+blob 9130112 fp32 114688 f32(t("hift/resblocks/4/convs1/1/weight"))
+blob 9588928 fp32 128 f32(t("hift/resblocks/4/convs2/0/bias"))
+blob 9589504 fp32 114688 f32(t("hift/resblocks/4/convs2/0/weight"))
+blob 10048320 fp32 128 f32(t("hift/resblocks/4/convs1/0/bias"))
+blob 10048896 fp32 114688 f32(t("hift/resblocks/4/convs1/0/weight"))
+blob 10507712 fp32 128 f32(t("hift/resblocks/3/convs2/2/bias"))
+blob 10508288 fp32 49152 f32(t("hift/resblocks/3/convs2/2/weight"))
+blob 10704960 fp32 128 f32(t("hift/resblocks/3/convs1/2/bias"))
+blob 10705536 fp32 49152 f32(t("hift/resblocks/3/convs1/2/weight"))
+blob 10902208 fp32 128 f32(t("hift/resblocks/3/convs2/1/bias"))
+blob 10902784 fp32 49152 f32(t("hift/resblocks/3/convs2/1/weight"))
+blob 11099456 fp32 128 f32(t("hift/resblocks/3/convs1/1/bias"))
+blob 11100032 fp32 49152 f32(t("hift/resblocks/3/convs1/1/weight"))
+blob 11296704 fp32 128 f32(t("hift/resblocks/3/convs2/0/bias"))
+blob 11297280 fp32 49152 f32(t("hift/resblocks/3/convs2/0/weight"))
+blob 11493952 fp32 128 f32(t("hift/resblocks/3/convs1/0/bias"))
+blob 11494528 fp32 49152 f32(t("hift/resblocks/3/convs1/0/weight"))
+blob 11691200 fp32 128 f32(t("hift/source_resblocks/1/convs2/2/bias"))
+blob 11691776 fp32 114688 f32(t("hift/source_resblocks/1/convs2/2/weight"))
+blob 12150592 fp32 128 f32(t("hift/source_resblocks/1/convs1/2/bias"))
+blob 12151168 fp32 114688 f32(t("hift/source_resblocks/1/convs1/2/weight"))
+blob 12609984 fp32 128 f32(t("hift/source_resblocks/1/convs2/1/bias"))
+blob 12610560 fp32 114688 f32(t("hift/source_resblocks/1/convs2/1/weight"))
+blob 13069376 fp32 128 f32(t("hift/source_resblocks/1/convs1/1/bias"))
+blob 13069952 fp32 114688 f32(t("hift/source_resblocks/1/convs1/1/weight"))
+blob 13528768 fp32 128 f32(t("hift/source_resblocks/1/convs2/0/bias"))
+blob 13529344 fp32 114688 f32(t("hift/source_resblocks/1/convs2/0/weight"))
+blob 13988160 fp32 128 f32(t("hift/source_resblocks/1/convs1/0/bias"))
+blob 13988736 fp32 114688 f32(t("hift/source_resblocks/1/convs1/0/weight"))
+blob 14447552 fp32 128 f32(t("hift/source_downs/1/bias"))
+blob 14448128 fp32 13824 f32(t("hift/source_downs/1/weight"))
+blob 14503488 fp32 128 f32(t("hift/ups/1/bias"))
+blob 14504064 fp32 360448 f32(t("hift/ups/1/weight"))
+blob 15945920 fp32 256 f32(t("hift/resblocks/2/convs2/2/bias"))
+blob 15947008 fp32 720896 f32(t("hift/resblocks/2/convs2/2/weight"))
+blob 18830656 fp32 256 f32(t("hift/resblocks/2/convs1/2/bias"))
+blob 18831744 fp32 720896 f32(t("hift/resblocks/2/convs1/2/weight"))
+blob 21715392 fp32 256 f32(t("hift/resblocks/2/convs2/1/bias"))
+blob 21716480 fp32 720896 f32(t("hift/resblocks/2/convs2/1/weight"))
+blob 24600128 fp32 256 f32(t("hift/resblocks/2/convs1/1/bias"))
+blob 24601216 fp32 720896 f32(t("hift/resblocks/2/convs1/1/weight"))
+blob 27484864 fp32 256 f32(t("hift/resblocks/2/convs2/0/bias"))
+blob 27485952 fp32 720896 f32(t("hift/resblocks/2/convs2/0/weight"))
+blob 30369600 fp32 256 f32(t("hift/resblocks/2/convs1/0/bias"))
+blob 30370688 fp32 720896 f32(t("hift/resblocks/2/convs1/0/weight"))
+blob 33254336 fp32 256 f32(t("hift/resblocks/1/convs2/2/bias"))
+blob 33255424 fp32 458752 f32(t("hift/resblocks/1/convs2/2/weight"))
+blob 35090496 fp32 256 f32(t("hift/resblocks/1/convs1/2/bias"))
+blob 35091584 fp32 458752 f32(t("hift/resblocks/1/convs1/2/weight"))
+blob 36926656 fp32 256 f32(t("hift/resblocks/1/convs2/1/bias"))
+blob 36927744 fp32 458752 f32(t("hift/resblocks/1/convs2/1/weight"))
+blob 38762816 fp32 256 f32(t("hift/resblocks/1/convs1/1/bias"))
+blob 38763904 fp32 458752 f32(t("hift/resblocks/1/convs1/1/weight"))
+blob 40598976 fp32 256 f32(t("hift/resblocks/1/convs2/0/bias"))
+blob 40600064 fp32 458752 f32(t("hift/resblocks/1/convs2/0/weight"))
+blob 42435136 fp32 256 f32(t("hift/resblocks/1/convs1/0/bias"))
+blob 42436224 fp32 458752 f32(t("hift/resblocks/1/convs1/0/weight"))
+blob 44271296 fp32 256 f32(t("hift/resblocks/0/convs2/2/bias"))
+blob 44272384 fp32 196608 f32(t("hift/resblocks/0/convs2/2/weight"))
+blob 45058880 fp32 256 f32(t("hift/resblocks/0/convs1/2/bias"))
+blob 45059968 fp32 196608 f32(t("hift/resblocks/0/convs1/2/weight"))
+blob 45846464 fp32 256 f32(t("hift/resblocks/0/convs2/1/bias"))
+blob 45847552 fp32 196608 f32(t("hift/resblocks/0/convs2/1/weight"))
+blob 46634048 fp32 256 f32(t("hift/resblocks/0/convs1/1/bias"))
+blob 46635136 fp32 196608 f32(t("hift/resblocks/0/convs1/1/weight"))
+blob 47421632 fp32 256 f32(t("hift/resblocks/0/convs2/0/bias"))
+blob 47422720 fp32 196608 f32(t("hift/resblocks/0/convs2/0/weight"))
+blob 48209216 fp32 256 f32(t("hift/resblocks/0/convs1/0/bias"))
+blob 48210304 fp32 196608 f32(t("hift/resblocks/0/convs1/0/weight"))
+blob 48996800 fp32 256 f32(t("hift/source_resblocks/0/convs2/2/bias"))
+blob 48997888 fp32 458752 f32(t("hift/source_resblocks/0/convs2/2/weight"))
+blob 50832960 fp32 256 f32(t("hift/source_resblocks/0/convs1/2/bias"))
+blob 50834048 fp32 458752 f32(t("hift/source_resblocks/0/convs1/2/weight"))
+blob 52669120 fp32 256 f32(t("hift/source_resblocks/0/convs2/1/bias"))
+blob 52670208 fp32 458752 f32(t("hift/source_resblocks/0/convs2/1/weight"))
+blob 54505280 fp32 256 f32(t("hift/source_resblocks/0/convs1/1/bias"))
+blob 54506368 fp32 458752 f32(t("hift/source_resblocks/0/convs1/1/weight"))
+blob 56341440 fp32 256 f32(t("hift/source_resblocks/0/convs2/0/bias"))
+blob 56342528 fp32 458752 f32(t("hift/source_resblocks/0/convs2/0/weight"))
+blob 58177600 fp32 256 f32(t("hift/source_resblocks/0/convs1/0/bias"))
+blob 58178688 fp32 458752 f32(t("hift/source_resblocks/0/convs1/0/weight"))
+blob 60013760 fp32 256 f32(t("hift/source_downs/0/bias"))
+blob 60014848 fp32 138240 f32(t("hift/source_downs/0/weight"))
+blob 60567872 fp32 256 f32(t("hift/ups/0/bias"))
+blob 60568960 fp32 2097152 f32(t("hift/ups/0/weight"))
+blob 68957632 fp32 512 f32(t("hift/conv_pre/bias"))
+blob 68959744 fp32 204800 f32(t("hift/conv_pre/weight"))
+blob 69779008 fp32 256 f32(t("hift/source_resblocks/0/activations1/0/alpha"))
+blob 69780096 fp32 256 f32(recip(add(t("hift/source_resblocks/0/activations1/0/alpha"), 1e-9)))
+blob 69781184 fp32 256 f32(t("hift/source_resblocks/0/activations2/0/alpha"))
+blob 69782272 fp32 256 f32(recip(add(t("hift/source_resblocks/0/activations2/0/alpha"), 1e-9)))
+blob 69783360 fp32 256 f32(t("hift/source_resblocks/0/activations1/1/alpha"))
+blob 69784448 fp32 256 f32(recip(add(t("hift/source_resblocks/0/activations1/1/alpha"), 1e-9)))
+blob 69785536 fp32 256 f32(t("hift/source_resblocks/0/activations2/1/alpha"))
+blob 69786624 fp32 256 f32(recip(add(t("hift/source_resblocks/0/activations2/1/alpha"), 1e-9)))
+blob 69787712 fp32 256 f32(t("hift/source_resblocks/0/activations1/2/alpha"))
+blob 69788800 fp32 256 f32(recip(add(t("hift/source_resblocks/0/activations1/2/alpha"), 1e-9)))
+blob 69789888 fp32 256 f32(t("hift/source_resblocks/0/activations2/2/alpha"))
+blob 69790976 fp32 256 f32(recip(add(t("hift/source_resblocks/0/activations2/2/alpha"), 1e-9)))
+blob 69792064 fp32 256 f32(t("hift/resblocks/0/activations1/0/alpha"))
+blob 69793152 fp32 256 f32(recip(add(t("hift/resblocks/0/activations1/0/alpha"), 1e-9)))
+blob 69794240 fp32 256 f32(t("hift/resblocks/0/activations2/0/alpha"))
+blob 69795328 fp32 256 f32(recip(add(t("hift/resblocks/0/activations2/0/alpha"), 1e-9)))
+blob 69796416 fp32 256 f32(t("hift/resblocks/0/activations1/1/alpha"))
+blob 69797504 fp32 256 f32(recip(add(t("hift/resblocks/0/activations1/1/alpha"), 1e-9)))
+blob 69798592 fp32 256 f32(t("hift/resblocks/0/activations2/1/alpha"))
+blob 69799680 fp32 256 f32(recip(add(t("hift/resblocks/0/activations2/1/alpha"), 1e-9)))
+blob 69800768 fp32 256 f32(t("hift/resblocks/0/activations1/2/alpha"))
+blob 69801856 fp32 256 f32(recip(add(t("hift/resblocks/0/activations1/2/alpha"), 1e-9)))
+blob 69802944 fp32 256 f32(t("hift/resblocks/0/activations2/2/alpha"))
+blob 69804032 fp32 256 f32(recip(add(t("hift/resblocks/0/activations2/2/alpha"), 1e-9)))
+blob 69805120 fp32 256 f32(t("hift/resblocks/1/activations1/0/alpha"))
+blob 69806208 fp32 256 f32(recip(add(t("hift/resblocks/1/activations1/0/alpha"), 1e-9)))
+blob 69807296 fp32 256 f32(t("hift/resblocks/1/activations2/0/alpha"))
+blob 69808384 fp32 256 f32(recip(add(t("hift/resblocks/1/activations2/0/alpha"), 1e-9)))
+blob 69809472 fp32 256 f32(t("hift/resblocks/1/activations1/1/alpha"))
+blob 69810560 fp32 256 f32(recip(add(t("hift/resblocks/1/activations1/1/alpha"), 1e-9)))
+blob 69811648 fp32 256 f32(t("hift/resblocks/1/activations2/1/alpha"))
+blob 69812736 fp32 256 f32(recip(add(t("hift/resblocks/1/activations2/1/alpha"), 1e-9)))
+blob 69813824 fp32 256 f32(t("hift/resblocks/1/activations1/2/alpha"))
+blob 69814912 fp32 256 f32(recip(add(t("hift/resblocks/1/activations1/2/alpha"), 1e-9)))
+blob 69816000 fp32 256 f32(t("hift/resblocks/1/activations2/2/alpha"))
+blob 69817088 fp32 256 f32(recip(add(t("hift/resblocks/1/activations2/2/alpha"), 1e-9)))
+blob 69818176 fp32 256 f32(t("hift/resblocks/2/activations1/0/alpha"))
+blob 69819264 fp32 256 f32(recip(add(t("hift/resblocks/2/activations1/0/alpha"), 1e-9)))
+blob 69820352 fp32 256 f32(t("hift/resblocks/2/activations2/0/alpha"))
+blob 69821440 fp32 256 f32(recip(add(t("hift/resblocks/2/activations2/0/alpha"), 1e-9)))
+blob 69822528 fp32 256 f32(t("hift/resblocks/2/activations1/1/alpha"))
+blob 69823616 fp32 256 f32(recip(add(t("hift/resblocks/2/activations1/1/alpha"), 1e-9)))
+blob 69824704 fp32 256 f32(t("hift/resblocks/2/activations2/1/alpha"))
+blob 69825792 fp32 256 f32(recip(add(t("hift/resblocks/2/activations2/1/alpha"), 1e-9)))
+blob 69826880 fp32 256 f32(t("hift/resblocks/2/activations1/2/alpha"))
+blob 69827968 fp32 256 f32(recip(add(t("hift/resblocks/2/activations1/2/alpha"), 1e-9)))
+blob 69829056 fp32 256 f32(t("hift/resblocks/2/activations2/2/alpha"))
+blob 69830144 fp32 256 f32(recip(add(t("hift/resblocks/2/activations2/2/alpha"), 1e-9)))
+blob 69831232 fp32 128 f32(t("hift/source_resblocks/1/activations1/0/alpha"))
+blob 69831808 fp32 128 f32(recip(add(t("hift/source_resblocks/1/activations1/0/alpha"), 1e-9)))
+blob 69832384 fp32 128 f32(t("hift/source_resblocks/1/activations2/0/alpha"))
+blob 69832960 fp32 128 f32(recip(add(t("hift/source_resblocks/1/activations2/0/alpha"), 1e-9)))
+blob 69833536 fp32 128 f32(t("hift/source_resblocks/1/activations1/1/alpha"))
+blob 69834112 fp32 128 f32(recip(add(t("hift/source_resblocks/1/activations1/1/alpha"), 1e-9)))
+blob 69834688 fp32 128 f32(t("hift/source_resblocks/1/activations2/1/alpha"))
+blob 69835264 fp32 128 f32(recip(add(t("hift/source_resblocks/1/activations2/1/alpha"), 1e-9)))
+blob 69835840 fp32 128 f32(t("hift/source_resblocks/1/activations1/2/alpha"))
+blob 69836416 fp32 128 f32(recip(add(t("hift/source_resblocks/1/activations1/2/alpha"), 1e-9)))
+blob 69836992 fp32 128 f32(t("hift/source_resblocks/1/activations2/2/alpha"))
+blob 69837568 fp32 128 f32(recip(add(t("hift/source_resblocks/1/activations2/2/alpha"), 1e-9)))
+blob 69838144 fp32 128 f32(t("hift/resblocks/3/activations1/0/alpha"))
+blob 69838720 fp32 128 f32(recip(add(t("hift/resblocks/3/activations1/0/alpha"), 1e-9)))
+blob 69839296 fp32 128 f32(t("hift/resblocks/3/activations2/0/alpha"))
+blob 69839872 fp32 128 f32(recip(add(t("hift/resblocks/3/activations2/0/alpha"), 1e-9)))
+blob 69840448 fp32 128 f32(t("hift/resblocks/3/activations1/1/alpha"))
+blob 69841024 fp32 128 f32(recip(add(t("hift/resblocks/3/activations1/1/alpha"), 1e-9)))
+blob 69841600 fp32 128 f32(t("hift/resblocks/3/activations2/1/alpha"))
+blob 69842176 fp32 128 f32(recip(add(t("hift/resblocks/3/activations2/1/alpha"), 1e-9)))
+blob 69842752 fp32 128 f32(t("hift/resblocks/3/activations1/2/alpha"))
+blob 69843328 fp32 128 f32(recip(add(t("hift/resblocks/3/activations1/2/alpha"), 1e-9)))
+blob 69843904 fp32 128 f32(t("hift/resblocks/3/activations2/2/alpha"))
+blob 69844480 fp32 128 f32(recip(add(t("hift/resblocks/3/activations2/2/alpha"), 1e-9)))
+blob 69845056 fp32 128 f32(t("hift/resblocks/4/activations1/0/alpha"))
+blob 69845632 fp32 128 f32(recip(add(t("hift/resblocks/4/activations1/0/alpha"), 1e-9)))
+blob 69846208 fp32 128 f32(t("hift/resblocks/4/activations2/0/alpha"))
+blob 69846784 fp32 128 f32(recip(add(t("hift/resblocks/4/activations2/0/alpha"), 1e-9)))
+blob 69847360 fp32 128 f32(t("hift/resblocks/4/activations1/1/alpha"))
+blob 69847936 fp32 128 f32(recip(add(t("hift/resblocks/4/activations1/1/alpha"), 1e-9)))
+blob 69848512 fp32 128 f32(t("hift/resblocks/4/activations2/1/alpha"))
+blob 69849088 fp32 128 f32(recip(add(t("hift/resblocks/4/activations2/1/alpha"), 1e-9)))
+blob 69849664 fp32 128 f32(t("hift/resblocks/4/activations1/2/alpha"))
+blob 69850240 fp32 128 f32(recip(add(t("hift/resblocks/4/activations1/2/alpha"), 1e-9)))
+blob 69850816 fp32 128 f32(t("hift/resblocks/4/activations2/2/alpha"))
+blob 69851392 fp32 128 f32(recip(add(t("hift/resblocks/4/activations2/2/alpha"), 1e-9)))
+blob 69851968 fp32 128 f32(t("hift/resblocks/5/activations1/0/alpha"))
+blob 69852544 fp32 128 f32(recip(add(t("hift/resblocks/5/activations1/0/alpha"), 1e-9)))
+blob 69853120 fp32 128 f32(t("hift/resblocks/5/activations2/0/alpha"))
+blob 69853696 fp32 128 f32(recip(add(t("hift/resblocks/5/activations2/0/alpha"), 1e-9)))
+blob 69854272 fp32 128 f32(t("hift/resblocks/5/activations1/1/alpha"))
+blob 69854848 fp32 128 f32(recip(add(t("hift/resblocks/5/activations1/1/alpha"), 1e-9)))
+blob 69855424 fp32 128 f32(t("hift/resblocks/5/activations2/1/alpha"))
+blob 69856000 fp32 128 f32(recip(add(t("hift/resblocks/5/activations2/1/alpha"), 1e-9)))
+blob 69856576 fp32 128 f32(t("hift/resblocks/5/activations1/2/alpha"))
+blob 69857152 fp32 128 f32(recip(add(t("hift/resblocks/5/activations1/2/alpha"), 1e-9)))
+blob 69857728 fp32 128 f32(t("hift/resblocks/5/activations2/2/alpha"))
+blob 69858304 fp32 128 f32(recip(add(t("hift/resblocks/5/activations2/2/alpha"), 1e-9)))
+blob 69858880 fp32 64 f32(t("hift/source_resblocks/2/activations1/0/alpha"))
+blob 69859200 fp32 64 f32(recip(add(t("hift/source_resblocks/2/activations1/0/alpha"), 1e-9)))
+blob 69859520 fp32 64 f32(t("hift/source_resblocks/2/activations2/0/alpha"))
+blob 69859840 fp32 64 f32(recip(add(t("hift/source_resblocks/2/activations2/0/alpha"), 1e-9)))
+blob 69860160 fp32 64 f32(t("hift/source_resblocks/2/activations1/1/alpha"))
+blob 69860480 fp32 64 f32(recip(add(t("hift/source_resblocks/2/activations1/1/alpha"), 1e-9)))
+blob 69860800 fp32 64 f32(t("hift/source_resblocks/2/activations2/1/alpha"))
+blob 69861120 fp32 64 f32(recip(add(t("hift/source_resblocks/2/activations2/1/alpha"), 1e-9)))
+blob 69861440 fp32 64 f32(t("hift/source_resblocks/2/activations1/2/alpha"))
+blob 69861760 fp32 64 f32(recip(add(t("hift/source_resblocks/2/activations1/2/alpha"), 1e-9)))
+blob 69862080 fp32 64 f32(t("hift/source_resblocks/2/activations2/2/alpha"))
+blob 69862400 fp32 64 f32(recip(add(t("hift/source_resblocks/2/activations2/2/alpha"), 1e-9)))
+blob 69862720 fp32 64 f32(t("hift/resblocks/6/activations1/0/alpha"))
+blob 69863040 fp32 64 f32(recip(add(t("hift/resblocks/6/activations1/0/alpha"), 1e-9)))
+blob 69863360 fp32 64 f32(t("hift/resblocks/6/activations2/0/alpha"))
+blob 69863680 fp32 64 f32(recip(add(t("hift/resblocks/6/activations2/0/alpha"), 1e-9)))
+blob 69864000 fp32 64 f32(t("hift/resblocks/6/activations1/1/alpha"))
+blob 69864320 fp32 64 f32(recip(add(t("hift/resblocks/6/activations1/1/alpha"), 1e-9)))
+blob 69864640 fp32 64 f32(t("hift/resblocks/6/activations2/1/alpha"))
+blob 69864960 fp32 64 f32(recip(add(t("hift/resblocks/6/activations2/1/alpha"), 1e-9)))
+blob 69865280 fp32 64 f32(t("hift/resblocks/6/activations1/2/alpha"))
+blob 69865600 fp32 64 f32(recip(add(t("hift/resblocks/6/activations1/2/alpha"), 1e-9)))
+blob 69865920 fp32 64 f32(t("hift/resblocks/6/activations2/2/alpha"))
+blob 69866240 fp32 64 f32(recip(add(t("hift/resblocks/6/activations2/2/alpha"), 1e-9)))
+blob 69866560 fp32 64 f32(t("hift/resblocks/7/activations1/0/alpha"))
+blob 69866880 fp32 64 f32(recip(add(t("hift/resblocks/7/activations1/0/alpha"), 1e-9)))
+blob 69867200 fp32 64 f32(t("hift/resblocks/7/activations2/0/alpha"))
+blob 69867520 fp32 64 f32(recip(add(t("hift/resblocks/7/activations2/0/alpha"), 1e-9)))
+blob 69867840 fp32 64 f32(t("hift/resblocks/7/activations1/1/alpha"))
+blob 69868160 fp32 64 f32(recip(add(t("hift/resblocks/7/activations1/1/alpha"), 1e-9)))
+blob 69868480 fp32 64 f32(t("hift/resblocks/7/activations2/1/alpha"))
+blob 69868800 fp32 64 f32(recip(add(t("hift/resblocks/7/activations2/1/alpha"), 1e-9)))
+blob 69869120 fp32 64 f32(t("hift/resblocks/7/activations1/2/alpha"))
+blob 69869440 fp32 64 f32(recip(add(t("hift/resblocks/7/activations1/2/alpha"), 1e-9)))
+blob 69869760 fp32 64 f32(t("hift/resblocks/7/activations2/2/alpha"))
+blob 69870080 fp32 64 f32(recip(add(t("hift/resblocks/7/activations2/2/alpha"), 1e-9)))
+blob 69870400 fp32 64 f32(t("hift/resblocks/8/activations1/0/alpha"))
+blob 69870720 fp32 64 f32(recip(add(t("hift/resblocks/8/activations1/0/alpha"), 1e-9)))
+blob 69871040 fp32 64 f32(t("hift/resblocks/8/activations2/0/alpha"))
+blob 69871360 fp32 64 f32(recip(add(t("hift/resblocks/8/activations2/0/alpha"), 1e-9)))
+blob 69871680 fp32 64 f32(t("hift/resblocks/8/activations1/1/alpha"))
+blob 69872000 fp32 64 f32(recip(add(t("hift/resblocks/8/activations1/1/alpha"), 1e-9)))
+blob 69872320 fp32 64 f32(t("hift/resblocks/8/activations2/1/alpha"))
+blob 69872640 fp32 64 f32(recip(add(t("hift/resblocks/8/activations2/1/alpha"), 1e-9)))
+blob 69872960 fp32 64 f32(t("hift/resblocks/8/activations1/2/alpha"))
+blob 69873280 fp32 64 f32(recip(add(t("hift/resblocks/8/activations1/2/alpha"), 1e-9)))
+blob 69873600 fp32 64 f32(t("hift/resblocks/8/activations2/2/alpha"))
+blob 69873920 fp32 64 f32(recip(add(t("hift/resblocks/8/activations2/2/alpha"), 1e-9)))
+# conv_post's bias halves, inline constants of the program in spec order:
+# the phase half (channels 9-17), then the magnitude half (channels 0-8).
+patch 695 fp32 9 f32(slice(t("hift/conv_post/bias"), 0, 9, 18))
+patch 1101 fp32 9 f32(slice(t("hift/conv_post/bias"), 0, 0, 9))
+end

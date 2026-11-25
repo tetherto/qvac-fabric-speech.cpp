@@ -322,6 +322,7 @@ set(TTS_CPP_LIB_SOURCES
     src/cosyvoice_pipeline.cpp
     src/cosyvoice_coreml.cpp
     src/cosyvoice_coreml_pipeline.cpp
+    src/cosyvoice_coreml_stages.cpp
     src/cosyvoice_instruct.cpp
     src/cosyvoice_frontend.cpp
     src/cosyvoice_engine.cpp
@@ -514,6 +515,9 @@ if (TTS_CPP_BUILD_LIBRARY)
     include(${CMAKE_CURRENT_SOURCE_DIR}/../coreml/qvac_coreml.cmake)
     qvac_coreml_add_to(tts-cpp NAMESPACE tts_cpp_coreml PREFIX TTS_CPP ENABLE ${TTS_CPP_COREML}
         TEMPLATES "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/parler-dac-w128"
+                  "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/cosyvoice3-frontend-f1024"
+                  "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/cosyvoice3-hift-f0-m512"
+                  "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/cosyvoice3-hift-m512"
                   "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/moss-speech-tokenizer-30s"
                   "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/moss-sfx-vae-w320"
                   "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/audio8-codec-w64"
@@ -1577,12 +1581,59 @@ if (TTS_CPP_BUILD_TESTS)
     # GGUF. Self-contained (writes its own synthetic GGUF), so it always runs.
     add_executable(test-cosyvoice-coreml test/test_cosyvoice_coreml.cpp)
     target_link_libraries(test-cosyvoice-coreml PRIVATE tts-cpp)
-    target_include_directories(test-cosyvoice-coreml PRIVATE src)
+    # memory_schedule.h: the shared phase attribution of the Core ML memory
+    # schedules.
+    target_include_directories(test-cosyvoice-coreml PRIVATE src ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/test)
     if (TTS_CPP_COREML)
         target_compile_definitions(test-cosyvoice-coreml PRIVATE TTS_CPP_USE_COREML)
     endif()
     tts_cpp_apply_ccache(test-cosyvoice-coreml)
     tts_cpp_register_test(test-cosyvoice-coreml LABEL "unit")
+    # A failed F0 prediction is retired and the unit redone on ggml, equal to
+    # ggml alone, on a twin of the F0 template's reference manifest.
+    if (TARGET qvac-coreml-tool)
+        set(_cosy_hift_twin "${CMAKE_CURRENT_BINARY_DIR}/cosyvoice3-hift-twin.gguf")
+        add_test(NAME test-cosyvoice-hift-twin
+                 COMMAND qvac-coreml-tool twin
+                         --manifest "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/cosyvoice3-hift-m512/reference-gguf.json"
+                         --seed 1 --types f32 -o "${_cosy_hift_twin}")
+        set_tests_properties(test-cosyvoice-hift-twin PROPERTIES LABELS "unit" FIXTURES_SETUP cosyvoice-hift-twin)
+        add_test(NAME test-cosyvoice-coreml-f0-redo COMMAND test-cosyvoice-coreml --f0-redo "${_cosy_hift_twin}")
+        set_tests_properties(test-cosyvoice-coreml-f0-redo PROPERTIES LABELS "unit"
+                             FIXTURES_REQUIRED cosyvoice-hift-twin)
+    endif()
+
+    # The front-end, F0 and HiFT Core ML routes never read the cache, so fit
+    # is the same before and after a generation, with and without warm hints.
+    # Checked on twins of the templates' reference manifests (the front-end's
+    # flow tensors; the whole HiFT GGUF); CI also runs it with --fit on the
+    # staged model directory and the cache a generated run populated.
+    add_executable(test-cosyvoice-fit-stable test/test_cosyvoice_fit_stable.cpp)
+    target_link_libraries(test-cosyvoice-fit-stable PRIVATE tts-cpp)
+    target_include_directories(test-cosyvoice-fit-stable PRIVATE src test ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/test)
+    if (TTS_CPP_COREML)
+        # The hint cases write records where the runtime looks for them, so
+        # the test uses the runtime's hint-path helper (same namespace).
+        get_target_property(_tcb_coreml_ns tts-cpp QVAC_COREML_NS)
+        target_compile_definitions(test-cosyvoice-fit-stable PRIVATE TTS_CPP_USE_COREML
+                                   QVAC_COREML_NS=${_tcb_coreml_ns})
+        target_include_directories(test-cosyvoice-fit-stable PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/include ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/src)
+    endif()
+    tts_cpp_apply_ccache(test-cosyvoice-fit-stable)
+    if (TARGET qvac-coreml-tool)
+        set(_cosy_flow_twin "${CMAKE_CURRENT_BINARY_DIR}/cosyvoice3-frontend-twin.gguf")
+        add_test(NAME test-cosyvoice-frontend-twin
+                 COMMAND qvac-coreml-tool twin
+                         --manifest "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/cosyvoice3-frontend-f1024/reference-gguf.json"
+                         --seed 1 --types f32 -o "${_cosy_flow_twin}")
+        set_tests_properties(test-cosyvoice-frontend-twin PROPERTIES LABELS "unit"
+                             FIXTURES_SETUP cosyvoice-frontend-twin)
+        add_test(NAME test-cosyvoice-fit-stable
+                 COMMAND test-cosyvoice-fit-stable --flow "${_cosy_flow_twin}" --hift "${_cosy_hift_twin}")
+        set_tests_properties(test-cosyvoice-fit-stable PROPERTIES LABELS "unit"
+                             FIXTURES_REQUIRED "cosyvoice-frontend-twin;cosyvoice-hift-twin")
+    endif()
     tts_cpp_register_test(test-cosyvoice-coreml-lm
         EXE test-cosyvoice-coreml LABEL "fixture" ARGS "--lm-fixture")
     tts_cpp_register_test(test-cosyvoice-coreml-stages

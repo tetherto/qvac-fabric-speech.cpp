@@ -48,9 +48,11 @@
 // Implemented in src/cosyvoice_engine.cpp.
 
 #include "tts-cpp/backend.h"
+#include "tts-cpp/coreml_options.h"
 #include "tts-cpp/export.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -228,6 +230,40 @@ struct EngineOptions {
     // Writable directory for the OpenCL program-binary cache (Android).  Empty
     // leaves ggml's default, which on Android resolves under HOME and is inert.
     std::string opencl_cache_dir;
+
+    // ---------------- Core ML (Apple, TTS_CPP_COREML builds) ----------
+    //
+    // The flow front-end, the HiFT F0 predictor and the HiFT decoder on the
+    // shared Core ML runtime (tts-cpp/coreml_options.h). Each stage's sidecar
+    // is either prebuilt next to its GGUF (cosyvoice3-flow*.gguf ->
+    // cosyvoice3-flow-frontend.mlmodelc; cosyvoice3-hift*.gguf ->
+    // cosyvoice3-hift-f0.mlmodelc and cosyvoice3-hift.mlmodelc) or, with
+    // coreml.cache_dir set on macOS 15 or later, generated from the GGUF into
+    // that cache. Both load in the background: until a stage's sidecar is
+    // ready the stage runs on ggml (SynthesisResult::coreml_pending), and
+    // coreml.wait = construct makes the constructor wait instead. A stage
+    // whose prediction fails is retired and redone on ggml (use = require
+    // fails the call instead). Unset fields fall back to the COSYVOICE_COREML_*
+    // environment (COSYVOICE_COREML_COMPUTE_UNITS, default cpu_and_ane;
+    // COSYVOICE_COREML_STRICT; COSYVOICE_COREML_DISABLE, or the legacy
+    // COSYVOICE_COREML_COMPUTE_UNITS=disabled). Use = off also keeps the LM
+    // and flow-DiT sidecars closed. CosyVoice's minimal set is the three
+    // stages, requested in pipeline order.
+    CoremlOptions coreml;
+    // Development and benchmarks: plan the three stages as if no sidecar sat
+    // next to the GGUFs, so a model directory with prebuilt sidecars measures
+    // the generated route (with coreml.cache_dir). fit_params follows it too.
+    bool coreml_ignore_prebuilt = false;
+
+    // The workload and headroom of the fit_params call that assessed this
+    // engine (FitOptions::text_tokens, speech_tokens and margin_bytes; the
+    // defaults are FitOptions'). With coreml.memory_budget_bytes set, the
+    // constructor repeats that fit to decide memory-degrade (Core ML off when
+    // only the ggml projection fits the budget), so these must match the
+    // assessment, or the engine can keep Core ML where that fit dropped it.
+    int fit_text_tokens = 30;
+    int fit_speech_tokens = 0;
+    uint64_t fit_margin_bytes = 256ull * 1024 * 1024;
 };
 
 // Per-chunk PCM callback for streaming synthesis.  Receives `samples`
@@ -284,6 +320,19 @@ struct SynthesisResult {
 
     StageTimings     timings;        // per-stage wall clock for this call
     std::vector<int> speech_tokens;  // the LM trajectory this call actually used
+
+    // Core ML (TTS_CPP_COREML builds): what the flow front-end, the HiFT F0
+    // predictor and the HiFT decoder ran on in this call ("ggml",
+    // "coreml-ane", "coreml-all", ...; a stage whose prediction failed and
+    // was redone on ggml reports "ggml"), and their merge, coreml_backend:
+    // the one label they share, or "mixed".
+    std::string frontend_backend = "ggml";
+    std::string f0_backend       = "ggml";
+    std::string hift_backend     = "ggml";
+    std::string coreml_backend   = "ggml";
+    // True when a stage of this call ran on ggml only because its Core ML
+    // sidecar was not ready yet (still generating, compiling or loading).
+    bool coreml_pending = false;
 };
 
 // Persistent engine.  Loads the model once at construction; subsequent
@@ -336,6 +385,28 @@ public:
 
     // True when a GPU device was present but unusable (fell back to CPU).
     bool gpu_unsupported() const;
+
+    // Core ML status of the front-end, F0 and HiFT stages as JSON (schema 1:
+    // engine, cache_dir, generation, stages with state, route, compute units,
+    // label, artifact key, timings and error). "{}" in builds without
+    // TTS_CPP_COREML.
+    std::string coreml_status() const;
+    // Waits until every stage with a sidecar is ready or one has failed,
+    // `timeout_ms` passes (< 0: no limit) or cancel() is called. True when all
+    // are ready. Returns false at once while a stage has not been requested
+    // yet (coreml.prewarm none before the first synthesis) or waits for
+    // memory (deferred). coreml_wait(0) only polls.
+    bool coreml_wait(int64_t timeout_ms = -1) const;
+    // The construction group's result as JSON ("group", "success",
+    // "nothing_to_prepare", "slots", "skipped_route_none"); "{}" without
+    // Core ML. With coreml.wait = construct the constructor returned once it
+    // finished.
+    std::string coreml_construction() const;
+    // Requests another group: scope none requests nothing, any other scope
+    // the three stages (CosyVoice's minimal set). With `wait` it blocks until
+    // every requested stage is ready or terminal, or cancel() is called.
+    // Returns the group's result as JSON ("{}" without Core ML).
+    std::string coreml_prewarm(CoremlOptions::Prewarm scope, bool wait);
 
 private:
     struct Impl;

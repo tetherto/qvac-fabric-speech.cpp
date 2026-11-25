@@ -14,6 +14,9 @@
 
 namespace {
 constexpr int max_feature_dimensions = 8;
+constexpr const char * UNITS_ENV = "COSYVOICE_COREML_COMPUTE_UNITS";
+// The legacy value of UNITS_ENV that turns Core ML off.
+constexpr const char * UNITS_DISABLED = "disabled";
 
 void require_shape(const cosyvoice_coreml & model, const char * name, const std::vector<int64_t> & shape) {
     if (!model.matches(name, shape)) throw std::runtime_error(std::string("cosyvoice: incompatible Core ML feature ") + name);
@@ -34,12 +37,16 @@ void require_finite(const float * values, const std::vector<int64_t> & shape) {
     if (!values || !std::all_of(values, values + count, [](float x) { return std::isfinite(x); }))
         throw std::runtime_error("cosyvoice: non-finite Core ML feature");
 }
+
+[[maybe_unused]] bool units_env_disabled() {
+    const char * units = std::getenv(UNITS_ENV);
+    return units && std::string(units) == UNITS_DISABLED;
+}
 }
 
 bool cosyvoice_coreml::has_sidecar(const std::string & gguf, const std::string & suffix) {
 #ifdef TTS_CPP_USE_COREML
-    const char * units = std::getenv("COSYVOICE_COREML_COMPUTE_UNITS");
-    if (units && std::string(units) == "disabled") return false;
+    if (units_env_disabled()) return false;
     return tts_cpp::detail::coreml_sidecar_exists(tts_cpp::detail::coreml_sidecar_path(gguf, suffix));
 #else
     (void) gguf;
@@ -50,8 +57,8 @@ bool cosyvoice_coreml::has_sidecar(const std::string & gguf, const std::string &
 
 std::shared_ptr<cosyvoice_coreml> cosyvoice_coreml::load(const std::string & gguf, const std::string & suffix) {
 #ifdef TTS_CPP_USE_COREML
-    const char * units = std::getenv("COSYVOICE_COREML_COMPUTE_UNITS");
-    if (units && std::string(units) == "disabled") return {};
+    const char * units = std::getenv(UNITS_ENV);
+    if (units_env_disabled()) return {};
     if (units && std::string(units) != "cpu_only" && std::string(units) != "cpu_and_ane" &&
         std::string(units) != "cpu_and_gpu" && std::string(units) != "all")
         throw std::invalid_argument("cosyvoice: invalid COSYVOICE_COREML_COMPUTE_UNITS");
@@ -73,7 +80,35 @@ std::shared_ptr<cosyvoice_coreml> cosyvoice_coreml::load(const std::string & ggu
 #endif
 }
 
+std::shared_ptr<cosyvoice_coreml> cosyvoice_coreml::borrow(std::shared_ptr<void> owner, void * moss_model,
+                                                           std::string label, binding b) {
+    auto result = std::shared_ptr<cosyvoice_coreml>(new cosyvoice_coreml());
+    result->model_ = std::shared_ptr<void>(std::move(owner), moss_model);
+    result->label_ = std::move(label);
+    result->binding_ = std::move(b);
+    return result;
+}
+
+std::shared_ptr<cosyvoice_coreml> cosyvoice_coreml::fake(std::map<std::string, std::vector<int64_t>> dims,
+                                                         fake_predict predict, std::string label, binding b) {
+    auto result = std::shared_ptr<cosyvoice_coreml>(new cosyvoice_coreml());
+    result->fake_dims_ = std::move(dims);
+    result->fake_predict_ = std::move(predict);
+    result->label_ = std::move(label);
+    result->binding_ = std::move(b);
+    return result;
+}
+
+void cosyvoice_coreml::retire(const std::string & reason) {
+    if (retired_.exchange(true)) return;
+    if (binding_.retire) binding_.retire(reason);
+}
+
 std::vector<int64_t> cosyvoice_coreml::dimensions(const char * name) const {
+    if (fake_predict_) {
+        const auto it = fake_dims_.find(name);
+        return it == fake_dims_.end() ? std::vector<int64_t>{} : it->second;
+    }
 #ifdef TTS_CPP_USE_COREML
     int64_t shape[max_feature_dimensions]{};
     const auto count = moss_coreml_feature_dims(static_cast<moss_coreml_model *>(model_.get()), name,
@@ -90,6 +125,7 @@ bool cosyvoice_coreml::matches(const char * name, const std::vector<int64_t> & s
 }
 
 bool cosyvoice_coreml::stateful() const {
+    if (fake_predict_) return false;
 #ifdef TTS_CPP_USE_COREML
     return moss_coreml_has_state(static_cast<moss_coreml_model *>(model_.get())) != 0;
 #else
@@ -123,15 +159,27 @@ void cosyvoice_coreml::predict(std::initializer_list<cosyvoice_coreml_input> inp
         output_names.push_back(output.name);
         output_data.push_back(output.data);
     }
+    {
+        // A model the shared runtime holds serves one prediction at a time.
+        std::unique_lock<std::mutex> lock;
+        if (binding_.lock) lock = binding_.lock();
+        if (fake_predict_) {
+            if (fake_predict_(input_names.data(), input_data.data(), static_cast<int>(input_names.size()),
+                              output_names.data(), output_data.data(), static_cast<int>(output_names.size())) != 0)
+                throw std::runtime_error("cosyvoice: Core ML prediction failed");
+        } else {
 #ifdef TTS_CPP_USE_COREML
-    if (moss_coreml_predict(static_cast<moss_coreml_model *>(model_.get()),
-                            input_names.data(), input_data.data(), static_cast<int>(input_names.size()),
-                            output_names.data(), output_data.data(), static_cast<int>(output_names.size())) != 0)
-        throw std::runtime_error("cosyvoice: Core ML prediction failed");
+            if (moss_coreml_predict(static_cast<moss_coreml_model *>(model_.get()),
+                                    input_names.data(), input_data.data(), static_cast<int>(input_names.size()),
+                                    output_names.data(), output_data.data(), static_cast<int>(output_names.size())) != 0)
+                throw std::runtime_error("cosyvoice: Core ML prediction failed");
 #else
-    throw std::runtime_error("cosyvoice: Core ML support was not compiled");
+            throw std::runtime_error("cosyvoice: Core ML support was not compiled");
 #endif
+        }
+    }
     for (const auto & output : outputs) require_finite(output.data, output.shape);
-    if (!predictions_) std::fprintf(stderr, "cosyvoice: Core ML predictions active (%s)\n", label_.c_str());
+    if (!predictions_ && !binding_.retire)
+        std::fprintf(stderr, "cosyvoice: Core ML predictions active (%s)\n", label_.c_str());
     ++predictions_;
 }

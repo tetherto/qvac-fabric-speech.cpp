@@ -11,6 +11,7 @@
 //   the JSON carries n_speech_tokens / tm / mel_len / n_samples, so a
 //       cross-leg check can assert equal work instead of trusting the operator.
 
+#include "cosyvoice_coreml_cli.h"
 #include "tts-cpp/cosyvoice/engine.h"
 #include "bench_wav.h"
 
@@ -115,9 +116,11 @@ void usage(const char * a0) {
         "          [--s3tok-gguf FILE] [--campplus-gguf FILE]\n"
         "          [--backends-dir DIR] [--opencl-cache-dir DIR]\n"
         "          [--wav-out FILE] [--json-out FILE]\n"
+        "%s"
         "\n"
         "With --reference-audio, load: includes the one-time cloning bake (tokenizer +\n"
-        "CAM++ + prompt mel); it is not part of the per-synthesis numbers.\n", a0);
+        "CAM++ + prompt mel); it is not part of the per-synthesis numbers.\n", a0,
+        cosyvoice_cli::COREML_USAGE);
 }
 
 // Whole-string parse for --vulkan-device: atoi would turn "abc" into
@@ -140,9 +143,16 @@ int main(int argc, char ** argv) {
     std::string llm_gguf, flow_gguf, hift_gguf;
     int seed = 42, n_gpu_layers = 0, n_threads = 0, runs = 3, warmup = 1, vulkan_device = 0;
     bool greedy = false;
+    cosyvoice_cli::coreml_args coreml;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
+        try {
+            if (cosyvoice_cli::parse_coreml_arg(i, argc, argv, coreml)) continue;
+        } catch (const std::invalid_argument & e) {
+            fprintf(stderr, "cosyvoice-bench: %s\n", e.what());
+            return 1;
+        }
         if (a == "--model-dir" && i + 1 < argc) model_dir = argv[++i];
         else if (a == "--llm-gguf" && i + 1 < argc) llm_gguf = argv[++i];
         else if (a == "--flow-gguf" && i + 1 < argc) flow_gguf = argv[++i];
@@ -197,6 +207,7 @@ int main(int argc, char ** argv) {
     if (!campplus_gguf.empty())   opts.campplus_gguf_path = campplus_gguf;
     if (!backends_dir.empty())     opts.backends_dir     = backends_dir;
     if (!opencl_cache_dir.empty()) opts.opencl_cache_dir = opencl_cache_dir;
+    cosyvoice_cli::apply_coreml_args(coreml, opts);
 
     if (!tokens_in.empty()) {
         if (!read_tokens(tokens_in, opts.force_speech_tokens)) {
@@ -245,9 +256,11 @@ int main(int argc, char ** argv) {
             st_tot.ms.push_back(t.total_ms);
             if (res.duration_s > 0) rtfs.push_back((t.total_ms / 1000.0) / res.duration_s);
         }
-        fprintf(stderr, "  run %d/%d%s  total=%.1f ms  audio=%.2f s  tokens=%d\n",
+        fprintf(stderr, "  run %d/%d%s  total=%.1f ms  audio=%.2f s  tokens=%d  core ml %s/%s/%s%s\n",
                 r + 1, warmup + runs, measured ? "" : " (warmup)",
-                res.timings.total_ms, res.duration_s, res.timings.n_speech_tokens);
+                res.timings.total_ms, res.duration_s, res.timings.n_speech_tokens,
+                res.frontend_backend.c_str(), res.f0_backend.c_str(), res.hift_backend.c_str(),
+                res.coreml_pending ? " pending" : "");
         last = std::move(res);
     }
 
@@ -266,6 +279,10 @@ int main(int argc, char ** argv) {
                median(rtfs), 1.0 / median(rtfs));
     }
 
+    if (!cosyvoice_cli::write_coreml_status(coreml, engine)) {
+        fprintf(stderr, "cosyvoice-bench: cannot write --coreml-status-json %s\n", coreml.status_json.c_str());
+        return 1;
+    }
     if (!tokens_out.empty()) {
         if (write_tokens(tokens_out, last.speech_tokens)) {
             fprintf(stderr, "wrote %zu speech tokens to %s\n",
@@ -307,6 +324,9 @@ int main(int argc, char ** argv) {
             os << "  \"warmup\": " << warmup << ",\n";
             os << "  \"load_ms\": " << load_ms << ",\n";
             os << "  \"audio_s\": " << last.duration_s << ",\n";
+            os << "  \"coreml\": {\"frontend\": \"" << last.frontend_backend << "\", \"f0\": \""
+               << last.f0_backend << "\", \"hift\": \"" << last.hift_backend << "\", \"pending\": "
+               << (last.coreml_pending ? "true" : "false") << "},\n";
             os << "  \"work\": {"
                << "\"speech_tokens\": " << last.timings.n_speech_tokens
                << ", \"decode_steps\": " << last.timings.n_decode_steps

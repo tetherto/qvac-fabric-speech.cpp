@@ -39,7 +39,7 @@ Explicit Hexagon placement is supported for
 ## Apple Core ML sidecars
 
 `TTS_CPP_COREML=ON` enables optional Chatterbox S3Gen, Pocket TTS FlowLM step and Mimi decoder, Supertonic vocoder,
-Audio8 codec, Parler-TTS DAC and MOSS sidecars on Apple. Their guides own naming, export commands, accepted
+Audio8 codec, Parler-TTS DAC, CosyVoice3 and MOSS sidecars on Apple. Their guides own naming, export commands, accepted
 shapes, low-bit restrictions, placement and runtime status:
 
 - [Chatterbox S3Gen encoder, CFM and HiFT](chatterbox.md#core-ml-sidecars)
@@ -47,6 +47,7 @@ shapes, low-bit restrictions, placement and runtime status:
 - [Supertonic vocoder](supertonic.md#core-ml-vocoder-sidecar)
 - [Audio8 codec](audio8.md#core-ml-codec-sidecar)
 - [Parler-TTS DAC decoder](parler.md#core-ml-dac-sidecar-apple-neural-engine)
+- [CosyVoice3 LM, flow front-end, DiT, F0 predictor and HiFT decoder](cosyvoice3.md#core-ml-sidecars)
 - [MOSS-TTS / MOSS-TTSD codec decoder](moss.md#core-ml-codec-decoder)
 - [MOSS-SoundEffect DiT and VAE](moss.md#core-ml-dit-and-vae)
 - [MOSS-Speech speech tokenizer](moss.md#core-ml-speech-tokenizer)
@@ -62,9 +63,10 @@ the device and keeps it in the cache; the stage runs on ggml until the sidecar
 is ready. A prebuilt sidecar next to the GGUF still takes precedence. Today
 the [Parler-TTS DAC decoder](parler.md#generated-sidecar-and-background-loading),
 the [Supertonic vocoder](supertonic.md#generated-vocoder-sidecar) (Supertonic
-1, 2 and 3, every quantisation tier), and the
-[Pocket TTS FlowLM step and Mimi decoder](pocket-tts.md#generated-sidecars-and-background-loading)
+1, 2 and 3, every quantisation tier), the
+[Pocket TTS FlowLM step and Mimi decoder](pocket-tts.md#generated-sidecars-and-background-loading),
 the [MOSS speech tokenizer and SoundEffect VAE](moss.md#moss-on-device-generation),
+the [CosyVoice3 flow front-end, F0 predictor and HiFT decoder](cosyvoice3.md#generated-sidecars-and-background-loading),
 and the [Audio8 codec](audio8.md#generated-sidecar-and-background-loading)
 can generate under their validated policies. Audio8 generation is gated on
 memory validation.
