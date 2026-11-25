@@ -5,17 +5,18 @@ import importlib.util
 import json
 import os
 from pathlib import Path
-import re
-import statistics
+import math
 import subprocess
 import tempfile
 
 STEM = "diar_streaming_sortformer_4spk-v2.1"
 MODEL_NAME = STEM + ".q8_0.gguf"
-ARMS = ("metal", "legacy", "diarizer")
-FIXTURES = ("abcba", "abcdba")
-CHUNKS_MS = (1000, 2000)
-ROUTE = re.compile(r"diarization-route: pass=(\d+) coreml=([01]) frames=(\d+)")
+ARMS = ("metal", "diarizer")
+FIXTURE = "abcba"
+CALLS = 2
+CAPACITY = 2048
+MAXIMUM_ERROR = 0.02
+RELATIVE_L2 = 0.003
 COREML_ENV_PREFIX = "PARAKEET_COREML_"
 TIMEOUT_SECONDS = 600
 COLLAR_MS = 250
@@ -26,16 +27,6 @@ def load_scorer():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
-
-
-def validate_routes(log, arm):
-    routes = [(int(index), int(coreml), int(frames)) for index, coreml, frames in ROUTE.findall(log)]
-    if not routes or [row[0] for row in routes] != list(range(1, len(routes) + 1)):
-        raise ValueError("missing or incomplete per-pass routing evidence")
-    expected = int(arm != "metal")
-    if any(coreml != expected or frames <= 0 for _, coreml, frames in routes):
-        raise ValueError(f"unexpected backend or empty pass in {arm}")
-    return {"network_passes": len(routes), "coreml_passes": sum(row[1] for row in routes)}
 
 
 def hash_file(path):
@@ -54,8 +45,7 @@ def stage_arm(assets, destination, arm):
     if not model.is_file() or model.stat().st_size == 0:
         raise ValueError(f"missing model: {model}")
     (destination / MODEL_NAME).symlink_to(model.resolve())
-    names = {"metal": (), "legacy": (STEM + "-encoder", STEM + "-encoder-bypass-pre-encode"),
-             "diarizer": (STEM + "-diarizer-410",)}[arm]
+    names = {"metal": (), "diarizer": (STEM + f"-diarizer-{CAPACITY}",)}[arm]
     for name in names:
         bundle = assets / (name + ".mlmodelc")
         if not (bundle / "model.mil").is_file() or not (bundle / "weights/weight.bin").is_file():
@@ -72,44 +62,74 @@ def arm_environment(arm):
     return environment
 
 
-def run_case(args, model, arm, fixture, chunk, iteration):
-    name = f"{arm}-{fixture}-{chunk}ms-{iteration}"
-    base = args.out / name
-    command = [str(args.binary.resolve()), "--model", str(model.absolute()),
-               "--wav", str(args.samples / (fixture + ".wav")), "--stream", "--stream-chunk-ms", str(chunk),
-               "--emit", "jsonl", "--backend", "metal", "--n-gpu-layers", "999", "--verbose"]
-    base.with_suffix(".command.json").write_text(json.dumps(command, indent=2) + "\n")
-    with base.with_suffix(".jsonl").open("w") as stdout, base.with_suffix(".log").open("w") as stderr:
+def validate_result(result, arm):
+    if result["coreml"] is not (arm == "diarizer"):
+        raise ValueError(f"unexpected backend in {arm}")
+    probabilities = result["probabilities"]
+    if result["frames"] <= 0 or result["speakers"] <= 0 or not probabilities:
+        raise ValueError("empty probability output")
+    if len(probabilities) != result["frames"] * result["speakers"]:
+        raise ValueError("invalid probability shape")
+    if any(not math.isfinite(value) or not 0 <= value <= 1 for value in probabilities):
+        raise ValueError("invalid probability value")
+
+
+def compare(actual, reference):
+    if any(actual[key] != reference[key] for key in ("frames", "speakers", "stride")):
+        raise ValueError("probability dimensions or time grid differ")
+    deltas = [a - b for a, b in zip(actual["probabilities"], reference["probabilities"])]
+    maximum = max(abs(delta) for delta in deltas)
+    energy = sum(value * value for value in reference["probabilities"])
+    relative = math.sqrt(sum(delta * delta for delta in deltas) / max(energy, 1e-30))
+    return {"maximum_probability_error": maximum, "relative_l2": relative,
+            "passed": maximum <= MAXIMUM_ERROR and relative <= RELATIVE_L2}
+
+
+def run_arm(args, staging, arm):
+    model = stage_arm(args.assets, staging / arm, arm)
+    prefix = args.out / arm
+    command = [str(args.binary.resolve()), str(model.absolute()),
+               str(args.samples / (FIXTURE + ".wav")), str(prefix)]
+    prefix.with_suffix(".command.json").write_text(json.dumps(command, indent=2) + "\n")
+    with prefix.with_suffix(".stdout").open("w") as stdout, prefix.with_suffix(".log").open("w") as stderr:
         subprocess.run(command, env=arm_environment(arm), stdout=stdout, stderr=stderr,
                        timeout=TIMEOUT_SECONDS, check=True)
-    routing = validate_routes(base.with_suffix(".log").read_text(), arm)
-    scorer = load_scorer()
-    hypothesis = scorer.parse_hypothesis_jsonl(base.with_suffix(".jsonl").read_text())
-    reference = scorer.parse_rttm((args.samples / (fixture + ".rttm")).read_text())
-    score = scorer.compute_der(hypothesis, reference, collar_ms=COLLAR_MS)
-    result = {"arm": arm, "fixture": fixture, "chunk_ms": chunk, "run": iteration, **routing, **score}
-    base.with_suffix(".score.json").write_text(json.dumps(result, indent=2) + "\n")
-    return result
+    return load_calls(prefix, arm)
 
 
-def run_cases(args, staging):
+def load_calls(prefix, arm):
     results = []
-    for arm in ARMS:
-        model = stage_arm(args.assets, staging / arm, arm)
-        for fixture in FIXTURES:
-            for chunk in CHUNKS_MS:
-                for iteration in range(1, args.runs + 1):
-                    results.append(run_case(args, model, arm, fixture, chunk, iteration))
+    for call in range(1, CALLS + 1):
+        result = json.loads(Path(f"{prefix}-{call}.json").read_text())
+        validate_result(result, arm)
+        results.append(result)
     return results
 
 
-def summarize(results):
-    groups = {}
-    for row in results:
-        key = (row["arm"], row["fixture"], row["chunk_ms"])
-        groups.setdefault(key, []).append(row["der"])
-    return [{"arm": arm, "fixture": fixture, "chunk_ms": chunk, "der_runs": values,
-             "der_median": statistics.median(values)} for (arm, fixture, chunk), values in groups.items()]
+def score_calls(results, reference):
+    scorer = load_scorer()
+    scores = []
+    for result in results:
+        hypothesis = scorer.parse_hypothesis_jsonl(
+            "\n".join(json.dumps(segment) for segment in result["segments"]))
+        scores.append(scorer.compute_der(hypothesis, reference, collar_ms=COLLAR_MS))
+    return scores
+
+
+def run_comparison(args, staging):
+    reference = load_scorer().parse_rttm((args.samples / (FIXTURE + ".rttm")).read_text())
+    if len({segment[2] for segment in reference}) != 3:
+        raise ValueError("expected a three-speaker reference")
+    outputs = {arm: run_arm(args, staging, arm) for arm in ARMS}
+    comparisons = [compare(actual, native) for actual, native in
+                   zip(outputs["diarizer"], outputs["metal"])]
+    return {"probability_comparisons": comparisons,
+            "der": {arm: score_calls(outputs[arm], reference) for arm in ARMS},
+            "passed": all(row["passed"] for row in comparisons),
+            "thresholds": {"maximum_probability_error": MAXIMUM_ERROR, "relative_l2": RELATIVE_L2},
+            "threshold_source": "engines/parakeet/test/test_sortformer_diarizer_coreml_parity.cpp",
+            "der_gate": None, "collar_ms": COLLAR_MS,
+            "fixture": FIXTURE, "calls_per_backend": CALLS}
 
 
 def main():
@@ -118,18 +138,16 @@ def main():
     parser.add_argument("--assets", type=Path, required=True)
     parser.add_argument("--samples", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--runs", type=int, default=3)
     args = parser.parse_args()
-    if args.runs < 1:
-        parser.error("--runs must be positive")
     args.out.mkdir(parents=True, exist_ok=True)
     manifest = {"assets": asset_manifest(args.assets), "binary_sha256": hash_file(args.binary),
                 "samples": asset_manifest(args.samples), "collar_ms": COLLAR_MS}
     (args.out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     with tempfile.TemporaryDirectory(prefix="sortformer-preflight-") as staging:
-        results = run_cases(args, Path(staging))
-    (args.out / "summary.json").write_text(json.dumps(summarize(results), indent=2) + "\n")
+        result = run_comparison(args, Path(staging))
+    (args.out / "summary.json").write_text(json.dumps(result, indent=2) + "\n")
+    return 0 if result["passed"] else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

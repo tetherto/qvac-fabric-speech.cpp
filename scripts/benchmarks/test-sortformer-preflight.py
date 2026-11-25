@@ -15,45 +15,53 @@ PREFLIGHT = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PREFLIGHT)
 
 
-class RoutingTests(unittest.TestCase):
-    def test_all_passes_must_match(self):
-        self.assertEqual(PREFLIGHT.validate_routes(
-            "diarization-route: pass=1 coreml=1 frames=12\n"
-            "diarization-route: pass=2 coreml=1 frames=8", "legacy"),
-            {"network_passes": 2, "coreml_passes": 2})
-        self.assertEqual(PREFLIGHT.validate_routes(
-            "diarization-route: pass=1 coreml=0 frames=12", "metal")["coreml_passes"], 0)
+class FullNetworkTests(unittest.TestCase):
+    def result(self, probabilities=None, coreml=True):
+        return {"coreml": coreml, "frames": 1, "speakers": 2, "stride": 0.08,
+                "probabilities": [0.5, 0.25] if probabilities is None else probabilities,
+                "segments": [{"speaker": 0, "start": 0, "end": 4}]}
 
-    def test_rejects_availability_fallback_and_incomplete_evidence(self):
-        cases = ("Core ML encoder loaded", "diarization-route: pass=1 coreml=0 frames=12",
-                 "diarization-route: pass=2 coreml=1 frames=12",
-                 "diarization-route: pass=1 coreml=1 frames=0",
-                 "diarization-route: pass=1 coreml=1 frames=12\n"
-                 "diarization-route: pass=2 coreml=0 frames=12")
-        for log in cases:
-            with self.subTest(log=log), self.assertRaises(ValueError):
-                PREFLIGHT.validate_routes(log, "diarizer")
+    def test_thresholds_match_existing_gate(self):
+        source = (HERE.parents[1] / "engines/parakeet/test/test_sortformer_diarizer_coreml_parity.cpp").read_text()
+        self.assertIn(f"kMaximumProbabilityError = {PREFLIGHT.MAXIMUM_ERROR};", source)
+        self.assertIn(f"kMaximumRelativeError = {PREFLIGHT.RELATIVE_L2};", source)
 
-    def test_environment_does_not_inherit_disabled_routes(self):
+    def test_probabilities_and_both_thresholds(self):
+        native = self.result([1.0, 1.0], False)
+        self.assertTrue(PREFLIGHT.compare(native, native)["passed"])
+        self.assertFalse(PREFLIGHT.compare(self.result([0.99, 1.0]), native)["passed"])
+        actual = self.result([1.0] * 1000)
+        native = self.result([1.0] * 1000, False)
+        actual["probabilities"][0] = 0.9781
+        self.assertFalse(PREFLIGHT.compare(actual, native)["passed"])
+        metric = PREFLIGHT.compare(self.result([0.5, 0.5]), self.result([1.0, 1.0], False))
+        self.assertAlmostEqual(metric["maximum_probability_error"], 0.5)
+        self.assertAlmostEqual(metric["relative_l2"], 0.5)
+
+    def test_rejects_fallback_empty_invalid_and_mismatched_output(self):
+        for result in (self.result(coreml=False), self.result([]), self.result([0.5]),
+                       self.result([float("nan"), 0.5]), self.result([float("inf"), 0.5]),
+                       self.result([-0.1, 0.5])):
+            with self.subTest(result=result), self.assertRaises(ValueError):
+                PREFLIGHT.validate_result(result, "diarizer")
+        native = self.result(coreml=False)
+        native["stride"] = 0.1
+        with self.assertRaises(ValueError):
+            PREFLIGHT.compare(self.result(), native)
+
+    def test_environment_and_asset_isolation(self):
         with patch.dict(os.environ, {"PARAKEET_COREML_DISABLE": "1", "PARAKEET_COREML_ONLY": "1"}):
-            self.assertNotIn("PARAKEET_COREML_DISABLE", PREFLIGHT.arm_environment("legacy"))
+            self.assertNotIn("PARAKEET_COREML_DISABLE", PREFLIGHT.arm_environment("diarizer"))
             self.assertNotIn("PARAKEET_COREML_ONLY", PREFLIGHT.arm_environment("metal"))
             self.assertEqual(PREFLIGHT.arm_environment("metal")["PARAKEET_COREML_DISABLE"], "1")
-
-    def test_missing_assets_fail(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             with self.assertRaisesRegex(ValueError, "missing model"):
-                PREFLIGHT.stage_arm(root, root / "first", "legacy")
+                PREFLIGHT.stage_arm(root, root / "missing", "diarizer")
             (root / PREFLIGHT.MODEL_NAME).write_bytes(b"model")
             with self.assertRaisesRegex(ValueError, "incomplete bundle"):
-                PREFLIGHT.stage_arm(root, root / "second", "legacy")
-
-    def test_arms_are_isolated(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / PREFLIGHT.MODEL_NAME).write_bytes(b"model")
-            bundle = root / (PREFLIGHT.STEM + "-diarizer-410.mlmodelc")
+                PREFLIGHT.stage_arm(root, root / "incomplete", "diarizer")
+            bundle = root / (PREFLIGHT.STEM + f"-diarizer-{PREFLIGHT.CAPACITY}.mlmodelc")
             (bundle / "weights").mkdir(parents=True)
             (bundle / "weights/weight.bin").write_bytes(b"weights")
             (bundle / "model.mil").write_text("model")
@@ -61,31 +69,55 @@ class RoutingTests(unittest.TestCase):
             PREFLIGHT.stage_arm(root, root / "diarizer", "diarizer")
             self.assertEqual(len(list((root / "metal").iterdir())), 1)
             self.assertEqual(len(list((root / "diarizer").iterdir())), 2)
-            self.assertEqual(PREFLIGHT.hash_file(root / "metal" / PREFLIGHT.MODEL_NAME),
-                             PREFLIGHT.hash_file(root / "diarizer" / PREFLIGHT.MODEL_NAME))
 
-    def test_summary_groups_runs_and_chunk_sizes(self):
-        rows = [{"arm": "metal", "fixture": "abcba", "chunk_ms": 1000, "der": value}
-                for value in (0, 0, 1)]
-        rows.append({"arm": "metal", "fixture": "abcba", "chunk_ms": 2000, "der": 0.5})
-        self.assertEqual([row["der_median"] for row in PREFLIGHT.summarize(rows)], [0, 0.5])
-
-    def test_cli_preserves_staged_path_and_writes_scores(self):
+    def test_complete_calls_preserve_staged_path(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "abcba.rttm").write_text("SPEAKER sample 1 0 4 <NA> <NA> A <NA> <NA>\n")
-            args = SimpleNamespace(binary=root / "binary", samples=root, out=root)
+            args = SimpleNamespace(binary=root / "binary", samples=root, assets=root, out=root)
             model = root / "staged" / PREFLIGHT.MODEL_NAME
             def invoke(command, **kwargs):
-                self.assertEqual(command[2], str(model))
-                self.assertEqual(command[command.index("--backend") + 1], "metal")
-                kwargs["stdout"].write('{"speaker":0,"start":0,"end":4}\n')
-                kwargs["stderr"].write("diarization-route: pass=1 coreml=1 frames=50\n")
-            with patch.object(PREFLIGHT.subprocess, "run", side_effect=invoke):
-                result = PREFLIGHT.run_case(args, model, "legacy", "abcba", 1000, 1)
-            self.assertEqual(result["der"], 0)
-            self.assertEqual(result["coreml_passes"], 1)
-            self.assertTrue((root / "legacy-abcba-1000ms-1.score.json").is_file())
+                self.assertEqual(command[1], str(model))
+                self.assertEqual(command[2], str(root / "abcba.wav"))
+                self.assertEqual(len(command), 4)
+                for call in range(1, 3):
+                    Path(f"{command[3]}-{call}.json").write_text(json.dumps(self.result()))
+            with patch.object(PREFLIGHT, "stage_arm", return_value=model), patch.object(
+                    PREFLIGHT.subprocess, "run", side_effect=invoke):
+                self.assertEqual(len(PREFLIGHT.run_arm(args, root, "diarizer")), 2)
+            (root / "diarizer-2.json").unlink()
+            with self.assertRaises(FileNotFoundError):
+                PREFLIGHT.load_calls(root / "diarizer", "diarizer")
+            self.assertTrue((root / "diarizer-1.json").exists())
+
+    def test_failed_gate_keeps_summary_and_returns_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "binary"
+            binary.write_bytes(b"binary")
+            report = {"passed": False, "probability_comparisons": [
+                {"maximum_probability_error": 0.0219, "relative_l2": 0.0135, "passed": False}]}
+            arguments = ["preflight", "--binary", str(binary), "--assets", str(root),
+                         "--samples", str(root), "--out", str(root / "out")]
+            with patch("sys.argv", arguments), patch.object(PREFLIGHT, "run_comparison", return_value=report):
+                self.assertEqual(PREFLIGHT.main(), 1)
+            self.assertEqual(json.loads((root / "out/summary.json").read_text()), report)
+
+    def test_both_calls_gate_and_der_collar(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "abcba.rttm").write_text("".join(
+                f"SPEAKER sample 1 {index * 4} 4 <NA> <NA> {speaker} <NA> <NA>\n"
+                for index, speaker in enumerate("ABC")))
+            args = SimpleNamespace(samples=root)
+            def run_arm(args, staging, arm):
+                return [self.result(coreml=arm == "diarizer"),
+                        self.result([0.4, 0.25] if arm == "diarizer" else None, arm == "diarizer")]
+            with patch.object(PREFLIGHT, "run_arm", side_effect=run_arm):
+                report = PREFLIGHT.run_comparison(args, root)
+            self.assertFalse(report["passed"])
+            self.assertTrue(report["probability_comparisons"][0]["passed"])
+            self.assertEqual(report["der"]["metal"][0]["collar_ms"], 250)
+            self.assertIsNone(report["der_gate"])
 
 
 class DriverMedianTests(unittest.TestCase):

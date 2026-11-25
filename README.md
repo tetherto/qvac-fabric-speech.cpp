@@ -317,19 +317,28 @@ the existing self-hosted authorization gate and the Apple GPU runner. Registry
 access requires `AWS_OIDC_ROLE_ARN` and `MODEL_S3_BUCKET`; missing access or model
 bundles fails the job rather than producing a skipped quality result.
 
-The preflight compares forced Metal, the published September 28 encoder bundles,
-and a freshly exported fp16 410-frame full diarizer from the same q8_0 GGUF.
-It streams `abcba` and `abcdba` at 1-second and 2-second chunk sizes, three fresh
-processes per case. The legacy bundles retain their published weights; their
-source precision may differ from the q8_0 GGUF. The new export is a diagnostic
-candidate, not a replacement for the distributed artifacts.
+The preflight makes two complete `Engine::diarize` calls on the three-speaker
+`abcba` recording per backend, reusing each engine between calls. It compares
+forced native Metal with a freshly exported fp16 2048-frame whole-network
+Core ML diarizer from the same q8_0 GGUF. The capacity covers the entire
+recording; only the full diarizer is staged beside the accelerated model, so
+`encoder_used_coreml` confirms whole-network execution. A native fallback or
+empty output fails the preflight. The audio frontend remains native.
 
-Artifacts contain asset/audio/binary SHA-256 hashes, source revisions, export
-logs, commands, raw hypotheses, per-pass routing, per-run DER and medians. DER
-uses a 250 ms collar. Every network pass must match its requested Core ML or
-ggml arm; missing routing evidence or fallback fails the preflight. Quality
-scores are diagnostic and have no new pass threshold. This distinguishes
-routing or infrastructure failures from measured quality differences.
+Artifacts retain each call's speaker probabilities, segments, routing flag,
+commands, logs, asset hashes and revisions. Probability comparisons use the
+existing `test_sortformer_diarizer_coreml_parity.cpp` limits: maximum absolute
+error <= 0.02 and relative L2 <= 0.003, with native probabilities as reference.
+Both calls must pass. DER is reported per call with a 250 ms collar and optimal
+speaker-label mapping; it has no new threshold. The separate AOSC speaker test
+has a default 30% DER ceiling on streaming output without this collar, so that
+ceiling is not applied to these offline calls.
+
+This is a repository-fixture reproduction, not the original failed recording:
+the original audio, model/bundle identity and gate invocation are unknown.
+The parity limits above originate in a lower-level batch/slab test; applying
+them to complete calls is an explicit diagnostic extension. The exported bundle
+is a diagnostic candidate, not a replacement for distributed artifacts.
 
 The generic benchmark driver now computes `der_median` from every measured run
 and preserves `.der-runs.json` plus per-run hypothesis files. Any scoring failure
