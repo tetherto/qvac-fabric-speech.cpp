@@ -3662,8 +3662,12 @@ static std::vector<whisper_vocab::id> tokenize(const whisper_vocab & vocab, cons
 #ifdef WHISPER_USE_COREML
 // replace .bin with -encoder.mlmodelc
 static std::string whisper_get_coreml_path_encoder(std::string path_bin) {
+    const std::string fit_suffix = ".fit.gguf";
     auto pos = path_bin.rfind('.');
-    if (pos != std::string::npos) {
+    if (path_bin.size() >= fit_suffix.size() &&
+        path_bin.compare(path_bin.size() - fit_suffix.size(), fit_suffix.size(), fit_suffix) == 0) {
+        path_bin.resize(path_bin.size() - fit_suffix.size());
+    } else if (pos != std::string::npos) {
         path_bin = path_bin.substr(0, pos);
     }
 
