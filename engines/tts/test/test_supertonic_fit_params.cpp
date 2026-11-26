@@ -43,6 +43,8 @@
 #include "tts-cpp/supertonic/fit.h"
 
 #include "supertonic_internal.h"
+#include "supertonic_coreml_path.h"
+#include "test_env_portable.h"
 
 #include "ggml-backend.h"
 #include "gguf.h"
@@ -337,6 +339,22 @@ void run_synthetic_gates() {
                "synthetic missing model was not model-unreadable (" + fr.reason + ")");
     }
 
+#ifdef TTS_CPP_USE_COREML
+    {
+        const std::string sidecar = coreml_vocoder_sidecar_path(path);
+        const bool created = std::filesystem::create_directory(sidecar);
+        tts_cpp::supertonic::FitOptions opts;
+        opts.model_gguf_path = path;
+        unsetenv("SUPERTONIC_COREML_DISABLE");
+        const auto fit = tts_cpp::supertonic::fit_params(opts);
+        setenv("SUPERTONIC_COREML_DISABLE", "1", 1);
+        expect(fit.status == tts_cpp::FitStatus::Error &&
+                   fit.reason == "coreml-memory-estimate-unavailable",
+               "synthetic Core ML sidecar was omitted from the fit verdict");
+        if (created) std::filesystem::remove(sidecar);
+    }
+#endif
+
     std::error_code ec;
     std::filesystem::remove(path, ec);
 }
@@ -537,6 +555,7 @@ void run_gates(const std::string & path, int n_gpu_layers) {
 }  // namespace
 
 int main(int argc, char ** argv) {
+    setenv("SUPERTONIC_COREML_DISABLE", "1", 1);
     if (argc < 2) {
         // No-argument (always-on CI) form: metadata-only synthetic GGUF.
         // Weight-sizing parity + the refusal paths need no fixture; the

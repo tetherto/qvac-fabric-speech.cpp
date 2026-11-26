@@ -946,7 +946,7 @@ passes on the same host:
 | Host | Runs | Peak increment | Largest prepare | Largest load and warm | Largest resident step | Steady growth | `ANECompilerService` growth |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | M2, macOS 27.2.1 | 18 | 64.7-138.0 MiB | 64.8-86.1 MiB | 12.7-96.7 MiB | 6.6-108.8 MiB | 30.6-138.0 MiB | 280.0-557.1 MiB |
-| M4 Max, macOS 26.7.2 | 16 | 63.0-79.4 MiB | 63.6-84.4 MiB | 14.9-26.7 MiB | 5.9-29.9 MiB | 32.4-46.6 MiB | 279.9-628.2 MiB |
+| M4 Max, macOS 26.7.2 | 18 | 63.0-116.2 MiB | 63.6-88.3 MiB | 14.9-26.7 MiB | 5.9-33.1 MiB | 32.4-65.5 MiB | 279.9-628.2 MiB |
 
 The ranges are over runs, each run's largest value. Steady growth comes from
 the runs that recorded the settled footprint (14 on the M2, 10 on the M4 Max).
@@ -960,7 +960,7 @@ on both hosts, rounded up to 1 MiB (`memory.measured` in `template.json`):
 
 | Constant | Largest measured | Recorded |
 |---|---:|---:|
-| prepare: `generation_peak_bytes` (9 MiB) + 8 MiB + `compile_peak_bytes` | 86.1 MiB (M2) | 108 MiB |
+| prepare: `generation_peak_bytes` (9 MiB) + 8 MiB + `compile_peak_bytes` | 88.3 MiB (M4 Max) | 111 MiB |
 | `load_peak_bytes.cpu_and_ane` | 96.7 MiB (M2) | 121 MiB |
 | resident part per capacity: `runtime_weight_bytes` + 2 x I/O (`workspace_bytes` 0) | 108.8 MiB (M2) | 137 MiB |
 | `ane_compile_reserve_bytes` | 628.2 MiB (M4 Max) | 786 MiB |
