@@ -1091,6 +1091,10 @@ if (PARAKEET_BUILD_TESTS)
     parakeet_apply_ccache(test-sentencepiece-bpe)
     parakeet_register_test(test-sentencepiece-bpe LABEL "unit")
 
+    add_executable(sortformer-preflight test/sortformer_preflight.cpp)
+    target_link_libraries(sortformer-preflight PRIVATE qvac-parakeet)
+    parakeet_apply_ccache(sortformer-preflight)
+
     add_executable(test-sortformer-streaming test/test_sortformer_streaming.cpp)
     target_link_libraries(test-sortformer-streaming PRIVATE qvac-parakeet)
     target_include_directories(test-sortformer-streaming PRIVATE include src ggml/include)
