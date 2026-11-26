@@ -38,10 +38,7 @@ jobs:
     timeout-minutes: 120
     permissions:
       contents: read
-      id-token: write
     env:
-      AWS_REGION: eu-central-1
-      MODEL_S3_BUCKET: ${{ secrets.MODEL_S3_BUCKET }}
       GGML_REPO: https://github.com/tetherto/qvac-ext-ggml.git
     steps:
       - uses: actions/checkout@v4
@@ -63,22 +60,13 @@ jobs:
           uv venv --python 3.11 "$PREFLIGHT_ROOT/python"
           uv pip install --python "$PREFLIGHT_ROOT/python/bin/python" \
             torch==2.7.0 numpy==2.2.6 gguf==0.19.0 coremltools==9.0 \
-            PyYAML==6.0.3 sentencepiece==0.2.0 awscli==1.42.30
+            PyYAML==6.0.3 sentencepiece==0.2.0
           uv pip freeze --python "$PREFLIGHT_ROOT/python/bin/python" > "$PREFLIGHT_ROOT/results/python-packages.txt"
-      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a
-        with:
-          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-      - name: Fetch published model
+      - name: Convert pinned NVIDIA checkpoint
         run: |
           set -euo pipefail
-          test -n "$MODEL_S3_BUCKET"
-          aws="$PREFLIGHT_ROOT/python/bin/aws"
-          stem=diar_streaming_sortformer_4spk-v2.1
-          root="s3://$MODEL_S3_BUCKET/qvac_models_compiled/ggml/parakeet"
-          "$aws" s3 cp "$root/2026-05-20/$stem.q8_0.gguf" "$PREFLIGHT_ROOT/assets/$stem.q8_0.gguf" --no-progress
-          find "$PREFLIGHT_ROOT/assets" -type f -exec shasum -a 256 {} + > "$PREFLIGHT_ROOT/results/published-assets.sha256"
-          printf '%s\n' "$root/2026-05-20/$stem.q8_0.gguf" > "$PREFLIGHT_ROOT/results/asset-sources.txt"
+          "$PREFLIGHT_ROOT/python/bin/python" scripts/benchmarks/prepare-sortformer-preflight.py \
+            --root "$PREFLIGHT_ROOT" 2>&1 | tee "$PREFLIGHT_ROOT/results/conversion.log"
       - name: Export full diarizer from the same GGUF
         run: |
           set -euo pipefail

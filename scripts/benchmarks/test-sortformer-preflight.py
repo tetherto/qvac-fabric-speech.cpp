@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import importlib.util
 import json
+import io
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -13,6 +15,57 @@ HERE = Path(__file__).resolve().parent
 SPEC = importlib.util.spec_from_file_location("preflight", HERE / "sortformer-preflight.py")
 PREFLIGHT = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PREFLIGHT)
+
+
+PREPARE_SPEC = importlib.util.spec_from_file_location("prepare", HERE / "prepare-sortformer-preflight.py")
+PREPARE = importlib.util.module_from_spec(PREPARE_SPEC)
+PREPARE_SPEC.loader.exec_module(PREPARE)
+
+
+class PreparationTests(unittest.TestCase):
+    def test_wrong_checkpoint_stops_before_conversion(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                PREPARE, "urlopen", return_value=io.BytesIO(b"incorrect")), patch.object(
+                PREPARE.subprocess, "run") as run:
+            with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
+                PREPARE.prepare(Path(directory))
+            run.assert_not_called()
+
+    def test_verified_checkpoint_conversion_and_provenance(self):
+        payload = b"verified checkpoint"
+        digest = hashlib.sha256(payload).hexdigest()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            def convert(command, **kwargs):
+                self.assertTrue(kwargs["check"])
+                checkpoint = Path(command[command.index("--ckpt") + 1])
+                self.assertEqual(checkpoint.name, PREPARE.STEM + ".nemo")
+                self.assertEqual(checkpoint.read_bytes(), payload)
+                self.assertEqual(command[-4:], ["--quant", "q8_0", "--head", "sortformer"])
+                Path(command[command.index("--out") + 1]).write_bytes(b"gguf")
+            with patch.object(PREPARE, "CHECKPOINT_SHA256", digest), patch.object(
+                    PREPARE, "urlopen", return_value=io.BytesIO(payload)) as download, patch.object(
+                    PREPARE.subprocess, "run", side_effect=convert):
+                PREPARE.prepare(root)
+            self.assertIn(PREPARE.REVISION, download.call_args.args[0])
+            report = json.loads((root / "results/model-provenance.json").read_text())
+            self.assertEqual(report["checkpoint_sha256"], digest)
+            self.assertEqual(report["gguf_sha256"], hashlib.sha256(b"gguf").hexdigest())
+
+    def test_converter_failure_retains_provenance(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                PREPARE, "download_checkpoint"), patch.object(
+                PREPARE.subprocess, "run", side_effect=subprocess.CalledProcessError(1, "converter")):
+            root = Path(directory)
+            with self.assertRaises(subprocess.CalledProcessError):
+                PREPARE.prepare(root)
+            self.assertTrue((root / "results/model-provenance.json").exists())
+
+    def test_missing_converter_output_fails(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                PREPARE, "download_checkpoint"), patch.object(PREPARE.subprocess, "run"):
+            with self.assertRaisesRegex(ValueError, "nonempty GGUF"):
+                PREPARE.prepare(Path(directory))
 
 
 class FullNetworkTests(unittest.TestCase):

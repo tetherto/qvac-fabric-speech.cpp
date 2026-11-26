@@ -313,9 +313,17 @@ projection fusion; shared CUDA matmul routing is unchanged.
 
 The `Sortformer Core ML preflight` workflow runs on same-repository pull requests
 that touch Parakeet or benchmark scripts, and supports manual dispatch. It uses
-the existing self-hosted authorization gate and the Apple GPU runner. Registry
-access requires `AWS_OIDC_ROLE_ARN` and `MODEL_S3_BUCKET`; missing access or model
-bundles fails the job rather than producing a skipped quality result.
+the existing self-hosted authorization gate and the Apple GPU runner. It downloads
+NVIDIA's public v2.1 NeMo checkpoint at revision
+`cd03eee90fbec18297ac31b8c21546e596b7f71c`, checks its pinned SHA-256, and converts
+it to q8_0 with the repository converter before exporting Core ML. Keeping the
+original checkpoint filename lets the converter emit the required AOSC variant
+metadata. No AWS role or private model artifact is required. Download, checksum,
+conversion and exporter validation failures fail the job.
+
+`model-provenance.json` records the checkpoint URL, revision and checksum,
+converter checksum, command and generated GGUF checksum. `conversion.log`
+preserves converter diagnostics. Exporter compatibility validation is unchanged.
 
 The preflight makes two complete `Engine::diarize` calls on the three-speaker
 `abcba` recording per backend, reusing each engine between calls. It compares
