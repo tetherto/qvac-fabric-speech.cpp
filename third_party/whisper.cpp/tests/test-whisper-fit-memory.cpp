@@ -14,7 +14,9 @@ ggml_backend_device cpu;
 bool cpu_available = true;
 int host_queries = 0;
 bool query_ok = true;
+#if defined(GGML_HEXAGON_RUNTIME_INFO_VERSION)
 ggml_backend_hexagon_runtime_info_v1 retained = {}, future = {};
+#endif
 }
 
 void ggml_backend_dev_get_props(ggml_backend_dev_t dev, ggml_backend_dev_props * props) { *props = dev->props; }
@@ -29,6 +31,7 @@ void ggml_backend_dev_memory(ggml_backend_dev_t dev, size_t * free_bytes, size_t
 ggml_backend_dev_t ggml_backend_get_device(ggml_backend_t backend) { return backend->dev; }
 ggml_backend_reg_t ggml_backend_dev_backend_reg(ggml_backend_dev_t dev) { return dev->reg; }
 
+#if defined(GGML_HEXAGON_RUNTIME_INFO_VERSION)
 static bool runtime_query(ggml_backend_t, uint64_t nodes, ggml_backend_hexagon_runtime_info_v1 * out, size_t size) {
     if (!query_ok || size != sizeof(*out) || (nodes != 0 && nodes != 4096)) {
         return false;
@@ -41,6 +44,10 @@ void * ggml_backend_reg_get_proc_address(ggml_backend_reg_t reg, const char * na
     return reg->has_query && std::strcmp(name, "ggml_backend_hexagon_get_runtime_info_v1") == 0 ?
         reinterpret_cast<void *>(runtime_query) : nullptr;
 }
+#else
+// A ggml without the Hexagon runtime-info header exposes no such query.
+void * ggml_backend_reg_get_proc_address(ggml_backend_reg_t, const char *) { return nullptr; }
+#endif
 
 #define CHECK(expr) do { if (!(expr)) { std::fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #expr); return 1; } } while (0)
 
@@ -78,6 +85,11 @@ int main() {
 
     ggml_backend backend;
     backend.dev = &dev;
+#if !defined(GGML_HEXAGON_RUNTIME_INFO_VERSION)
+    uint64_t bytes = 1;
+    CHECK(whisper_fit_query_backend_overhead(&backend, 4096, bytes) && bytes == 0);
+    (void) query_ok;
+#else
     retained.version = future.version = GGML_HEXAGON_RUNTIME_INFO_VERSION;
     retained.session_count = future.session_count = 2;
     retained.host_bytes_bound = 100;
@@ -107,6 +119,7 @@ int main() {
     CHECK(whisper_fit_query_backend_overhead(&backend, 4096, bytes) && bytes == std::numeric_limits<uint64_t>::max());
     reg.has_query = false;
     CHECK(whisper_fit_query_backend_overhead(&backend, 4096, bytes) && bytes == 0);
+#endif
     std::puts("test-whisper-fit-memory: all checks passed");
     return 0;
 }

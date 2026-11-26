@@ -4,17 +4,19 @@ Part of the [speech-stack documentation](../README.md).
 
 ## Shared runtime
 
-The umbrella resolves one installed speech-branch ggml before adding the
-engines. Every enabled engine consumes that dependency; the ggml tree inside
-the Whisper subtree is not compiled by the umbrella. Direct engine builds
-may instead stage their own speech-branch checkout, as their build guides describe.
+The umbrella resolves one installed fabric ggml (the `ggml/` tree of
+[qvac-fabric-llm.cpp](https://github.com/tetherto/qvac-fabric-llm.cpp), the
+same ggml the LLM stack ships) before adding the engines. Every enabled engine
+consumes that dependency; the ggml tree inside the Whisper subtree is not
+compiled by the umbrella. Direct engine builds may instead stage their own
+checkout of that tree, as their build guides describe.
 
 ```text
 Whisper          Parakeet          TTS          AudioGen
    |                 |             |              |
    +-----------------+-------------+--------------+
                      |
-          ggml-speech (qvac-ext-ggml@speech)
+       qvac-fabric ggml (qvac-fabric-llm.cpp/ggml)
                      |
        CPU / Metal / Vulkan / OpenCL / CUDA / Hexagon
 

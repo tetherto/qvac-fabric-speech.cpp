@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <stdexcept>
 #include <string>
 
 namespace tts_cpp {
@@ -64,9 +65,19 @@ FitResult fit_params(const FitOptions & opts) {
         return r;
     }
 
-    // Enabled S3Gen Core ML sidecars run outside ggml: their resident models
-    // and prediction buffers cannot be projected (CosyVoice's rule).
-    if (detail::coreml_sidecars_enabled(opts.s3gen_gguf_path, detail::resolve_coreml_policy())) {
+    // The prebuilt S3Gen Core ML route runs outside ggml: its resident models
+    // and prediction buffers are not projected yet (CosyVoice's rule), so it
+    // keeps this refusal until the route's memory is measured. The route
+    // depends only on presence and options, so the verdict is the same before
+    // and after the sidecars load.
+    bool coreml_route = false;
+    try {
+        coreml_route = detail::coreml_prebuilt_route(opts.s3gen_gguf_path, opts.coreml);
+    } catch (const std::invalid_argument &) {
+        r.reason = "invalid-arguments";
+        return r;
+    }
+    if (coreml_route) {
         r.reason = "coreml-memory-estimate-unavailable";
         r.report = "The S3Gen Core ML sidecars' resident models and prediction buffers cannot be projected; "
                    "set CHATTERBOX_COREML_DISABLE=1 to project the ggml S3Gen instead.\n";

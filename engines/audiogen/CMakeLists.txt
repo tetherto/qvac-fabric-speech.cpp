@@ -5,9 +5,9 @@ project(audiogen-cpp LANGUAGES C CXX VERSION 0.1.0)
 # text/cond encoders -> DiT flow-matching -> Oobleck VAE -> 48 kHz stereo PCM).
 # Split out of tts-cpp into its own engine folder so the audiogen backend is
 # a self-contained library, mirroring the per-engine folder layout the repo
-# already uses for tts-cpp / parakeet-cpp. Consumes the same `ggml-speech`
-# fork as the rest of the QVAC speech stack (it needs the custom `snake` and
-# `col2im_1d` CPU ops that live on the qvac-ext-ggml/speech branch).
+# already uses for tts-cpp / parakeet-cpp. Consumes the same fabric ggml
+# (the ggml/ tree of qvac-fabric-llm.cpp) as the rest of the QVAC speech
+# stack; it needs the custom `snake` and `col2im_1d` ops that live there.
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -35,7 +35,7 @@ option(AUDIOGEN_BUILD_LIBRARY     "audiogen-cpp: build the audiogen library (lin
 option(AUDIOGEN_BUILD_EXECUTABLES "audiogen-cpp: build the CLI + per-stage smoke harnesses"        ${AUDIOGEN_STANDALONE_DEFAULT})
 option(AUDIOGEN_BUILD_TESTS       "audiogen-cpp: build the CPU-only unit tests"                     ${AUDIOGEN_STANDALONE_DEFAULT})
 option(AUDIOGEN_INSTALL           "audiogen-cpp: generate install rules"                            ON)
-option(AUDIOGEN_USE_SYSTEM_GGML   "audiogen-cpp: use system-installed GGML (find_package(ggml)) instead of a vendored ggml. Defaults ON: the QVAC speech-stack vcpkg port `ggml-speech` (qvac-ext-ggml/speech branch) is the canonical, pre-patched ggml with the custom snake / col2im_1d ops this engine needs." ON)
+option(AUDIOGEN_USE_SYSTEM_GGML   "audiogen-cpp: use system-installed GGML (find_package(ggml)) instead of a vendored ggml. Defaults ON: the `qvac-fabric` vcpkg port (the ggml of qvac-fabric-llm.cpp) is the canonical, pre-patched ggml with the custom snake / col2im_1d ops this engine needs." ON)
 option(AUDIOGEN_CCACHE            "audiogen-cpp: use ccache as compiler launcher if available"      ON)
 
 if (ANDROID OR IOS OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
@@ -81,23 +81,23 @@ endfunction()
 
 # ---- ggml -----------------------------------------------------------------
 # audiogen-cpp does not vendor ggml. In this in-tree subtree we consume the
-# QVAC `ggml-speech` port (find_package(ggml)); it ships the snake / col2im_1d
+# `qvac-fabric` port (find_package(ggml)); it ships the snake / col2im_1d
 # ops the VAE + DiT graphs rely on. A parent project that already declares a
 # `ggml` target (e.g. a super-build) wins and we skip the find entirely.
 if (NOT TARGET ggml)
     if (AUDIOGEN_USE_SYSTEM_GGML)
         find_package(ggml CONFIG REQUIRED)
         if (NOT ggml_FOUND)
-            message(FATAL_ERROR "audiogen-cpp: system-installed GGML (ggml-speech) not found. "
+            message(FATAL_ERROR "audiogen-cpp: system-installed GGML (qvac-fabric) not found. "
                                 "Point -Dggml_DIR=<...>/lib/cmake/ggml at a ggml built from "
-                                "qvac-ext-ggml/speech (needs the snake + col2im_1d ops).")
+                                "qvac-fabric-llm.cpp ggml/ (needs the snake + col2im_1d ops).")
         endif()
         if (NOT TARGET ggml)
             add_library(ggml ALIAS ggml::ggml)
         endif()
     else()
         message(FATAL_ERROR "audiogen-cpp: AUDIOGEN_USE_SYSTEM_GGML=OFF is unsupported in this "
-                            "in-tree subtree (no vendored ggml/ here). Build the ggml-speech "
+                            "in-tree subtree (no vendored ggml/ here). Build the qvac-fabric "
                             "port and set AUDIOGEN_USE_SYSTEM_GGML=ON (the default).")
     endif()
 endif()
@@ -213,6 +213,15 @@ if (AUDIOGEN_BUILD_LIBRARY)
             ${AUDIOGEN_FOUNDATION_FRAMEWORK}
         )
     endif()
+    # Shared Core ML runtime (engines/coreml): compiled into libaudiogen-cpp
+    # under its own namespace when AUDIOGEN_COREML is on. No engine source uses
+    # it yet.
+    include(${CMAKE_CURRENT_SOURCE_DIR}/../coreml/qvac_coreml.cmake)
+    qvac_coreml_add_to(audiogen-cpp NAMESPACE audiogen_coreml PREFIX AUDIOGEN ENABLE ${AUDIOGEN_COREML})
+    # The Core ML exit hooks call that runtime, whose namespace is defined on
+    # audiogen-cpp only: compiled here, not in the object library (the in-tree
+    # tools link the objects without the runtime).
+    target_sources(audiogen-cpp PRIVATE src/coreml_exit.cpp)
 
     set_target_properties(audiogen-cpp PROPERTIES
         POSITION_INDEPENDENT_CODE ON
@@ -231,6 +240,7 @@ if (AUDIOGEN_BUILD_LIBRARY)
         # statically pull in.
         target_compile_definitions(audiogen-cpp-objects PRIVATE AUDIOGEN_SHARED AUDIOGEN_BUILD)
         target_compile_definitions(audiogen-cpp PUBLIC AUDIOGEN_SHARED)
+        target_compile_definitions(audiogen-cpp PRIVATE AUDIOGEN_BUILD)  # src/coreml_exit.cpp
     endif()
 
     if (CMAKE_BUILD_TYPE STREQUAL "Release" OR NOT CMAKE_BUILD_TYPE)
@@ -302,6 +312,10 @@ if (AUDIOGEN_BUILD_TESTS)
         add_test(NAME ${target} COMMAND $<TARGET_FILE:${target}> ${ART_ARGS})
         set_property(TEST ${target} PROPERTY LABELS ${ART_LABEL})
     endfunction()
+
+    # Portable tests of the shared Core ML runtime (engines/coreml), Linux and macOS.
+    include(${CMAKE_CURRENT_SOURCE_DIR}/../coreml/qvac_coreml.cmake)
+    qvac_coreml_add_tests(REQUIRE_GGML)
 
     add_executable(test-audiogen-parity-checks test/test_parity_checks.cpp)
     audiogen_register_test(test-audiogen-parity-checks)

@@ -2,7 +2,7 @@
 // follow-up, finding #1): every other sched test in this repo runs with a
 // CPU primary, where the scheduler degenerates to a single-backend
 // pass-through split and no op ever migrates.  This test uses the BLAS
-// backend (device type ACCEL, shipped in ggml-speech) as the PRIMARY: its
+// backend (device type ACCEL, shipped in the fabric ggml) as the PRIMARY: its
 // supports_op accepts only MUL_MAT / OUT_PROD (f32, contiguous, dims >= 32)
 // and view-class ops, so every ADD / SCALE / CPY node in the graph is
 // genuinely rejected and must migrate to the CPU-last backend — a real
@@ -15,7 +15,7 @@
 //   analogue) accumulate correct state across sched_reset cycles.
 //
 // A mock supports_op-rejecting backend is not an option here: the system
-// ggml-speech package installs no ggml-backend-impl.h, so backend/device
+// qvac-fabric package installs no ggml-backend-impl.h, so backend/device
 // interface structs are not visible to this repo.  BLAS is strictly better
 // anyway — a real backend with a real rejection predicate.
 //

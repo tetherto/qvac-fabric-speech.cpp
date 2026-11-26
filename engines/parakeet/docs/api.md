@@ -22,7 +22,7 @@ Include `<parakeet/parakeet.h>` for the complete surface or individual headers.
 | `EngineResult::encoder_used_coreml` | Whether every encoder invocation of this transcription ran on the Core ML sidecar |
 | `DiarizationResult::encoder_used_coreml` | Whether every network pass of this diarization ran its encoder on Core ML: a diarizer sidecar, or Sortformer v2.1's encoder sidecar. False for calls above the staged capacities, which run on ggml |
 | `EngineResult::segment_plan_ms` / `assemble_ms` | Non-zero only on the Core ML independent-segment path (TDT decoder sidecar): pause-cut planning, and per-segment concatenation plus stitching; with `preprocess_ms`, `encoder_ms` and `decode_ms` they account for `total_ms` |
-| `parakeet_log_set` | Install the host logging sink |
+| `parakeet_log_set` | Install the host logging sink; ggml's messages go to the same sink. It returns only after every callback still running on the previous sink has returned (background Core ML loads may log from other threads), so the previous user data can be freed right after; it never waits for the calling thread's own callbacks |
 | `parakeet_cli_main` | Embed the same CLI entry point exported by the library |
 | `moss::TranscribeEngine::transcribe` | MOSS transcription with speakers, timestamps and hotwords; separate API in `<parakeet/moss_transcribe.h>`, see [MOSS guide](moss-transcribe.md); `encoder_on_coreml()` and `TranscribeResult::encoder_backend` report the [Core ML encoder sidecar](moss-transcribe.md#core-ml-encoder-sidecar) |
 | `fit_params` | Memory-fit preflight: project whether a GGUF + workload fits the device without loading weights (`<parakeet/fit.h>`) |
@@ -55,11 +55,20 @@ streaming. Unified selects trained chunk/right-context values and ignores
 ignores both sliding-window context knobs.
 
 `StreamingOptions::chunk_ms = 0` (the default) resolves to 2000 ms for full
-TranscribePsy EU and the previous 1000 ms value for other ASR families. Positive
-values remain explicit: setting 1000 preserves one-second behavior. Resolution
-happens before callback/push validation and context calculations;
-`StreamSession::options().chunk_ms` reports the effective value. Nemotron still
-requires one of its trained positive operating points.
+TranscribePsy EU, 30000 ms for other TDT push streams, and 1000 ms for other
+ASR families and encode-once callback streams. Standard TDT push streams reject
+explicit chunks below 30000 ms: short sliding windows can silently lose entire
+phrases, even with Core ML disabled. Keep the default 10000 ms left context and
+2000 ms right lookahead for this conservative operating point. This is a guard
+against the known failure, not a guarantee of identical offline transcripts.
+For lower latency use a cache-aware streaming model such as Unified RNN-T.
+
+The chunk size controls processing, not individual PCM write size. Arbitrarily
+small writes remain supported, and `finalize()` transcribes a tail shorter than
+one chunk. First output normally requires a chunk plus its right lookahead;
+short recordings produce output on finalization. Resolution happens before
+validation and context calculations; `StreamSession::options().chunk_ms` reports
+the effective value. Nemotron requires a trained positive operating point.
 
 Full-EU chunk defaults apply on every backend, including CPU, Metal, Vulkan
 and Android. With `EngineOptions::language = "auto"`, push streams buffer the

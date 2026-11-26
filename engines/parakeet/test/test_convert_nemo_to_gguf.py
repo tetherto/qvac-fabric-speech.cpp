@@ -3,6 +3,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 def install_gguf_stub():
@@ -367,6 +368,29 @@ class ConverterRnntTests(unittest.TestCase):
         self.assertEqual(writer.values["parakeet.long_form.window_frames"], 750)
         self.assertEqual(writer.values["parakeet.long_form.context_frames"], 94)
 
+    def test_full_eu_long_form_defaults_and_explicit_overrides(self):
+        for window, overlap, expected in ((None, None, (750, 94)),
+                                          (120, None, (1500, 188)),
+                                          (None, 0.1, (750, 38)),
+                                          (120, 0, (1500, 0)),
+                                          (120, 0.2, (1500, 150))):
+            with self.subTest(window=window, overlap=overlap):
+                writer = RecordingWriter()
+                CONVERTER.write_long_form_hint(writer, 160, 16000, unified_config(),
+                    window, overlap, CONVERTER.TRANSCRIBEPSY_EU_VARIANT)
+                self.assertEqual((writer.values["parakeet.long_form.window_frames"],
+                                  writer.values["parakeet.long_form.context_frames"]), expected)
+
+    def test_long_form_options_reject_invalid_values(self):
+        for window in (0, -1, float("inf"), float("nan")):
+            with self.subTest(window=window), self.assertRaisesRegex(ValueError, "finite and positive"):
+                CONVERTER.resolve_long_form_hint(window, None)
+        for overlap in (-0.1, 0.6, float("inf"), float("nan")):
+            with self.subTest(overlap=overlap), self.assertRaisesRegex(ValueError, "between 0 and 0.5"):
+                CONVERTER.resolve_long_form_hint(60, overlap)
+        with self.assertRaisesRegex(ValueError, "requires --long-form-window-sec"):
+            CONVERTER.resolve_long_form_hint(None, 0.25)
+
     def test_tdt_durations_from_model_defaults(self):
         config = unified_config()
         config["model_defaults"]["tdt_durations"] = [0, 1, 2, 3, 4]
@@ -429,6 +453,55 @@ class ConverterRnntTests(unittest.TestCase):
         CONVERTER.write_provenance(writer, "nemotron", "custom")
         self.assertEqual(writer.values["general.description"], "custom")
         self.assertEqual(writer.values["general.license"], "OpenMDW-1.1")
+
+    def test_full_eu_provenance_and_description_override(self):
+        for description in (None, "Custom EU export"):
+            with self.subTest(description=description):
+                writer = RecordingWriter()
+                CONVERTER.write_provenance(writer, "tdt", description,
+                                            CONVERTER.TRANSCRIBEPSY_EU_VARIANT)
+                expected = description or "TranscribePsy-250M-EU FastConformer-TDT ASR (Apache-2.0)"
+                self.assertEqual(writer.values["general.description"], expected)
+                self.assertEqual(writer.values["general.license"], "Apache-2.0")
+                self.assertEqual(writer.values["general.source.url"],
+                                 "https://huggingface.co/qvac/TranscribePsy-250M-EU")
+
+    def test_full_eu_write_gguf_resolves_metadata_before_tensor_export(self):
+        config = unified_config()
+        config["loss"] = {"loss_name": "tdt", "tdt_kwargs": {"durations": [0, 1, 2]}}
+        config["encoder"] = {"d_model": 8, "n_layers": 2, "n_heads": 2,
+            "ff_expansion_factor": 4, "conv_kernel_size": 3,
+            "subsampling_factor": 8, "subsampling_conv_channels": 4, "feat_in": 8}
+        config["preprocessor"] = {"sample_rate": 16000, "n_fft": 512,
+            "features": 8, "window_size": 0.025, "window_stride": 0.01}
+
+        class MetadataRecorded(Exception):
+            pass
+
+        class MetadataWriter(RecordingWriter):
+            def add_name(self, value):
+                self.values["general.name"] = value
+
+            def add_file_type(self, value):
+                raise MetadataRecorded
+
+        for description, window, overlap, expected in ((None, None, None, (750, 94)),
+                ("Custom full EU", 120, 0.1, (1500, 75))):
+            with self.subTest(description=description, window=window):
+                writer = MetadataWriter()
+                with patch.object(CONVERTER, "load_transcribepsy_eu_weights", return_value=()), \
+                        self.assertRaises(MetadataRecorded):
+                    CONVERTER.write_gguf(Path("out.gguf"), Path("model.nemo"), config,
+                        {}, b"", {}, "f16", description=description,
+                        long_form_window_sec=window, long_form_overlap=overlap,
+                        writer_factory=lambda *args, **kwargs: writer,
+                        eu_adapters=Path("adapters.safetensors"), eu_gate=Path("gate.safetensors"))
+                self.assertEqual(writer.values["general.license"], "Apache-2.0")
+                self.assertEqual(writer.values["general.source.url"], CONVERTER.TRANSCRIBEPSY_EU_SOURCE)
+                self.assertEqual((writer.values["parakeet.long_form.window_frames"],
+                                  writer.values["parakeet.long_form.context_frames"]), expected)
+                self.assertEqual(writer.values["general.description"], description or
+                                 "TranscribePsy-250M-EU FastConformer-TDT ASR (Apache-2.0)")
 
     def test_writes_rnnt_tensor_namespace(self):
         names = []

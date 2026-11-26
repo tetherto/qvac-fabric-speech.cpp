@@ -170,7 +170,7 @@ def method_section(hub):
     <div>
       <h3>How it runs</h3>
       <ul>
-        <li>Every Sunday from 18:00 CET each shared machine updates the engine master and ggml speech heads, builds every backend it has, provisions the pinned models and runs the matrix of <code>scripts/benchmarks/desktop-weekly/families.json</code>; a Claude task collects the summaries on Monday morning and refreshes these pages.</li>
+        <li>Every Sunday from 11:00 CET each shared machine updates the engine master head and the ggml commit it pins (the ggml of qvac-fabric-llm.cpp), builds every backend it has, provisions the pinned models and runs the matrix of <code>scripts/benchmarks/desktop-weekly/families.json</code>; a Claude task collects the summaries on Monday morning and refreshes these pages.</li>
         <li>Weekly rows, report rows and campaign rows are never in one chart: the report rows are copied from the comparison report of 2026-11-04 (QVAC and twelve other engines on the same machines, with that report's builds, inputs and timing scopes) and the campaign rows keep the build, inputs and dates of the QVAC speech engines report (October 2026 edition); each set is compared only among itself.</li>
         <li>ASR, Supertonic and Nemotron rows time inference only; Audio8, MOSS-TTS and ACE-Step rows are whole fresh processes including model load from a warm filesystem cache.</li>
         <li>Quality checks are narrow: ASR WER on one English clip, TTS intelligibility on one prompt. Music quality and speaker similarity are unmeasured.</li>

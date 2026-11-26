@@ -1,6 +1,6 @@
 # audiogen-cpp
 
-Native [ACE-Step 1.5](https://github.com/ace-step/ACE-Step-1.5) and MiniMax-Music3 text-to-music in pure C++ on [ggml](https://github.com/tetherto/qvac-ext-ggml): caption and lyrics in, stereo audio out, no Python or PyTorch at inference time.
+Native [ACE-Step 1.5](https://github.com/ace-step/ACE-Step-1.5) and MiniMax-Music3 text-to-music in pure C++ on [ggml](https://github.com/tetherto/qvac-fabric-llm.cpp/tree/master/ggml): caption and lyrics in, stereo audio out, no Python or PyTorch at inference time.
 
 | Property | Value |
 |---|---|
@@ -8,7 +8,7 @@ Native [ACE-Step 1.5](https://github.com/ace-step/ACE-Step-1.5) and MiniMax-Musi
 | Public API | `tts_cpp::acestep::Engine`, `tts_cpp::minimax::Engine`; [memory-fit preflights](docs/memory-fit.md) `tts_cpp::acestep::fit_params`, `tts_cpp::minimax::fit_params` |
 | Output | interleaved stereo PCM, model-defined sample rate, `pcm[t * 2 + ch]` |
 | Backends | CPU, Vulkan (including Android Mali iGPUs), Metal, OpenCL (validated on Adreno 700+), CUDA, Hexagon NPU on explicit request (`backend = "hexagon"`, every ACE-Step stage including the LM, validated on Snapdragon 8 Elite); WebGPU (Dawn) is selectable with `backend = "webgpu"` but unmeasured, so the LM and detokenizer stay on the CPU there; [AMD XDNA DiT](docs/backends.md#amd-xdna-npu) on explicit request with the remaining stages on CPU; optional Core ML VAE-decoder sidecar on Apple (`AUDIOGEN_COREML`) |
-| ggml | requires the `ggml-speech` port for the custom `ggml_snake` and `ggml_col2im_1d` ops |
+| ggml | requires the fabric ggml (`qvac-fabric` port) for the custom `ggml_snake` and `ggml_col2im_1d` ops |
 | Consumed by | the `@qvac/audiogen-ggml` addon in [QVAC](https://github.com/tetherto/qvac) |
 
 Automatic GPU selection accepts only devices supporting the required F32
@@ -26,6 +26,12 @@ existing behavior. See [backend selection](docs/backends.md#backends).
 Apple builds can optionally use a Core ML sidecar for the ACE-Step VAE decoder.
 Export, placement and fallback contracts are in
 [docs/backends.md](docs/backends.md#core-ml-vae-decoder-sidecar).
+Process exit with Core ML: a process that exits while a sidecar is still compiling or loading in the
+background waits for that load (by default at most 15 s on macOS, 2 s on iOS) when its main thread is armed.
+The main thread is armed automatically when it makes the engine; a host that makes engines on another thread
+(as the qvac addons do) calls `coreml_arm_exit_guard()` on its main thread, or the terminal
+`coreml_shutdown_for_exit()` right before the process exits (`audiogen-cpp/coreml_exit.h`). See
+[the runtime's README](../coreml/README.md#process-exit).
 MiniMax-Music3 can explicitly use a [Core ML conditioner projection](docs/backends.md#minimax-core-ml-conditioner)
 with its remaining stages on the configured native backend. MiniMax is unavailable on mobile.
 
@@ -49,6 +55,9 @@ documents opt-in CLAP diagnostics, artifacts, benchmark timing boundaries,
 and MiniMax model preparation and transfer. Diagnostics do not gate quality.
 
 ## Documentation
+
+Cross-platform CI selects affected engines and caches Windows compiler outputs;
+see the [CI guide](../../docs/CI.md).
 
 Model-free tests run as separate math, tokenizer, backend, loading,
 quantization, audio, and generation-policy suites. The macOS CI lane also

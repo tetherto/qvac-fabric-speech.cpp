@@ -126,7 +126,7 @@ int main(int argc, char ** argv) {
     for (int k = 0; k < n_runs; ++k) {
         EncoderOutputs out;
         if (int rc = run_encoder(model, mel.data(), n_mel_frames, model.mel_cfg.n_mels,
-                                 out, /*max_layers=*/-1,
+                                 out, parakeet::EncoderRoute::ggml(), /*max_layers=*/-1,
                                  /*capture_intermediates=*/false); rc != 0) {
             std::fprintf(stderr,
                 "[test-sched-encoder-determinism] run_encoder rc=%d (run %d)\n", rc, k);

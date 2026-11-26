@@ -163,7 +163,12 @@ the bounded parity harness.
 
 Streaming is available through the `parler::Engine` callback API using
 `stream_chunk_frames` and `stream_first_chunk_frames`. Neither `parler-cli` nor
-the limited `tts-cli` Parler route exposes those controls.
+the limited `tts-cli` Parler route exposes those controls. With a fixed seed,
+repeating a call on one engine reproduces its PCM bit for bit on every backend,
+streamed or not: the prefill and every DAC window plan their graph buffers from
+that graph alone, so a backend whose kernel choice follows the buffer layout
+(the CUDA fused kernels) cannot pick up the layout an earlier, larger window
+left in the allocator.
 
 ## Core ML DAC sidecar (Apple Neural Engine)
 
@@ -187,6 +192,285 @@ python scripts/parler/export-dac-coreml.py \
     --gguf models/parler-mini-v1-f32.gguf --compile-dir models
 # check the rebuild first: --parity-dir artifacts/parler-ref --no-export
 ```
+
+### Generated sidecar and background loading
+
+Without a prebuilt sidecar the engine can build the same sidecar itself from
+the GGUF it loads: set a cache directory (`EngineOptions::coreml.cache_dir`,
+or `QVAC_COREML_CACHE_DIR`). On macOS 15 or later, in a build with
+`TTS_CPP_COREML=ON` and `TTS_CPP_COREML_GENERATE=ON` (the macOS default; iOS
+builds embed no template), the engine checks the GGUF against the embedded
+template `parler-dac-w128` (`coreml-templates/parler-dac-w128/`: the
+exporter's weight-free graph for a 128-frame window plus a recipe), writes
+the sidecar's `weight.bin` from the GGUF's `dac.dec.*` tensors, compiles the
+package on the device and publishes it into the cache. Nothing is downloaded
+and no Python runs. The weights are byte-identical to the exporter's fp16
+export of the same GGUF, so a generated sidecar decodes exactly like the
+prebuilt one. Every quantization of a model shares one artifact, since the
+cache key covers only the DAC tensors (F32 in every tier); mini and Indic
+share the template. large-v1's Hugging Face `audio_encoder` config equals
+mini's (`dac_44khZ_8kbps`: latent 1024, 9 codebooks of 1024 entries, 86 Hz
+at 44.1 kHz), so it should share it too, but that stays unverified at the
+tensor level until a converted large-v1 GGUF is checked against the
+template. A GGUF that does not match runs on ggml with state `no_template`.
+The engine opens the GGUF once and reads its metadata and every weight
+through that descriptor, and generates only from that file: a GGUF replaced
+at the path during the load or since (an atomic rename, a re-pointed
+symlink) fails generation with `source_changed`, and the DAC stays on ggml.
+
+The sidecar, generated or prebuilt, loads in the background. Until it is
+ready every DAC call decodes on ggml and `SynthesisResult::coreml_pending`
+is true; each `parler_dac_decode` call takes its backend once, at its start,
+so one call never mixes backends (a stream whose sidecar becomes ready
+between chunks reports `mixed`). On an M2 (macOS 15.7.3) the first
+generation of the mini DAC takes about 3 s (digest 1.6 s, write 1.4 s,
+compile 0.12 s) and the first Neural Engine load 8.1 s; later processes
+adopt the cached artifact, and a warm load takes about 0.1 s.
+
+| `EngineOptions::coreml` field | Effect |
+|---|---|
+| `cache_dir` | where generated sidecars and warm-load hints live; unset -> `QVAC_COREML_CACHE_DIR` -> none (no generation) |
+| `use` | `automatic` (default); `off` (ggml only); `require`: like `wait = call`, and a sidecar that cannot serve a call (failed to generate or load, a failed prediction) is an error |
+| `generate` | `background` (default) or `never` (prebuilt sidecars only) |
+| `wait` | `none` (default on macOS: never block, apart from a short bounded wait for a load this host finished quickly before); `construct` (the constructor waits until the DAC is ready or failed); `call` (each call waits) |
+| `prewarm` | `none` (nothing until the first call) or `minimal` / `predicted` / `all` (the DAC is requested at construction: the default) |
+| `compute_units` | as `coreml_compute_units`; unset falls back to it, then to `PARLER_COREML_COMPUTE_UNITS`, then `all` |
+| `strict_wait_ms` | longest wait of a `use = require` call; unset waits without limit |
+| `memory_budget_bytes` | the budget fit was assessed against; when only the ggml projection fits within the budget or the free memory, whichever is smaller, the DAC stays on ggml (memory-degrade) instead of fit refusing the model |
+
+With `memory_budget_bytes` set, the constructor repeats the fit to decide
+memory-degrade. It uses `EngineOptions::fit_description_tokens`,
+`fit_prompt_tokens` and `fit_margin_bytes` (defaults 50, 128 and 256 MiB,
+as in `FitOptions`): set them to the workload and headroom of the
+`fit_params` call that assessed the engine, so the engine reaches the same
+decision.
+
+`coreml_strict` maps to `use` (`true` -> `require`, `false` -> `automatic`)
+when `use` is unset. `PARLER_COREML_DISABLE` still overrides everything.
+`Engine::coreml_status()` returns the stage's state as JSON (`route`
+`prebuilt`, `generated` or `cached`; `state`; compute units; timings of the
+digest, write, compile, load and warm-up; the artifact key and path; the
+error and its class), and `Engine::coreml_wait(ms)` blocks until it is ready
+or has failed; it returns false at once while nothing has requested the DAC
+(`prewarm = none` before the first call) or its load waits for memory.
+`Engine::cancel()` also interrupts a call that waits for the sidecar
+(`wait = call` or `use = require`): the synthesis fails as cancelled. It
+ends a `coreml_wait()` in progress too, which then returns false; the
+sidecar keeps loading, and the next `coreml_wait()` waits for it again. A
+wait clears nothing: `coreml_wait(0)` only polls, and a longer wait ends
+on any `cancel()` made after it started (a count of cancels it compares
+with the one it started with), so concurrent waits and a synthesis on
+another thread each keep the cancels meant for them. With
+`prewarm = none` the constructor issues nothing, so `wait = construct` does
+not wait and `use = require` fails only when a call cannot be served.
+
+```cpp
+tts_cpp::parler::EngineOptions options;
+options.model_gguf_path = "models/parler-mini-v1-q8_0.gguf";
+options.coreml.cache_dir = "/Users/me/Library/Application Support/qvac-speech/coreml";
+tts_cpp::parler::Engine engine(options);   // returns at once; the DAC builds in the background
+auto first = engine.synthesize("Hello.", "A calm voice.");  // ggml DAC, first.coreml_pending
+engine.coreml_wait(-1);
+auto next = engine.synthesize("Hello.", "A calm voice.");   // next.dac_backend == "coreml-all"
+```
+
+With a generated route, `parler::fit_params` (with `FitOptions::coreml` set
+like the engine's) adds the template's Core ML envelope to the projection
+and reports it in `FitResult::coreml` (`route`, `bytes`, `validated`,
+`disabled_reason`, `ggml_only_fits`). The ggml DAC stays resident, since it
+serves every call until the sidecar is ready. The envelope is the sidecar's
+resident weights, I/O buffers, prediction workspace and the host quantizer
+copy, plus the larger of the generation and the load transients. Each of
+its constants is measured with its own 1.25 margin (below) for the `all`
+compute units, so the envelope adds none (`margin` 1.0, `coreml_bound`
+`measured`). Other compute-unit policies are not generated until
+validated. The route never reads the cache, so fit is the same before and
+after the first generation.
+
+Memory validation (`test-parler-dac-coreml --memory-schedule DIR`, compute
+units `all`): ggml DAC decodes run on the calling thread while the sidecar is
+generated, compiled, loaded and warmed into an empty cache in the background.
+The test reads the process footprint every 2 ms and the slot's state every
+10 ms. A run passes only when 1.25 times each phase it measured fits the
+template constant that charges it:
+
+- the prepare (digest, generation and compile, over the footprint just
+  before the digest) against `generation_peak_bytes` + 8 MiB +
+  `compile_peak_bytes`;
+- the load and warm-up (over the footprint just before the load) against
+  `load_peak_bytes.all`;
+- the steady state (ready, Core ML decodes running, over the footprint just
+  before the load) against the template's resident part (the host quantizer
+  copy is built at construction, before the load, so that footprint already
+  holds it);
+- `ANECompilerService`'s absolute size while loading against
+  `ane_compile_reserve_bytes`. Each `ps` query of the service is bracketed
+  by two reads of the slot state; one that crossed the load's start or end
+  is dropped, so a size read before the load never counts as one during it.
+
+A run also fails when a state was never sampled (the digest does not count
+for the generation), when a probe failed, or when a decode failed or ran on
+another backend than ggml or the route's own label (only successful decodes
+count towards the schedule's ggml and Core ML calls).
+
+The whole run (over the warm ggml baseline) is held to the envelope as
+measured, since the envelope adds phases that each carry the margin. A run
+that sets a new maximum for any phase therefore fails until the constants
+are recomputed.
+
+`ANECompilerService` is a long-lived system process shared by every process
+on the Mac: it runs as root under `aned`, so a test cannot restart it, and
+it does not exit when idle. Its size includes whatever other processes
+compiled, before this load or during it, summed over every instance of the
+service. Each run also prints its growth during the load (its peak less its
+size just before the load) and labels that baseline clean (at most 32 MiB),
+dirty or unknown (no sample before the load). A service that already holds
+memory reuses it, so on a dirty baseline the growth understates a cold
+compile on a clean host. No run on either host could start the service
+clean, so no isolated measurement compares the two placements, and the
+reserve is 1.25 times the largest absolute size while loading on any host:
+a conservative basis. In CI, where a pull request starts several macOS jobs
+at once, another job compiling for the Neural Engine during the load counts
+too; a run above 821.6 MiB fails the reserve and, by the rule above, raises
+it.
+
+Each run prints a per-phase table and a one-line JSON report. Each constant
+is 1.25 times the largest value measured over every run on every validated
+host, rounded up to 1 MiB (`memory.measured` in `template.json`), and the
+envelope applies no further margin. Figures in MiB, over 82 run reports:
+
+| Phase | M2, macOS 27.2.1 (37 runs) | M4 Max, macOS 26.7.2 (CI, 45 runs) | Charged |
+|---|--:|--:|--:|
+| prepare: generation and compile | 435.6-442.0 | 268.6-438.5 | 553 (1.25 x 442.0): `compile_peak_bytes` 329 on top of `generation_peak_bytes` 216 + 8 |
+| load and warm-up | 16.3-25.2 | 148.5-326.4 (warm-up 134.4-308.2) | 409 (1.25 x 326.4): `load_peak_bytes.all` |
+| steady state, over the footprint before the load | 0 (32 runs) | 150.1-326.7 (42 runs) | 409 (1.25 x 326.7): the weights 103.3, I/O 0.8 and `workspace_bytes` 305.0 |
+| whole run, over the warm ggml baseline | 453.0-466.3 | 577.7-759.2 | 962.6: the envelope, with the quantizer copy 0.6 |
+| `ANECompilerService` before the load | 2.9-393.8 (24 runs, one clean) | 123.3-485.8 (36 runs, none clean) | |
+| `ANECompilerService` growth during the load | 104.3-330.0 (24 runs) | 0.8-3.1 (36 runs) | reported |
+| `ANECompilerService` size while loading | 332.9-518.7 | 124.7-821.2 | 1,027 (1.25 x 821.2): `ane_compile_reserve_bytes` |
+
+The runs without a figure in a row predate its measurement. The M4 Max
+figures come from four CI runners of the same model, whose load and warm-up
+ranged from about 150 MiB in some jobs to 326 MiB in others.
+
+- **M2.** `all` runs the program on the Neural Engine. Its weights do not
+  show in the process footprint, and the generation is the peak.
+  `ANECompilerService` held 124-394 MiB before most loads and stayed at
+  333-519 MiB while loading. One run found the service process at 2.9 MiB
+  resident before the load (its pages compressed or purged meanwhile, not a
+  new process); it grew 330.0 MiB. The same M2 on macOS 15.7.3 peaked at
+  224-229 MiB over four runs (`ANECompilerService` 360-497 MiB absolute).
+  Those runs recorded no per-phase breakdown and move no constant, but stay
+  in `validated_for`.
+- **M4 Max.** `all` runs most of the program on the GPU (below), and only
+  the output stage on the Neural Engine, so `ANECompilerService` barely
+  grows (at most 3.1 MiB in every run that recorded its baseline). Its size
+  there comes mostly from other jobs' compiles on the runner's Mac, earlier
+  or concurrent. The largest reading, 821.2 MiB, came from a run that
+  recorded no baseline; the next two runs of the same job read 494 MiB. It
+  sets the reserve all the same, since no clean measurement shows what a
+  cold compile of this placement needs. The first prediction adds 134-308
+  MiB, which stays resident: the prediction workspace. The whole schedule
+  takes 3.5 s there, so the process still holds the generation's memory
+  when the load starts (the M2 has returned it by the time the sidecar is
+  ready). Its whole run is therefore the prepare plus the resident, which
+  is the sum the envelope charges.
+
+The envelope is 1,009,356,800 bytes (962.6 MiB), up from 475.4 MiB. With the
+M2's values alone (the template's weights and I/O as the resident part) it
+would be 657.6 MiB: the macOS 27 generation peak (442 MiB, against the
+216 MiB of the template's generation estimate) causes most of the rise, and
+the M4 Max's GPU resident adds the remaining 305.0 MiB, its
+`workspace_bytes`. `validated_for` is matched on the compute units only, so every
+chip is charged the larger figure. A cold Neural Engine load starts only
+while 1,027 MiB are available; until then the DAC stays on ggml (state
+`deferred(memory)`). Phones are not affected today: the runtime generates
+sidecars on macOS only, so on iOS the route is none and fit charges no Core
+ML envelope. Matching validation on the chip class, as well as the compute
+units, is planned before generation is enabled on iOS, whose chips run the
+program on the Neural Engine like the M2.
+
+Generated-sidecar accuracy (mini `q8_0`, compute units `all`, fp16, on an
+empty cache; the generated `weight.bin` is byte-identical to the exporter's
+export of the same GGUF):
+
+| Check | SNR | max abs |
+|---|--:|--:|
+| random codes, 265 frames (3 windows), vs ggml CPU | 56.2 dB | 1.7e-3 |
+| random codes, 42 frames (one partial window), vs ggml CPU | 56.4 dB | 1.2e-3 |
+| random codes, 1 frame, vs ggml CPU | 53.3 dB | 1.5e-3 |
+| HF reference `case0` (greedy codes, 4.9 s), vs the PyTorch fp32 wav (macOS 27.2.1) | 49.7 dB | 1.4e-3 |
+
+CI generates the sidecar from a staged `parler-mini-v1-q8_0.gguf` on every
+pull request (`test-parler-dac-coreml --cache-dir DIR --min-snr 54
+--require-coreml --units-sweep`), and runs the memory schedule above three
+times in its own step, each from a re-signed copy of the test (a fresh
+identity, so every Neural Engine load is cold) and an empty cache. Its
+runner is an Apple M4 Max,
+a chip with a recorded floor under `all` (below), so CI holds `all` to 50 dB
+and the same artifact under `cpu_and_ane` to 54 dB. The 54 dB gate under
+`all` on the M2 comes from the device run of the same command, not from CI.
+A one-frame decode (512 samples of mostly masked context, an ill-conditioned
+fp16 SNR) is held to 53 dB on the M2 only, for the generated sidecar under
+`all`, which measures 53.3 dB there; every other chip, the units sweep and
+the prebuilt sidecars hold it to `--min-snr` like the longer cases. With `--ref-dir` (the `case0_*.npy`
+fixtures `scripts/parler/dump-reference.py` writes from the Hugging Face
+checkpoint), the HF reference check uses `--min-speech-snr` (default 45 dB).
+It runs only on a device with the fixtures, not in CI; the M2 (macOS 27.2.1)
+measures 49.7 dB.
+
+`--units-sweep` also prints the same artifact's SNR for every compute-unit
+policy. The rows are reported only, except that on a chip with a floor the
+`cpu_and_ane` row is held to `--min-snr` in every case. A case holds only
+when the reference decoded on ggml and the sidecar decoded it under the
+label the requested units give (`coreml-ane` for `cpu_and_ane`; a fallback
+to ggml would compare ggml with itself, and a sidecar opened on other units
+fails the row); on such a chip a sweep
+that cannot find, link or load the artifact fails. Random codes, 265 / 42 / 1 frames,
+vs ggml CPU:
+
+| Host | `cpu_only` | `cpu_and_gpu` | `cpu_and_ane` | `all` |
+|---|--:|--:|--:|--:|
+| M2, macOS 15.7.3 (24G419) | 44.9 / 45.1 / 44.5 dB | 68.3 / 69.2 / 67.7 dB | 56.2 / 56.4 / 53.3 dB | 56.2 / 56.4 / 53.3 dB |
+| M2, macOS 27.2.1 (26B131) | 45.0 / 45.2 / 44.6 dB | 68.3 / 69.2 / 67.7 dB | 56.2 / 56.4 / 53.3 dB | 56.2 / 56.4 / 53.3 dB |
+| M4 Max, macOS 26.7.2 (25G332) | 45.0 / 45.2 / 44.6 dB | 68.3 / 69.2 / 67.7 dB | 54.8 / 55.0 / 54.2 dB | 51.3 / 51.4 / 51.8 dB |
+
+The ggml reference is the same on every host (the `cpu_and_gpu` figures
+match to 0.01 dB), and the M2 measures the same on macOS 15 and 27, so the
+difference comes from the chip. Core ML partitions the program between the
+GPU and the Neural Engine with its own per-chip cost model (`MLComputePlan`):
+
+- On the M2, `all` runs every op on the Neural Engine, exactly as
+  `cpu_and_ane`.
+- On the M4 Max, `all` runs 443 of the 493 ops (89.5% of the estimated
+  cost) on the GPU. It leaves eight folded-stage convolutions and the output
+  stage (`conv_out`, `tanh`) on the Neural Engine. In that GPU-fed island
+  the Neural Engine compiler fuses `tanh` into `conv_out` as its activation,
+  which measures 51.7 dB from exact inputs (62.8 dB for `conv_out` alone).
+  Up to the output stage, the M4 Max's `all` path is as accurate as the GPU
+  (68 dB).
+
+No single spelling of the program holds 54 dB under `all` on both chips
+(265 / 42 / 1 frames, against the PyTorch fp32 rebuild):
+
+| Program | M2 `all` | M4 Max `all` |
+|---|--:|--:|
+| as exported | 56.6 / 56.7 / 54.9 dB | 51.5 / 51.4 / 50.5 dB |
+| output stage in fp32 (off the Neural Engine) | 52.8 / 52.2 / 51.5 dB | 67.9 / 68.5 / 65.9 dB |
+| `tanh` after the output unfold | 52.3 / 51.8 / 50.5 dB | 51.5 / 51.4 / 50.5 dB |
+
+Within the M2's all-Neural-Engine program, the fused output stage is the
+more accurate one. `specializationStrategy = fastPrediction` does not change
+the M4 Max figures. The template therefore keeps `all`, and the test holds
+the M4 Max to a recorded 50 dB floor under `all`
+(`GENERATED_ALL_UNITS_FLOORS` in `test/parler/test_dac_coreml.cpp`, keyed
+on `sysctl machdep.cpu.brand_string`, matched exactly). Every other chip is
+held to `--min-snr`. The floor expires: the test fails once every
+multi-frame case on a floored chip reaches `--min-snr`, so the row is
+removed. On the M4 Max the same artifact under `cpu_and_ane` holds 54 dB at
+about twice the `all` window time, but the engine does not generate for
+`cpu_and_ane`: compute-unit policies other than `all` are not generated
+until their memory envelope is validated (see the fit envelope above).
 
 | Environment | Effect |
 |---|---|
@@ -225,19 +509,19 @@ options.coreml_decoder = true; // remains false by default; separate opt-in
 tts_cpp::parler::Engine engine(options);
 ```
 
-`Engine::dac_on_coreml()` reports whether the sidecar is attached;
+`Engine::dac_on_coreml()` reports whether the sidecar is ready;
 `SynthesisResult::dac_backend` reports where each call's DAC ran (`ggml`, the
 `coreml-*` compute label, or `mixed` across streamed chunks). `parler-cli`
 prints it after synthesis and `parler-bench` on its `dac:` line and as
 `dac_backend` in `--json-out` (the bench attaches the sidecar like the Engine;
 `PARLER_COREML_DISABLE=1` benchmarks the ggml DAC). A sidecar whose
-prediction fails is retired for the engine's lifetime and the call's whole
-range is decoded again on ggml, so no output mixes a failed call's windows;
-chunks already streamed are kept. Under the captured strict policy that call and
-every later one fail instead. With an enabled sidecar present,
-`parler::fit_params` returns `Error` with `coreml-memory-estimate-unavailable`
-(Core ML resident memory cannot be projected); `PARLER_COREML_DISABLE=1`
-projects the ggml DAC.
+prediction fails is retired (for every engine using it in the process) and
+the call's whole range is decoded again on ggml, so no output mixes a failed
+call's windows; chunks already streamed are kept. Under the captured strict
+policy that call and every later one fail instead. With an enabled prebuilt
+sidecar present, `parler::fit_params` returns `Error` with
+`coreml-memory-estimate-unavailable` (its resident memory is not projected
+until validated); `PARLER_COREML_DISABLE=1` projects the ggml DAC.
 
 How the sidecar decodes: the engine walks the utterance in fixed windows of
 the exported width (128 frames, 1.49 s, by default) with
@@ -665,7 +949,7 @@ attention over an F16 KV cache) and the DAC all run on the NPU; the host only
 samples. Weights and the fused decoder stacks go into the Hexagon repack
 buffer type. HTP has no K-quant matmul and looks up embedding rows only from
 F32/F16 tables, so a `q6_k` GGUF is refused at load: use `q8_0`, `f16` or
-`f32`. It needs a `qvac-ext-ggml@speech` build with the Hexagon fixes for
+`f32`. It needs a fabric ggml build with the Hexagon fixes for
 fused F32-precision matmuls and the tanh GELU.
 
 The Hexagon DAC runs each snake as one fused node, each transposed

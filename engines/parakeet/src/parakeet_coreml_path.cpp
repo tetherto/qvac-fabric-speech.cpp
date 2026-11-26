@@ -1,6 +1,7 @@
 #include "parakeet_coreml_path.h"
 
 #include <algorithm>
+#include <iterator>
 #include <array>
 #include <cctype>
 #include <cstddef>
@@ -61,6 +62,10 @@ std::string coreml_encoder_sidecar_path(const std::string & gguf_path) {
 
 std::string coreml_eu_other_sidecar_path(const std::string & gguf_path) {
     return coreml_sidecar_base(gguf_path) + "-encoder-other.mlmodelc";
+}
+
+std::string coreml_eu_shared_sidecar_path(const std::string & gguf_path) {
+    return coreml_sidecar_base(gguf_path) + "-encoder-shared.mlmodelc";
 }
 
 std::string coreml_eu_gate_sidecar_path(const std::string & gguf_path) {
@@ -166,10 +171,41 @@ LoadedWeights loaded_weights(const std::vector<CoremlDiarizerBundle> & bundles,
 
 }  // namespace
 
+std::vector<int> coreml_diarizer_loaded_capacities(const std::vector<int> & sorted_capacities,
+                                                   const std::vector<CoremlFrameRange> & ranges) {
+    std::vector<int> out;
+    for (int capacity : sorted_capacities) {
+        if (bundle_loaded(ranges, sorted_capacities, capacity)) out.push_back(capacity);
+    }
+    return out;
+}
+
+uint64_t coreml_diarizer_bundle_set_resident_bytes(int bundles, uint64_t weights_bytes) {
+    return bundles == 0 ? 0 : kAneWeightCopies * weights_bytes + kCoremlRuntimeBytes;
+}
+
 uint64_t coreml_diarizer_resident_bytes(const std::vector<CoremlDiarizerBundle> & bundles,
                                         const std::vector<CoremlFrameRange> & ranges) {
     const LoadedWeights loaded = loaded_weights(bundles, ranges);
-    return loaded.bundles == 0 ? 0 : kAneWeightCopies * loaded.bytes + kCoremlRuntimeBytes;
+    return coreml_diarizer_bundle_set_resident_bytes(loaded.bundles, loaded.bytes);
+}
+
+std::vector<CoremlDiarizerBundle> coreml_diarizer_loaded_bundles(
+        const std::vector<CoremlDiarizerBundle> & bundles, const std::vector<CoremlFrameRange> & ranges) {
+    const std::vector<int> capacities = bundle_capacities(bundles);
+    std::vector<CoremlDiarizerBundle> loaded;
+    std::copy_if(bundles.begin(), bundles.end(), std::back_inserter(loaded),
+                 [&](const CoremlDiarizerBundle & b) { return bundle_loaded(ranges, capacities, b.capacity); });
+    return loaded;
+}
+
+std::vector<CoremlFrameRange> coreml_diarizer_construction_ranges(CoremlDiarizerPrewarm prewarm) {
+    switch (prewarm) {
+        case CoremlDiarizerPrewarm::none: return {};
+        case CoremlDiarizerPrewarm::minimal: return {CoremlFrameRange{1, 1}};
+        case CoremlDiarizerPrewarm::all: return {CoremlFrameRange{1, INT32_MAX}};
+    }
+    return {};
 }
 
 }  // namespace parakeet

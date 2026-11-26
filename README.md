@@ -1,6 +1,6 @@
 # qvac-fabric-speech.cpp
 
-On-device speech and audio AI in C++17 on [ggml](https://github.com/tetherto/qvac-ext-ggml): speech-to-text, speaker diarization, end-of-utterance detection, text-to-speech, voice cloning, sound effects, speech-to-speech, enhancement, and music generation.
+On-device speech and audio AI in C++17 on [ggml](https://github.com/tetherto/qvac-fabric-llm.cpp/tree/master/ggml): speech-to-text, speaker diarization, end-of-utterance detection, text-to-speech, voice cloning, sound effects, speech-to-speech, enhancement, and music generation.
 
 | Property | Value |
 |---|---|
@@ -10,9 +10,20 @@ On-device speech and audio AI in C++17 on [ggml](https://github.com/tetherto/qva
 | Desktop | Linux, macOS, Windows |
 | Mobile | Android arm64-v8a, iOS arm64; model and backend coverage varies by engine |
 | Backends | CPU, Metal, Vulkan, OpenCL, CUDA, WebGPU (Dawn, opt-in; see [WebGPU](#webgpu-dawn)); selected models also support explicit Hexagon placement or optional Apple Core ML sidecars |
-| Shared ggml | One `ggml-speech` dependency from [qvac-ext-ggml@speech](https://github.com/tetherto/qvac-ext-ggml/tree/speech) |
+| Shared ggml | One `qvac-fabric` dependency: the `ggml/` tree of [qvac-fabric-llm.cpp](https://github.com/tetherto/qvac-fabric-llm.cpp), the same ggml the LLM stack ships |
 
 ## Supported models
+
+Parakeet mel preprocessing keeps FFT twiddle tables in worker or stream scope,
+avoiding a reproduced MinGW heap crash during dynamic thread-local cleanup while
+preserving parallel execution and serial/threaded numerical parity.
+
+Supertonic engines can be reused after cancellation without reloading their
+models. `Engine::synthesize_segment()` preserves caller-selected sentence or
+clause boundaries, and `Engine::release_thread_resources()` releases a worker's
+inference caches before that thread exits. See the
+[TTS guide](engines/tts/README.md) for the lifecycle contract.
+Cancellation can wait for an active vector-estimator loop to finish.
 
 The engine guides own model formats, quantization, backend validation, and input
 requirements. An available ggml backend does not imply every model has been
@@ -24,6 +35,19 @@ through decoding, including Nemotron's locale-prompt projection. Encoder tensors
 with extra padding frames retain host routing. See the
 [device encoder handoff](engines/parakeet/docs/backends.md#device-encoder-handoff)
 for routing, fallback and validation coverage.
+
+Parakeet TDT uses the native encoder beyond a standard Core ML sidecar's input
+capacity; short Core ML windows require an export with a validated seam policy.
+These standard TDT sidecars retain native weights even with
+`PARAKEET_COREML_ONLY=1`; incompatible encoder-less GGUFs fail at load time.
+Standard TDT push streams default to 30-second chunks and reject smaller explicit
+chunks to prevent phrase loss. Small PCM writes and final tail flushing remain
+supported; full TranscribePsy EU retains its separate streaming policy. See the
+[Parakeet streaming contract](engines/parakeet/docs/api.md).
+
+The standard TDT ggml encoder masks right-padding in attention and convolution,
+so padding cannot alter valid encoder frames. Offline TDT still re-encodes
+windows in push streams; accuracy can vary with the available context.
 
 | Engine | Model families | Capabilities and limitations |
 |---|---|---|
@@ -130,6 +154,47 @@ contracts; see the engine guides before exporting or deploying one.
 | AudioGen | ACE-Step VAE decoder | [AudioGen backends](engines/audiogen/docs/backends.md#core-ml-vae-decoder-sidecar) |
 | AudioGen | MiniMax conditioner projection, or explicit full-network Core ML (`coreml_profile_dir` + `coreml_compute_units`, macOS 15+) | [MiniMax Core ML](engines/audiogen/docs/backends.md#minimax-core-ml-conditioner) |
 
+Nemotron 3 Diarization and Sortformer v2.1 diarizers need no exported bundle
+on macOS: a build with
+`PARAKEET_COREML=ON` (the generator, `PARAKEET_COREML_GENERATE`, is on by default
+on macOS) generates each diarizer capacity from the GGUF on the device in the
+background, compiles it and keeps it in a cache directory, and diarization runs
+on ggml until a capacity is ready. Generation needs that cache directory: set
+`CoremlOptions::cache_dir` or `QVAC_COREML_CACHE_DIR` for the library (it has
+none by default, and then nothing is generated), or `--coreml-cache-dir` for
+the `parakeet` CLI (which defaults to
+`~/Library/Application Support/qvac-speech/coreml`). See
+[Generated sidecars](engines/parakeet/README.md#generated-sidecars) for the
+setup, options and memory.
+The generated Sortformer v2.1 capacity is charged at 259 MiB after calibration
+against the latest overlapped Core ML preparation measurements, retaining the
+required 25% safety margin.
+
+TranscribePsy conversion uses 60-second windows with 25% overlap for full EU
+and records its Apache-2.0 provenance. For EU-sub Core ML deployment, the
+repository provides an encoder-stripping tool and decoder output-projection
+palettization with `--nbits-out`; see the
+[conversion guide](engines/parakeet/docs/models.md#transcribepsy).
+Full-EU Core ML export requires an F16 GGUF and macOS with Xcode for compilation.
+The [full-EU guide](engines/parakeet/docs/transcribepsy-eu-coreml.md#export-and-deployment)
+provides the conversion command and recommends explicit FP16 encoders/decoder
+as the baseline, with six-bit encoders for smaller deployments. The Engine also
+loads a [shared-weight multifunction encoder](engines/parakeet/docs/transcribepsy-eu-coreml.md#shared-weight-runtime-deployment)
+for English, adapted and gate routes, including encoder-less GGUF deployments.
+It replaces the three fixed bundles without changing the public API or Core ML build option.
+An [experimental route-sharing harness](engines/parakeet/docs/transcribepsy-eu-coreml.md#trying-route-sharing-exports)
+can measure those alternatives separately from the deployed runtime.
+Its [automated regression tests](engines/parakeet/examples/ios-coreml-bench/README.md#route-harness-regression-tests)
+cover fixture/report serialization and native prediction/loading with generated models,
+including rejection of malformed manifests and duplicate WAV stems.
+
+Chatterbox loads its sidecar functions in the background through the shared
+Core ML runtime (`engines/coreml`): construction and synthesis never wait for a
+Neural Engine compile, each sentence runs on Metal until the functions it needs
+are ready, and `tts_cpp::CoremlOptions` (`EngineOptions::coreml`, `tts-cli
+--coreml-*`) selects what loads up front, whether to wait, and where warm-load
+hints live; see [Chatterbox loading, fallback and options](engines/tts/docs/chatterbox.md#loading-fallback-and-options).
+
 MiniMax's full Core ML route is also exposed through its public C++ engine.
 Build with `AUDIOGEN_MINIMAX_COREML=ON` and supply both `coreml_profile_dir` and
 `coreml_compute_units`; the separate flag does not enable automatic ACE-Step
@@ -143,6 +208,13 @@ preflight returns `Error` with `coreml-memory-estimate-unavailable` when
 enabled sidecars are present, rather than undercounting their resident memory.
 Re-export CosyVoice3 LM sidecars with the current exporter to preserve cache
 feedback on macOS 15 and 26; see the [Core ML guide](engines/tts/docs/cosyvoice3.md#core-ml-sidecars).
+
+`scripts/coreml/bench-load-time.py` measures Core ML load time for the
+Chatterbox sidecars: first-load compile on a fresh host identity, warm load,
+time until every function is ready with and without the admission gate, and
+whether loaded functions share weight memory. The
+[Core ML load time measurements](docs/COREML-LOAD-TIME.md#setup-and-usage)
+list its requirements, the commands to run it and the recorded results.
 
 ### Hexagon NPU (Snapdragon)
 
@@ -161,8 +233,7 @@ and OpenCL on the same device.
 
 ### WebGPU (Dawn)
 
-`GGML_WEBGPU=ON` (the `webgpu` feature of the `speech-cpp` / `ggml-speech`
-ports) adds ggml's WebGPU backend on Google Dawn, driven natively inside the
+`GGML_WEBGPU=ON` (the `webgpu` feature of the `speech-cpp` port) adds ggml's WebGPU backend on Google Dawn, driven natively inside the
 process; no browser is involved. It registers as `WebGPU`, ranks with Vulkan
 and Metal in every engine's automatic GPU selection (CUDA still wins on the
 same NVIDIA card), and is selected explicitly with `--backend webgpu` or
@@ -187,8 +258,10 @@ Parler, CosyVoice3 and Audio8 sample their tokens, so their WebGPU and CPU
 renders diverge after the first differing token the way any two backends do;
 the transcripts are the check. They rely on ggml-webgpu computing the matmul
 and flash-attention ops they mark `GGML_PREC_F32` with f32 activations and
-f32 accumulation, which ggml-speech provides from 2026-10-27; with an older
-ggml-speech their decoders overflow f16 and produce NaN logits, silence or
+f32 accumulation, which the fabric ggml provides since qvac-fabric-llm.cpp
+`be6e387b` (ported from ggml-speech 2026-10-27) and on the temp-11739 line
+since its base `ee1ccf4e3`; with an older ggml their
+decoders overflow f16 and produce NaN logits, silence or
 noise.
 
 ## Getting started
@@ -276,10 +349,20 @@ and model-specific exceptions.
 
 ## Documentation
 
+The [CI guide](docs/CI.md) describes engine-specific cross-platform job selection,
+Windows compiler caching, and the VAD contract tests.
+
 Parakeet's [test guide](engines/parakeet/docs/testing.md) separates model-free
 unit tests from fixture coverage. Its fixture runner rejects runs with no executed
 tests and can require specific model-family tests to pass; the opt-in GPU CI lane
 uses this gate.
+
+TTS's [test guide](engines/tts/docs/testing.md) separates model-free checks
+from optional numerical fixtures and documents how to generate independent
+WAV/mel, CAMPPlus and speech-tokenizer references. WAV/mel fixtures need no model
+checkpoint, and NPY loading rejects truncated files. Chatterbox preprocessing and streaming
+parity harnesses reject numerical mismatches, non-finite values and incomplete
+output.
 
 AudioGen's [test guide](engines/audiogen/docs/testing.md) documents independent
 model-free suites and required model-backed CI coverage. The macOS lane stages

@@ -11,7 +11,7 @@ project matches the validation build and avoids ignored stale local headers:
 
 ```bash
 export SPEECH_SOURCE="$PWD/engines/parakeet"
-export GGML_SOURCE="/path/to/current/qvac-ext-ggml"
+export GGML_SOURCE="/path/to/current/qvac-fabric-llm.cpp/ggml"
 DRIVER_DIR=/tmp/eu-desktop-driver
 mkdir -p "$DRIVER_DIR"
 cat > "$DRIVER_DIR/CMakeLists.txt" <<'CMAKE'
@@ -59,7 +59,7 @@ xcrun devicectl device copy from --device "$DEVICE_ID" \
   --source Documents/bench.json --destination /tmp/bench.json
 ```
 
-`GGML_SOURCE` is a current `qvac-ext-ggml` checkout on its `speech` branch.
+`GGML_SOURCE` is the `ggml/` tree of a current `qvac-fabric-llm.cpp` checkout.
 `MODEL_DIR` contains the GGUF and exported `.mlmodelc` sidecars from the
 [full-EU guide](../../docs/transcribepsy-eu-coreml.md). Packaging copies only
 GGUFs and compiled models, excluding checkpoints and `.mlpackage` intermediates.
@@ -151,3 +151,102 @@ and compares native Metal with Core ML. The first session includes lazy precise
 program loading; repeated sessions retain identical text. Use `--explicit-context`
 instead to exercise API 750-frame windows/25-frame context with auto/force0/force1
 decoder policies and actual prediction counters.
+
+## Experimental route probe
+
+`route_probe.mm` runs the isolated [route-sharing exports](../../docs/transcribepsy-eu-coreml.md#trying-route-sharing-exports)
+directly through Core ML, including named multifunction entry points and the
+runtime adapter-scale input. It does not link Parakeet or claim runtime support
+for these packages. It compares compiled features against independent FP32
+references, saves actual output tensors, records per-function compute placement,
+load/first/warm timings, physical footprint and thermal state. The ordinary
+benchmark above remains the transcription/streaming harness.
+
+Export the prototypes and prepare fixtures with `route_experiments.py` first.
+Build and package a **fresh** development bundle using a current provisioning
+profile, matching bundle ID, and local signing identity:
+
+If the development profile has expired, Xcode automatic signing can create a
+fresh one using an existing signed-in developer account. Build the matching
+development target with `xcodebuild -project "$SIGNING_PROJECT" -target "$SIGNING_TARGET" -sdk iphoneos -allowProvisioningUpdates build`,
+then use the resulting app's `embedded.mobileprovision`. Building the target
+directly also avoids scheme destination-selection errors when the SDK is
+available but Xcode reports that the iOS platform is not installed. A newly
+issued profile may need approval on the phone under Settings > General >
+VPN & Device Management before launch.
+
+```bash
+PROBE=engines/parakeet/examples/ios-coreml-bench
+xcrun --sdk iphoneos clang++ -std=c++17 -fobjc-arc -arch arm64 \
+  -miphoneos-version-min=18.0 -framework UIKit -framework CoreML -framework Foundation \
+  "$PROBE/route_probe.mm" -o "$EXPERIMENTS/route-probe"
+APP="$EXPERIMENTS/RouteProbe.app"
+$PYTHON "$PROBE/route_experiments.py" phone-fixtures \
+  --fixtures "$EXPERIMENTS/fixtures" --output "$APP/fixtures"
+$PYTHON "$PROBE/package.py" --binary "$EXPERIMENTS/route-probe" \
+  --profile "$PROVISIONING_PROFILE" --identity "$SIGN_IDENTITY" --bundle-id "$BUNDLE_ID" \
+  --model-dir "bits0=$EXPERIMENTS/bits0" --model-dir "bits6=$EXPERIMENTS/bits6" \
+  --samples "$EXPERIMENTS/fixtures" --output "$APP"
+xcrun devicectl device install app --device "$DEVICE_ID" "$APP"
+for BITS in 0 6; do
+  for KIND in separate shared unified load-eager load-en load-other load-auto-en load-auto-other; do
+    xcrun devicectl device process launch --device "$DEVICE_ID" --console -- "$BUNDLE_ID" \
+      "bits$BITS" "$KIND" "bits$BITS-$KIND"
+  done
+done
+```
+
+The three positional arguments are the model directory inside the bundle, the
+probe kind, and a simple output-directory name inside Documents. Loading probes
+retain just the specified handles; `load-auto-*` models the gate plus selected
+route. They measure handle initialization only, without inference or gate
+classification. `separate`, `shared` and `unified` additionally run all fixtures,
+with five warm predictions each; `unified` uses scale 0 for gate measurements.
+Process-per-kind runs preserve existing OS specialization caches. Do not infer
+first-install or ANE placement results from warmed timings alone. A compute plan
+with no device assignments leaves placement unverified.
+
+Copy each result directory from the app's Documents directory using
+`devicectl device copy from`, keeping the output JSON and binary tensors together.
+Summarize the copied directories and evaluate the original CPU gate classifier
+on the phone's actual intermediate outputs:
+
+```bash
+$PYTHON "$PROBE/route_experiments.py" summarize-native \
+  --native-results "$EXPERIMENTS/phone-results" --fixtures "$EXPERIMENTS/fixtures" \
+  --output "$EXPERIMENTS/phone-summary"
+```
+
+The summary compares outputs with the separate compiled routes and reports gate
+probabilities and decisions against the FP32 reference. These are numerical and
+sample-routing checks, not language-corpus transcription accuracy measurements.
+
+The same probe also builds on macOS by omitting UIKit and the iPhone target
+flags. Pass an absolute model directory and the prepared phone-fixture directory
+as a fourth argument; set `QVAC_ROUTE_OUTPUT_DIR` to keep desktop outputs in the
+experiment directory. The native compute-plan query uses the selected function's
+configuration, which also permits placement inspection of non-default functions.
+
+### Route harness regression tests
+
+Using the pinned Core ML Python environment, run these tests from the repository
+root without downloading model checkpoints or connecting an iPhone:
+
+```bash
+$PYTHON engines/parakeet/test/test_route_experiments.py
+$PYTHON engines/parakeet/test/test_route_probe_runtime.py
+```
+
+The Python suite checks binary fixture serialization, precision-specific baseline
+matching, positive and negative gate-decision reports, valid-row cropping,
+adapter-scale selection, non-finite output rejection, loading reports and
+duplicate WAV stem rejection before preparation. Input WAVs must have distinct
+filename stems, even when they are in different directories. The
+native smoke suite builds `route_probe.mm` and generates tiny FP16/FP32 Core ML
+models, including a multifunction package and a route-input program. It checks
+saved prediction tensors, all five loading-only modes without fixture files,
+and rejection of truncated inputs and malformed manifests. Prediction modes
+require a JSON object with a nonempty `fixtures` array; invalid manifests fail
+before any model is loaded. Native tests require macOS 15+ and Xcode
+tools; unsupported hosts exit with skip code 77. Both suites are registered in
+CTest and the existing Apple Core ML workflow lane.

@@ -29,7 +29,7 @@ bool sched_force_enabled() {
     return e && e[0] && e[0] != '0';
 }
 
-// MIRRORS SCHEDULER INTERNALS — re-verify on EVERY ggml-speech sync.
+// MIRRORS SCHEDULER INTERNALS — re-verify on EVERY fabric ggml sync.
 //
 // This re-derives, outside the scheduler, the exact condition under which
 // ggml_backend_sched_backend_id_from_cur() rejects a node with
@@ -120,6 +120,10 @@ ggml_status sched_fallback_compute(sched_fallback & fb, ggml_backend_t primary,
     // primary itself (CPU-only model).  Set its thread count per call.
     backend_set_n_threads(fb.cpu_backend ? fb.cpu_backend : primary, n_threads);
     return ggml_backend_sched_graph_compute(fb.sched, gf);
+}
+
+bool direct_alloc_with_fresh_layout(ggml_gallocr_t allocr, ggml_cgraph * gf) {
+    return allocr && gf && ggml_gallocr_reserve(allocr, gf) && ggml_gallocr_alloc_graph(allocr, gf);
 }
 
 ggml_status direct_compute(ggml_backend_t backend, ggml_cgraph * gf, int n_threads) {

@@ -1,3 +1,4 @@
+#include "coreml_test_options.h"
 #include "mel_preprocess.h"
 #include "parakeet_ctc.h"
 #include "parakeet_sortformer.h"
@@ -26,6 +27,7 @@ constexpr const char * kDisableEnv = "PARAKEET_COREML_DISABLE";
 constexpr const char * kDiarizerDisableEnv = "PARAKEET_COREML_DIARIZER_DISABLE";
 constexpr const char * kUnitsEnv = "PARAKEET_COREML_COMPUTE_UNITS";
 constexpr const char * kNeuralEngineLabel = "coreml-ane";
+constexpr int kTemplateCapacities = 1;  // the embedded Sortformer v2.1 template: 410 frames
 
 struct Comparison {
     double maximum_error = 0.0;
@@ -79,9 +81,16 @@ void unset_env(const char * name) {
 #endif
 }
 
+// --cache-dir: the diarizer is generated from the GGUF into this cache
+// directory (no adjacent bundle may exist), and the test fails unless the
+// capacity is generated or adopted from that cache.
+std::string g_cache_dir;
+
 bool load_model(const char * path, bool disable_coreml, parakeet::ParakeetCtcModel & model) {
     if (disable_coreml) set_env(kDisableEnv, "1");
-    const int status = parakeet::load_from_gguf(path, model, kThreads, kGpuLayers, false);
+    parakeet::CoremlOptions options = coreml_ready_options();
+    if (!g_cache_dir.empty()) options.cache_dir = g_cache_dir;
+    const int status = parakeet::load_from_gguf(path, model, kThreads, kGpuLayers, false, "auto", options);
     if (disable_coreml) unset_env(kDisableEnv);
     return status == 0;
 }
@@ -115,13 +124,25 @@ bool defaults_to_neural_engine(const parakeet::ParakeetCtcModel & model) {
     return ane;
 }
 
+// PARAKEET_COREML_DIARIZER_DISABLE hides the diarizer: two loads with the
+// same options (and cache directory), the first with the variable clear and
+// a capacity serving, the second with it set and none.
 bool diarizer_env_hides_sidecars(const char * path) {
+    parakeet::CoremlOptions options = coreml_ready_options();
+    if (!g_cache_dir.empty()) options.cache_dir = g_cache_dir;
+    parakeet::ParakeetCtcModel shown;
+    const bool shown_loaded =
+        parakeet::load_from_gguf(path, shown, kThreads, kGpuLayers, false, "auto", options) == 0;
+    const int shown_capacity = shown_loaded ? largest_capacity(shown) : 0;
     set_env(kDiarizerDisableEnv, "1");
-    parakeet::ParakeetCtcModel model;
-    const bool loaded = parakeet::load_from_gguf(path, model, kThreads, kGpuLayers, false) == 0;
+    parakeet::ParakeetCtcModel hidden_model;
+    const bool loaded =
+        parakeet::load_from_gguf(path, hidden_model, kThreads, kGpuLayers, false, "auto", options) == 0;
     unset_env(kDiarizerDisableEnv);
-    const bool hidden = loaded && largest_capacity(model) == 0;
-    std::printf("[%s] diarizer-disable-env: coreml=%d\n", hidden ? "ok  " : "FAIL", hidden ? 0 : 1);
+    const int hidden_capacity = loaded ? largest_capacity(hidden_model) : -1;
+    const bool hidden = shown_capacity > 0 && hidden_capacity == 0;
+    std::printf("[%s] diarizer-disable-env: capacity %d with the variable clear, %d with it set\n",
+                hidden ? "ok  " : "FAIL", shown_capacity, hidden_capacity);
     return hidden;
 }
 
@@ -156,7 +177,7 @@ bool batch_case(parakeet::ParakeetCtcModel & accelerated, parakeet::ParakeetCtcM
     const bool routed = parakeet::sortformer_diarize_mel_coreml(accelerated, mel.data(), mel_frames, {}, actual);
     parakeet::EncoderOutputs encoded;
     parakeet::SortformerDiarizationResult expected;
-    if (parakeet::run_encoder(reference, mel.data(), mel_frames, reference.mel_cfg.n_mels, encoded,
+    if (parakeet::run_encoder(reference, mel.data(), mel_frames, reference.mel_cfg.n_mels, encoded, parakeet::EncoderRoute::ggml(),
                               -1, false, false) != 0 ||
         parakeet::sortformer_diarize_ggml(reference, encoded.encoder_out.data(), encoded.n_enc_frames,
                                           encoded.d_model, {}, expected) != 0) {
@@ -179,16 +200,56 @@ bool slab_case(parakeet::ParakeetCtcModel & accelerated, parakeet::ParakeetCtcMo
     return report(name, frames, routed, compare(actual.speaker_probs, expected.speaker_probs));
 }
 
+// Every diarizer stage of the status JSON came from the generation cache,
+// one per embedded template. Stage objects have sorted keys, so each starts
+// at its "artifact_key".
+bool every_diarizer_generated(const std::string & status) {
+    const std::string start = "{\"artifact_key\"";
+    int stages = 0;
+    for (size_t at = status.find(start); at != std::string::npos;) {
+        const size_t next = status.find(start, at + 1);
+        const std::string stage = status.substr(at, next == std::string::npos ? std::string::npos : next - at);
+        at = next;
+        if (stage.find("\"stage\":\"diarizer-") == std::string::npos) continue;
+        ++stages;
+        if (stage.find("\"route\":\"generated\"") == std::string::npos &&
+            stage.find("\"route\":\"cached\"") == std::string::npos) {
+            return false;
+        }
+    }
+    return stages == kTemplateCapacities;
+}
+
 }
 
 int main(int argc, char ** argv) {
-    if (argc != 3) {
-        std::fprintf(stderr, "usage: %s MODEL.gguf AUDIO.wav\n", argv[0]);
+    std::vector<const char *> positional;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--cache-dir" && i + 1 < argc) {
+            g_cache_dir = argv[++i];
+        } else {
+            positional.push_back(argv[i]);
+        }
+    }
+    if (positional.size() != 2) {
+        std::fprintf(stderr, "usage: %s MODEL.gguf AUDIO.wav [--cache-dir DIR]\n", argv[0]);
         return 2;
     }
+    argv[1] = const_cast<char *>(positional[0]);
+    argv[2] = const_cast<char *>(positional[1]);
     parakeet::ParakeetCtcModel accelerated;
     parakeet::ParakeetCtcModel reference;
     if (!load_model(argv[1], false, accelerated)) return 1;
+    if (!g_cache_dir.empty()) {
+        // A generated run never skips: no diarizer, or one that is not from the
+        // cache, fails.
+        const std::string status = parakeet::model_coreml_status_json(accelerated);
+        std::printf("coreml status: %s\n", status.c_str());
+        if (largest_capacity(accelerated) <= 0 || !every_diarizer_generated(status)) {
+            std::printf("[FAIL] the diarizer was not generated into %s\n", g_cache_dir.c_str());
+            return 1;
+        }
+    }
     const int capacity = largest_capacity(accelerated);
     if (capacity <= 0) {
         std::printf("SKIP: no Core ML diarizer beside %s\n", argv[1]);

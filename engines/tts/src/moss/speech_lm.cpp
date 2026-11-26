@@ -819,6 +819,12 @@ void SpeechLM::begin(int n_ctx) { impl_->begin(n_ctx); }
 void SpeechLM::release_generation() { impl_->release_generation(); }
 void SpeechLM::release_weights() { impl_->release_weights(); }
 
+uint64_t SpeechLM::free_device_bytes() const {
+    size_t free_bytes = 0, total_bytes = 0;
+    ::tts_cpp::detail::backend_memory(impl_->backend, free_bytes, total_bytes);
+    return free_bytes;
+}
+
 SpeechLogits SpeechLM::prefill(const std::vector<SpeechRow> & rows, int batch_tokens, const SpeechStop & stop) {
     return impl_->prefill(rows, batch_tokens, stop);
 }

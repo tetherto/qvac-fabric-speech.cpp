@@ -36,6 +36,30 @@ in [MOSS GPU validation](docs/moss.md#gpu-validation-cuda-and-vulkan); smoke cov
 not establish general speech quality. OpenCL remains untested here. See the [API matrix](docs/api.md) for
 streaming support and the [model guide](docs/models.md) for storage tiers.
 
+Supertonic cancellation applies to the in-flight synthesis request. Starting a
+subsequent batch or streaming `Engine::synthesize()` clears the prior cancellation
+state, so voice applications can interrupt playback and reuse the loaded engine
+for the next reply.
+Cancellation is checked between synthesis stages and chunks; an active vector
+estimator can finish its entire loop before cancellation is observed.
+
+Supertonic also exposes `Engine::synthesize_segment()` for callers that already
+select sentence or clause boundaries. It synthesizes the entire supplied segment
+without applying the internal text chunker, preserves continuation intonation
+for unfinished clauses, and optionally delivers one PCM callback. The existing
+`synthesize()` streaming API retains its configured internal text chunking.
+
+Hosts that synthesize on worker threads should reuse one thread for the session
+and call `Engine::release_thread_resources()` on that thread before it exits.
+This releases its inference graph caches while the model backend is still
+alive. Keep the engine alive until the worker has completed this cleanup; the
+same engine can synthesize again after its caches are released.
+
+The `test-supertonic-request-lifecycle` and `-v3` fixture tests cover cancellation
+and reuse, whole-segment continuation/resampling parity, optional callbacks, and
+worker cache cleanup. They run when the corresponding model exists under
+`TTS_CPP_TEST_MODEL_DIR`; `test-supertonic-api` checks the public API without models.
+
 MOSS generation starts at the reference assistant header. ISO language codes
 accepted by the API/CLI are converted to the model's language names (`en` to
 `English`, `zh` to `Chinese`); spelled-out names pass through.
@@ -49,7 +73,7 @@ English dialogue and each requested turn with local MOSS transcription, retrying
 including ASR results that reach the decoding token limit. It supports CPU and
 CUDA, plus Vulkan through `--gpu --backend vulkan`.
 
-This in-tree package consumes the shared `ggml-speech` dependency. Build and
+This in-tree package consumes the shared fabric ggml (`qvac-fabric`) dependency. Build and
 vcpkg consumption instructions are in [docs/build.md](docs/build.md).
 
 MOSS-SoundEffect native diffusion prepares the fixed cross-attention keys and
@@ -104,8 +128,15 @@ Whisper transcripts as their CPU renders over four prompts (2026-10-26);
 their sampled tokens diverge between backends, so waveforms are not compared.
 These are the TTS models whose automatic GPU selection admits WebGPU
 (CosyVoice3 on Windows and desktop Linux, like Vulkan and CUDA). The
-LM-based ones need a ggml-speech whose WebGPU kernels honour
-`GGML_PREC_F32` (2026-10-27 or later).
+LM-based ones need a fabric ggml whose WebGPU kernels honour
+`GGML_PREC_F32` (qvac-fabric-llm.cpp `be6e387b` or later).
+
+Process exit with Core ML: a process that exits while a sidecar is still compiling or loading in the
+background waits for that load (by default at most 15 s on macOS, 2 s on iOS) when its main thread is armed.
+The main thread is armed automatically when it makes the engine; a host that makes engines on another thread
+(as the qvac addons do) calls `coreml_arm_exit_guard()` on its main thread, or the terminal
+`coreml_shutdown_for_exit()` right before the process exits (`tts-cpp/coreml_exit.h`). See
+[the runtime's README](../coreml/README.md#process-exit).
 
 LavaSR denoiser and enhancer GPU selection includes ARM Mali/Immortalis
 through Vulkan when GPU execution is requested, and excludes WebGPU: the
@@ -129,7 +160,10 @@ speech LM, flow and HiFT neural
 stages, the Supertonic vocoder, the Audio8 codec, the Parler-TTS DAC decoder
 (on the Neural Engine), and
 the MOSS-TTS codec decoder, MOSS-SoundEffect DiT and VAE, and MOSS-Speech
-speech tokenizer. Export, routing, fallback, and per-call status are documented in
+speech tokenizer. Chatterbox loads its sidecar functions in the background and runs
+each sentence on Metal until they are ready (`EngineOptions::coreml`,
+`tts-cli --coreml-use|wait|prewarm|compute-units|cache-dir|status-json`).
+Export, routing, fallback, and per-call status are documented in
 [Chatterbox](docs/chatterbox.md#core-ml-sidecars),
 [Pocket TTS](docs/pocket-tts.md#core-ml-sidecars),
 [CosyVoice3](docs/cosyvoice3.md#core-ml-sidecars),
@@ -138,9 +172,26 @@ speech tokenizer. Export, routing, fallback, and per-call status are documented 
 [Parler-TTS](docs/parler.md#core-ml-dac-sidecar-apple-neural-engine), and
 [MOSS](docs/backends.md#apple-core-ml-sidecars).
 
+The Parler-TTS DAC sidecar can also be generated on the device from the GGUF
+itself: with `EngineOptions::coreml.cache_dir` (or `QVAC_COREML_CACHE_DIR`)
+set, macOS 15 or later and no prebuilt sidecar next to the GGUF, the engine
+builds it from an embedded template, compiles it and keeps it in the cache;
+synthesis runs on the ggml DAC until it is ready. Its accuracy against the
+ggml DAC depends on how Core ML partitions it on the chip: 56 dB on an M2,
+where `all` runs it on the Neural Engine; 51 dB on an M4 Max, where `all`
+runs most of it on the GPU and the output stage on the Neural Engine. CI
+runs on an M4 Max: it holds `all` to that chip's recorded 50 dB floor and
+the same sidecar under `cpu_and_ane` to 54 dB. The M2's 54 dB gate under
+`all` is checked by the device run, not by CI. See
+[Parler-TTS generated sidecar](docs/parler.md#generated-sidecar-and-background-loading).
+
 CosyVoice3 HiFT sidecars use FP32 for waveform parity. With enabled Chatterbox,
-Pocket TTS, CosyVoice3 or Parler-TTS sidecars present, `fit_params` returns `Error` with
+Pocket TTS, CosyVoice3 or prebuilt Parler-TTS sidecars present, `fit_params` returns `Error` with
 `coreml-memory-estimate-unavailable`; it cannot project Core ML resident memory.
+A generated Parler-TTS DAC is projected: fit adds its template's Core ML memory envelope,
+963 MiB under `all` (1.25 times the largest values measured on an M2 and on the M4 Max CI
+runner, where `all` runs on the GPU, with no further margin). Phones are not affected today, since sidecars are generated
+on macOS only; see [Parler-TTS memory validation](docs/parler.md#generated-sidecar-and-background-loading).
 Re-export CosyVoice3 LM sidecars with the current exporter for correct cache
 feedback on macOS 15 and 26; see [CosyVoice3 Core ML](docs/cosyvoice3.md#core-ml-sidecars).
 
@@ -150,6 +201,12 @@ Hebrew, Russian, Chinese and Hindi need external preprocessing. See
 
 Backend selection and model-specific validation are documented in
 [docs/backends.md](docs/backends.md) and [docs/testing.md](docs/testing.md).
+Cross-platform CI selects affected engines and caches Windows compiler outputs;
+see the [CI guide](../../docs/CI.md).
+The test guide includes a model-free matched WAV/mel fixture generator,
+reference-generation commands for CAMPPlus and S3TokenizerV2, and truncated-NPY
+rejection checks, plus the failure criteria for voice-cloning and streaming
+parity. Model-free checks run without downloading checkpoints.
 Metadata-only memory preflight covers MOSS Delay/TTSD and MOSS-SoundEffect,
 including text/diffusion/decode workloads for sound effects. Entry points are indexed in
 [docs/api.md](docs/api.md#memory-fit-preflight). Every fit result names its device

@@ -16,6 +16,9 @@ readonly DEADLINE_POLL_SECONDS="${DEADLINE_POLL_SECONDS:-5}"
 readonly KILL_GRACE_SECONDS="${KILL_GRACE_SECONDS:-15}"
 readonly GPU_SAMPLE_MS=250
 readonly HOST_LOAD_WINDOW_SECONDS=1
+readonly GPU_LEASE_TOOL="gpu-run"
+readonly LEASED_GPU_INDEX=0
+readonly ENGINE_GGML_PIN_FILE="engines/tts/scripts/setup-ggml.sh"
 readonly HOST_LOAD_SUFFIX=".load.json"
 readonly MEMORY_SAMPLE_SECONDS=0.25
 readonly KIB_PER_MIB=1024
@@ -42,8 +45,8 @@ load_config() {
   LOCK_WAIT_HOURS="${LOCK_WAIT_HOURS:-$DEFAULT_LOCK_WAIT_HOURS}"
   ENGINE_REPO="${ENGINE_REPO:-https://github.com/tetherto/qvac-fabric-speech.cpp.git}"
   ENGINE_BRANCH="${ENGINE_BRANCH:-master}"
-  GGML_REPO="${GGML_REPO:-https://github.com/tetherto/qvac-ext-ggml.git}"
-  GGML_BRANCH="${GGML_BRANCH:-speech}"
+  GGML_REPO="${GGML_REPO:-https://github.com/tetherto/qvac-fabric-llm.cpp.git}"
+  GGML_BRANCH="${GGML_BRANCH:-}"
   BACKENDS="${BACKENDS:-auto}"
   CUDA_ARCH="${CUDA_ARCH:-120a-real}"
   CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
@@ -63,7 +66,48 @@ load_config() {
   GGML_SRC="$SRC_DIR/ggml"
   REGISTRY_CLIENT_DIR="$BENCH_HOME/registry-client"
   MODELS_VENV="$BENCH_HOME/venv"
+  adopt_gpu_lease
   export BENCH_HOME CONFIG_FILE MODELS_DIR FAMILIES_JSON BACKENDS
+}
+
+inside_gpu_lease() { [ -n "${GPU_RUN_LEASE:-}" ]; }
+
+adopt_gpu_lease() {
+  if inside_gpu_lease; then
+    GPU_INDEX="$LEASED_GPU_INDEX"
+    export GPU_LOCK_QUIET=1
+  fi
+}
+
+leased_gpu_uuid() {
+  case "${CUDA_VISIBLE_DEVICES:-}" in GPU-*) echo "${CUDA_VISIBLE_DEVICES%%,*}" ;; *) echo "" ;; esac
+}
+
+gpu_monitor_target() {
+  local leased=""
+  if inside_gpu_lease; then leased="$(leased_gpu_uuid)"; fi
+  echo "${leased:-$GPU_INDEX}"
+}
+
+gpu_physical_index() {
+  local leased=""
+  if inside_gpu_lease; then leased="${GPU_RUN_GPUS:-}"; fi
+  echo "${leased:-$GPU_INDEX}"
+}
+
+gpu_backends_requested() {
+  case ",$(resolve_backends)," in *",cuda,"*|*",vulkan,"*) return 0 ;; *) return 1 ;; esac
+}
+
+needs_gpu_lease() {
+  ! inside_gpu_lease && command -v "$GPU_LEASE_TOOL" > /dev/null 2>&1 && gpu_backends_requested
+}
+
+gpu_lease_timeout_seconds() { echo $(( LOCK_WAIT_HOURS * SECONDS_PER_HOUR )); }
+
+export_gpu_selection() {
+  if inside_gpu_lease; then unset GGML_VK_VISIBLE_DEVICES; return 0; fi
+  export CUDA_VISIBLE_DEVICES="$GPU_INDEX" GGML_VK_VISIBLE_DEVICES="$GPU_INDEX"
 }
 
 setup_path() {
@@ -126,7 +170,7 @@ cmake_generator() {
 
 gpu_busy_linux() {
   command -v nvidia-smi > /dev/null || return 1
-  [ -n "$(nvidia-smi -i "$GPU_INDEX" --query-compute-apps=pid --format=csv,noheader 2>/dev/null)" ]
+  [ -n "$(nvidia-smi -i "$(gpu_monitor_target)" --query-compute-apps=pid --format=csv,noheader 2>/dev/null)" ]
 }
 
 gpu_busy_darwin() {
@@ -233,15 +277,42 @@ fetch_ref() {
   git -C "$dir" fetch -q --depth 1 origin "$ref" && git -C "$dir" reset -q --hard FETCH_HEAD
 }
 
-clone_repo() {
-  local url="$1" branch="$2" dir="$3"
-  git clone -q --depth 1 --branch "$branch" "$url" "$dir"
+init_repo() {
+  local url="$1" dir="$2"
+  git init -q "$dir" && git -C "$dir" remote add origin "$url"
 }
 
 update_repo() {
   local url="$1" branch="$2" dir="$3" pin="$4"
-  if [ ! -d "$dir/.git" ]; then clone_repo "$url" "$branch" "$dir" || return 1; fi
-  fetch_ref "$dir" "${pin:-$branch}"
+  if [ ! -d "$dir/.git" ]; then init_repo "$url" "$dir" || return 1; fi
+  git -C "$dir" remote set-url origin "$url" && fetch_ref "$dir" "${pin:-$branch}"
+}
+
+engine_ggml_pin() {
+  sed -n 's/^GGML_REF="\([0-9a-f]\{40\}\)".*/\1/p' "$ENGINE_SRC/$ENGINE_GGML_PIN_FILE" 2>/dev/null | head -n 1
+}
+
+ggml_ref() {
+  if [ -n "${GGML_PIN:-}" ]; then echo "$GGML_PIN"
+  elif [ -n "$GGML_BRANCH" ]; then echo "$GGML_BRANCH"
+  else engine_ggml_pin; fi
+}
+
+ggml_ref_source() {
+  if [ -n "${GGML_PIN:-}" ]; then echo "GGML_PIN"
+  elif [ -n "$GGML_BRANCH" ]; then echo "branch $GGML_BRANCH"
+  else echo "the engine's pin in $ENGINE_GGML_PIN_FILE"; fi
+}
+
+update_ggml() {
+  local ref
+  ref="$(ggml_ref)"
+  if [ -z "$ref" ]; then log "no ggml commit: $ENGINE_GGML_PIN_FILE of the engine has no GGML_REF and neither GGML_PIN nor GGML_BRANCH is set"; return 1; fi
+  update_repo "$GGML_REPO" "" "$GGML_SRC" "$ref"
+}
+
+ggml_cmake_source() {
+  if [ -f "$GGML_SRC/ggml/CMakeLists.txt" ]; then echo "$GGML_SRC/ggml"; else echo "$GGML_SRC"; fi
 }
 
 date_has_nanoseconds() { [[ "$(/bin/date +%N 2>/dev/null)" =~ ^[0-9]+$ ]]; }
@@ -261,9 +332,9 @@ apply_clock_shim() {
 update_sources() {
   mkdir -p "$SRC_DIR"
   update_repo "$ENGINE_REPO" "$ENGINE_BRANCH" "$ENGINE_SRC" "${ENGINE_PIN:-}" || return 1
-  update_repo "$GGML_REPO" "$GGML_BRANCH" "$GGML_SRC" "${GGML_PIN:-}" || return 1
+  update_ggml || return 1
   apply_clock_shim
-  log "engine $(repo_head_line "$ENGINE_SRC") ggml $(repo_head_line "$GGML_SRC")"
+  log "engine $(repo_head_line "$ENGINE_SRC") ggml $(repo_head_line "$GGML_SRC") from $(ggml_ref_source)"
 }
 
 ggml_backend_options() {
@@ -293,9 +364,18 @@ cmake_prefix_path() {
   echo "$own${own:+${CMAKE_PREFIX_PATH:+;}}$CMAKE_PREFIX_PATH"
 }
 
+cached_cmake_source() { sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "$1/CMakeCache.txt" 2>/dev/null; }
+
+discard_ggml_build_of_another_source() {
+  local build="${BUILDS_DIR:?}/${1:?}/ggml" cached
+  cached="$(cached_cmake_source "$build")"
+  if [ -n "$cached" ] && [ "$cached" != "$(ggml_cmake_source)" ]; then rm -rf "$build"; fi
+}
+
 configure_ggml() {
   local backend="$1" dir="$BUILDS_DIR/$1" log_dir="$2"
-  cmake -S "$GGML_SRC" -B "$dir/ggml" -G "$(cmake_generator)" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
+  discard_ggml_build_of_another_source "$backend"
+  cmake -S "$(ggml_cmake_source)" -B "$dir/ggml" -G "$(cmake_generator)" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
     -DGGML_OPENMP=OFF -DGGML_BUILD_TESTS=OFF -DGGML_BUILD_EXAMPLES=OFF -DGGML_CCACHE=OFF \
     -DCMAKE_INSTALL_PREFIX="$dir/ggml-install" -DCMAKE_PREFIX_PATH="$(cmake_prefix_path)" $(ggml_backend_options "$backend") \
     > "$log_dir/ggml-configure.log" 2>&1
@@ -341,7 +421,7 @@ export_backend_environment() {
   local lib="$BUILDS_DIR/$1/ggml-install/lib"
   export LD_LIBRARY_PATH="$lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
   export DYLD_LIBRARY_PATH="$lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
-  export CUDA_VISIBLE_DEVICES="$GPU_INDEX" GGML_VK_VISIBLE_DEVICES="$GPU_INDEX"
+  export_gpu_selection
   export_coreml_python
 }
 
@@ -392,7 +472,7 @@ start_gpu_sampler() {
   GPU_SAMPLER_PID=""
   case "$(memory_sampler_kind)" in
     nvidia-smi)
-      nvidia-smi -i "$GPU_INDEX" --query-gpu=timestamp,memory.used,utilization.gpu --format=csv,noheader,nounits \
+      nvidia-smi -i "$(gpu_monitor_target)" --query-gpu=timestamp,memory.used,utilization.gpu --format=csv,noheader,nounits \
         -lms "$GPU_SAMPLE_MS" > "$1" 2>/dev/null & ;;
     meminfo) sample_system_memory > "$1" & ;;
     *) return 0 ;;

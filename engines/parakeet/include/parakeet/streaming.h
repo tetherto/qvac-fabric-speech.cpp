@@ -60,7 +60,9 @@ using StreamEventCallback = std::function<void(const StreamEvent &)>;
 struct StreamingOptions {
     int sample_rate  = 16000;
     // Zero selects the model default: 2000 ms for full TranscribePsy EU,
-    // 1000 ms for other transcription families. Positive values are explicit.
+    // 30000 ms for other TDT push streams, 1000 ms for other transcription
+    // families and encode-once streams. Standard TDT push streams reject
+    // explicit values below 30000 ms because short windows can drop phrases.
     // Nemotron accepts only 80, 160, 320, 560, or 1120 ms operating points.
     static constexpr int automatic_chunk_ms = 0;
     int chunk_ms = automatic_chunk_ms;

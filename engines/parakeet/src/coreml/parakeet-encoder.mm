@@ -12,6 +12,7 @@
 #endif
 
 #import "coreml/parakeet-encoder.h"
+#include "coreml/parakeet_coreml_load_error.h"
 #include "coreml/parakeet_coreml_shape.h"
 #include "coreml/parakeet_coreml_units.h"
 
@@ -20,6 +21,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -37,6 +39,7 @@ NSString * const kAneKeyBiasInput = @"key_bias";
 // Optional: exports that mask every subsampling resolution take the
 // mel-frame validity too; the published TranscribePsy export does not.
 NSString * const kAneMelMaskInput = @"mel_mask";
+NSString * const kEuSharedSchemaVersion = @"1";
 
 // Additive attention bias for pad keys. Matches KEY_BIAS_PAD in the exporter:
 // fp16 -inf would make an all-pad softmax row NaN, -1e4 saturates just as hard.
@@ -312,19 +315,63 @@ bool copy_channel_first_output(MLMultiArray * arr, float * dst, int64_t n_rows, 
     return true;
 }
 
-// The compiled bundle's metadata.json lists the model's inputs by name, so the
-// export kind is known before the (expensive) model load has to pick its
-// compute units. A bundle without readable metadata is treated as single-input.
-bool mlmodelc_declares_ane_inputs(NSString * path) {
+// The input names metadata.json declares, decoded from its input schema, or
+// nil when the schema is missing, unreadable or incomplete.
+NSArray<NSString *> * mlmodelc_input_names(NSString * path) {
     NSString * metadata = [path stringByAppendingPathComponent:@"metadata.json"];
-    NSString * text = [NSString stringWithContentsOfFile:metadata
-                                                encoding:NSUTF8StringEncoding
-                                                   error:nil];
-    if (text == nil) return false;
-    NSString * pad_mask = [NSString stringWithFormat:@"\"%@\"", kAnePadMaskInput];
-    NSString * key_bias = [NSString stringWithFormat:@"\"%@\"", kAneKeyBiasInput];
-    return [text containsString:pad_mask] && [text containsString:key_bias];
+    NSData * data = [NSData dataWithContentsOfFile:metadata];
+    if (data == nil) return nil;
+    id root = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    NSDictionary * description = nil;
+    if ([root isKindOfClass:[NSArray class]] && [(NSArray *) root count] > 0 &&
+        [((NSArray *) root)[0] isKindOfClass:[NSDictionary class]]) {
+        description = ((NSArray *) root)[0];
+    } else if ([root isKindOfClass:[NSDictionary class]]) {
+        description = root;
+    }
+    id schema = description[@"inputSchema"];
+    if (![schema isKindOfClass:[NSArray class]] || [(NSArray *) schema count] == 0) return nil;
+    NSMutableArray<NSString *> * names = [NSMutableArray array];
+    for (id input in (NSArray *) schema) {
+        id name = [input isKindOfClass:[NSDictionary class]] ? ((NSDictionary *) input)[@"name"] : nil;
+        if (![name isKindOfClass:[NSString class]]) return nil;
+        [names addObject:name];
+    }
+    return names;
 }
+
+// What metadata.json shows about the export without loading it, from the
+// decoded input names: 1 the fixed-window Neural Engine export (it declares
+// both Neural Engine inputs), 0 conclusively another export, -1 unknown (no
+// metadata, or a schema that cannot be read or lists no complete names).
+// Only the model's own description is authoritative for -1.
+int mlmodelc_export_kind(NSString * path) {
+    NSArray<NSString *> * names = mlmodelc_input_names(path);
+    if (names == nil) return -1;
+    return [names containsObject:kAnePadMaskInput] && [names containsObject:kAneKeyBiasInput] ? 1 : 0;
+}
+
+// The export kind is known before the (expensive) model load has to pick
+// its compute units; unknown metadata is treated as single-input.
+bool mlmodelc_declares_ane_inputs(NSString * path) { return mlmodelc_export_kind(path) == 1; }
+
+
+}  // namespace
+
+// A framework load failure: the error's domain, code and description.
+void parakeet_coreml_record_load_error(NSError * err, parakeet_coreml_load_error * error) {
+    if (error == nullptr) return;
+    *error = parakeet_coreml_load_error{};
+    if (err == nil) {
+        std::snprintf(error->message, sizeof(error->message), "%s", "MLModel returned no model");
+        return;
+    }
+    std::snprintf(error->domain, sizeof(error->domain), "%s", err.domain.UTF8String);
+    error->code = (long long) err.code;
+    std::snprintf(error->message, sizeof(error->message), "%s", err.localizedDescription.UTF8String);
+}
+
+namespace {
 
 bool declares_ane_inputs(NSDictionary<NSString *, MLFeatureDescription *> * ins) {
     return ins[kAneMelInput].type == MLFeatureTypeMultiArray &&
@@ -398,6 +445,7 @@ struct parakeet_coreml_context {
     std::string  valid_mask_name;
     bool         masks_mel_padding = false;
     std::string  output_name;
+    std::string  function_name;
     std::string  label;
     std::vector<int64_t> declared_input_dims;
     std::vector<int64_t> declared_output_dims;
@@ -720,32 +768,134 @@ bool prepare_cached_masked_io(parakeet_coreml_context * ctx, MLModel * model,
 }  // namespace
 
 enum class CoremlPlacement { Automatic, Cpu, NeuralEngine, Gpu };
-static parakeet_coreml_context * init_coreml_model(const char *, const char *, CoremlPlacement);
+// `units`: resolved compute units for the automatic placement (null: the
+// export's own default); the fixed placements ignore them. `function_name`
+// selects one function of a multifunction program.
+static parakeet_coreml_context * init_coreml_model(const char *, const char * units, CoremlPlacement,
+                                                  const char * function_name = nullptr,
+                                                  parakeet_coreml_load_error * error = nullptr);
+
+struct parakeet_coreml_context * parakeet_coreml_init_eu_function(
+        const char * path, const char * function_name, bool cpu_only) {
+    if (!function_name || (std::strcmp(function_name, "en") != 0 &&
+        std::strcmp(function_name, "other") != 0 && std::strcmp(function_name, "gate") != 0)) return nullptr;
+    return init_coreml_model(path, nullptr,
+        cpu_only ? CoremlPlacement::Cpu : CoremlPlacement::NeuralEngine, function_name);
+}
 
 struct parakeet_coreml_context * parakeet_coreml_init(const char * path_mlmodelc) {
-    return init_coreml_model(path_mlmodelc, kComputeUnitsEnv, CoremlPlacement::Automatic);
+    return init_coreml_model(path_mlmodelc, std::getenv(kComputeUnitsEnv), CoremlPlacement::Automatic);
 }
 
 struct parakeet_coreml_context * parakeet_coreml_init_ane(const char * path_mlmodelc) {
-    return init_coreml_model(path_mlmodelc, kComputeUnitsEnv, CoremlPlacement::NeuralEngine);
+    return init_coreml_model(path_mlmodelc, nullptr, CoremlPlacement::NeuralEngine);
 }
 
 struct parakeet_coreml_context * parakeet_coreml_init_gpu(const char * path_mlmodelc) {
-    return init_coreml_model(path_mlmodelc, kComputeUnitsEnv, CoremlPlacement::Gpu);
+    return init_coreml_model(path_mlmodelc, nullptr, CoremlPlacement::Gpu);
 }
 
 struct parakeet_coreml_context * parakeet_coreml_init_cpu(const char * path_mlmodelc) {
-    return init_coreml_model(path_mlmodelc, kComputeUnitsEnv, CoremlPlacement::Cpu);
+    return init_coreml_model(path_mlmodelc, nullptr, CoremlPlacement::Cpu);
 }
 
 struct parakeet_coreml_context * parakeet_coreml_init_with_units_env(const char * path_mlmodelc,
                                                                      const char * units_env) {
-    return init_coreml_model(path_mlmodelc, units_env, CoremlPlacement::Automatic);
+    if (path_mlmodelc == nullptr || units_env == nullptr) return nullptr;
+    return init_coreml_model(path_mlmodelc, std::getenv(units_env), CoremlPlacement::Automatic);
+}
+
+struct parakeet_coreml_context * parakeet_coreml_init_with_units(const char * path_mlmodelc,
+                                                                 const char * units) {
+    return init_coreml_model(path_mlmodelc, units, CoremlPlacement::Automatic);
+}
+
+struct parakeet_coreml_context * parakeet_coreml_init_with_units_error(
+        const char * path_mlmodelc, const char * units, parakeet_coreml_load_error * error) {
+    return init_coreml_model(path_mlmodelc, units, CoremlPlacement::Automatic, nullptr, error);
+}
+
+int parakeet_coreml_encoder_export_kind(const char * path_mlmodelc) {
+    if (path_mlmodelc == nullptr) return -1;
+    @autoreleasepool {
+        NSString * path = [[NSString alloc] initWithUTF8String:path_mlmodelc];
+        return path != nil ? mlmodelc_export_kind(path) : -1;
+    }
+}
+
+namespace {
+
+// Bytes of one schema entry: "shape" like "[1, 128, 1, 2001]" times its
+// "dataType" width; 0 when either is missing or not fixed.
+uint64_t schema_entry_bytes(id entry) {
+    if (![entry isKindOfClass:[NSDictionary class]]) return 0;
+    id shape = ((NSDictionary *) entry)[@"shape"];
+    id type = ((NSDictionary *) entry)[@"dataType"];
+    if (![shape isKindOfClass:[NSString class]] || ![type isKindOfClass:[NSString class]]) return 0;
+    uint64_t width = 0;
+    if ([type isEqualToString:@"Float16"]) width = 2;
+    else if ([type isEqualToString:@"Float32"] || [type isEqualToString:@"Int32"]) width = 4;
+    else if ([type isEqualToString:@"Float64"]) width = 8;
+    if (width == 0) return 0;
+    NSString * body = [[(NSString *) shape stringByReplacingOccurrencesOfString:@"[" withString:@""]
+        stringByReplacingOccurrencesOfString:@"]" withString:@""];
+    uint64_t elements = 1;
+    for (NSString * part in [body componentsSeparatedByString:@","]) {
+        NSString * dim = [part stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        const long long n = dim.longLongValue;
+        if (n <= 0) return 0;  // flexible or malformed
+        elements *= (uint64_t) n;
+    }
+    return elements * width;
+}
+
+}  // namespace
+
+uint64_t parakeet_coreml_declared_io_bytes(const char * path_mlmodelc) {
+    if (path_mlmodelc == nullptr) return 0;
+    @autoreleasepool {
+        NSString * path = [[NSString alloc] initWithUTF8String:path_mlmodelc];
+        NSData * data = path ? [NSData dataWithContentsOfFile:[path stringByAppendingPathComponent:@"metadata.json"]] : nil;
+        if (data == nil) return 0;
+        id root = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+        id description = [root isKindOfClass:[NSArray class]] && [(NSArray *) root count] > 0 ? ((NSArray *) root)[0] : root;
+        if (![description isKindOfClass:[NSDictionary class]]) return 0;
+        uint64_t total = 0;
+        for (NSString * key in @[@"inputSchema", @"outputSchema"]) {
+            id schema = ((NSDictionary *) description)[key];
+            if (![schema isKindOfClass:[NSArray class]] || [(NSArray *) schema count] == 0) return 0;
+            for (id entry in (NSArray *) schema) {
+                const uint64_t bytes = schema_entry_bytes(entry);
+                if (bytes == 0) return 0;
+                total += bytes;
+            }
+        }
+        return total;
+    }
+}
+
+bool parakeet_coreml_encoder_prefers_ane(const char * path_mlmodelc) {
+    if (path_mlmodelc == nullptr) return false;
+    @autoreleasepool {
+        NSString * path = [[NSString alloc] initWithUTF8String:path_mlmodelc];
+        return path != nil && mlmodelc_declares_ane_inputs(path);
+    }
 }
 
 static parakeet_coreml_context * init_coreml_model(const char * path_mlmodelc,
-                                                  const char * units_env, CoremlPlacement placement) {
-    if (path_mlmodelc == nullptr || units_env == nullptr) return nullptr;
+                                                  const char * units, CoremlPlacement placement,
+                                                  const char * function_name,
+                                                  parakeet_coreml_load_error * error) {
+    if (error != nullptr) *error = parakeet_coreml_load_error{};
+    // The model loaded, but its interface is not one Parakeet runs.
+    auto incompatible = [error](const char * what) -> parakeet_coreml_context * {
+        if (error != nullptr) {
+            error->incompatible = 1;
+            std::snprintf(error->message, sizeof(error->message), "%s", what);
+        }
+        return nullptr;
+    };
+    if (path_mlmodelc == nullptr) return nullptr;
 
     @autoreleasepool {
         NSString * path = [[NSString alloc] initWithUTF8String:path_mlmodelc];
@@ -756,9 +906,16 @@ static parakeet_coreml_context * init_coreml_model(const char * path_mlmodelc,
         // available, since their few GPU-preferred operations would otherwise
         // fall back to the CPU and erase the encoder speedup.
         MLModelConfiguration * config = [[MLModelConfiguration alloc] init];
+        if (function_name != nullptr) {
+            if (@available(macOS 15.0, iOS 18.0, *)) {
+                config.functionName = [NSString stringWithUTF8String:function_name];
+            } else {
+                return nullptr;
+            }
+        }
         std::string label;
-        config.computeUnits = parakeet_coreml_requested_units(
-            units_env, mlmodelc_declares_ane_inputs(path), &label);
+        config.computeUnits = parakeet_coreml_units_for(
+            units, mlmodelc_declares_ane_inputs(path), &label);
         if (placement == CoremlPlacement::NeuralEngine) {
             config.computeUnits = MLComputeUnitsCPUAndNeuralEngine;
             label = "coreml-ane";
@@ -776,19 +933,23 @@ static parakeet_coreml_context * init_coreml_model(const char * path_mlmodelc,
         MLModel * model = [MLModel modelWithContentsOfURL:[NSURL fileURLWithPath:path]
                                             configuration:config
                                                     error:&err];
-        if (model == nil || err != nil) return nullptr;
+        if (model == nil || err != nil) {
+            parakeet_coreml_record_load_error(err, error);
+            return nullptr;
+        }
 
         NSDictionary<NSString *, MLFeatureDescription *> * input_descs =
             model.modelDescription.inputDescriptionsByName;
         if (declares_ane_inputs(input_descs)) {
             NSString * ane_out = sole_multiarray_feature(model.modelDescription.outputDescriptionsByName);
-            if (ane_out == nil) return nullptr;
+            if (ane_out == nil) return incompatible("the Neural Engine export has no single output");
             auto * ctx = new parakeet_coreml_context();
             ctx->model = CFBridgingRetain(model);
             ctx->label = std::move(label);
+            if (function_name != nullptr) ctx->function_name = function_name;
             if (!bind_ane_window(ctx, model, ane_out)) {
                 parakeet_coreml_free(ctx);
-                return nullptr;
+                return incompatible("the Neural Engine window inputs do not bind");
             }
             return ctx;
         }
@@ -809,11 +970,11 @@ static parakeet_coreml_context * init_coreml_model(const char * path_mlmodelc,
             masks_mel_padding = true;
         }
         NSString * out_name = sole_multiarray_feature(model.modelDescription.outputDescriptionsByName);
-        if (in_name == nil || out_name == nil) return nullptr;
+        if (in_name == nil || out_name == nil) return incompatible("unexpected encoder inputs or outputs");
 
         MLMultiArrayConstraint * input_constraint = model.modelDescription.inputDescriptionsByName[in_name].multiArrayConstraint;
         MLMultiArrayConstraint * output_constraint = model.modelDescription.outputDescriptionsByName[out_name].multiArrayConstraint;
-        if (input_constraint == nil) return nullptr;
+        if (input_constraint == nil) return incompatible("the encoder input has no array constraint");
 
         auto * ctx = new parakeet_coreml_context();
         ctx->model       = CFBridgingRetain(model);
@@ -835,6 +996,14 @@ bool parakeet_coreml_matches_eu_route(const struct parakeet_coreml_context * ctx
     @autoreleasepool {
         MLModel * model = (__bridge MLModel *) ctx->model;
         NSDictionary * metadata = model.modelDescription.metadata[MLModelCreatorDefinedKey];
+        const bool shared = !ctx->function_name.empty();
+        NSString * layer_key = shared
+            ? [NSString stringWithFormat:@"parakeet.eu.%s.n_layers", route]
+            : @"parakeet.encoder.n_layers";
+        const bool valid_route = shared
+            ? ctx->function_name == route && !flexible &&
+                [metadata[@"parakeet.eu.shared_version"] isEqualToString:kEuSharedSchemaVersion]
+            : [metadata[@"parakeet.eu.route"] isEqualToString:[NSString stringWithUTF8String:route]];
         const bool valid_interface = flexible
             ? !ctx->input_shape_fixed &&
                 [metadata[@"parakeet.eu.flexible"] isEqualToString:@"true"] &&
@@ -847,8 +1016,8 @@ bool parakeet_coreml_matches_eu_route(const struct parakeet_coreml_context * ctx
                 model.modelDescription.inputDescriptionsByName[kAneMelMaskInput].type == MLFeatureTypeMultiArray;
         return valid_interface &&
             [metadata[@"parakeet.model_variant"] isEqualToString:@"transcribepsy-250m-eu"] &&
-            [metadata[@"parakeet.eu.route"] isEqualToString:[NSString stringWithUTF8String:route]] &&
-            [metadata[@"parakeet.encoder.n_layers"] isEqualToString:[NSString stringWithFormat:@"%d", layers]];
+            valid_route &&
+            [metadata[layer_key] isEqualToString:[NSString stringWithFormat:@"%d", layers]];
     }
 }
 

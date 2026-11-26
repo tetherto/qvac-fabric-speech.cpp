@@ -9,16 +9,21 @@ and optional Core ML export have separate Python dependencies in the engine
 guides. Backend toolchains, such as CUDA or the Vulkan SDK, are required only
 when building those ggml backends.
 
-From the repository root, build and install a shared speech-branch ggml, then
-configure the umbrella against its install prefix. These development commands
-use the checked-out branch revision; record `git -C ggml-src rev-parse HEAD`
-with your build. To reproduce a registry build, fetch and check out the exact
-source `REF` in the [`ggml-speech` portfile](https://github.com/tetherto/qvac-registry-vcpkg/blob/main/ports/ggml-speech/portfile.cmake)
-before configuring, rather than using the moving branch tip.
+From the repository root, build and install the shared fabric ggml, the
+`ggml/` tree of [qvac-fabric-llm.cpp](https://github.com/tetherto/qvac-fabric-llm.cpp)
+(the same ggml the LLM stack ships), then configure the umbrella against its
+install prefix. Use the commit the CI lanes pin (`GGML_REF` in
+`.github/workflows/whisper-ci.yml`) and record it with your build. To
+reproduce a registry build, check out the `v<VERSION>` tag the
+[`qvac-fabric` portfile](https://github.com/tetherto/qvac-registry-vcpkg/blob/main/ports/qvac-fabric/portfile.cmake)
+pins instead.
 
 ```sh
-git clone --branch speech https://github.com/tetherto/qvac-ext-ggml ggml-src
-cmake -S ggml-src -B ggml-src/build -DCMAKE_BUILD_TYPE=Release \
+GGML_REF=<commit from .github/workflows/whisper-ci.yml>
+git init -q ggml-src
+git -C ggml-src fetch --depth 1 https://github.com/tetherto/qvac-fabric-llm.cpp "$GGML_REF"
+git -C ggml-src checkout -q FETCH_HEAD
+cmake -S ggml-src/ggml -B ggml-src/build -DCMAKE_BUILD_TYPE=Release \
   -DBUILD_SHARED_LIBS=ON -DGGML_LLAMAFILE=ON \
   -DCMAKE_INSTALL_PREFIX="$PWD/ggml-install"
 cmake --build ggml-src/build --parallel
@@ -40,9 +45,12 @@ Run from the repository root in Developer PowerShell. This example uses the
 Visual Studio generator and a Release configuration:
 
 ```powershell
-git clone --branch speech https://github.com/tetherto/qvac-ext-ggml ggml-src
+$ggmlRef = "<commit from .github/workflows/whisper-ci.yml>"
+git init -q ggml-src
+git -C ggml-src fetch --depth 1 https://github.com/tetherto/qvac-fabric-llm.cpp $ggmlRef
+git -C ggml-src checkout -q FETCH_HEAD
 $speechGgmlInstall = Join-Path (Get-Location) "ggml-install"
-cmake -S ggml-src -B ggml-src/build `
+cmake -S ggml-src/ggml -B ggml-src/build `
   -DBUILD_SHARED_LIBS=ON -DGGML_LLAMAFILE=ON `
   "-DCMAKE_INSTALL_PREFIX=$speechGgmlInstall"
 cmake --build ggml-src/build --config Release --parallel
@@ -100,8 +108,8 @@ NVIDIA card), or explicitly with `--backend webgpu` on the CLIs and
 documented in the engine backend guides; a backend that compiles does not
 imply every model has been checked on it.
 
-The ggml CI lanes use Dawn's prebuilt release binaries; the `ggml-speech`
-vcpkg port builds Dawn from source through the official `dawn` port instead
+The ggml CI lanes use Dawn's prebuilt release binaries; the `speech-cpp`
+vcpkg port's `webgpu` feature builds Dawn from source through the official `dawn` port instead
 (the same toolchain and C++ runtime as the consumer, which a prebuilt Dawn
 cannot promise). To reproduce the CI build, point CMake at a Dawn install
 and enable the backend when building ggml:
@@ -110,7 +118,7 @@ and enable the backend when building ggml:
 curl -fL -o dawn.tar.gz \
   https://github.com/google/dawn/releases/download/v20260317.182325/Dawn-18eb229ef5f707c1464cc581252e7603c73a3ef0-ubuntu-latest-Release.tar.gz
 mkdir dawn && tar -xf dawn.tar.gz -C dawn --strip-components=1
-cmake -S ggml-src -B ggml-src/build -DCMAKE_BUILD_TYPE=Release \
+cmake -S ggml-src/ggml -B ggml-src/build -DCMAKE_BUILD_TYPE=Release \
   -DBUILD_SHARED_LIBS=ON -DGGML_WEBGPU=ON \
   -DDawn_DIR="$PWD/dawn/lib64/cmake/Dawn" \
   -DCMAKE_INSTALL_PREFIX="$PWD/ggml-install"
@@ -174,10 +182,10 @@ Each engine also configures directly. Defaults and ggml acquisition differ:
 The [`speech-cpp`](https://github.com/tetherto/qvac-registry-vcpkg/tree/main/ports/speech-cpp)
 vcpkg port builds the umbrella. Select engine features such as
 `speech-cpp[whisper,parakeet,vulkan]`; backend features (`metal`, `vulkan`,
-`opencl`, `cuda`, `webgpu`) select the corresponding shared `ggml-speech`
+`opencl`, `cuda`, `webgpu`) select the corresponding shared `qvac-fabric`
 dependency features. `webgpu` is opt-in on every platform and pulls the
 registry's own `dawn` port (the official port pinned at the version the
-speech-branch `ggml-webgpu` compiles against, Linux defaults trimmed to
+fabric `ggml-webgpu` compiles against, Linux defaults trimmed to
 Vulkan), so a consumer manifest must import `vulkan-headers`,
 `vulkan-utility-libraries` and `vcpkg-get-python-packages` from
 microsoft/vcpkg. CMake package names remain engine-specific.

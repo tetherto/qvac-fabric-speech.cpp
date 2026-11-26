@@ -1,4 +1,5 @@
 // Fixture-backed public API test. Each CTest invocation owns one Engine/process.
+#include "coreml_test_options.h"
 #include "parakeet/engine.h"
 
 #include <cctype>
@@ -49,6 +50,8 @@ int main(int argc, char ** argv) {
         opts.backend = backend;
         opts.n_threads = 4;
         opts.n_gpu_layers = backend == "cpu" ? 0 : 999;
+        // Sidecars load in the background; the contract below needs it ready.
+        if (coreml) opts.coreml = coreml_ready_options();
         parakeet::Engine engine(opts);
         require(engine.model_type() == "tdt", "Mosaic did not load as TDT");
         require(engine.backend_device() == (backend == "cpu" ? parakeet::BackendDevice::CPU : parakeet::BackendDevice::GPU),

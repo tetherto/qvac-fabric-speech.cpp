@@ -4,7 +4,8 @@ Part of the [audiogen engine documentation](../README.md).
 
 ## Build
 
-Standalone from the repository root, against an installed `ggml-speech`:
+Standalone from the repository root, against an installed fabric ggml (the
+`qvac-fabric` port, or a local install of the qvac-fabric-llm.cpp `ggml/` tree):
 
 ```sh
 cmake -S engines/audiogen -B build/audiogen -DCMAKE_BUILD_TYPE=Release \

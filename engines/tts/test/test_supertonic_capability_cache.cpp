@@ -203,7 +203,7 @@ void test_forwarders_idempotent() {
 // handle's heap address recycled by a later backend of a DIFFERENT
 // type replayed the dead backend's capabilities (fused_supertonic_ops
 // from CPU onto CUDA aborted the qvac linux-x64 CUDA lane on the
-// unimplemented GGML_OP_SUPERTONIC_DEPTHWISE_1D).  Two live CPU
+// unimplemented GGML_OP_CONV_1D_DW_DIRECT).  Two live CPU
 // backends resolve to the same device, so the second query must HIT
 // the first one's entry.
 void test_same_device_backends_share_cache_entry() {

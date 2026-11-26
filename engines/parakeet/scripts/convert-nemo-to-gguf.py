@@ -118,6 +118,10 @@ from converter_args import parse_args
 
 
 ARCH = "parakeet-ctc"
+TRANSCRIBEPSY_EU_VARIANT = "transcribepsy-250m-eu"
+TRANSCRIBEPSY_EU_SOURCE = "https://huggingface.co/qvac/TranscribePsy-250M-EU"
+TRANSCRIBEPSY_WINDOW_SECONDS = 60.0
+TRANSCRIBEPSY_WINDOW_OVERLAP = 0.25
 
 NEMOTRON_TARGET = (
     "nemo.collections.asr.models.rnnt_bpe_models_prompt."
@@ -971,9 +975,28 @@ def long_form_hint_frames(hop_length: int, sample_rate: int, subsampling_factor:
     return window_frames, context_frames
 
 
+def resolve_long_form_hint(window_sec, overlap, model_variant=""):
+    if model_variant == TRANSCRIBEPSY_EU_VARIANT:
+        if window_sec is None:
+            window_sec = TRANSCRIBEPSY_WINDOW_SECONDS
+        if overlap is None:
+            overlap = TRANSCRIBEPSY_WINDOW_OVERLAP
+    if window_sec is None:
+        if overlap is not None:
+            raise ValueError("--long-form-overlap requires --long-form-window-sec")
+        return None, None
+    if not math.isfinite(window_sec) or window_sec <= 0:
+        raise ValueError("--long-form-window-sec must be finite and positive")
+    if overlap is not None and (not math.isfinite(overlap) or not 0 <= overlap <= 0.5):
+        raise ValueError("--long-form-overlap must be finite and between 0 and 0.5")
+    return window_sec, overlap
+
+
 def write_long_form_hint(writer, hop_length: int, sample_rate: int, cfg: dict,
-                         window_sec: float | None, overlap: float | None):
+                         window_sec: float | None, overlap: float | None,
+                         model_variant=""):
     """parakeet.long_form.* keys for a model that recommends its own window."""
+    window_sec, overlap = resolve_long_form_hint(window_sec, overlap, model_variant)
     if window_sec is None:
         return
     subsampling_factor = int(cfg.get("encoder", {}).get("subsampling_factor", 8))
@@ -983,13 +1006,17 @@ def write_long_form_hint(writer, hop_length: int, sample_rate: int, cfg: dict,
     writer.add_uint32("parakeet.long_form.context_frames", context_frames)
 
 
-def write_provenance(writer, model_type: str, description=None):
+def write_provenance(writer, model_type: str, description=None, model_variant=""):
     """general.description plus the per-family license keys.
 
     An explicit `description` (the converter's --description) replaces the
     family text only; the license and source keys stay.
     """
-    if model_type == "nemotron":
+    if model_variant == TRANSCRIBEPSY_EU_VARIANT:
+        writer.add_description(description or "TranscribePsy-250M-EU FastConformer-TDT ASR (Apache-2.0)")
+        writer.add_string("general.license", "Apache-2.0")
+        writer.add_string("general.source.url", TRANSCRIBEPSY_EU_SOURCE)
+    elif model_type == "nemotron":
         writer.add_description(
             description or
             "NVIDIA Nemotron 3.5 ASR Streaming 0.6B "
@@ -1070,6 +1097,9 @@ def write_gguf(out: Path, ckpt: Path, cfg: dict, sd: dict, tok_bytes: bytes,
         raise ValueError("TranscribePsy EU requires both adapters and gate")
     eu_weights = (load_transcribepsy_eu_weights(cfg, model_type, eu_adapters, eu_gate)
                   if eu_adapters is not None else None)
+    model_variant = TRANSCRIBEPSY_EU_VARIANT if eu_weights is not None else ""
+    long_form_window_sec, long_form_overlap = resolve_long_form_hint(
+        long_form_window_sec, long_form_overlap, model_variant)
     if model_type == "rnnt":
         validate_rnnt_contract(cfg, sd)
     if model_type == "eou":
@@ -1116,14 +1146,14 @@ def write_gguf(out: Path, ckpt: Path, cfg: dict, sd: dict, tok_bytes: bytes,
         "sortformer":  f"sortformer-{d_model}-{n_layers}l",
     }[model_type]
     writer.add_name(model_name)
-    write_provenance(writer, model_type, description)
+    write_provenance(writer, model_type, description, model_variant)
     write_long_form_hint(writer, hop_length, sample_rate, cfg, long_form_window_sec, long_form_overlap)
     writer.add_file_type(FILE_TYPE_MAP[quant])
 
     writer.add_string("parakeet.model.type", model_type)
     if eu_weights is not None:
         layers, _, _, rank, tap, attn_dim, hidden, threshold = eu_weights
-        writer.add_string("parakeet.model_variant", "transcribepsy-250m-eu")
+        writer.add_string("parakeet.model_variant", model_variant)
         writer.add_array("parakeet.eu.adapter_layers", layers)
         writer.add_uint32("parakeet.eu.adapter_rank", rank)
         writer.add_uint32("parakeet.eu.gate_layer", tap)

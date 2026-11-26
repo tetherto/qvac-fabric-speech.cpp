@@ -106,6 +106,10 @@ fail() {
   exit 1
 }
 
+run_under_gpu_lease() {
+  exec "$GPU_LEASE_TOOL" -n 1 --timeout "$(gpu_lease_timeout_seconds)" -- /bin/bash "${BASH_SOURCE[0]}" "$@"
+}
+
 write_narrative() {
   ANTHROPIC_API_KEY="$(read_secret "${ANTHROPIC_API_KEY_FILE:-}")" python3 "$TOOLS_DIR/narrate.py" \
     --report "$RUN_DIR/report.md" --out "$RUN_DIR/narrative.md" || log "narrative skipped"
@@ -151,6 +155,7 @@ main() {
   load_config
   setup_path
   if [ -n "$BACKENDS_ARG" ]; then BACKENDS="$BACKENDS_ARG"; fi
+  if needs_gpu_lease; then run_under_gpu_lease "$@"; fi
   prepare_run_dir
   STARTED="$(utc_now)"
   log "start $(run_name) backends=$(resolve_backends)"

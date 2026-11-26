@@ -19,8 +19,12 @@ The engine reads that table from the GGUF; --dump-embedding writes a copy as
 fp16 [vocab+1, H_pred] for inspection.
 
 Weights are palettized to --nbits bits (default 6) except the joint output
-projection, which stays fp16 unless --nbits-out is set; the published model uses
---nbits-out 6. The graph geometry is also written to <out>.meta.json for
+projection, which stays fp16 unless --nbits-out is set. Its channel group is
+the greatest common divisor of V_out and the preferred encoder group size
+(2 for the full EU model's 8198 outputs). --nbits 0 --nbits-out 6 quantizes
+only this projection. The exporter verifies the emitted LUT indices and group
+size before reporting success; unsupported or skipped compression fails.
+The graph geometry is also written to <out>.meta.json for
 reference; the engine does not read it.
 
 I/O contract:
@@ -54,6 +58,7 @@ tdt_decode_lanes (src/parakeet_tdt.cpp).
 import argparse
 import importlib.util
 import json
+import math
 from pathlib import Path
 
 import numpy as np
@@ -268,7 +273,7 @@ def check_parity(model, weights, geom, seed=0):
 
 
 def find_joint_out_ops(mlmodel, v_out):
-    """Op names of the convs that produce V_out channels, to exempt them."""
+    """Identify joint output convolutions before weight compression."""
     names = []
     for func in mlmodel._mil_program.functions.values():
         for op in func.operations:
@@ -279,6 +284,57 @@ def find_joint_out_ops(mlmodel, v_out):
             if val is not None and val.shape[0] == v_out:
                 names.append(op.name)
     return names
+
+
+def joint_out_group_size(v_out, preferred_group_size):
+    if v_out <= 0 or preferred_group_size <= 0:
+        raise ValueError("joint output channels and preferred group size must be positive")
+    return math.gcd(v_out, preferred_group_size)
+
+
+def verify_joint_out_palettization(mlmodel, op_names, nbits, group_size):
+    remaining = set(op_names)
+    for function in mlmodel._mil_program.functions.values():
+        for op in function.operations:
+            if op.name not in remaining:
+                continue
+            weight = op.inputs["weight"]
+            if nbits:
+                producer = weight.op
+                if producer.op_type != "constexpr_lut_to_dense":
+                    raise RuntimeError(f"joint output {op.name} was not palettized as requested")
+                actual_bits = producer.indices.dtype.get_bitwidth()
+                actual_group = weight.shape[0] // producer.lut.shape[0]
+                if actual_bits != nbits or actual_group != group_size:
+                    raise RuntimeError(
+                        f"joint output {op.name} has {actual_bits}-bit/group {actual_group}; "
+                        f"requested {nbits}-bit/group {group_size}")
+            elif weight.op.op_type != "const" or weight.val.dtype != np.float16:
+                raise RuntimeError(f"joint output {op.name} did not remain fp16")
+            remaining.remove(op.name)
+    if not op_names or remaining:
+        raise RuntimeError("joint output projection missing from converted decoder")
+
+
+def palettize_decoder_weights(mlmodel, v_out, nbits, nbits_out, preferred_group_size):
+    from coremltools.optimize.coreml import (
+        OpPalettizerConfig, OptimizationConfig, palettize_weights,
+    )
+    out_ops = find_joint_out_ops(mlmodel, v_out)
+    if not out_ops:
+        raise RuntimeError("joint output projection missing from converted decoder")
+    group_size = joint_out_group_size(v_out, preferred_group_size)
+    output_config = None if not nbits_out else OpPalettizerConfig(
+        nbits=nbits_out, mode="kmeans", granularity="per_grouped_channel",
+        group_size=group_size, weight_threshold=0)
+    global_config = None if not nbits else OpPalettizerConfig(
+        nbits=nbits, mode="kmeans", granularity="per_grouped_channel",
+        group_size=preferred_group_size)
+    config = OptimizationConfig(global_config=global_config,
+                                op_name_configs={name: output_config for name in out_ops})
+    result = palettize_weights(mlmodel, config)
+    verify_joint_out_palettization(result, out_ops, nbits_out, group_size)
+    return result, out_ops, group_size
 
 
 def main():
@@ -295,7 +351,7 @@ def main():
                     help="weight palettization bit width; 0 exports fp16 (default 6)")
     ap.add_argument("--nbits-out", type=int, default=0, choices=[0, 2, 3, 4, 6, 8],
                     help="separate bit width for the joint output projection; "
-                         "0 keeps it fp16 (default 0; the published model uses 6)")
+                         "0 keeps it fp16 (default 0; independent of --nbits)")
     ap.add_argument("--dump-embedding", type=Path, default=None,
                     help="write the token embedding table as fp16 [vocab+1, H_pred] "
                          "for inspection; the engine reads it from the GGUF")
@@ -350,30 +406,14 @@ def main():
         minimum_deployment_target=ct.target.iOS18,
     )
 
-    if args.nbits:
-        from coremltools.optimize.coreml import (
-            OpPalettizerConfig, OptimizationConfig, palettize_weights,
-        )
-        out_ops = find_joint_out_ops(mlmodel, geom.v_out)
-        op_configs = {
-            name: (None if args.nbits_out == 0 else OpPalettizerConfig(
-                nbits=args.nbits_out, mode="kmeans",
-                granularity="per_grouped_channel",
-                group_size=ane.PALETTIZE_GROUP_SIZE))
-            for name in out_ops
-        }
-        config = OptimizationConfig(
-            global_config=OpPalettizerConfig(
-                nbits=args.nbits, mode="kmeans",
-                granularity="per_grouped_channel",
-                group_size=ane.PALETTIZE_GROUP_SIZE),
-            op_name_configs=op_configs,
-        )
-        mlmodel = palettize_weights(mlmodel, config)
-        kept = "fp16" if args.nbits_out == 0 else f"{args.nbits_out}-bit"
-        print(f"[export] palettized weights to {args.nbits}-bit "
-              f"(per_grouped_channel, group_size={ane.PALETTIZE_GROUP_SIZE}); "
-              f"joint output projection ({', '.join(out_ops)}) kept {kept}")
+    if args.nbits or args.nbits_out:
+        mlmodel, out_ops, out_group = palettize_decoder_weights(
+            mlmodel, geom.v_out, args.nbits, args.nbits_out, ane.PALETTIZE_GROUP_SIZE)
+        output_precision = ("fp16" if args.nbits_out == 0 else
+                            f"{args.nbits_out}-bit/group_size={out_group}")
+        print(f"[export] weight palettization requested: {args.nbits}-bit "
+              f"(0 keeps fp16, preferred_group_size={ane.PALETTIZE_GROUP_SIZE}); "
+              f"verified joint output projection ({', '.join(out_ops)}): {output_precision}")
 
     mlmodel.save(str(args.out))
     print(f"[export] saved {args.out}")

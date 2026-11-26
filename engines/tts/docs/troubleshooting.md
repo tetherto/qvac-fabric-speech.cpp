@@ -5,8 +5,8 @@ Part of the [tts engine documentation](../README.md).
 ## Troubleshooting
 
 **`TTS_CPP_USE_SYSTEM_GGML=OFF` reports a missing `engines/tts/ggml`** — run
-`bash engines/tts/scripts/setup-ggml.sh` to stage the pinned
-`qvac-ext-ggml@speech` checkout there, or install `ggml-speech`, set
+`bash engines/tts/scripts/setup-ggml.sh` to stage the pinned fabric ggml
+there, or install `qvac-fabric`, set
 `CMAKE_PREFIX_PATH` or use the vcpkg toolchain, and leave the option enabled.
 
 **A CLI is not under `build/`** — umbrella builds place it under

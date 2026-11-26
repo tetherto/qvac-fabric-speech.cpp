@@ -30,8 +30,8 @@ complete list, including the file-by-file mapping of the acestep.cpp ports and
 the optional Python packages used by scripts/.
 
 * ggml (MIT License), Copyright (c) 2023-2026 The ggml authors.
-  Consumed as a system package through the ggml-speech vcpkg port; no ggml
-  sources are vendored here.
+  Consumed as a system package through the qvac-fabric vcpkg port (the ggml
+  tree of tetherto/qvac-fabric-llm.cpp); no ggml sources are vendored here.
   Source: https://github.com/ggml-org/ggml
 
 * acestep.cpp (MIT License), Copyright (c) 2023-2026 The acestep.cpp authors.

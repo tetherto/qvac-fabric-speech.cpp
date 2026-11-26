@@ -1,4 +1,5 @@
 #include "tts-cpp/parler/engine.h"
+#include "tts-cpp/parler/fit.h"
 
 #include "internal.h"
 #include "decoder_runtime.h"
@@ -13,7 +14,6 @@
 #include <atomic>
 #include <cstdio>
 #include <random>
-#include <set>
 #include <stdexcept>
 #include <thread>
 
@@ -22,9 +22,25 @@ namespace parler {
 
 using namespace ::tts_cpp::parler::detail;
 
+namespace {
+
+// EngineOptions::coreml, with the legacy per-instance fields as fallbacks for
+// its unset fields.
+CoremlOptions parler_merge_legacy_coreml(const EngineOptions & opts) {
+    CoremlOptions o = opts.coreml;
+    if (!o.compute_units && !opts.coreml_compute_units.empty()) o.compute_units = opts.coreml_compute_units;
+    if (o.use == CoremlOptions::Use::unset && opts.coreml_strict.has_value()) {
+        o.use = *opts.coreml_strict ? CoremlOptions::Use::require : CoremlOptions::Use::automatic;
+    }
+    return o;
+}
+
+} // namespace
+
 struct Engine::Impl {
     EngineOptions        opts;
     parler_model         model;
+    std::shared_ptr<parler_dac_coreml> dac_coreml;  // the DAC on the shared Core ML runtime
     parler_decoder_runtime decoder{model};
     parler_tokenizer     tokenizer;         // descriptions (and prompts when shared)
     parler_bpe_tokenizer prompt_tokenizer;  // prompts, iff the GGUF ships one
@@ -35,6 +51,10 @@ struct Engine::Impl {
     std::string        cached_description;
     bool               has_cached_description = false;
     std::atomic<bool>  cancel_requested{false};
+    // Counts Engine::cancel() calls. A blocking coreml_wait() ends when it
+    // moves past the value the wait started with: nothing clears it, so one
+    // wait never swallows a cancel meant for another, or for a synthesis.
+    std::atomic<uint64_t> wait_cancels{0};
 
     ~Impl() {
         if (allocr) ggml_gallocr_free(allocr);
@@ -123,10 +143,11 @@ struct Engine::Impl {
 
         SynthesisResult res;
         res.sample_rate = hp.dac_sample_rate;
-        std::set<std::string> dac_backends;
-        auto note_dac_backend = [&](const std::string & backend) {
-            dac_backends.insert(backend);
-            res.dac_backend = dac_backends.size() == 1 ? backend : PARLER_DAC_MIXED_BACKEND;
+        std::string dac_label;
+        auto note_dac_backend = [&](const std::string & backend, bool pending) {
+            dac_label = parler_merge_dac_backend(dac_label, backend);
+            res.dac_backend = dac_label;
+            res.coreml_pending = res.coreml_pending || pending;
         };
 
         // Streaming re-decodes the growing code prefix every stream_chunk_frames
@@ -148,11 +169,14 @@ struct Engine::Impl {
             // bit-identical to slicing a whole-sequence decode
             std::vector<float> pcm;
             std::string dac_err, dac_backend;
+            bool dac_pending = false;
             if (!parler_dac_decode(model, c.data(), nf, n_threads, pcm, nullptr,
-                                   emitted_frames, emit_end, &dac_err, &dac_backend)) {
+                                   emitted_frames, emit_end, &dac_err, &dac_backend, &dac_pending,
+                                   &cancel_requested)) {
+                check_cancel();
                 throw std::runtime_error("parler: DAC decode failed: " + dac_err);
             }
-            note_dac_backend(dac_backend);
+            note_dac_backend(dac_backend, dac_pending);
             (*on_chunk)(pcm.data(), pcm.size(), chunk_index++, final_flush);
             res.pcm.insert(res.pcm.end(), pcm.begin(), pcm.end());
             emitted_frames = emit_end;
@@ -195,11 +219,14 @@ struct Engine::Impl {
         }
 
         std::string dac_err, dac_backend;
+        bool dac_pending = false;
         if (!parler_dac_decode(model, codes.data(), n_frames, n_threads, res.pcm,
-                               nullptr, 0, -1, &dac_err, &dac_backend)) {
+                               nullptr, 0, -1, &dac_err, &dac_backend, &dac_pending,
+                               &cancel_requested)) {
+            check_cancel();
             throw std::runtime_error("parler: DAC decode failed: " + dac_err);
         }
-        note_dac_backend(dac_backend);
+        note_dac_backend(dac_backend, dac_pending);
         res.duration_s  = res.pcm.empty() ? 0.0f
                         : (float) res.pcm.size() / (float) hp.dac_sample_rate;
         return res;
@@ -215,6 +242,27 @@ Engine::Engine(const EngineOptions & opts) : pimpl_(new Impl()) {
     if (!opts.backends_dir.empty()) {
         ::tts_cpp::detail::set_backends_directory(opts.backends_dir);
     }
+#ifdef TTS_CPP_USE_COREML
+    // Fit's memory-degrade: with a budget, Core ML is dropped when only the
+    // ggml verdict fits. Decided before the weights load, so it reads the
+    // same free memory fit_params reports, for the workload and headroom the
+    // caller's fit assessed.
+    const CoremlOptions dac_options = parler_merge_legacy_coreml(opts);
+    bool degrade = false;
+    if (dac_options.memory_budget_bytes) {
+        FitOptions fit;
+        fit.model_gguf_path = opts.model_gguf_path;
+        fit.n_gpu_layers = opts.n_gpu_layers;
+        fit.backend = opts.backend;
+        fit.backends_dir = opts.backends_dir;
+        fit.max_frames = opts.max_frames;
+        fit.description_tokens = opts.fit_description_tokens;
+        fit.prompt_tokens = opts.fit_prompt_tokens;
+        fit.margin_bytes = opts.fit_margin_bytes;
+        fit.coreml = dac_options;
+        degrade = fit_params(fit).coreml.disabled_reason == "memory";
+    }
+#endif
     std::string err;
     if (!parler_load_gguf(opts.model_gguf_path, pimpl_->model, opts.n_gpu_layers, &err, opts.backend)) {
         throw std::runtime_error("parler: " + err);
@@ -230,7 +278,12 @@ Engine::Engine(const EngineOptions & opts) : pimpl_(new Impl()) {
                                        pimpl_->model.ptok_add_bos)) {
         throw std::runtime_error("parler: prompt tokenizer load failed");
     }
+#ifdef TTS_CPP_USE_COREML
+    pimpl_->dac_coreml = parler_dac_coreml::create(pimpl_->model, opts.model_gguf_path, dac_options, degrade);
+#else
+    parler_dac_plan_route(opts.model_gguf_path, parler_merge_legacy_coreml(opts), 0);  // validates the options
     parler_attach_dac_sidecar(pimpl_->model, opts.model_gguf_path, coreml_policy);
+#endif
     if (opts.coreml_decoder && !coreml_policy.disabled) {
         auto sidecar = parler_open_decoder_sidecar(pimpl_->model, opts.model_gguf_path, coreml_policy, err);
         if (!sidecar) {
@@ -294,6 +347,7 @@ SynthesisResult Engine::synthesize(const std::string & prompt,
 
 void Engine::cancel() {
     pimpl_->cancel_requested.store(true, std::memory_order_relaxed);
+    pimpl_->wait_cancels.fetch_add(1);
 }
 
 const EngineOptions & Engine::options() const { return pimpl_->opts; }
@@ -304,7 +358,21 @@ std::string Engine::backend_name() const {
 }
 
 bool Engine::dac_on_coreml() const {
-    return pimpl_->model.dac_sidecar != nullptr;
+    return pimpl_->model.dac_sidecar != nullptr || (pimpl_->dac_coreml && pimpl_->dac_coreml->wait(0));
+}
+
+std::string Engine::coreml_status() const {
+    return pimpl_->dac_coreml ? pimpl_->dac_coreml->status_json() : std::string("{}");
+}
+
+bool Engine::coreml_wait(int64_t timeout_ms) const {
+    if (!pimpl_->dac_coreml) return false;
+    // A readiness poll has nothing to cancel and touches no flag.
+    if (timeout_ms == 0) return pimpl_->dac_coreml->wait(0);
+    // A blocking wait ends early on any Engine::cancel() made after it
+    // started; it clears nothing, so concurrent waits and a synthesis on
+    // another thread each keep the cancels meant for them.
+    return pimpl_->dac_coreml->wait(timeout_ms, &pimpl_->wait_cancels, pimpl_->wait_cancels.load());
 }
 
 bool Engine::decoder_on_coreml() const { return pimpl_->decoder.active(); }

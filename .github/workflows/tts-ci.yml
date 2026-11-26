@@ -2,7 +2,7 @@
 # reorg QIP, PR 1).
 #
 # Scope (QIP "PR 0" lane): build chatterbox + supertonic + lavasr and every
-# test harness against system ggml (qvac-ext-ggml @ speech — mandatory here:
+# test harness against system ggml (qvac-fabric-llm.cpp ggml/ at GGML_REF — mandatory here:
 # TTS_CPP_USE_SYSTEM_GGML defaults ON and the bundled path is rejected in
 # this tree), then run the non-GPU ctest suites (fixture-free tests and the
 # ones with committed fixtures pass; model-dependent ones auto-DISABLE to
@@ -18,6 +18,7 @@ on:
     branches: [master]
     paths:
       - 'engines/tts/**'
+      - 'engines/coreml/**'
       - 'engines/test/**'
       - 'scripts/benchmarks/chatterbox-hexagon*'
       - 'scripts/benchmarks/chatterbox-hexagon/**'
@@ -29,6 +30,7 @@ on:
   pull_request:
     paths:
       - 'engines/tts/**'
+      - 'engines/coreml/**'
       - 'engines/test/**'
       - 'scripts/benchmarks/chatterbox-hexagon*'
       - 'scripts/benchmarks/chatterbox-hexagon/**'
@@ -82,8 +84,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GGML_REPO: https://github.com/tetherto/qvac-ext-ggml.git
-  GGML_BRANCH: speech # single ggml pin shared with parakeet-ci.yml
+  GGML_REPO: https://github.com/tetherto/qvac-fabric-llm.cpp.git
+  GGML_REF: 3cefcca8107194a372f015b13f27cd1aac301b67 # the fabric ggml pin (qvac-fabric-llm.cpp, ggml/); one pin shared by every lane
 
 jobs:
   runner_names:
@@ -114,10 +116,7 @@ jobs:
         backend: ${{ fromJSON(inputs.moss_e2e_backends) }}
         model: ${{ fromJSON(inputs.moss_e2e_cases) }}
     env:
-      GGML_E2E_SHA: e16d1332bdafcaade27eb402c62418239faef632
-      # The ASR oracle needs the current Whisper fork's scheduler/memory API.
-      # Keep its CPU-only runtime independent of the GPU runtime under test.
-      GGML_ASR_SHA: 380c5f9f3e1811dfd88adeb1c19ab887bcf8ab3e
+      GGML_E2E_SHA: 3cefcca8107194a372f015b13f27cd1aac301b67
       MOSS_QUALITY_CONTEXT: moss-quality/${{ matrix.backend }}/${{ matrix.model }}
     steps:
       # workflow_dispatch check suites are not included in the PR check rollup.
@@ -186,7 +185,7 @@ jobs:
               exit 1
               ;;
           esac
-          cmake -S ggml-src -B ggml-src/build -DCMAKE_BUILD_TYPE=Release \
+          cmake -S ggml-src/ggml -B ggml-src/build -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=ON -DGGML_NATIVE=OFF \
             $BACKEND_OPTIONS -DGGML_METAL=OFF \
             -DGGML_BUILD_TESTS=OFF -DGGML_BUILD_EXAMPLES=OFF \
@@ -221,16 +220,11 @@ jobs:
           PY
       - name: Build independent CPU reference ASR
         if: startsWith(matrix.model, 'tts-')
-        # The vendored ggml lacks APIs used by this fork's Whisper memory-fit
-        # code. Build a compatible pinned CPU ggml, then statically link the
-        # oracle in its own process so it cannot load the GPU test runtime.
+        # Same pinned fabric ggml as the run under test, built CPU-only and
+        # statically linked into the oracle's own process so it cannot load
+        # the GPU test runtime.
         run: |
-          git init -q ggml-asr-src
-          git -C ggml-asr-src remote add origin "$GGML_REPO"
-          git -C ggml-asr-src fetch --depth 1 origin "$GGML_ASR_SHA"
-          git -C ggml-asr-src checkout -q FETCH_HEAD
-          git -C ggml-asr-src rev-parse HEAD > moss-e2e-results/asr-ggml-commit.txt
-          cmake -S ggml-asr-src -B build-ggml-asr -DCMAKE_BUILD_TYPE=Release \
+          cmake -S ggml-src/ggml -B build-ggml-asr -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=OFF -DGGML_BACKEND_DL=OFF -DGGML_NATIVE=OFF \
             -DGGML_VULKAN=OFF -DGGML_METAL=OFF -DGGML_CUDA=OFF -DGGML_OPENCL=OFF \
             -DGGML_WEBGPU=OFF -DGGML_HEXAGON=OFF -DGGML_BLAS=OFF \
@@ -292,7 +286,7 @@ jobs:
         include:
           - os: ubuntu-24.04
           # Same host with tinyBLAS (GGML_LLAMAFILE) compiled into ggml, the
-          # configuration the ggml-speech port ships for Linux x64: exercises
+          # configuration the speech-cpp port ships for Linux x64: exercises
           # the tinyBLAS-aware CPU tolerance in the Parler parity tests and
           # asserts the feature detection sees it (test-backend-features).
           - os: ubuntu-24.04
@@ -322,9 +316,9 @@ jobs:
           fi
           echo "CCACHE_DIR=${{ github.workspace }}/.ccache" >> "$GITHUB_ENV"
 
-      - name: Resolve ggml pin (tip of ${{ env.GGML_BRANCH }})
+      - name: Resolve ggml pin (qvac-fabric-llm.cpp@${{ env.GGML_REF }})
         id: ggml
-        run: echo "sha=$(git ls-remote "$GGML_REPO" "refs/heads/$GGML_BRANCH" | cut -f1)" >> "$GITHUB_OUTPUT"
+        run: echo "sha=$GGML_REF" >> "$GITHUB_OUTPUT"
 
       - name: Cache ggml install
         id: ggml-cache
@@ -348,18 +342,15 @@ jobs:
       # silicon, unlike hosted macos-14 whose Apple Paravirtual device has
       # no simdgroup matmul and aborts Metal-touching tests at kernel
       # encode (QVAC-22775).
-      - name: Build ggml (system ggml, qvac-ext-ggml@${{ env.GGML_BRANCH }})
+      - name: Build ggml (system ggml, qvac-fabric-llm.cpp@${{ env.GGML_REF }})
         if: steps.ggml-cache.outputs.cache-hit != 'true'
         run: |
-          # Fetch the exact SHA the cache key was derived from — the branch
-          # tip may have advanced since the ls-remote resolution, and a
-          # tip-only shallow clone would then silently build (and cache)
-          # a different commit than the key claims.
+          # Fetch exactly the pinned SHA the cache key was derived from.
           git init -q ggml-src
           git -C ggml-src remote add origin "$GGML_REPO"
           git -C ggml-src fetch --depth 1 origin ${{ steps.ggml.outputs.sha }}
           git -C ggml-src checkout -q FETCH_HEAD
-          cmake -S ggml-src -B ggml-src/build \
+          cmake -S ggml-src/ggml -B ggml-src/build \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=ON \
             -DGGML_NATIVE=OFF \
@@ -395,7 +386,13 @@ jobs:
       - name: Test (non-GPU)
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/ggml-install/lib
-        run: ctest --test-dir build -LE 'gpu|perf' --output-on-failure --timeout 600
+        run: ctest --test-dir build -LE 'gpu|perf|coreml-runtime|coreml-toy' --output-on-failure --timeout 600
+
+      # Shared Core ML runtime (engines/coreml): portable scheduler, lifetime
+      # and option tests with fake loaders. --no-tests=error fails the step
+      # when the test is not registered; the test has no skip path.
+      - name: Test (Core ML runtime, portable)
+        run: ctest --test-dir build -L coreml-runtime --no-tests=error --output-on-failure --timeout 300
 
       # Exercise real tiny GGUF files in one hosted lane, without checkpoints
       # or adding Python dependencies to the native/runtime installation.
@@ -421,7 +418,10 @@ jobs:
     needs: [runner_names, authorize]
     if: needs.authorize.outputs.allowed == 'true' && github.event.inputs.run_moss_e2e != 'true'
     runs-on: ${{ needs.runner_names.outputs.macos_arm64_gpu }}
-    timeout-minutes: 60
+    # 105: a cold Chatterbox Turbo fixture build (download, conversion, export)
+    # plus the Neural Engine compile of its runtime checks, on top of the 75
+    # the lane needs with the Parler DAC generation steps.
+    timeout-minutes: 105
     steps:
       - name: Manual Workspace Cleanup
         run: rm -rf "$GITHUB_WORKSPACE" && mkdir -p "$GITHUB_WORKSPACE"
@@ -433,9 +433,9 @@ jobs:
       - name: Install ccache
         run: echo "CCACHE_DIR=${{ github.workspace }}/.ccache" >> "$GITHUB_ENV"
 
-      - name: Resolve ggml pin (tip of ${{ env.GGML_BRANCH }})
+      - name: Resolve ggml pin (qvac-fabric-llm.cpp@${{ env.GGML_REF }})
         id: ggml
-        run: echo "sha=$(git ls-remote "$GGML_REPO" "refs/heads/$GGML_BRANCH" | cut -f1)" >> "$GITHUB_OUTPUT"
+        run: echo "sha=$GGML_REF" >> "$GITHUB_OUTPUT"
 
       - name: Cache ggml install
         id: ggml-cache
@@ -451,14 +451,14 @@ jobs:
           key: ccache-tts-macos-26-${{ github.sha }}
           restore-keys: ccache-tts-macos-26-
 
-      - name: Build ggml (system ggml, qvac-ext-ggml@${{ env.GGML_BRANCH }})
+      - name: Build ggml (system ggml, qvac-fabric-llm.cpp@${{ env.GGML_REF }})
         if: steps.ggml-cache.outputs.cache-hit != 'true'
         run: |
           git init -q ggml-src
           git -C ggml-src remote add origin "$GGML_REPO"
           git -C ggml-src fetch --depth 1 origin ${{ steps.ggml.outputs.sha }}
           git -C ggml-src checkout -q FETCH_HEAD
-          cmake -S ggml-src -B ggml-src/build \
+          cmake -S ggml-src/ggml -B ggml-src/build \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=ON \
             -DGGML_NATIVE=OFF \
@@ -488,7 +488,22 @@ jobs:
       - name: Test (non-GPU)
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/ggml-install/lib
-        run: ctest --test-dir build -LE 'gpu|perf' --output-on-failure --timeout 600
+        run: ctest --test-dir build -LE 'gpu|perf|coreml-runtime|coreml-toy' --output-on-failure --timeout 600
+
+      # Shared Core ML runtime (engines/coreml): portable scheduler, lifetime
+      # and option tests with fake loaders. --no-tests=error fails the step
+      # when the test is not registered; the test has no skip path.
+      - name: Test (Core ML runtime, portable)
+        run: ctest --test-dir build -L coreml-runtime --no-tests=error --output-on-failure --timeout 300
+
+      # Generation end to end on the device with the test-only toy templates
+      # (stateless, two-function, MLState): embedded table, generate, on-device
+      # compile, load, predict, artifact.json, user metadata, quarantine
+      # repair. Needs macOS 15; the test fails, never skips, below it.
+      - name: Test (Core ML toy templates, on device)
+        run: |
+          sw_vers
+          ctest --test-dir build -L coreml-toy --no-tests=error --output-on-failure --timeout 600
 
       - name: Test (Metal kernel parity)
         run: |
@@ -527,10 +542,12 @@ jobs:
       # Snake spellings, and a Core ML conversion of a reduced encoder, all on
       # random weights (no download). Then tiny sidecars declaring each
       # feature larger than the runtime packs it, which the runtime must
-      # reject before the shared runner copies anything (a skip, 77, fails the
-      # step). Stage parity and the Engine sentence overlap on the real
-      # checkpoints are test-chatterbox-coreml-stages / -engine
-      # (CHATTERBOX_COREML_TEST_S3GEN, CHATTERBOX_COREML_TEST_T3).
+      # reject before the shared runner copies anything, and tiny multi-width
+      # sidecars for background loading and routing (pending calls, width
+      # choice, load order, bounded waits, the resident cap, retirement,
+      # destruction mid-load). A skip, 77, fails the step. Stage parity, the
+      # Engine overlap and the slow-load checks on the real Turbo checkpoint
+      # are the next steps.
       - name: Test (Core ML Chatterbox S3Gen exporter and feature shapes)
         if: runner.os == 'macOS'
         env:
@@ -545,6 +562,77 @@ jobs:
             --out chatterbox-coreml-shapes
           CHATTERBOX_COREML_TEST_SHAPES="$PWD/chatterbox-coreml-shapes" \
             ./build/test-chatterbox-coreml --shape-fixture
+          CHATTERBOX_COREML_TEST_SHAPES="$PWD/chatterbox-coreml-shapes" \
+            ./build/test-chatterbox-coreml --pending-fixture
+
+      # Chatterbox Turbo for the Core ML runtime checks: T3 and S3Gen q8_0
+      # GGUFs converted from the pinned Hugging Face revision, and S3Gen
+      # sidecars exported with two widths (768 and 1024 frames hold every
+      # sentence of the checks, and keep each run's cold Neural Engine compile
+      # short). Cache key: revision + script hashes.
+      - name: Cache Chatterbox Turbo Core ML fixture
+        if: runner.os == 'macOS'
+        id: chatterbox-turbo-cache
+        uses: actions/cache@v4
+        with:
+          path: chatterbox-turbo-fixture
+          key: chatterbox-turbo-coreml-${{ runner.os }}-${{ runner.arch }}-749d1c1a-${{ hashFiles('engines/tts/scripts/convert-t3-turbo-to-gguf.py', 'engines/tts/scripts/convert-s3gen-to-gguf.py', 'engines/tts/scripts/export-chatterbox-coreml.py', 'engines/tts/scripts/chatterbox_coreml_models.py', 'engines/parakeet/scripts/requirements-coreml.txt') }}
+
+      - name: Build Chatterbox Turbo Core ML fixture
+        if: runner.os == 'macOS' && steps.chatterbox-turbo-cache.outputs.cache-hit != 'true'
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          set -euo pipefail
+          rev=749d1c1a46eb10492095d68fbcf55691ccf137cd
+          hf=chatterbox-turbo-checkpoint
+          mkdir -p "$hf" chatterbox-turbo-fixture
+          for f in t3_turbo_v1.safetensors s3gen_meanflow.safetensors conds.pt ve.safetensors vocab.json \
+                   merges.txt added_tokens.json special_tokens_map.json tokenizer_config.json; do
+            curl -sSfL --retry 3 -o "$hf/$f" "https://huggingface.co/ResembleAI/chatterbox-turbo/resolve/$rev/$f"
+          done
+          echo "fcf1f8c1d651bb7e3acd69ee5be269b4ac10c02980b7708213d598bc9f7cdf87  $hf/t3_turbo_v1.safetensors" | shasum -a 256 -c -
+          echo "d65cb687a2ed581ee6cc297e919ffefa63386944f42364ae13b78a594945514f  $hf/s3gen_meanflow.safetensors" | shasum -a 256 -c -
+          echo "b1852099306fd6a7814eb9d0bd10186caba7249596cc23868f78a0eefbfa5033  $hf/conds.pt" | shasum -a 256 -c -
+          coreml_python="$(command -v python3.11 || command -v python3)"
+          "$coreml_python" -m venv .venv-chatterbox-turbo
+          py=.venv-chatterbox-turbo/bin/python
+          # librosa builds the mel filterbanks both converters embed; numba is
+          # pinned to a release that accepts the requirements' numpy 1.26.4.
+          "$py" -m pip install -r engines/parakeet/scripts/requirements-coreml.txt \
+            'safetensors==0.8.0' 'huggingface_hub==1.31.0' 'librosa==0.10.2.post1' 'numba==0.68.1'
+          "$py" engines/tts/scripts/convert-t3-turbo-to-gguf.py --ckpt-dir "$hf" --quant q8_0 \
+            --out chatterbox-turbo-fixture/chatterbox-t3-turbo-q8_0.gguf
+          "$py" engines/tts/scripts/convert-s3gen-to-gguf.py --variant turbo --ckpt-dir "$hf" --quant q8_0 \
+            --out chatterbox-turbo-fixture/chatterbox-s3gen-q8_0.gguf
+          "$py" engines/tts/scripts/convert-s3gen-to-gguf.py --variant turbo --ckpt-dir "$hf" --quant f32 \
+            --out "$hf/chatterbox-s3gen-f32.gguf"
+          "$py" engines/tts/scripts/export-chatterbox-coreml.py --gguf "$hf/chatterbox-s3gen-f32.gguf" \
+            --frames 768,1024 --output chatterbox-turbo-fixture --compile
+          rm -rf chatterbox-turbo-fixture/*.mlpackage "$hf"
+
+      # The Chatterbox Core ML runtime on the staged Turbo checkpoint, run
+      # once with no skip (a skip, 77, fails the step): the first synthesis
+      # while every function is still loading equals a use = off run sample
+      # for sample, through the Engine and through tts-cli, and later calls
+      # run on Core ML; the Engine sentence overlap against sequential
+      # synthesis, cancellation, strict mode, a CFM failure rolled back to a
+      # whole ggml integration and a worker failure rendered again; Engine
+      # streaming with the loads held through the first chunk and released
+      # between two callbacks (per-chunk routing, the aggregate pending flag
+      # and the final chunk); then per-stage parity against ggml.
+      - name: Test (Core ML Chatterbox runtime on staged Turbo)
+        if: runner.os == 'macOS'
+        env:
+          CHATTERBOX_COREML_TEST_T3: ${{ github.workspace }}/chatterbox-turbo-fixture/chatterbox-t3-turbo-q8_0.gguf
+          CHATTERBOX_COREML_TEST_S3GEN: ${{ github.workspace }}/chatterbox-turbo-fixture/chatterbox-s3gen-q8_0.gguf
+          CHATTERBOX_COREML_TEST_CLI: ${{ github.workspace }}/build/tts-cli
+        run: |
+          set -euo pipefail
+          sw_vers -productVersion
+          ./build/test-chatterbox-coreml --engine-fixture --slow-load
+          ./build/test-chatterbox-coreml --streaming-fixture
+          ./build/test-chatterbox-coreml --stages-fixture
 
       # Pocket Core ML FlowLM step and Mimi decoder, all on random weights (no
       # download): frame-by-frame decoding through the stateful step against a
@@ -605,9 +693,160 @@ jobs:
             --fallback-gguf parler-coreml-fixture-fallback/parler-tiny-f32.gguf \
             --min-snr 60 --require-coreml
 
+      # Parler mini q8_0, converted by the repo's converter from the pinned
+      # checkpoint revision and checked against a pinned SHA-256: the
+      # real-weights inputs of the generated DAC sidecar (template
+      # parler-dac-w128; the DAC tensors are F32 in every tier). The
+      # converter records the checkpoint directory's name as parler.variant,
+      # so the download goes to a directory named after the Hugging Face
+      # repository. Cache key: checkpoint revision + converter hash.
+      - name: Cache Parler mini q8_0
+        if: runner.os == 'macOS'
+        id: parler-mini-cache
+        uses: actions/cache@v4
+        with:
+          path: parler-mini
+          key: parler-mini-v1-q8_0-0392b945-${{ hashFiles('engines/tts/scripts/parler/convert-to-gguf.py') }}
+
+      - name: Stage Parler mini q8_0
+        if: runner.os == 'macOS' && steps.parler-mini-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          rev=0392b9451a601e528fd863bbb0598431fee810d9
+          mkdir -p parler-mini parler-tts-mini-v1
+          for f in config.json generation_config.json tokenizer.json model.safetensors; do
+            curl -sSfL --retry 3 -o "parler-tts-mini-v1/$f" \
+              "https://huggingface.co/parler-tts/parler-tts-mini-v1/resolve/$rev/$f"
+          done
+          echo "bc430eb6752b96ffb3f67036d1a6e207fbd031575a775716ffa64ef1eeb03692  parler-tts-mini-v1/model.safetensors" \
+            | shasum -a 256 -c -
+          coreml_python="$(command -v python3.11 || command -v python3)"
+          "$coreml_python" -m venv .venv-parler-mini
+          .venv-parler-mini/bin/python -m pip install --upgrade pip
+          .venv-parler-mini/bin/python -m pip install -r engines/parakeet/scripts/requirements-coreml.txt \
+            safetensors==0.8.0 huggingface_hub==1.31.0
+          .venv-parler-mini/bin/python engines/tts/scripts/parler/convert-to-gguf.py \
+            --model-id parler-tts-mini-v1 --reference-repo "parler-tts/parler-tts-mini-v1@$rev" \
+            --dtype q8_0 --out parler-mini/parler-mini-v1-q8_0.gguf
+          rm -rf parler-tts-mini-v1
+
+      # Checked on every run, whether the GGUF was just converted or restored
+      # from the cache.
+      - name: Check Parler mini q8_0
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          shasum -a 256 parler-mini/parler-mini-v1-q8_0.gguf
+          echo "e450872b4a1a0d8979970c2a804c508b9fdca2877ef9f94d03ee471991921f5f  parler-mini/parler-mini-v1-q8_0.gguf" \
+            | shasum -a 256 -c -
+
+      # The generated Parler DAC sidecar on real weights:
+      # - the real-weights gate: the C++ generator on the staged GGUF is
+      #   byte-equal to the unchanged exporter run on its f32 copy, and the
+      #   specs match;
+      # - generated from the GGUF alone into an empty cache, compiled and
+      #   loaded on the device, then parity against the ggml DAC on random
+      #   codes at 54 dB (fp16 on the Neural Engine measures 56.2-56.4 dB),
+      #   the Engine, fit's envelope and near-budget memory-degrade. On an
+      #   M4 Max, Core ML runs most of the program on the GPU under `all` and
+      #   fuses the output stage's tanh into its convolution on the Neural
+      #   Engine (51.3-51.8 dB); the test holds that chip to its recorded
+      #   50 dB floor under `all` (test_dac_coreml.cpp, docs/parler.md) and
+      #   fails once the floor is no longer needed;
+      # - the same artifact's SNR per compute-unit policy, so the log records
+      #   which path `all` takes on this host; on a chip with a floor the
+      #   `cpu_and_ane` row is held to --min-snr (54 dB).
+      # The binaries run directly and --require-coreml fails the step if a
+      # Core ML gate would skip. The cache stays for the fit step below.
+      - name: Test (Core ML Parler DAC generated sidecar, staged mini q8_0)
+        id: parler-dac-generated
+        if: runner.os == 'macOS'
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          set -euo pipefail
+          sw_vers
+          py=.venv-parler-coreml/bin/python
+          if [ ! -x "$py" ]; then py=.venv-cosyvoice-coreml/bin/python; fi
+          if [ ! -x "$py" ]; then
+            coreml_python="$(command -v python3.11 || command -v python3)"
+            "$coreml_python" -m venv .venv-parler-coreml
+            .venv-parler-coreml/bin/python -m pip install -r engines/parakeet/scripts/requirements-coreml.txt
+            py=.venv-parler-coreml/bin/python
+          fi
+          gguf=parler-mini/parler-mini-v1-q8_0.gguf
+          "$py" engines/coreml/python/coreml_template.py --tool build/qvac-coreml-tool real \
+            --template-dir engines/tts/coreml-templates/parler-dac-w128 --gguf "$gguf"
+          rm -rf parler-dac-cache
+          ./build/test-parler-dac-coreml --gguf "$gguf" --cache-dir "$PWD/parler-dac-cache" \
+            --min-snr 54 --require-coreml --units-sweep
+
+      # The memory validation behind the Parler DAC template's memory
+      # constants, on this runner's chip, where `all` runs most of the program
+      # on the GPU (on an M2 it runs on the Neural Engine): ggml decodes run
+      # while the sidecar is generated, compiled, loaded and warmed in the
+      # background, three times, each from a re-signed copy of the test and an
+      # empty cache, so every Neural Engine load is cold. Each run prints its
+      # per-phase table and fails unless 1.25 x each phase it measured (the
+      # prepare, the load and warm-up, the steady state, ANECompilerService's
+      # absolute size while loading) fits the template constant that charges
+      # it, and the whole run fits the envelope: the constants are 1.25 x the
+      # largest value of every run on every validated host, so a run that sets
+      # a new maximum fails until they are recomputed (docs/parler.md). Each
+      # run also prints the service's growth and its size before the load,
+      # labelled clean, dirty or unknown. Runs whenever the generated-sidecar
+      # step ran, so a parity failure does not hide it. Known failure mode: the
+      # service's size sums every instance on the Mac, and a pull request
+      # starts several build-test-macos jobs at once (tts, audiogen), so a job
+      # on a co-hosted runner that compiles for the Neural Engine during this
+      # load counts too: a run above 821.6 MiB fails the 1,027 MiB reserve and,
+      # by the rule above, raises it.
+      - name: Memory schedule (generated Parler DAC, overlapped, this runner)
+        if: >-
+          !cancelled() && runner.os == 'macOS' &&
+          (steps.parler-dac-generated.outcome == 'success' || steps.parler-dac-generated.outcome == 'failure')
+        run: |
+          set -euo pipefail
+          sw_vers
+          sysctl -n machdep.cpu.brand_string hw.memsize
+          gguf=parler-mini/parler-mini-v1-q8_0.gguf
+          rm -rf parler-dac-memory
+          mkdir -p parler-dac-memory
+          status=0
+          for i in 1 2 3; do
+            id="qvac-memory-$(uuidgen)"
+            cp build/test-parler-dac-coreml "parler-dac-memory/$id"
+            codesign -s - -f -i "$id" "parler-dac-memory/$id"
+            "parler-dac-memory/$id" --gguf "$gguf" --memory-schedule "$PWD/parler-dac-memory/cache-$i" \
+              --require-coreml || status=1
+            rm -rf "parler-dac-memory/cache-$i" "parler-dac-memory/$id" "$HOME/Library/Caches/$id"
+          done
+          rm -rf parler-dac-memory
+          exit "$status"
+
+      # fit is the same with an empty cache and with the cache the step above
+      # populated, whose hints are also rewritten stale and non-stale. It runs
+      # whenever the step above ran, so a parity failure does not hide it.
+      - name: Test (Parler fit with an empty and a populated Core ML cache)
+        if: >-
+          !cancelled() && runner.os == 'macOS' &&
+          (steps.parler-dac-generated.outcome == 'success' || steps.parler-dac-generated.outcome == 'failure')
+        run: |
+          set -euo pipefail
+          gguf=parler-mini/parler-mini-v1-q8_0.gguf
+          status=0
+          ./build/test-parler-fit-stable --gguf "$gguf" --fit || status=1
+          ./build/test-parler-fit-stable --gguf "$gguf" --fit --cache-dir "$PWD/parler-dac-cache" || status=1
+          rm -rf parler-dac-cache
+          exit "$status"
+
+      # Runs whenever the generated-sidecar step ran, so a failure there does
+      # not hide the decoder results.
       - name: Test (Core ML Parler decoder state and recovery)
         id: parler-decoder-runtime
-        if: runner.os == 'macOS'
+        if: >-
+          !cancelled() && runner.os == 'macOS' &&
+          (steps.parler-dac-generated.outcome == 'success' || steps.parler-dac-generated.outcome == 'failure')
         env:
           PYTHONDONTWRITEBYTECODE: '1'
           PARLER_REQUIRE_HF_CAPTURE: '1'
@@ -839,6 +1078,31 @@ jobs:
             exit 1
           fi
 
+      # Process exit while a real Core ML load is in flight (engines/coreml),
+      # with the staged vocoder: each run compiles a fresh copy under a fresh
+      # code-signing identity and exits at a different point of the load. The
+      # control sweep turns the exit wait off (the behaviour before it
+      # existed) and only reports how often this runner crashes without it;
+      # the second sweep must not crash, hang or fail a load. Run directly:
+      # ctest registers the test DISABLED, since the model is staged after
+      # configure.
+      - name: Test (Core ML exit during a load, on device)
+        if: runner.os == 'macOS'
+        run: |
+          model=supertonic-coreml-fixture/supertonic2-vocoder.mlmodelc
+          ./build/test-coreml-exit-load --model "$model" --runs 40 --max-delay-ms 400 \
+            --exit-wait-ms 0 --report-only | tee exit-load-control.log | grep -E 'control load|signal|hang|^REPORT'
+          # The control's children crash on purpose: drop their reports (the
+          # crash reporter writes them a few seconds after the crash).
+          sleep 10
+          rm -f "$HOME"/Library/Logs/DiagnosticReports/qvac-exit-load-*
+          signals="$(sed -nE 's/.*\(([0-9]+) signals.*/\1/p' exit-load-control.log | tail -1)"
+          echo "::notice::Core ML exit control sweep (wait off): ${signals:-?} of 40 children crashed"
+          if [ "${signals:-0}" = 0 ]; then
+            echo "::warning::The control sweep did not crash on this runner: the sweep below proves less"
+          fi
+          ./build/test-coreml-exit-load --model "$model"
+
       - name: Test (Core ML Supertonic encoder sidecar)
         if: runner.os == 'macOS'
         env:
@@ -941,7 +1205,10 @@ jobs:
       # A CPU-only ggml would skip or falsely pass the GPU suites.
       - name: Build ggml + engine (native backends) and run GPU suites
         run: |
-          git clone --depth 1 --branch "$GGML_BRANCH" "$GGML_REPO" ggml-src
+          git init -q ggml-src
+          git -C ggml-src remote add origin "$GGML_REPO"
+          git -C ggml-src fetch --depth 1 origin "$GGML_REF"
+          git -C ggml-src checkout -q FETCH_HEAD
           CUDA_OPTION=""
           if command -v nvcc >/dev/null 2>&1 || [ -x /usr/local/cuda/bin/nvcc ]; then
             NVCC_PATH=$(command -v nvcc || echo /usr/local/cuda/bin/nvcc)
@@ -954,7 +1221,7 @@ jobs:
           # this lane runs the *engine's* ctest suite, never ggml's, so
           # compiling ggml's tests only spends runner time and couples the
           # lane to breakage in code it does not exercise.
-          cmake -S ggml-src -B ggml-src/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
+          cmake -S ggml-src/ggml -B ggml-src/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
             -DGGML_VULKAN=ON \
             $CUDA_OPTION \
             -DGGML_BUILD_TESTS=OFF \

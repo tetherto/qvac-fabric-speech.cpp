@@ -1,11 +1,11 @@
-// Validation harness for the streaming port (PROGRESS.md B1).
+// Validation harness for per-chunk streaming mel parity.
 //
 // Reads Python's streaming dumps produced by
 // `scripts/dump-streaming-reference.py`, runs the C++ pipeline once per
 // chunk with the matching `finalize` flag and token prefix, and compares
 // per-chunk mel output against Python's `chunk_{k}_mels_new.npy`.
 //
-// Phase 3 additions: carries `hift_cache_source` across chunks, applies
+// Carries `hift_cache_source` across chunks, applies
 // `apply_trim_fade` only to chunk 0, concatenates the per-chunk wavs into
 // `streamed_wav_cpp.npy`, and reports RMS error vs Python's
 // `streamed_wav.npy` — HiFT sinegen uses a different RNG than Python's
@@ -16,7 +16,7 @@
 //   ./build/test-streaming  models/chatterbox-s3gen.gguf  /tmp/streaming_ref/
 
 #include "tts-cpp/chatterbox/s3gen_pipeline.h"
-#include "npy.h"
+#include "parity_test.h"
 
 #include <algorithm>
 #include <cmath>
@@ -28,53 +28,8 @@
 #include <vector>
 #include <sys/stat.h>
 
-// Minimal .npy writer (float32 1-D / 2-D only; matches the harness needs).
-static void npy_write_f32(const std::string & path, const std::vector<float> & v,
-                          const std::vector<int64_t> & shape) {
-    std::ofstream f(path, std::ios::binary);
-    if (!f) { fprintf(stderr, "error: cannot write %s\n", path.c_str()); return; }
-    std::string hdr = "{'descr': '<f4', 'fortran_order': False, 'shape': (";
-    for (size_t i = 0; i < shape.size(); ++i) {
-        hdr += std::to_string(shape[i]);
-        if (shape.size() == 1 || i + 1 < shape.size()) hdr += ", ";
-    }
-    hdr += "), }";
-    // pad so total header length (10 bytes preamble + hdr + newline) is % 64.
-    size_t total = 10 + hdr.size() + 1;
-    size_t pad = (64 - (total % 64)) % 64;
-    hdr.append(pad, ' ');
-    hdr += '\n';
-    uint16_t hlen = (uint16_t)hdr.size();
-    f.write("\x93NUMPY", 6);
-    char ver[2] = { 1, 0 };
-    f.write(ver, 2);
-    f.write((const char*)&hlen, 2);
-    f.write(hdr.data(), hdr.size());
-    f.write((const char*)v.data(), v.size() * sizeof(float));
-}
-
 static bool path_exists(const std::string & p) {
     struct stat st; return ::stat(p.c_str(), &st) == 0;
-}
-
-struct cmp_result {
-    double max_abs = 0, rms = 0, rel = 0;
-    int n = 0;
-};
-
-static cmp_result cmp_f32(const float * a, const float * b, size_t n) {
-    cmp_result r; r.n = (int)n;
-    double ss = 0, max_ref = 0;
-    for (size_t i = 0; i < n; ++i) {
-        double d = std::fabs((double)a[i] - (double)b[i]);
-        if (d > r.max_abs) r.max_abs = d;
-        ss += d * d;
-        double e = std::fabs((double)b[i]);
-        if (e > max_ref) max_ref = e;
-    }
-    r.rms = std::sqrt(ss / n);
-    r.rel = max_ref > 0 ? r.max_abs / max_ref : r.max_abs;
-    return r;
 }
 
 int main(int argc, char ** argv) {
@@ -87,11 +42,14 @@ int main(int argc, char ** argv) {
 
     npy_array all_tokens = npy_load(ref + "/speech_tokens.npy");
     const int n_speech = (int)all_tokens.n_elements();
-    const int32_t * tok_ptr = (const int32_t *)all_tokens.data.data();
+    const int32_t * tok_ptr = npy_as_i32(all_tokens);
+    if (n_speech == 0) { fprintf(stderr, "error: empty speech tokens\n"); return 1; }
     fprintf(stderr, "loaded %d speech tokens\n", n_speech);
 
     int k = 0;
     int prev_mels_emitted = 0;
+    int previous_tokens = 0;
+    int failures = 0;
     double max_rel = 0;
     double total_rms = 0;
     std::vector<float> hift_cache_source;   // tail of prev chunk's post-SineGen source
@@ -105,8 +63,12 @@ int main(int argc, char ** argv) {
         if (!path_exists(tok_path)) break;
 
         npy_array toks_chunk = npy_load(tok_path);
-        const int32_t * cp = (const int32_t *)toks_chunk.data.data();
+        const int32_t * cp = npy_as_i32(toks_chunk);
         const int n_cum = (int)toks_chunk.n_elements();
+        if (n_cum <= previous_tokens || n_cum > n_speech) {
+            fprintf(stderr, "error: chunk tokens must advance within the global sequence\n");
+            return 1;
+        }
         const bool is_last = (n_cum == n_speech);
 
         fprintf(stderr, "\n=== chunk %d ===  tokens_total=%d  finalize=%s  "
@@ -161,10 +123,11 @@ int main(int argc, char ** argv) {
         const std::string z_path = ref + "/chunk_" + kbuf + "_step0_x_in.npy";
         if (path_exists(z_path)) {
             npy_array z = npy_load(z_path);
-            const float * zp = (const float *)z.data.data();
+            const float * zp = npy_as_f32(z);
             opts.cfm_z0_override.assign(zp, zp + z.n_elements());
         } else {
-            fprintf(stderr, "  (no cfm_z0 dump; using std::mt19937 — expect rel ≈ 0.25)\n");
+            fprintf(stderr, "error: missing per-chunk CFM noise; regenerate streaming references\n");
+            return 1;
         }
 
         int rc = s3gen_synthesize_to_wav(chunk_tokens, opts);
@@ -176,24 +139,21 @@ int main(int argc, char ** argv) {
         // Compare mel against Python.
         npy_array py_mel  = npy_load(mel_path);
         npy_array cpp_mel = npy_load(dump_path);
-        const float * py  = (const float *)py_mel.data.data();
-        const float * cpp = (const float *)cpp_mel.data.data();
-        const size_t n    = std::min(py_mel.n_elements(), cpp_mel.n_elements());
-        const size_t py_rows  = py_mel.shape[0];
-        const size_t cpp_rows = cpp_mel.shape[0];
-        fprintf(stderr, "  mel shapes:   py=(%zu, %lld)  cpp=(%zu, %lld)\n",
-                py_rows,  (long long)py_mel.shape[1],
-                cpp_rows, (long long)cpp_mel.shape[1]);
-        if (py_rows != cpp_rows) {
-            fprintf(stderr, "  *** SHAPE MISMATCH — C++ emitted %zu frames, Python %zu\n",
-                    cpp_rows, py_rows);
+        if (cpp_mel.shape.size() != 2 || cpp_mel.shape[1] != 80) {
+            fprintf(stderr, "error: expected C++ mel shape (T, 80)\n");
+            return 1;
         }
-        auto s = cmp_f32(cpp, py, n);
-        fprintf(stderr, "  mel diff:     max_abs=%.4e  rms=%.4e  rel=%.4e\n",
-                s.max_abs, s.rms, s.rel);
-        if (s.rel > max_rel) max_rel = s.rel;
-        total_rms += s.rms;
-        prev_mels_emitted += (int)cpp_rows;
+        const float * cpp = npy_as_f32(cpp_mel);
+        const std::vector<float> mel(cpp, cpp + cpp_mel.n_elements());
+        constexpr double kMelRelativeTolerance = 2e-3;
+        if (!tts_test::check_f32("streaming mel", mel, cpp_mel.shape, py_mel,
+                                 kMelRelativeTolerance)) ++failures;
+        const auto stats = compare_f32(cpp, npy_as_f32(py_mel),
+                                        std::min(mel.size(), py_mel.n_elements()));
+        max_rel = std::max(max_rel, stats.rel_err);
+        total_rms += stats.rms_err;
+        prev_mels_emitted += (int) cpp_mel.shape[0];
+        previous_tokens = n_cum;
 
         // Carry cache_source over to the next chunk.
         hift_cache_source = std::move(source_tail_out);
@@ -218,23 +178,27 @@ int main(int argc, char ** argv) {
                 for (size_t i = 0; i < pcm.size(); ++i) cpp_wav[i] = (float)pcm[i] / 32768.0f;
             }
         }
+        if (cpp_wav.empty()) {
+            fprintf(stderr, "error: missing or empty chunk WAV\n");
+            return 1;
+        }
         const std::string py_wav_path = ref + "/chunk_" + kbuf + "_wav.npy";
         if (path_exists(py_wav_path) && !cpp_wav.empty()) {
             npy_array py_wav_arr = npy_load(py_wav_path);
             const float * pywav = (const float *)py_wav_arr.data.data();
             size_t wn = std::min((size_t)py_wav_arr.n_elements(), cpp_wav.size());
-            auto ws = cmp_f32(cpp_wav.data(), pywav, wn);
+            auto ws = compare_f32(cpp_wav.data(), pywav, wn);
             fprintf(stderr, "  wav  diff:    max_abs=%.4e  rms=%.4e  rel=%.4e  (informational, RNG mismatch expected)\n",
-                    ws.max_abs, ws.rms, ws.rel);
-            if (ws.rel > wav_max_rel) wav_max_rel = ws.rel;
-            wav_total_rms += ws.rms;
+                    ws.max_abs_err, ws.rms_err, ws.rel_err);
+            if (ws.rel_err > wav_max_rel) wav_max_rel = ws.rel_err;
+            wav_total_rms += ws.rms_err;
             wav_chunks += 1;
         }
         streamed_wav_cpp.insert(streamed_wav_cpp.end(), cpp_wav.begin(), cpp_wav.end());
         k += 1;
     }
 
-    fprintf(stderr, "\nresult: %d chunks verified, worst mel rel=%.4e, mean mel rms=%.4e\n",
+    fprintf(stderr, "\nresult: %d chunks processed, worst mel rel=%.4e, mean mel rms=%.4e\n",
             k, max_rel, total_rms / std::max(k, 1));
     if (wav_chunks > 0) {
         fprintf(stderr, "        per-chunk wav: worst rel=%.4e, mean rms=%.4e\n",
@@ -243,8 +207,8 @@ int main(int argc, char ** argv) {
 
     // Save streamed_wav_cpp for offline comparison vs Python's streamed_wav.
     if (!streamed_wav_cpp.empty()) {
-        npy_write_f32(ref + "/streamed_wav_cpp.npy",
-                      streamed_wav_cpp, {(int64_t)streamed_wav_cpp.size()});
+        npy_save_f32(ref + "/streamed_wav_cpp.npy",
+                     {(int64_t)streamed_wav_cpp.size()}, streamed_wav_cpp.data());
         fprintf(stderr, "        streamed wav (%zu samples) → %s/streamed_wav_cpp.npy\n",
                 streamed_wav_cpp.size(), ref.c_str());
         const std::string py_streamed = ref + "/streamed_wav.npy";
@@ -252,10 +216,14 @@ int main(int argc, char ** argv) {
             npy_array py_sw = npy_load(py_streamed);
             const float * py = (const float *)py_sw.data.data();
             size_t n = std::min((size_t)py_sw.n_elements(), streamed_wav_cpp.size());
-            auto sw = cmp_f32(streamed_wav_cpp.data(), py, n);
+            auto sw = compare_f32(streamed_wav_cpp.data(), py, n);
             fprintf(stderr, "        streamed vs Python: rms=%.4e max_abs=%.4e rel=%.4e\n",
-                    sw.rms, sw.max_abs, sw.rel);
+                    sw.rms_err, sw.max_abs_err, sw.rel_err);
         }
     }
-    return 0;
+    if (k == 0 || previous_tokens != n_speech) {
+        fprintf(stderr, "error: streaming fixtures do not cover the complete token sequence\n");
+        return 1;
+    }
+    return failures == 0 ? 0 : 1;
 }

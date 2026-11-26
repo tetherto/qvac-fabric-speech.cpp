@@ -56,7 +56,7 @@ int encode_wav(ParakeetCtcModel & model, const char * wav, EncodedSequence & out
         return rc;
     }
     EncoderOutputs enc;
-    if (int rc = parakeet::run_encoder(model, mel.data(), n_mel_frames, model.mel_cfg.n_mels, enc);
+    if (int rc = parakeet::run_encoder(model, mel.data(), n_mel_frames, model.mel_cfg.n_mels, enc, parakeet::EncoderRoute::ggml());
         rc != 0) {
         return rc;
     }

@@ -19,6 +19,8 @@
 // window-size resolver, and the seam trim + append) so they can be unit-tested
 // without loading a model (see test/test_long_form_windows.cpp).
 
+#include "parakeet_model_type.h"
+
 #include <climits>
 #include <cmath>
 #include <cstddef>
@@ -139,21 +141,24 @@ plan_long_form_windows(int n_units, int center_units, int ctx_units,
 constexpr int kTranscribePsyWindowFrames  = 750;
 constexpr int kTranscribePsyContextFrames = 94;
 constexpr const char * kTranscribePsyDescriptionMark = "TranscribePsy";
+constexpr const char * kTranscribePsyEuVariant = "transcribepsy-250m-eu";
 
 // The window a model recommends for the automatic long-form plan: the GGUF's
 // parakeet.long_form.window_frames / context_frames keys when it carries
-// them, or TranscribePsy's validated setting for a GGUF whose description
-// names the model (the published file predates the keys). Returns false,
+// them, or TranscribePsy's validated setting identified by its full-EU variant
+// or legacy description. Returns false,
 // with both outputs 0, when the model recommends nothing.
 inline bool long_form_hint_for_model(int window_key, int context_key,
                                      const std::string & description,
-                                     int & window, int & context) {
+                                     int & window, int & context,
+                                     const std::string & model_variant = "") {
     if (window_key > 0) {
         window  = window_key;
         context = context_key > 0 ? context_key : 0;
         return true;
     }
-    if (description.find(kTranscribePsyDescriptionMark) != std::string::npos) {
+    if (model_variant == kTranscribePsyEuVariant ||
+        description.find(kTranscribePsyDescriptionMark) != std::string::npos) {
         window  = kTranscribePsyWindowFrames;
         context = kTranscribePsyContextFrames;
         return true;
@@ -264,6 +269,15 @@ constexpr int kLongFormAutoContextFrames = 256;
 // Floor so a pathologically small pos_emb_max_len can't collapse the centre.
 constexpr int kLongFormMinWindowFrames   = 256;
 
+inline bool long_form_context_frames_for_model(double overlap, int requested_window,
+                                               int hint_window, int pos_emb_max_len,
+                                               int & context) {
+    const int requested = requested_window == 0 && hint_window > 0 ? hint_window : requested_window;
+    const int window = resolve_long_form_window_frames(requested, pos_emb_max_len,
+        kLongFormAutoWindowFrames, kLongFormMinWindowFrames);
+    return long_form_context_frames_from_overlap(overlap, window, context);
+}
+
 struct LongFormPlan {
     bool enabled        = false;
     int  window_frames  = 0;  // encoder-frame capacity of each window
@@ -318,6 +332,19 @@ inline LongFormPlan resolve_coreml_fixed_shape_plan(int fixed_mel_frames,
     plan.right_context_frames = context_frames;
     plan.sub            = sub;
     return plan;
+}
+
+// Legacy TDT sidecars have no validated seam policy. Their short windows can
+// leave the decoder emitting blanks or repetitions for whole phrases. Keep the
+// normal ggml plan for oversized inputs; masked ANE exports supply seam context.
+inline LongFormPlan resolve_coreml_tdt_shape_plan(int fixed_mel_frames,
+                                                 int requested_context_frames,
+                                                 int subsampling_factor,
+                                                 long long n_mel_frames,
+                                                 int validated_seam_context_frames) {
+    if (validated_seam_context_frames <= 0) return LongFormPlan{};
+    return resolve_coreml_fixed_shape_plan(fixed_mel_frames, requested_context_frames,
+                                           subsampling_factor, n_mel_frames);
 }
 
 inline bool should_use_nemotron_cache_aware_offline(
@@ -414,6 +441,81 @@ inline LongFormPlan resolve_long_form_plan_frames(int requested_window_frames,
     plan.left_context_frames  = context_frames;
     plan.right_context_frames = context_frames;
     return plan;
+}
+
+// Which Core ML shape contract the model's encoder sidecar follows.
+enum class CoremlShapeKind {
+    none,                   // no long-form Core ML plan (Nemotron, Sortformer, ...)
+    fixed,                  // CTC / RNN-T: pads shorter windows, tiles longer input
+    fixed_validated_seams,  // TDT: pads shorter windows; tiles longer input only when
+                            // the sidecar supplies a validated seam context, else
+                            // the ggml plan (resolve_coreml_tdt_shape_plan)
+    exact,                  // EOU: exact-shape calls only; oversized input stays on ggml
+};
+
+// The shape contract each model family's encoder sidecar follows. Families
+// without a long-form Core ML plan (Nemotron, the diarizers) get `none`.
+inline CoremlShapeKind coreml_shape_kind_for(ParakeetModelType type) {
+    switch (type) {
+        case ParakeetModelType::TDT:
+            return CoremlShapeKind::fixed_validated_seams;
+        case ParakeetModelType::CTC:
+        case ParakeetModelType::RNNT:
+            return CoremlShapeKind::fixed;
+        case ParakeetModelType::EOU:
+            return CoremlShapeKind::exact;
+        default:
+            return CoremlShapeKind::none;
+    }
+}
+
+// Route-aware long-form choice. `normal` is the ggml
+// plan from resolve_long_form_plan_frames. The Core ML fixed-shape plan is
+// considered only when the unit's route holds a handle: with a null route the
+// result is exactly the ggml-only plan, whatever sidecar exists or is still
+// loading. `route_fixed_mel_frames` / `route_seam_context_frames` come from
+// the acquired handle (its I/O after load).
+inline LongFormPlan choose_long_form_plan(const LongFormPlan & normal,
+                                          int opts_window_frames,
+                                          int opts_context_frames,
+                                          CoremlShapeKind kind,
+                                          bool route_holds,
+                                          int route_fixed_mel_frames,
+                                          int route_seam_context_frames,
+                                          int subsampling_factor,
+                                          long long n_mel_frames) {
+    // A negative window request explicitly disables automatic windowing. An
+    // oversized fixed-shape Core ML call will then fail its capacity check and
+    // run_encoder() keeps the ggml single-pass path.
+    if (!route_holds || opts_window_frames < 0 || kind == CoremlShapeKind::none) {
+        return normal;
+    }
+
+    LongFormPlan coreml;
+    if (kind == CoremlShapeKind::fixed || kind == CoremlShapeKind::fixed_validated_seams) {
+        // A sidecar validated with its own seam context (the fixed-window
+        // Neural Engine export) supplies it when the caller left it automatic.
+        const int context = opts_context_frames == 0 && route_seam_context_frames > 0
+            ? route_seam_context_frames
+            : opts_context_frames;
+        coreml = kind == CoremlShapeKind::fixed
+            ? resolve_coreml_fixed_shape_plan(route_fixed_mel_frames, context,
+                                              subsampling_factor, n_mel_frames)
+            : resolve_coreml_tdt_shape_plan(route_fixed_mel_frames, context, subsampling_factor,
+                                            n_mel_frames, route_seam_context_frames);
+    } else {
+        // Exact-shape EOU calls may use Core ML directly, but oversized inputs
+        // stay on ggml until windowed causal/chunked attention parity is proven.
+        coreml = resolve_coreml_exact_shape_plan(route_fixed_mel_frames, opts_context_frames,
+                                                 subsampling_factor, n_mel_frames);
+    }
+
+    // Respect a smaller user/model long-form limit, but force fixed-shape
+    // windowing when that is the only way the complete input fits the sidecar.
+    if (coreml.enabled && (!normal.enabled || coreml.window_frames < normal.window_frames)) {
+        return coreml;
+    }
+    return normal;
 }
 
 struct WindowTrim {

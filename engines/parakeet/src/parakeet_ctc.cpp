@@ -17,6 +17,7 @@
 
 #ifdef PARAKEET_USE_COREML
 #include "coreml/coreml_diarizers.h"
+#include "coreml/parakeet_coreml_sidecars.h"
 #include "coreml/parakeet-encoder.h"
 #include "coreml/parakeet-decoder.h"
 #include "parakeet_coreml_path.h"
@@ -29,6 +30,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -332,11 +334,27 @@ struct ParakeetCtcModel::Impl {
     std::unique_ptr<CtcHeadGraph> ctc_head_graph;
 
 #ifdef PARAKEET_USE_COREML
-    // Optional Apple Neural Engine encoder sidecar. Non-null only on
-    // Apple builds when a `<model>-encoder.mlmodelc` loaded successfully; run_encoder
-    // then routes the full-utterance offline FastConformer forward through Core ML
-    // instead of the ggml graph. Null keeps the ggml encoder (the universal path).
+    // Background Core ML sidecars: one runtime slot each for the
+    // encoder (`<model>-encoder.mlmodelc`), the Sortformer v2.1 AOSC bypass
+    // encoder (`-encoder-bypass-pre-encode`) and every diarizer capacity. They
+    // load on the runtime's lane; each call acquires its route at its start
+    // and runs on ggml with today's ggml plan until its slot is ready.
+    std::unique_ptr<CoremlSidecars> coreml;
+    std::shared_ptr<pcm::Slot> encoder_slot;
+    std::shared_ptr<pcm::Slot> bypass_slot;
+    // Synchronous encoder sidecar that owns the encoder: loaded before
+    // weight allocation when the GGUF has no encoder weights or
+    // PARAKEET_COREML_ONLY is set, and kept only when it may own the encoder
+    // (coreml_can_own_encoder). Never a slot; a failure is an error. A
+    // standard TDT sidecar never owns it, so with PARAKEET_COREML_ONLY and a
+    // full GGUF it is not kept here: the encoder slot loads it in the
+    // background like any other sidecar.
     parakeet_coreml_context * ctx_coreml = nullptr;
+    // TranscribePsy EU (model variant transcribepsy-250m-eu) is not on the
+    // runtime: its programs load synchronously and are selected per dispatch
+    // (selected_coreml_encoder). `ctx_coreml` holds its English fixed program
+    // (owner or not, see coreml_owns_encoder); the others are below, the
+    // flexible and precise ones loaded on first use.
     parakeet_coreml_context * ctx_coreml_eu_other = nullptr;
     parakeet_coreml_context * ctx_coreml_eu_gate = nullptr;
     parakeet_coreml_context * ctx_coreml_eu_flexible = nullptr;
@@ -346,10 +364,8 @@ struct ParakeetCtcModel::Impl {
     std::string eu_precise_gpu_path;
     std::vector<std::string> eu_invalid_gpu_paths;
     parakeet_coreml_context * ctx_coreml_eu_gate_flexible = nullptr;
+    // Backend of the last EU encoder dispatch (Engine::encoder_backend()).
     std::string last_coreml_encoder_backend;
-    // Optional fixed-capacity Sortformer v2.1 AOSC block-stack sidecar. Its
-    // input is post-subsampling [speaker cache | FIFO | chunk] embeddings.
-    parakeet_coreml_context * ctx_coreml_bypass = nullptr;
     // Optional Apple Neural Engine TDT decoder sidecar, loaded from a
     // `<model>-decoder.mlmodelc` on the same presence-driven terms as the
     // encoder and independently of it. Non-null only enables the batched lane
@@ -357,6 +373,14 @@ struct ParakeetCtcModel::Impl {
     // streaming paths keep the sequential decoder.
     parakeet_coreml_decoder * ctx_coreml_dec = nullptr;
     std::unique_ptr<CoremlDiarizers> coreml_diarizers;
+    // The identity (fstat) of the one descriptor the GGUF's metadata and
+    // tensor data were read through: a generated diarizer is prepared only
+    // from the file whose weights this model loaded.
+    pcm::SourceStat source;
+    bool source_ok = false;
+    // The owning engine's cancel flag: every unit's acquisition (an
+    // encoder window, a diarizer pass, an AOSC step) stops waiting on it.
+    const std::atomic<bool> * unit_cancel = nullptr;
 #endif
     // Set when the encoder sidecar loaded before weight allocation and the
     // `encoder.*` tensors were therefore never given memory: the GGUF has no
@@ -366,6 +390,12 @@ struct ParakeetCtcModel::Impl {
 
     ~Impl() {
 #ifdef PARAKEET_USE_COREML
+        // Slots never wait: a load in flight finishes on the runtime's
+        // lane and is released there.
+        coreml_diarizers.reset();
+        encoder_slot.reset();
+        bypass_slot.reset();
+        coreml.reset();
         if (ctx_coreml) parakeet_coreml_free(ctx_coreml);
         if (ctx_coreml_eu_other) parakeet_coreml_free(ctx_coreml_eu_other);
         if (ctx_coreml_eu_gate) parakeet_coreml_free(ctx_coreml_eu_gate);
@@ -373,7 +403,6 @@ struct ParakeetCtcModel::Impl {
         if (ctx_coreml_eu_gate_flexible) parakeet_coreml_free(ctx_coreml_eu_gate_flexible);
         if (ctx_coreml_eu_flexible) parakeet_coreml_free(ctx_coreml_eu_flexible);
         if (ctx_coreml_eu_other_flexible) parakeet_coreml_free(ctx_coreml_eu_other_flexible);
-        if (ctx_coreml_bypass) parakeet_coreml_free(ctx_coreml_bypass);
         if (ctx_coreml_dec) parakeet_coreml_decoder_free(ctx_coreml_dec);
 #endif
         for (auto & g : encoder_graphs) {
@@ -1882,6 +1911,7 @@ static bool path_is_directory(const std::string & path) {
 }
 
 static constexpr const char * kCoremlOnlyEnv    = "PARAKEET_COREML_ONLY";
+static constexpr const char * kCoremlDecoderUnitsEnv = "PARAKEET_COREML_DECODER_COMPUTE_UNITS";
 
 
 // Loads the TDT decoder sidecar when one sits next to the GGUF. Only TDT
@@ -1890,7 +1920,7 @@ static constexpr const char * kCoremlOnlyEnv    = "PARAKEET_COREML_ONLY";
 static void maybe_init_coreml_decoder(const std::string & gguf_path,
                                       ParakeetCtcModel  & model,
                                       bool                verbose) {
-    if (std::getenv(kCoremlDisableEnv) != nullptr) return;
+    if (!model.impl->coreml->resolved().enabled()) return;
     if (model.model_type != ParakeetModelType::TDT) return;
 
     const std::string path = coreml_decoder_sidecar_path(gguf_path);
@@ -1898,8 +1928,18 @@ static void maybe_init_coreml_decoder(const std::string & gguf_path,
         if (verbose) PARAKEET_LOG_INFO("parakeet: no Core ML decoder at '%s'; using ggml decoder\n", path.c_str());
         return;
     }
-    model.impl->ctx_coreml_dec = parakeet_coreml_decoder_init_with_cpu_default(
-        path.c_str(), model.model_variant == "transcribepsy-250m-eu");
+    // Synchronous, with the resolved units like every other loader, after
+    // the decoder-only PARAKEET_COREML_DECODER_COMPUTE_UNITS unless the
+    // units were set explicitly. With none set, the TranscribePsy EU decoder
+    // keeps its measured CPU default on macOS and every other decoder its
+    // cpu_and_ane default.
+    const pcm::Resolved & resolved = model.impl->coreml->resolved();
+    const char * units = loader_units(resolved);
+    if (resolved.units_source != pcm::Source::explicit_field) {
+        if (const char * decoder_units = std::getenv(kCoremlDecoderUnitsEnv)) units = decoder_units;
+    }
+    model.impl->ctx_coreml_dec = parakeet_coreml_decoder_init_with_units(
+        path.c_str(), units, model.model_variant == "transcribepsy-250m-eu");
     if (model.impl->ctx_coreml_dec == nullptr) {
         PARAKEET_LOG_WARN("parakeet: failed to load Core ML decoder at '%s'; falling back to ggml decoder\n", path.c_str());
         return;
@@ -1919,6 +1959,19 @@ static bool coreml_must_own_encoder(bool gguf_has_encoder) {
     return !gguf_has_encoder || std::getenv(kCoremlOnlyEnv) != nullptr;
 }
 
+static bool coreml_can_own_encoder(const gguf_context * g,
+                                   parakeet_coreml_context * ctx) {
+    if (!ctx) return false;
+    const bool needs_native_tdt = get_str(g, "parakeet.model.type", "ctc") == "tdt" &&
+        get_str(g, "parakeet.model_variant", "") != "transcribepsy-250m-eu" &&
+        parakeet_coreml_seam_context_frames(ctx) <= 0;
+    if (needs_native_tdt) {
+        PARAKEET_LOG_WARN("parakeet: TDT sidecar has no validated seam policy; native encoder "
+                          "weights are required for oversized inputs and push streaming\n");
+    }
+    return !needs_native_tdt;
+}
+
 // Reads the offline-encoder test straight off GGUF metadata, for the early
 // sidecar load that runs before the authoritative parse into EncoderConfig.
 static bool gguf_encoder_is_offline(const gguf_context * g) {
@@ -1931,26 +1984,60 @@ static bool gguf_encoder_is_offline(const gguf_context * g) {
         && !get_bool(g, "parakeet.encoder.causal_downsampling", false);
 }
 
-// Loads the encoder sidecar before weight allocation so the `encoder.*`
-// tensors can be skipped. Only the offline fixed-capacity families qualify
-// (the same ones should_use_coreml_encoder pads and windows); returns null,
-// after logging why, when the sidecar cannot take over the encoder.
 constexpr int kTranscribePsyEuMelBins = 128;
 enum class EuCoremlKind { FixedAne, FlexibleCpu, PreciseGpu };
+// `units`: the resolved compute units (CoremlOptions::compute_units, then
+// PARAKEET_COREML_COMPUTE_UNITS; null when unset). The EU loaders pick their
+// placement from them instead of reading the environment.
 static parakeet_coreml_context * load_eu_coreml_encoder(
-        const std::string & path, const char * route, int layers,
-        EuCoremlKind kind = EuCoremlKind::FixedAne, int expected_mel_frames = 0);
+        const std::string & path, const char * route, int layers, const char * units,
+        EuCoremlKind kind = EuCoremlKind::FixedAne, int expected_mel_frames = 0,
+        bool shared = false);
+
+static parakeet_coreml_context * load_eu_shared_encoders(
+        const std::string & gguf_path, int layers, int gate_layers, int mels,
+        int gate_mel_frames, const char * units, ParakeetCtcModel::Impl * impl,
+        bool load_auxiliaries = true) {
+    const auto path = coreml_eu_shared_sidecar_path(gguf_path);
+    if (!path_is_directory(path)) return nullptr;
+    auto * english = load_eu_coreml_encoder(path, "en", layers, units, EuCoremlKind::FixedAne, 0, true);
+    // Precise policies only need the English capacity/seam metadata. Ownership
+    // and fixed ANE inference require all routes to validate together.
+    if (!load_auxiliaries) return english;
+    auto * other = load_eu_coreml_encoder(path, "other", layers, units, EuCoremlKind::FixedAne, 0, true);
+    auto * gate = load_eu_coreml_encoder(path, "gate", gate_layers, units, EuCoremlKind::FixedAne, 0, true);
+    const auto capacity = parakeet_coreml_fixed_mel_frames(english, mels);
+    if (!english || !other || !gate || capacity < gate_mel_frames ||
+        capacity != parakeet_coreml_fixed_mel_frames(other, mels) ||
+        capacity != parakeet_coreml_fixed_mel_frames(gate, mels)) {
+        parakeet_coreml_free(english);
+        parakeet_coreml_free(other);
+        parakeet_coreml_free(gate);
+        PARAKEET_LOG_WARN("parakeet: incompatible full-EU shared encoder; trying separate sidecars\n");
+        return nullptr;
+    }
+    impl->ctx_coreml_eu_other = other;
+    impl->ctx_coreml_eu_gate = gate;
+    return english;
+}
 
 static parakeet_coreml_context * init_eu_coreml_owner(
-        const gguf_context * g, const std::string & gguf_path, ParakeetCtcModel::Impl * impl) {
+        const gguf_context * g, const std::string & gguf_path, const char * units,
+        ParakeetCtcModel::Impl * impl) {
     const int mels = (int) require_u32(g, "parakeet.preproc.n_mels");
     const int rate = (int) require_u32(g, "parakeet.preproc.sample_rate");
     const int hop = (int) require_u32(g, "parakeet.preproc.hop_length");
     const int layers = (int) get_u32(g, "parakeet.encoder.n_layers", 0);
-    auto * english = load_eu_coreml_encoder(coreml_encoder_sidecar_path(gguf_path), "en", layers);
-    auto * other = load_eu_coreml_encoder(coreml_eu_other_sidecar_path(gguf_path), "other", layers);
+    if (hop > 0) {
+        auto * shared = load_eu_shared_encoders(gguf_path, layers,
+            (int) get_u32(g, "parakeet.eu.gate_layer", 0) + 1, mels,
+            1 + kTranscribePsyEuGateSeconds * rate / hop, units, impl);
+        if (shared) return shared;
+    }
+    auto * english = load_eu_coreml_encoder(coreml_encoder_sidecar_path(gguf_path), "en", layers, units);
+    auto * other = load_eu_coreml_encoder(coreml_eu_other_sidecar_path(gguf_path), "other", layers, units);
     auto * gate = load_eu_coreml_encoder(coreml_eu_gate_sidecar_path(gguf_path), "gate",
-                                       (int) get_u32(g, "parakeet.eu.gate_layer", 0) + 1);
+                                       (int) get_u32(g, "parakeet.eu.gate_layer", 0) + 1, units);
     const bool compatible = english && other && gate &&
         parakeet_coreml_fixed_mel_frames(english, mels) ==
             parakeet_coreml_fixed_mel_frames(other, mels) &&
@@ -1968,16 +2055,23 @@ static parakeet_coreml_context * init_eu_coreml_owner(
     return english;
 }
 
+// Loads the encoder sidecar before weight allocation so the `encoder.*`
+// tensors can be skipped. Only the offline fixed-capacity families qualify
+// (the same ones coreml_encoder_eligibility pads); returns null, after logging
+// why, when no sidecar loads. coreml_can_own_encoder then decides whether the
+// loaded sidecar may own the encoder.
 static parakeet_coreml_context * init_coreml_only_encoder(const gguf_context * g,
                                                           const std::string & gguf_path,
+                                                          const pcm::Resolved & coreml,
                                                           bool verbose,
                                                           ParakeetCtcModel::Impl * impl) {
-    if (std::getenv(kCoremlDisableEnv) != nullptr) {
-        PARAKEET_LOG_WARN("parakeet: %s set; the GGUF's ggml encoder weights are kept\n", kCoremlDisableEnv);
+    if (!coreml.enabled()) {
+        PARAKEET_LOG_WARN("parakeet: Core ML is disabled (%s); the GGUF's ggml encoder weights are kept\n",
+                          coreml.disabled_reason.c_str());
         return nullptr;
     }
     if (get_str(g, "parakeet.model_variant", "") == "transcribepsy-250m-eu")
-        return init_eu_coreml_owner(g, gguf_path, impl);
+        return init_eu_coreml_owner(g, gguf_path, loader_units(coreml), impl);
     const std::string type = get_str(g, "parakeet.model.type", "ctc");
     if ((type != "tdt" && type != "ctc" && type != "rnnt") || !gguf_encoder_is_offline(g)) {
         PARAKEET_LOG_WARN("parakeet: a Core ML-only encoder needs an offline CTC, RNN-T or TDT "
@@ -1989,24 +2083,58 @@ static parakeet_coreml_context * init_coreml_only_encoder(const gguf_context * g
         PARAKEET_LOG_WARN("parakeet: no Core ML encoder at '%s'\n", path.c_str());
         return nullptr;
     }
-    parakeet_coreml_context * ctx = parakeet_coreml_init(path.c_str());
+    // A standard TDT sidecar owns the encoder only with a validated seam
+    // context, which only the fixed-window Neural Engine export provides
+    // (coreml_can_own_encoder). When the bundle's metadata shows another
+    // export, a load here would only be thrown away, so it is skipped: a
+    // full GGUF gets the background encoder slot and an encoder-less one is
+    // rejected, as after the load. A bundle whose metadata is missing,
+    // unreadable or does not list its inputs is loaded to find out.
+    if (type == "tdt" && parakeet_coreml_encoder_export_kind(path.c_str()) == 0) {
+        PARAKEET_LOG_WARN("parakeet: TDT sidecar has no validated seam policy; native encoder "
+                          "weights are required for oversized inputs and push streaming\n");
+        return nullptr;
+    }
+    // Synchronous on purpose: ownership fixes how the weights are
+    // allocated, so it is decided before allocation and never in the background.
+    parakeet_coreml_context * ctx = parakeet_coreml_init_with_units(path.c_str(), loader_units(coreml));
     if (ctx == nullptr) {
         PARAKEET_LOG_WARN("parakeet: failed to load Core ML encoder at '%s'\n", path.c_str());
         return nullptr;
     }
-    if (verbose) PARAKEET_LOG_INFO("parakeet: Core ML encoder loaded from '%s' and owns the encoder\n", path.c_str());
+    if (verbose) PARAKEET_LOG_INFO("parakeet: Core ML encoder loaded from '%s'\n", path.c_str());
     return ctx;
 }
+
+std::atomic<GgufLoadObserver> g_gguf_load_observer{nullptr};
+
+void set_gguf_load_observer(GgufLoadObserver fn) { g_gguf_load_observer.store(fn); }
 
 static void maybe_init_coreml_diarizers(const std::string & gguf_path,
                                         ParakeetCtcModel  & model,
                                         bool                verbose) {
-    if (coreml_diarizers_disabled()) return;
-    model.impl->coreml_diarizers = discover_coreml_diarizers(gguf_path);
-    if (model.impl->coreml_diarizers) {
-        for (int capacity : model.impl->coreml_diarizers->capacities()) {
-            PARAKEET_LOG_INFO("parakeet: Core ML diarizer available for %d frames at '%s'\n",
-                capacity, coreml_diarizer_sidecar_path(gguf_path, capacity).c_str());
+    if (std::getenv(kCoremlDiarizerDisableEnv) != nullptr) return;
+    // Nemotron 3 Diarization and Sortformer v2.1 capacities without an
+    // adjacent bundle are generated from the library's templates (when this
+    // instance can).
+    const std::vector<CoremlDiarizerTemplate> & templates =
+        diarizer_templates_for(model.model_type, model.model_variant);
+    // Without the descriptor's identity nothing is generated (source_changed).
+    pcm::SourceStat loaded = model.impl->source;
+    loaded.changed = loaded.changed || !model.impl->source_ok;
+    model.impl->coreml_diarizers = discover_coreml_diarizers(gguf_path, *model.impl->coreml, templates, loaded);
+    const std::vector<int> capacities =
+        model.impl->coreml_diarizers ? model.impl->coreml_diarizers->capacities() : std::vector<int>();
+    if (!capacities.empty()) {
+        for (int capacity : capacities) {
+            const std::string path = coreml_diarizer_sidecar_path(gguf_path, capacity);
+            if (path_is_directory(path)) {
+                PARAKEET_LOG_INFO("parakeet: Core ML diarizer available for %d frames at '%s'\n", capacity,
+                                  path.c_str());
+            } else {
+                PARAKEET_LOG_INFO("parakeet: Core ML diarizer for %d frames is generated from the GGUF into '%s'\n",
+                                  capacity, model.impl->coreml->resolved().cache_dir.c_str());
+            }
         }
     } else if (verbose) {
         PARAKEET_LOG_INFO("parakeet: no Core ML diarizer beside '%s'; using ggml\n",
@@ -2014,17 +2142,16 @@ static void maybe_init_coreml_diarizers(const std::string & gguf_path,
     }
 }
 
-// Presence-driven, additive loader: loads the Core ML encoder sidecar
-// when one sits next to the GGUF. Any miss (env override, unsupported family,
-// absent directory, load failure) leaves ctx_coreml null so ggml runs.
 static parakeet_coreml_context * load_eu_coreml_encoder(
-        const std::string & path, const char * route, int layers, EuCoremlKind kind, int expected_mel_frames) {
+        const std::string & path, const char * route, int layers, const char * units,
+        EuCoremlKind kind, int expected_mel_frames, bool shared) {
     if (!path_is_directory(path)) return nullptr;
     const auto started = std::chrono::steady_clock::now();
     const bool flexible = kind == EuCoremlKind::FlexibleCpu;
     const bool fixed_cpu = kind == EuCoremlKind::FixedAne &&
-        !parakeet::coreml_eu_loads_fixed_auxiliaries(std::getenv("PARAKEET_COREML_COMPUTE_UNITS"));
-    auto * ctx = (flexible || fixed_cpu) ? parakeet_coreml_init_cpu(path.c_str()) :
+        !parakeet::coreml_eu_loads_fixed_auxiliaries(units);
+    auto * ctx = shared ? parakeet_coreml_init_eu_function(path.c_str(), route, fixed_cpu) :
+        (flexible || fixed_cpu) ? parakeet_coreml_init_cpu(path.c_str()) :
         kind == EuCoremlKind::PreciseGpu ? parakeet_coreml_init_gpu(path.c_str()) :
                                          parakeet_coreml_init_ane(path.c_str());
     if (!ctx) return nullptr;
@@ -2043,17 +2170,29 @@ static parakeet_coreml_context * load_eu_coreml_encoder(
     return ctx;
 }
 
+// TranscribePsy EU's fixed programs load synchronously here, not as runtime
+// slots: the shared multifunction program when one sits next to the GGUF;
+// otherwise the English one, then (unless the units exclude the Neural
+// Engine) the other-language and gate programs.
 static void init_eu_coreml_encoders(const std::string & path, ParakeetCtcModel & model) {
     auto & impl = *model.impl;
+    const char * units = loader_units(impl.coreml->resolved());
+    if (model.mel_cfg.hop_length > 0) {
+        impl.ctx_coreml = load_eu_shared_encoders(path, model.encoder_cfg.n_layers,
+            model.eu_gate.layer + 1, model.mel_cfg.n_mels,
+            1 + kTranscribePsyEuGateSeconds * model.mel_cfg.sample_rate / model.mel_cfg.hop_length, units, &impl,
+            parakeet::coreml_eu_loads_fixed_auxiliaries(units));
+        if (impl.ctx_coreml) return;
+    }
     impl.ctx_coreml = load_eu_coreml_encoder(
-        coreml_encoder_sidecar_path(path), "en", model.encoder_cfg.n_layers);
+        coreml_encoder_sidecar_path(path), "en", model.encoder_cfg.n_layers, units);
     // Keep the English handle's shape/seam metadata. Policies excluding ANE
     // use precise programs and never select these two fixed auxiliaries.
-    if (!parakeet::coreml_eu_loads_fixed_auxiliaries(std::getenv("PARAKEET_COREML_COMPUTE_UNITS"))) return;
+    if (!parakeet::coreml_eu_loads_fixed_auxiliaries(units)) return;
     impl.ctx_coreml_eu_other = load_eu_coreml_encoder(
-        coreml_eu_other_sidecar_path(path), "other", model.encoder_cfg.n_layers);
+        coreml_eu_other_sidecar_path(path), "other", model.encoder_cfg.n_layers, units);
     impl.ctx_coreml_eu_gate = load_eu_coreml_encoder(
-        coreml_eu_gate_sidecar_path(path), "gate", model.eu_gate.layer + 1);
+        coreml_eu_gate_sidecar_path(path), "gate", model.eu_gate.layer + 1, units);
     if (impl.ctx_coreml && impl.ctx_coreml_eu_other &&
         parakeet_coreml_fixed_mel_frames(impl.ctx_coreml, model.mel_cfg.n_mels) !=
         parakeet_coreml_fixed_mel_frames(impl.ctx_coreml_eu_other, model.mel_cfg.n_mels)) {
@@ -2063,25 +2202,71 @@ static void init_eu_coreml_encoders(const std::string & path, ParakeetCtcModel &
     }
 }
 
+// Runs on the runtime's load lane with the resolved compute units.
+static pcm::LoadResult load_encoder_sidecar(const pcm::LoadRequest & request) {
+    pcm::LoadResult result;
+    parakeet_coreml_load_error error{};
+    parakeet_coreml_context * ctx = parakeet_coreml_init_with_units_error(
+        request.artifact_path.c_str(), pcm::to_string(request.units), &error);
+    if (ctx == nullptr) {
+        result.error = sidecar_load_error("Core ML " + request.stage, error);
+        PARAKEET_LOG_WARN("parakeet: failed to load Core ML %s at '%s' (%s); falling back to ggml\n",
+                          request.stage.c_str(), request.artifact_path.c_str(),
+                          result.error.message.c_str());
+        return result;
+    }
+    PARAKEET_LOG_INFO("parakeet: Core ML %s loaded from '%s'\n",
+                      request.stage.c_str(), request.artifact_path.c_str());
+    result.model = std::shared_ptr<void>(ctx, [](void * p) {
+        parakeet_coreml_free(static_cast<parakeet_coreml_context *>(p));
+    });
+    return result;
+}
+
+static SidecarRequest encoder_sidecar_request(const char * stage, const std::string & path,
+                                              bool minimal) {
+    SidecarRequest request;
+    request.stage = stage;
+    request.path = path;
+    request.present = path_is_directory(path);
+    // The fixed-window Neural Engine export is pinned to CPU and Neural
+    // Engine; every other export keeps all processors (today's defaults).
+    request.stage_default = request.present && parakeet_coreml_encoder_prefers_ane(path.c_str())
+        ? pcm::ComputeUnits::cpu_and_ane
+        : pcm::ComputeUnits::all;
+    request.load_fn = &load_encoder_sidecar;
+    request.geometry = sidecar_geometry(std::string(stage) == "bypass-encoder" ? SidecarLoader::bypass_encoder
+                                                                               : SidecarLoader::encoder);
+    request.minimal = minimal;
+    return request;
+}
+
+// Registers the encoder sidecar slots. Presence-driven and additive, as
+// before, but the load is a background job: the model is usable
+// on ggml at once, and a missing, disabled or failed sidecar leaves ggml.
 static void maybe_init_coreml_encoder(const std::string & gguf_path,
                                       ParakeetCtcModel  & model,
                                       bool                verbose) {
-    if (model.model_variant == "transcribepsy-250m-eu" && !std::getenv(kCoremlDisableEnv)) {
+    // TranscribePsy EU gets no slot: its fixed programs load synchronously
+    // here (or, when they own the encoder, before weight allocation) and its
+    // flexible and precise programs on first use, as before the runtime.
+    if (model.model_variant == "transcribepsy-250m-eu") {
+        if (!model.impl->coreml->resolved().enabled()) {
+            if (verbose) {
+                PARAKEET_LOG_INFO("parakeet: Core ML disabled (%s); using ggml\n",
+                                  model.impl->coreml->resolved().disabled_reason.c_str());
+            }
+            return;
+        }
         model.impl->eu_gguf_path = gguf_path;
         model.impl->eu_gate_flexible_path = coreml_eu_gate_sidecar_path(gguf_path);
         model.impl->eu_gate_flexible_path.insert(model.impl->eu_gate_flexible_path.size() - std::string(".mlmodelc").size(), "-flexible");
         model.impl->eu_flexible_path = coreml_eu_flexible_sidecar_path(gguf_path, false);
         model.impl->eu_other_flexible_path = coreml_eu_flexible_sidecar_path(gguf_path, true);
-    }
-    if (model.impl->ctx_coreml != nullptr) return;  // loaded before weight allocation
-    if (std::getenv(kCoremlDisableEnv) != nullptr) {
-        if (verbose) PARAKEET_LOG_INFO("parakeet: Core ML encoder disabled via PARAKEET_COREML_DISABLE; using ggml\n");
+        if (model.impl->ctx_coreml == nullptr) init_eu_coreml_encoders(gguf_path, model);
         return;
     }
-    if (model.model_variant == "transcribepsy-250m-eu") {
-        init_eu_coreml_encoders(gguf_path, model);
-        return;
-    }
+    if (model.impl->ctx_coreml != nullptr) return;  // owns the encoder (loaded before weight allocation)
     const bool supported_sortformer =
         model.model_type == ParakeetModelType::SORTFORMER &&
         model.model_variant == "sortformer-streaming-v2.1-aosc";
@@ -2100,36 +2285,33 @@ static void maybe_init_coreml_encoder(const std::string & gguf_path,
         }
         return;
     }
+    if (!model.impl->coreml->resolved().enabled() && verbose) {
+        PARAKEET_LOG_INFO("parakeet: Core ML disabled (%s); using ggml\n",
+                          model.impl->coreml->resolved().disabled_reason.c_str());
+    }
+
+    // A diarizer capacity that can serve a pass is the Sortformer minimal
+    // set; otherwise (no diarizer, or only status-only template capacities)
+    // the encoders are.
+    if (supported_sortformer) maybe_init_coreml_diarizers(gguf_path, model, verbose);
+    const bool encoder_minimal = encoder_sidecars_minimal(
+        model.impl->coreml_diarizers ? model.impl->coreml_diarizers->capacities() : std::vector<int>());
+
     const std::string path = coreml_encoder_sidecar_path(gguf_path);
-    if (path_is_directory(path)) {
-        model.impl->ctx_coreml = parakeet_coreml_init(path.c_str());
-        if (model.impl->ctx_coreml == nullptr) {
-            PARAKEET_LOG_WARN("parakeet: failed to load Core ML encoder at '%s'; falling back to ggml encoder\n", path.c_str());
-        } else {
-            PARAKEET_LOG_INFO("parakeet: Core ML encoder loaded from '%s'\n", path.c_str());
-        }
-    } else if (verbose) {
-        PARAKEET_LOG_INFO("parakeet: no Core ML encoder at '%s'; using ggml encoder\n", path.c_str());
+    model.impl->encoder_slot = model.impl->coreml->add(
+        encoder_sidecar_request("encoder", path, encoder_minimal));
+    if (verbose) {
+        PARAKEET_LOG_INFO("parakeet: Core ML encoder at '%s': %s\n", path.c_str(),
+                          pcm::state_label(model.impl->encoder_slot->state(), "").c_str());
     }
 
     if (supported_sortformer) {
-        maybe_init_coreml_diarizers(gguf_path, model, verbose);
         const std::string bypass_path = coreml_bypass_encoder_sidecar_path(gguf_path);
-        if (path_is_directory(bypass_path)) {
-            model.impl->ctx_coreml_bypass = parakeet_coreml_init(bypass_path.c_str());
-            if (model.impl->ctx_coreml_bypass == nullptr) {
-                PARAKEET_LOG_WARN(
-                    "parakeet: failed to load Core ML bypass encoder at '%s'; "
-                    "falling back to ggml for AOSC\n", bypass_path.c_str());
-            } else {
-                PARAKEET_LOG_INFO(
-                    "parakeet: Core ML bypass encoder loaded from '%s'\n",
-                    bypass_path.c_str());
-            }
-        } else if (verbose) {
-            PARAKEET_LOG_INFO(
-                "parakeet: no Core ML bypass encoder at '%s'; using ggml for AOSC\n",
-                bypass_path.c_str());
+        model.impl->bypass_slot = model.impl->coreml->add(
+            encoder_sidecar_request("bypass-encoder", bypass_path, encoder_minimal));
+        if (verbose) {
+            PARAKEET_LOG_INFO("parakeet: Core ML bypass encoder at '%s': %s\n", bypass_path.c_str(),
+                              pcm::state_label(model.impl->bypass_slot->state(), "").c_str());
         }
     }
 }
@@ -2486,8 +2668,17 @@ static int load_from_gguf_impl(const std::string & gguf_path,
                                int                 n_gpu_layers,
                                bool                verbose,
                                GgufLoadMeasure   * measure,
-                               const std::string & backend = "auto") {
+                               const std::string & backend = "auto",
+                               const CoremlOptions & coreml = {},
+                               bool memory_degraded = false) {
     auto impl = std::make_shared<ParakeetCtcModel::Impl>();
+#ifdef PARAKEET_USE_COREML
+    // Resolved once; a metadata-only load never touches Core ML.
+    if (!measure) impl->coreml = std::make_unique<CoremlSidecars>(coreml, nullptr, memory_degraded);
+#else
+    (void) coreml;
+    (void) memory_degraded;
+#endif
 
     impl->backend_cpu = init_cpu_backend();
     if (!impl->backend_cpu) {
@@ -2576,7 +2767,27 @@ static int load_from_gguf_impl(const std::string & gguf_path,
     }
 
     gguf_init_params params = { /*no_alloc=*/ true, &impl->ctx };
+#ifdef PARAKEET_USE_COREML
+    // Open the GGUF once: its identity comes from this descriptor, and the
+    // metadata and every tensor are read through it, so a generated sidecar
+    // can only be prepared from the file whose weights the model holds,
+    // whatever the path points at before or after.
+    std::unique_ptr<FILE, int (*)(FILE *)> gguf_file(nullptr, &std::fclose);
+    if (!measure) {
+        if (GgufLoadObserver observer = g_gguf_load_observer.load()) observer("open");
+        gguf_file.reset(std::fopen(gguf_path.c_str(), "rb"));
+        if (!gguf_file) {
+            PARAKEET_LOG_ERROR("gguf: failed to open %s\n", gguf_path.c_str());
+            return 1;
+        }
+        impl->source_ok = pcm::generation::source_stat_fd(fileno(gguf_file.get()), gguf_path, impl->source);
+        if (GgufLoadObserver observer = g_gguf_load_observer.load()) observer("opened");
+    }
+    impl->gguf = gguf_file ? gguf_init_from_file_ptr(gguf_file.get(), params)
+                           : gguf_init_from_file(gguf_path.c_str(), params);
+#else
     impl->gguf = gguf_init_from_file(gguf_path.c_str(), params);
+#endif
     if (!impl->gguf) {
         PARAKEET_LOG_ERROR("gguf: failed to open %s\n", gguf_path.c_str());
         return 1;
@@ -2587,19 +2798,30 @@ static int load_from_gguf_impl(const std::string & gguf_path,
 
     // A Parakeet GGUF without encoder weights (the Core ML distributions) runs
     // only with its encoder sidecar, which then has to load before allocation
-    // so the `encoder.*` tensors get no memory. PARAKEET_COREML_ONLY asks for the same
-    // with a full GGUF. The memory-fit projection never loads Core ML, so it
-    // cannot project such a model.
+    // so the `encoder.*` tensors get no memory. PARAKEET_COREML_ONLY requests the
+    // same for a full GGUF when its sidecar preserves the required routing.
+    // The memory-fit projection never loads Core ML and cannot project an
+    // encoder-less GGUF.
     const bool gguf_has_encoder = gguf_has_encoder_weights(g);
 #ifdef PARAKEET_USE_COREML
     if (!measure && coreml_must_own_encoder(gguf_has_encoder)) {
-        impl->ctx_coreml = init_coreml_only_encoder(g, gguf_path, verbose, impl.get());
-        impl->coreml_owns_encoder = impl->ctx_coreml != nullptr;
+        impl->ctx_coreml = init_coreml_only_encoder(g, gguf_path, impl->coreml->resolved(), verbose,
+                                                    impl.get());
+        impl->coreml_owns_encoder = coreml_can_own_encoder(g, impl->ctx_coreml);
+        if (impl->ctx_coreml != nullptr && !impl->coreml_owns_encoder) {
+            // A sidecar that may not own the encoder stays an ordinary one:
+            // the encoder slot loads it in the background like any full
+            // GGUF's, so it follows the resolved wait and use policy. (A
+            // bundle whose metadata already rules ownership out is not
+            // loaded here at all.)
+            parakeet_coreml_free(impl->ctx_coreml);
+            impl->ctx_coreml = nullptr;
+        }
     }
 #endif
     if (!gguf_has_encoder && !impl->coreml_owns_encoder) {
-        PARAKEET_LOG_ERROR("gguf: %s holds no encoder weights; it runs only with its "
-                           "%s sidecar on an Apple build with PARAKEET_COREML=ON\n",
+        PARAKEET_LOG_ERROR("gguf: %s holds no encoder weights; it requires a compatible "
+                           "encoder-owning %s sidecar on an Apple build with PARAKEET_COREML=ON\n",
                            gguf_path.c_str(), "-encoder.mlmodelc");
         return kGgufLoadNoEncoderWeights;
     }
@@ -2636,10 +2858,19 @@ static int load_from_gguf_impl(const std::string & gguf_path,
         }
         ggml_backend_buffer_set_usage(impl->weights_buffer, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
 
-        std::ifstream f(gguf_path, std::ios::binary);
-        if (!f) {
-            PARAKEET_LOG_ERROR("gguf: cannot reopen %s for tensor data\n", gguf_path.c_str());
-            return 13;
+#ifdef PARAKEET_USE_COREML
+        // The tensor data comes through the descriptor the metadata did.
+        FILE * data_file = gguf_file.get();
+#else
+        const void * data_file = nullptr;
+#endif
+        std::ifstream f;
+        if (data_file == nullptr) {
+            f.open(gguf_path, std::ios::binary);
+            if (!f) {
+                PARAKEET_LOG_ERROR("gguf: cannot reopen %s for tensor data\n", gguf_path.c_str());
+                return 13;
+            }
         }
         const size_t data_offset = gguf_get_data_offset(g);
         const int64_t n_tensors = gguf_get_n_tensors(g);
@@ -2654,13 +2885,37 @@ static int load_from_gguf_impl(const std::string & gguf_path,
             const size_t off   = gguf_get_tensor_offset(g, i);
             const size_t nbytes = ggml_nbytes(t);
             buf.resize(nbytes);
-            f.seekg((std::streamoff)(data_offset + off), std::ios::beg);
-            if (!f.read(buf.data(), nbytes)) {
+            bool read_ok = false;
+#ifdef PARAKEET_USE_COREML
+            if (data_file != nullptr) {
+                read_ok = fseeko(data_file, (off_t) (data_offset + off), SEEK_SET) == 0 &&
+                          std::fread(buf.data(), 1, nbytes, data_file) == nbytes;
+            } else
+#endif
+            {
+                f.seekg((std::streamoff)(data_offset + off), std::ios::beg);
+                read_ok = static_cast<bool>(f.read(buf.data(), nbytes));
+            }
+            if (!read_ok) {
                 PARAKEET_LOG_ERROR("gguf: short read on tensor '%s' (%zu bytes)\n", name, nbytes);
                 return 14;
             }
             ggml_backend_tensor_set(t, buf.data(), 0, nbytes);
         }
+#ifdef PARAKEET_USE_COREML
+        // The descriptor again after the last tensor read: a file written in
+        // place during the upload (same inode, a new size or mtime) may have
+        // given some tensors the new bytes, so the identity taken at the open
+        // is not the loaded weights' and must never join a job for it.
+        if (gguf_file && impl->source_ok) {
+            pcm::SourceStat after;
+            const bool same = pcm::generation::source_stat_fd(fileno(gguf_file.get()), gguf_path, after) &&
+                              after.size == impl->source.size && after.mtime_ns == impl->source.mtime_ns &&
+                              after.ino == impl->source.ino && after.dev == impl->source.dev;
+            if (!same) impl->source.changed = true;
+        }
+        if (GgufLoadObserver observer = g_gguf_load_observer.load()) observer("read");
+#endif
     }
 
     {
@@ -2688,7 +2943,10 @@ static int load_from_gguf_impl(const std::string & gguf_path,
             }
             out_model.impl = impl;
 #ifdef PARAKEET_USE_COREML
-            if (!measure) maybe_init_coreml_diarizers(gguf_path, out_model, verbose);
+            if (!measure) {
+                maybe_init_coreml_diarizers(gguf_path, out_model, verbose);
+                impl->coreml->start();
+            }
 #endif
             return 0;
         }
@@ -2781,7 +3039,8 @@ static int load_from_gguf_impl(const std::string & gguf_path,
                              get_u32(g, "parakeet.long_form.context_frames", 0),
                              get_str(g, "general.description", ""),
                              out_model.encoder_cfg.long_form_window_hint,
-                             out_model.encoder_cfg.long_form_context_hint);
+                             out_model.encoder_cfg.long_form_context_hint,
+                             out_model.model_variant);
     if (out_model.model_type == ParakeetModelType::NEMOTRON) {
         load_nemotron_metadata(g, out_model);
     }
@@ -3018,6 +3277,9 @@ static int load_from_gguf_impl(const std::string & gguf_path,
     if (!measure) {
         maybe_init_coreml_encoder(gguf_path, out_model, verbose);
         maybe_init_coreml_decoder(gguf_path, out_model, verbose);
+        // The construction group: the minimal set, requested once the ggml
+        // upload completed; with wait = construct this blocks.
+        impl->coreml->start();
     }
 #endif
 
@@ -3089,6 +3351,13 @@ int load_from_gguf(const std::string & gguf_path, ParakeetCtcModel & out_model,
                                verbose, /*measure=*/nullptr, backend);
 }
 
+int load_from_gguf(const std::string & gguf_path, ParakeetCtcModel & out_model,
+                   int n_threads, int n_gpu_layers, bool verbose, const std::string & backend,
+                   const CoremlOptions & coreml, bool memory_degraded) {
+    return load_from_gguf_impl(gguf_path, out_model, n_threads, n_gpu_layers,
+                               verbose, /*measure=*/nullptr, backend, coreml, memory_degraded);
+}
+
 int load_from_gguf_metadata_only(const std::string & gguf_path,
                                  ParakeetCtcModel  & out_model,
                                  int                 n_threads,
@@ -3149,12 +3418,201 @@ std::string model_active_device_name(const ParakeetCtcModel & m) {
 CoremlDiarizers * model_coreml_diarizers(const ParakeetCtcModel & m) {
     return m.impl ? m.impl->coreml_diarizers.get() : nullptr;
 }
+
+namespace {
+
+parakeet_coreml_context * encoder_context_of(void * model) {
+    return static_cast<parakeet_coreml_context *>(model);
+}
+
+EncoderRouteGeometry describe_encoder(parakeet_coreml_context * ctx, int n_mels) {
+    EncoderRouteGeometry g;
+    const int64_t frames = parakeet_coreml_fixed_mel_frames(ctx, n_mels);
+    if (frames > 0 && frames <= std::numeric_limits<int>::max()) g.fixed_mel_frames = (int) frames;
+    g.seam_context_frames = (int) parakeet_coreml_seam_context_frames(ctx);
+    g.masks_mel_padding = parakeet_coreml_masks_mel_padding(ctx);
+    return g;
+}
+
+const char * encoder_label(parakeet_coreml_context * ctx) {
+    return parakeet_coreml_backend_label(ctx);
+}
+
+int encode_on_context(void *, parakeet_coreml_context * ctx, int n_mel_frames, int mel_valid,
+                      int n_mels, const float * mel, int n_enc_frames, int d_model,
+                      float * encoder_out) {
+    return parakeet_coreml_encode_valid(ctx, n_mel_frames, mel_valid, n_mels, mel,
+                                        n_enc_frames, d_model, encoder_out);
+}
+
+const EncoderModelOps & encoder_ops() {
+    static const EncoderModelOps ops{&encoder_context_of, &describe_encoder, &encoder_label,
+                                     &encode_on_context};
+    return ops;
+}
+
+// The synchronous context as a route. The owner never retires, and a
+// failure is an error (there are no ggml encoder weights to fall back to).
+// Under use = require it is strict like a slot's route: a dispatch it cannot
+// serve throws.
+// TranscribePsy EU's English program gives the route its geometry (the
+// long-form plan and the segment cap); its dispatches pick their program in
+// run_encoder.
+EncoderRoute synchronous_route(const ParakeetCtcModel & m, bool strict) {
+    EncoderRoute::Ops ops;
+    ops.encode = &encode_on_context;
+    return EncoderRoute::coreml(m.impl->ctx_coreml, describe_encoder(m.impl->ctx_coreml, m.mel_cfg.n_mels),
+                                parakeet_coreml_backend_label(m.impl->ctx_coreml),
+                                std::static_pointer_cast<void>(m.impl), ops,
+                                /*owner=*/m.impl->coreml_owns_encoder,
+                                strict);
+}
+
+bool resolved_strict(const ParakeetCtcModel & m) {
+    return m.impl && m.impl->coreml && m.impl->coreml->resolved().strict();
+}
+
+// The encoder route if it is ready now, without requesting anything. A probe
+// (encoder_on_coreml, encoder_backend, the ggml prewarm pass): never throws
+// and is never strict, whatever use is.
+EncoderRoute ready_encoder_route(const ParakeetCtcModel & m) {
+    if (!m.impl) return {};
+    if (m.impl->ctx_coreml != nullptr) return synchronous_route(m, /*strict=*/false);
+    if (!m.impl->encoder_slot) return {};
+    return route_from_acquired(acquire_if_ready(*m.impl->encoder_slot), encoder_ops(), m.mel_cfg.n_mels,
+                               /*strict=*/false);
+}
+
+}  // namespace
 #endif
+
+EncoderRoute acquire_encoder_route(ParakeetCtcModel & m, const std::atomic<bool> * cancel) {
+#ifdef PARAKEET_USE_COREML
+    if (!m.impl) return {};
+    if (cancel == nullptr) cancel = m.impl->unit_cancel;
+    if (m.impl->ctx_coreml != nullptr) return synchronous_route(m, resolved_strict(m));
+    if (!m.impl->encoder_slot) return {};
+    // One acquisition per unit: raised to `now`, then the resolved wait mode
+    // (none: no blocking; call: until ready or terminal; strict throws).
+    return route_from_acquired(m.impl->encoder_slot->acquire(pcm::Demand::now, std::nullopt, cancel),
+                               encoder_ops(), m.mel_cfg.n_mels, m.impl->coreml->resolved().strict());
+#else
+    (void) m;
+    (void) cancel;
+    return {};
+#endif
+}
+
+void model_set_cancel_flag(ParakeetCtcModel & m, const std::atomic<bool> * cancel) {
+#ifdef PARAKEET_USE_COREML
+    if (!m.impl) return;
+    m.impl->unit_cancel = cancel;
+    if (m.impl->coreml_diarizers) m.impl->coreml_diarizers->set_cancel(cancel);
+#else
+    (void) m;
+    (void) cancel;
+#endif
+}
+
+EncoderRoute encoder_route_if_ready(ParakeetCtcModel & m) {
+#ifdef PARAKEET_USE_COREML
+    return ready_encoder_route(m);
+#else
+    (void) m;
+    return {};
+#endif
+}
+
+std::string model_coreml_status_json(const ParakeetCtcModel & m) {
+#ifdef PARAKEET_USE_COREML
+    if (m.impl && m.impl->coreml) return m.impl->coreml->status_json();
+#else
+    (void) m;
+#endif
+    return "{}";
+}
+
+// A group with no sidecar to prepare (no Core ML in the build, no sidecar,
+// or none planned): finished and successful at once.
+static std::string empty_group_json(const char * group) {
+    return std::string("{\"group\":\"") + group +
+           "\",\"nothing_to_prepare\":true,\"skipped_route_none\":[],\"slots\":[],\"success\":true}";
+}
+
+std::string model_coreml_construction_json(const ParakeetCtcModel & m) {
+#ifdef PARAKEET_USE_COREML
+    if (m.impl && m.impl->coreml) return m.impl->coreml->construction_json();
+#else
+    (void) m;
+#endif
+    return empty_group_json("construction");
+}
+
+std::string model_coreml_prewarm(ParakeetCtcModel & m, CoremlOptions::Prewarm scope, bool wait,
+                                 const std::atomic<bool> * cancel) {
+#ifdef PARAKEET_USE_COREML
+    if (m.impl && m.impl->coreml) return pcm::to_json(m.impl->coreml->prewarm(scope, wait, cancel));
+#else
+    (void) m;
+    (void) scope;
+    (void) wait;
+    (void) cancel;
+#endif
+    return empty_group_json("prewarm");
+}
+
+bool model_coreml_wait(ParakeetCtcModel & m, int64_t timeout_ms, const std::atomic<bool> * cancel) {
+#ifdef PARAKEET_USE_COREML
+    if (m.impl && m.impl->coreml) return m.impl->coreml->wait_construction(timeout_ms, cancel);
+#else
+    (void) m;
+    (void) timeout_ms;
+    (void) cancel;
+#endif
+    return true;  // nothing to wait for
+}
+
+void model_coreml_reset_call_stats(ParakeetCtcModel & m) {
+#ifdef PARAKEET_USE_COREML
+    if (m.impl && m.impl->coreml_diarizers) m.impl->coreml_diarizers->reset_call_stats();
+#else
+    (void) m;
+#endif
+}
+
+CoremlCallStats model_coreml_call_stats(ParakeetCtcModel & m) {
+    CoremlCallStats out;
+#ifdef PARAKEET_USE_COREML
+    if (m.impl && m.impl->coreml_diarizers) {
+        const CoremlDiarizerCallStats stats = m.impl->coreml_diarizers->call_stats();
+        out.coreml_passes = stats.coreml;
+        out.pending_passes = stats.not_ready;
+        out.label = stats.label;
+        out.capacity = stats.capacity;
+    }
+#else
+    (void) m;
+#endif
+    return out;
+}
 
 bool model_encoder_on_coreml(const ParakeetCtcModel & m) {
 #ifdef PARAKEET_USE_COREML
-    return m.impl && (m.impl->ctx_coreml != nullptr || m.impl->coreml_diarizers != nullptr ||
-        (m.model_variant == "transcribepsy-250m-eu" && model_selected_encoder_on_coreml(m, 1)));
+    if (!m.impl) return false;
+    if (ready_encoder_route(m).holds()) return true;
+    // TranscribePsy EU without its English fixed program: a flexible or
+    // precise program, validated on demand.
+    if (m.model_variant == "transcribepsy-250m-eu" && model_selected_encoder_on_coreml(m, 1)) {
+        return true;
+    }
+    if (!m.impl->coreml_diarizers) return false;
+    for (const auto & slot : m.impl->coreml->slots()) {
+        if (slot != m.impl->encoder_slot && slot != m.impl->bypass_slot &&
+            slot->state() == pcm::SlotState::ready) {
+            return true;
+        }
+    }
+    return false;
 #else
     (void) m;
     return false;
@@ -3167,13 +3625,11 @@ bool model_encoder_owned_by_coreml(const ParakeetCtcModel & m) {
 
 int model_coreml_seam_context_frames(const ParakeetCtcModel & m) {
 #ifdef PARAKEET_USE_COREML
-    if (m.impl && m.impl->ctx_coreml) {
-        return (int) parakeet_coreml_seam_context_frames(m.impl->ctx_coreml);
-    }
+    return ready_encoder_route(m).geometry().seam_context_frames;
 #else
     (void) m;
-#endif
     return 0;
+#endif
 }
 
 ::parakeet_coreml_decoder * model_coreml_decoder(const ParakeetCtcModel & m) {
@@ -3200,7 +3656,7 @@ std::string model_decoder_backend_name(const ParakeetCtcModel & m, bool include_
 
 bool model_bypass_encoder_on_coreml(const ParakeetCtcModel & m) {
 #ifdef PARAKEET_USE_COREML
-    return m.impl && m.impl->ctx_coreml_bypass != nullptr;
+    return m.impl && m.impl->bypass_slot && m.impl->bypass_slot->state() == pcm::SlotState::ready;
 #else
     (void) m;
     return false;
@@ -3209,24 +3665,21 @@ bool model_bypass_encoder_on_coreml(const ParakeetCtcModel & m) {
 
 int model_coreml_fixed_mel_frames(const ParakeetCtcModel & m) {
 #ifdef PARAKEET_USE_COREML
-    if (m.impl && m.impl->ctx_coreml) {
-        const int64_t frames =
-            parakeet_coreml_fixed_mel_frames(m.impl->ctx_coreml, m.mel_cfg.n_mels);
-        if (frames > 0 && frames <= std::numeric_limits<int>::max()) {
-            return (int) frames;
-        }
-    }
+    return ready_encoder_route(m).geometry().fixed_mel_frames;
 #else
     (void) m;
-#endif
     return 0;
+#endif
 }
 
 int model_coreml_bypass_fixed_frames(const ParakeetCtcModel & m) {
 #ifdef PARAKEET_USE_COREML
-    if (m.impl && m.impl->ctx_coreml_bypass) {
-        return (int) parakeet_coreml_fixed_mel_frames(
-            m.impl->ctx_coreml_bypass, m.encoder_cfg.d_model);
+    if (m.impl && m.impl->bypass_slot) {
+        pcm::Acquired a = acquire_if_ready(*m.impl->bypass_slot);
+        if (a.model) {
+            return (int) parakeet_coreml_fixed_mel_frames(
+                a.model->as<parakeet_coreml_context>(), m.encoder_cfg.d_model);
+        }
     }
 #else
     (void) m;
@@ -3236,12 +3689,16 @@ int model_coreml_bypass_fixed_frames(const ParakeetCtcModel & m) {
 
 std::string model_encoder_backend_name(const ParakeetCtcModel & m) {
 #ifdef PARAKEET_USE_COREML
-    if (m.impl && !m.impl->last_coreml_encoder_backend.empty())
+    // TranscribePsy EU reports where its last dispatch ran (its programs
+    // differ per route, length and placement).
+    if (m.impl && m.model_variant == "transcribepsy-250m-eu" &&
+        !m.impl->last_coreml_encoder_backend.empty()) {
         return m.impl->last_coreml_encoder_backend;
-    if (m.impl && m.impl->ctx_coreml) {
-        return parakeet_coreml_backend_label(m.impl->ctx_coreml);
     }
-    if (m.impl && m.impl->coreml_diarizers) {
+    if (const EncoderRoute route = ready_encoder_route(m); route.holds()) {
+        return route.coreml_label();
+    }
+    if (m.impl && m.impl->coreml_diarizers && model_encoder_on_coreml(m)) {
         return m.impl->coreml_diarizers->label();
     }
 #endif
@@ -4055,6 +4512,14 @@ DwConvLowering select_dw_lowering(const ParakeetCtcModel & model, ggml_backend_t
     return DwConvLowering::Im2col;
 }
 
+ggml_tensor * mask_convolution_padding(ggml_context * ctx, ggml_tensor * x,
+                                       int valid_frames) {
+    if (valid_frames >= x->ne[1]) return x;
+    const int padding = static_cast<int>(x->ne[1]) - valid_frames;
+    auto * prefix = ggml_cont(ctx, valid_mel_prefix(ctx, x, valid_frames));
+    return zero_pad_dim1(ctx, prefix, 0, padding);
+}
+
 ggml_tensor * conformer_conv_graph(ggml_context * ctx, ggml_tensor * xn,
                                    const BlockWeights & W,
                                    int d_model, int /*T*/, int conv_kernel,
@@ -4062,7 +4527,7 @@ ggml_tensor * conformer_conv_graph(ggml_context * ctx, ggml_tensor * xn,
                                    bool glu_fused,
                                    ConvNormType conv_norm_type,
                                    bool conv_causal,
-                                   float layer_norm_eps) {
+                                   float layer_norm_eps, int valid_frames) {
     // Use the weight directly when the GGUF already stores it squeezed to
     // (d_model, 2*d_model): a reshape is a view node, and a view over a
     // CPU-repack weight drops the repack traits (the mul_mat would then read
@@ -4094,6 +4559,8 @@ ggml_tensor * conformer_conv_graph(ggml_context * ctx, ggml_tensor * xn,
                          (size_t) d_model * y->nb[0]));
         y = ggml_mul(ctx, half1, ggml_sigmoid(ctx, half2));
     }
+
+    y = mask_convolution_padding(ctx, y, valid_frames);
 
     const int pad_left  = conv_causal ? (conv_kernel - 1) : ((conv_kernel - 1) / 2);
     const int pad_right = conv_causal ? 0                 : ((conv_kernel - 1) / 2);
@@ -4179,7 +4646,7 @@ ggml_tensor * conformer_block_graph(ggml_context * ctx, ggml_tensor * x,
                                     bool glu_fused,
                                     ConvNormType conv_norm_type,
                                     bool conv_causal,
-                                    float ff_headroom) {
+                                    float ff_headroom, int valid_frames) {
     ggml_tensor * residual = x;
     ggml_tensor * y = conformer_ff_graph(ctx, x,
                                          W.norm_ff1_w, W.norm_ff1_b,
@@ -4196,7 +4663,7 @@ ggml_tensor * conformer_block_graph(ggml_context * ctx, ggml_tensor * x,
     residual = x;
     xn = layer_norm_affine(ctx, x, W.norm_conv_w, W.norm_conv_b, eps);
     y = conformer_conv_graph(ctx, xn, W, d_model, T, conv_kernel, dw_lowering, glu_fused,
-                             conv_norm_type, conv_causal, eps);
+                             conv_norm_type, conv_causal, eps, valid_frames);
     x = ggml_add(ctx, residual, y);
 
     residual = x;
@@ -4495,6 +4962,17 @@ void build_pos_proj_cache(const ParakeetCtcModel & model, EncoderGraph & g, ggml
     }
 }
 
+constexpr float kMaskedAttentionScore = -1.0e30f;
+
+void mask_attention_padding(std::vector<float> & mask, int frames, int valid_frames) {
+    if (valid_frames >= frames) return;
+    if (mask.empty()) mask.assign((size_t) frames * frames, 0.0f);
+    for (int query = 0; query < frames; ++query) {
+        auto row = mask.begin() + (size_t) query * frames;
+        std::fill(row + valid_frames, row + frames, kMaskedAttentionScore);
+    }
+}
+
 // `measure_compute` (fit projection): when non-null the graph is built
 // normally but its compute buffer is only *sized* into `*measure_compute`
 // instead of reserved; no compute buffer is allocated and
@@ -4546,6 +5024,13 @@ static int build_encoder_graph_cached(const ParakeetCtcModel & model,
         T  = L3;
     }
 
+    // Standard offline TDT follows NeMo's padding masks in attention and convolution.
+    const bool mask_tdt_padding = !bypass_pre_encode &&
+        model.model_type == ParakeetModelType::TDT &&
+        model.model_variant != kTranscribePsyEuVariant;
+    const int valid_frames = mask_tdt_padding
+        ? sub_out_len(sub_out_len(sub_out_len(mel_valid))) : T;
+
     g.pe_host = compute_rel_pos_encoding(T, d_model);
 
     // Build the chunked-limited attention mask host-side once per graph.
@@ -4565,13 +5050,8 @@ static int build_encoder_graph_cached(const ParakeetCtcModel & model,
         const int left  = enc.att_context_left;
         const int right = enc.att_context_right;
         const int chunk = right + 1;
-        // Use a large finite "very negative" sentinel rather than -inf:
-        // Apple Clang at -O3 emits `-Wnan-infinity-disabled` because some
-        // FP optimisations treat infinity as UB, which empirically
-        // corrupts the chunked-limited mask on the EOU offline encoder
-        // (CTC / TDT use full attention so they're unaffected). Softmax
-        // with -1e30 saturates to ~0 just like -inf, with no UB risk.
-        g.att_mask_host.assign((size_t) T * T, -1.0e30f);
+        // A finite score masks keys without relying on infinity under Apple fast-math.
+        g.att_mask_host.assign((size_t) T * T, kMaskedAttentionScore);
         for (int i = 0; i < T; ++i) {
             const int c          = i / chunk;
             const int win_start  = c * chunk - left;
@@ -4584,6 +5064,7 @@ static int build_encoder_graph_cached(const ParakeetCtcModel & model,
     } else {
         g.att_mask_host.clear();
     }
+    mask_attention_padding(g.att_mask_host, T, valid_frames);
 
     const size_t graph_slots = GGML_DEFAULT_GRAPH_SIZE * 16;
     const size_t overhead = ggml_tensor_overhead() * graph_slots
@@ -4614,7 +5095,7 @@ static int build_encoder_graph_cached(const ParakeetCtcModel & model,
         g.pre_encode_in = nullptr;
     }
     g.pe_in   = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, d_model, 2 * T - 1);
-    if (use_chunked_mask) {
+    if (!g.att_mask_host.empty()) {
         g.att_mask = ggml_new_tensor_4d(gctx, GGML_TYPE_F32, T, T, 1, 1);
         ggml_set_name(g.att_mask, "att_mask");
         ggml_set_input(g.att_mask);
@@ -4751,7 +5232,8 @@ static int build_encoder_graph_cached(const ParakeetCtcModel & model,
             residual = x;
             xn = layer_norm_affine(gctx, x, W.norm_conv_w, W.norm_conv_b, eps);
             y = conformer_conv_graph(gctx, xn, W, d_model, T, conv_kernel, dw_lowering,
-                                     model.impl->glu_fused, enc.conv_norm_type, enc.conv_causal, eps);
+                                     model.impl->glu_fused, enc.conv_norm_type, enc.conv_causal, eps,
+                                     valid_frames);
             x = ggml_add(gctx, residual, y);
             g.post_conv_0_node = x;
             ggml_set_name(g.post_conv_0_node, "block_0_post_conv");
@@ -4777,7 +5259,7 @@ static int build_encoder_graph_cached(const ParakeetCtcModel & model,
             x = conformer_block_graph(gctx, x, g.pe_in, layer_pos_proj(i), g.att_mask, model.blocks[i],
                                       d_model, H, HD, T, conv_kernel, eps,
                                       dw_lowering, model.impl->attn, model.impl->glu_fused,
-                                      enc.conv_norm_type, enc.conv_causal, ff_headroom);
+                                      enc.conv_norm_type, enc.conv_causal, ff_headroom, valid_frames);
         }
         if (model.eu_use_adapters) {
             for (const auto & a : model.eu_adapters) {
@@ -4860,7 +5342,9 @@ static int build_encoder_graph_cached(const ParakeetCtcModel & model,
     return 0;
 }
 
-#ifdef PARAKEET_USE_COREML
+// Core ML encoder dispatch (portable: the sidecar call itself goes through the
+// unit's EncoderRoute, so builds without Core ML simply never hold a route).
+//
 // Post-subsampling encoder frame count (T_enc), derived purely from the mel frame
 // count via the three stride-2 subsampling convs -- the same recurrence run_encoder
 // uses to size the ggml graph, so the Core ML output slab matches frame-for-frame.
@@ -4881,6 +5365,16 @@ static bool encoder_is_offline(const EncoderConfig & enc) {
         && !enc.causal_downsampling;
 }
 
+#ifdef PARAKEET_USE_COREML
+// ── TranscribePsy EU encoder programs ──────────────────────────────────
+// Not on the runtime: run_encoder picks one of these per dispatch and runs it
+// directly; a failure falls back to ggml (or is an error for the owner).
+
+// The resolved compute units the EU placement policy reads (null: unset).
+static const char * eu_policy_units(const ParakeetCtcModel & model) {
+    return model.impl && model.impl->coreml ? loader_units(model.impl->coreml->resolved()) : nullptr;
+}
+
 static void clear_eu_precise_main_contexts(ParakeetCtcModel::Impl & impl) {
     parakeet_coreml_free(impl.ctx_coreml_eu_flexible);
     parakeet_coreml_free(impl.ctx_coreml_eu_other_flexible);
@@ -4893,7 +5387,7 @@ static void clear_eu_precise_main_contexts(ParakeetCtcModel::Impl & impl) {
 
 static parakeet_coreml_context * selected_eu_precise_gpu(const ParakeetCtcModel & model, int frames, int valid_frames) {
     auto & impl = *model.impl;
-    const char * units = std::getenv("PARAKEET_COREML_COMPUTE_UNITS");
+    const char * units = eu_policy_units(model);
 #if defined(__APPLE__) && TARGET_OS_IPHONE
     // iOS 18 MPSGraph aborts when static FP32 programs follow the CPU gate or
     // reload across routes. The masked FP32 CPU program preserves every mode.
@@ -4915,7 +5409,7 @@ static parakeet_coreml_context * selected_eu_precise_gpu(const ParakeetCtcModel 
             return impl.ctx_coreml_eu_precise_gpu;
         clear_eu_precise_main_contexts(impl);
         impl.ctx_coreml_eu_precise_gpu = load_eu_coreml_encoder(path,
-            model.eu_use_adapters ? "other" : "en", model.encoder_cfg.n_layers,
+            model.eu_use_adapters ? "other" : "en", model.encoder_cfg.n_layers, units,
             EuCoremlKind::PreciseGpu, capacity);
         if (impl.ctx_coreml_eu_precise_gpu) {
             impl.eu_precise_gpu_path = path;
@@ -4926,14 +5420,13 @@ static parakeet_coreml_context * selected_eu_precise_gpu(const ParakeetCtcModel 
     return nullptr;
 }
 
+// The TranscribePsy EU program for one dispatch: the gate tap, the fixed
+// program of the current language route when the input fits it, else a
+// precise (FP32 GPU, then flexible CPU) program, loaded on first use.
 static parakeet_coreml_context * selected_coreml_encoder(
         const ParakeetCtcModel & model, int max_layers, int n_mel_frames, int mel_valid, bool prefer_precise_eu) {
-    if (!model.impl) return nullptr;
-    if (model.model_variant != "transcribepsy-250m-eu") {
-        if (max_layers >= 0 && max_layers < model.encoder_cfg.n_layers) return nullptr;
-        return model.impl->ctx_coreml;
-    }
-    const char * units = std::getenv("PARAKEET_COREML_COMPUTE_UNITS");
+    if (!model.impl || model.model_variant != "transcribepsy-250m-eu") return nullptr;
+    const char * units = eu_policy_units(model);
     const bool cpu_only = parakeet::coreml_eu_requires_cpu_precision(units);
     if (max_layers == model.eu_gate.layer + 1 && !model.eu_use_adapters) {
         if (!cpu_only && !prefer_precise_eu && model.impl->ctx_coreml_eu_gate)
@@ -4941,7 +5434,7 @@ static parakeet_coreml_context * selected_coreml_encoder(
         auto & gate = model.impl->ctx_coreml_eu_gate_flexible;
         if (!gate && !model.impl->eu_gate_flexible_path.empty())
             gate = load_eu_coreml_encoder(model.impl->eu_gate_flexible_path, "gate",
-                                          model.eu_gate.layer + 1, EuCoremlKind::FlexibleCpu);
+                                          model.eu_gate.layer + 1, units, EuCoremlKind::FlexibleCpu);
         return gate;
     }
     if (max_layers >= 0 && max_layers < model.encoder_cfg.n_layers) return nullptr;
@@ -4963,27 +5456,45 @@ static parakeet_coreml_context * selected_coreml_encoder(
         parakeet_coreml_free(previous);
         previous = nullptr;
         flexible = load_eu_coreml_encoder(path, model.eu_use_adapters ? "other" : "en",
-                                          model.encoder_cfg.n_layers, EuCoremlKind::FlexibleCpu);
+                                          model.encoder_cfg.n_layers, units, EuCoremlKind::FlexibleCpu);
     }
     return flexible;
 }
 
-static bool should_use_coreml_encoder(const ParakeetCtcModel & model,
-                                      int n_mel_frames,
-                                      bool all_valid,
-                                      bool capture_intermediates,
-                                      bool allow_coreml_padded,
-                                      parakeet_coreml_context * ctx) {
-    if (!ctx) return false;
+// Whether the EU program `ctx` can take this dispatch. A program that
+// preserves encoder padding takes any input whose encoder frames fit it.
+static bool eu_coreml_encoder_takes(const ParakeetCtcModel & model, parakeet_coreml_context * ctx,
+                                    int n_mel_frames, bool capture_intermediates) {
+    if (!ctx || capture_intermediates) return false;  // per-stage parity harnesses stay on ggml
+    if (model.model_type != ParakeetModelType::TDT) return false;
+    const int64_t capacity = parakeet_coreml_fixed_mel_frames(ctx, model.mel_cfg.n_mels);
+    const bool padding_fits = parakeet_coreml_preserves_encoder_padding(ctx) &&
+        coreml_encoder_out_frames(model.encoder_cfg, n_mel_frames) <=
+            coreml_encoder_out_frames(model.encoder_cfg, capacity);
+    return encoder_is_offline(model.encoder_cfg) &&
+        (capacity <= 0 || n_mel_frames <= capacity || padding_fits);
+}
+#endif  // PARAKEET_USE_COREML
+
+static bool coreml_encoder_takes_shape(const ParakeetCtcModel & model,
+                                       const EncoderRoute & route,
+                                       int n_mel_frames,
+                                       bool all_valid,
+                                       bool capture_intermediates,
+                                       bool allow_coreml_padded) {
+    // TranscribePsy EU picks its program per dispatch (eu_coreml_encoder_takes).
+    if (model.model_variant == "transcribepsy-250m-eu") return false;
+    if (!model.impl || !route.usable()) return false;
     if (model.model_type != ParakeetModelType::CTC &&
         model.model_type != ParakeetModelType::RNNT &&
         model.model_type != ParakeetModelType::TDT &&
         model.model_type != ParakeetModelType::EOU &&
         model.model_type != ParakeetModelType::NEMOTRON &&
         model.model_type != ParakeetModelType::SORTFORMER) return false;
-    if (!all_valid && !allow_coreml_padded &&
-        model.model_variant != "transcribepsy-250m-eu") return false;
+    if (!all_valid && !allow_coreml_padded) return false;
     if (capture_intermediates) return false;  // per-stage parity harnesses stay on ggml
+    // CTC, RNN-T and TDT: the capacity is checked by the caller
+    // (coreml_encoder_eligibility), so a longer input is "cannot serve".
     if (model.model_type == ParakeetModelType::CTC) {
         return encoder_is_offline(model.encoder_cfg) &&
                model.encoder_cfg.conv_norm_type == ConvNormType::BatchNorm;
@@ -4993,16 +5504,10 @@ static bool should_use_coreml_encoder(const ParakeetCtcModel & model,
                model.encoder_cfg.conv_norm_type == ConvNormType::BatchNorm;
     }
     if (model.model_type == ParakeetModelType::TDT) {
-        const int64_t capacity = parakeet_coreml_fixed_mel_frames(ctx, model.mel_cfg.n_mels);
-        const bool padding_fits = model.model_variant == "transcribepsy-250m-eu" &&
-            parakeet_coreml_preserves_encoder_padding(ctx) &&
-            coreml_encoder_out_frames(model.encoder_cfg, n_mel_frames) <=
-                coreml_encoder_out_frames(model.encoder_cfg, capacity);
-        return encoder_is_offline(model.encoder_cfg) &&
-            (capacity <= 0 || n_mel_frames <= capacity || padding_fits);
+        return encoder_is_offline(model.encoder_cfg);
     }
     if (model.model_type == ParakeetModelType::SORTFORMER) {
-        const int fixed_frames = model_coreml_fixed_mel_frames(model);
+        const int fixed_frames = route.geometry().fixed_mel_frames;
         return model.model_variant == "sortformer-streaming-v2.1-aosc" &&
                fixed_frames > 0 &&
                n_mel_frames == fixed_frames &&
@@ -5013,7 +5518,7 @@ static bool should_use_coreml_encoder(const ParakeetCtcModel & model,
     // into the compiled program. Never pad a shorter invocation: added future
     // encoder frames can change token emission (and the EOU boundary).
     const EncoderConfig & enc = model.encoder_cfg;
-    const int fixed_frames = model_coreml_fixed_mel_frames(model);
+    const int fixed_frames = route.geometry().fixed_mel_frames;
     return fixed_frames > 0
         && n_mel_frames == fixed_frames
         && enc.causal_downsampling
@@ -5022,6 +5527,54 @@ static bool should_use_coreml_encoder(const ParakeetCtcModel & model,
         && enc.att_chunked_limited
         && enc.att_context_left >= 0
         && enc.att_context_right >= 0;
+}
+
+// Where one encoder dispatch may run. A fixed-capacity handle (an offline
+// fixed export or the ANE window) cannot serve a longer CTC, RNN-T or TDT
+// input: that dispatch is "cannot serve", which runs on ggml and leaves the
+// route usable (a capacity miss is not a prediction failure), or throws on a
+// strict route. EOU, Nemotron and the AOSC bypass need the exact compiled
+// shape, so any other length is simply a ggml dispatch.
+static EncoderEligibility coreml_encoder_eligibility(const ParakeetCtcModel & model,
+                                                     const EncoderRoute & route,
+                                                     int n_mel_frames,
+                                                     bool all_valid,
+                                                     bool capture_intermediates,
+                                                     bool allow_coreml_padded) {
+    if (!coreml_encoder_takes_shape(model, route, n_mel_frames, all_valid,
+                                    capture_intermediates, allow_coreml_padded)) {
+        return EncoderEligibility::ggml;
+    }
+    const bool capacity_bound = model.model_type == ParakeetModelType::CTC ||
+                                model.model_type == ParakeetModelType::RNNT ||
+                                model.model_type == ParakeetModelType::TDT;
+    if (capacity_bound && !route_fits_capacity(route, n_mel_frames)) {
+        return EncoderEligibility::cannot_serve;
+    }
+    return EncoderEligibility::coreml;
+}
+
+void model_coreml_check_stream_window(ParakeetCtcModel & m, int window_mel_frames,
+                                      const std::atomic<bool> * cancel) {
+#ifdef PARAKEET_USE_COREML
+    // Strict streams, and streams on an encoder Core ML owns (no ggml
+    // weights to run a window the sidecar cannot take), are checked.
+    if (!m.impl || !m.impl->coreml) return;
+    const bool owned = m.impl->ctx_coreml != nullptr && m.impl->coreml_owns_encoder;
+    if (!owned && !m.impl->coreml->resolved().strict()) return;
+    const EncoderRoute route = acquire_encoder_route(m, cancel);
+    // The same eligibility the window's run_encoder computes (every frame
+    // valid, no capture, no padding).
+    const EncoderEligibility eligibility = coreml_encoder_eligibility(
+        m, route, window_mel_frames, /*all_valid=*/true, /*capture_intermediates=*/false,
+        /*allow_coreml_padded=*/false);
+    const std::string reason = strict_stream_window_refusal(route, eligibility, window_mel_frames);
+    if (!reason.empty()) route.refuse("Engine::stream_start: " + reason, false);
+#else
+    (void) m;
+    (void) window_mel_frames;
+    (void) cancel;
+#endif
 }
 
 static int run_coreml_ctc_head(ParakeetCtcModel & model,
@@ -5080,42 +5633,18 @@ static int run_coreml_ctc_head(ParakeetCtcModel & model,
     return 0;
 }
 
-// Fills out.encoder_out from the Core ML sidecar, then runs the CTC projection
-// on ggml when required. Returns 0 when handled on Core ML; non-zero lets the
-// caller fall back to the complete native encoder graph.
-static int run_encoder_coreml(ParakeetCtcModel & model,
-                              parakeet_coreml_context * ctx,
-                              const float      * mel,
-                              int                n_mel_frames,
-                              int                mel_valid,
-                              int                n_mels,
-                              EncoderOutputs   & out) {
-    const EncoderConfig & enc     = model.encoder_cfg;
-    const int             d_model = enc.d_model;
-    const bool masked = model.model_variant == "transcribepsy-250m-eu" ||
-        parakeet_coreml_masks_mel_padding(ctx);
-    const bool preserve_padding = parakeet_coreml_preserves_encoder_padding(ctx);
-    const int T = coreml_encoder_out_frames(enc,
-        masked && !preserve_padding ? mel_valid : n_mel_frames);
-    const int fixed_capacity = (int) parakeet_coreml_fixed_mel_frames(ctx, n_mels);
-    const int input_frames = preserve_padding
-        ? (fixed_capacity > 0 ? std::min(n_mel_frames, fixed_capacity) : n_mel_frames)
-        : model.model_variant == "transcribepsy-250m-eu" ? mel_valid : n_mel_frames;
-
-    out.n_enc_frames = T;
-    out.d_model      = d_model;
-    out.vocab_size   = model.vocab_size;
-    out.encoder_out.resize((size_t) T * d_model);
-
-    const int rc = parakeet_coreml_encode_valid(ctx,
-                                           input_frames, mel_valid, n_mels, mel,
-                                           T, d_model, out.encoder_out.data());
-    if (rc != 0) return rc;
+// The shared tail of a Core ML encoder dispatch: rejects non-finite
+// features, runs the CTC projection on ggml when required and clears the
+// per-stage captures. Returns 0 when the dispatch is complete; non-zero lets
+// the caller fall back to the complete native encoder graph.
+static int finish_coreml_encoder_output(ParakeetCtcModel & model, int T, EncoderOutputs & out) {
+#ifdef PARAKEET_USE_COREML
     if (!parakeet::coreml_features_are_finite(out.encoder_out.data(), out.encoder_out.size())) {
         PARAKEET_LOG_WARN("parakeet: Core ML encoder returned non-finite features\n");
         constexpr int kNonFiniteCoremlFeatures = -10;
         return kNonFiniteCoremlFeatures;
     }
+#endif
 
     if (model.model_type == ParakeetModelType::CTC) {
         const int head_rc = run_coreml_ctc_head(
@@ -5126,7 +5655,6 @@ static int run_encoder_coreml(ParakeetCtcModel & model,
     }
 
     out.used_coreml = true;
-    model.impl->last_coreml_encoder_backend = parakeet_coreml_backend_label(ctx);
     out.subsampling_out.clear();
     out.block_0_post_ff1.clear();
     out.block_0_post_attn.clear();
@@ -5136,13 +5664,74 @@ static int run_encoder_coreml(ParakeetCtcModel & model,
     out.block_last_out.clear();
     return 0;
 }
+
+// Fills out.encoder_out from the Core ML sidecar, then runs the CTC projection
+// on ggml when required. Returns 0 when handled on Core ML; non-zero lets the
+// caller fall back to the complete native encoder graph.
+static int run_encoder_coreml(ParakeetCtcModel & model,
+                              const EncoderRoute & route,
+                              const float      * mel,
+                              int                n_mel_frames,
+                              int                mel_valid,
+                              int                n_mels,
+                              EncoderOutputs   & out) {
+    const EncoderConfig & enc     = model.encoder_cfg;
+    const int             d_model = enc.d_model;
+    const bool masked = route.geometry().masks_mel_padding;
+    const int T = coreml_encoder_out_frames(enc, masked ? mel_valid : n_mel_frames);
+
+    out.n_enc_frames = T;
+    out.d_model      = d_model;
+    out.vocab_size   = model.vocab_size;
+    out.encoder_out.resize((size_t) T * d_model);
+
+    // Under the shared model's prediction lock (one in flight per instance).
+    const int rc = route.encode(n_mel_frames, mel_valid, n_mels, mel,
+                                T, d_model, out.encoder_out.data());
+    if (rc != 0) return rc;
+    return finish_coreml_encoder_output(model, T, out);
+}
+
+#ifdef PARAKEET_USE_COREML
+// One TranscribePsy EU dispatch on the program selected_coreml_encoder chose.
+// Every EU program masks the mel padding; one that preserves the encoder
+// padding returns the frames of the whole (padded) input.
+static int run_eu_encoder_coreml(ParakeetCtcModel & model,
+                                 parakeet_coreml_context * ctx,
+                                 const float * mel,
+                                 int n_mel_frames,
+                                 int mel_valid,
+                                 int n_mels,
+                                 EncoderOutputs & out) {
+    const EncoderConfig & enc     = model.encoder_cfg;
+    const int             d_model = enc.d_model;
+    const bool preserve_padding = parakeet_coreml_preserves_encoder_padding(ctx);
+    const int T = coreml_encoder_out_frames(enc, preserve_padding ? n_mel_frames : mel_valid);
+    const int fixed_capacity = (int) parakeet_coreml_fixed_mel_frames(ctx, n_mels);
+    const int input_frames = preserve_padding
+        ? (fixed_capacity > 0 ? std::min(n_mel_frames, fixed_capacity) : n_mel_frames)
+        : mel_valid;
+
+    out.n_enc_frames = T;
+    out.d_model      = d_model;
+    out.vocab_size   = model.vocab_size;
+    out.encoder_out.resize((size_t) T * d_model);
+
+    const int rc = parakeet_coreml_encode_valid(ctx,
+                                           input_frames, mel_valid, n_mels, mel,
+                                           T, d_model, out.encoder_out.data());
+    if (rc != 0) return rc;
+    const int finish_rc = finish_coreml_encoder_output(model, T, out);
+    if (finish_rc == 0) model.impl->last_coreml_encoder_backend = parakeet_coreml_backend_label(ctx);
+    return finish_rc;
+}
 #endif  // PARAKEET_USE_COREML
 
 bool model_selected_encoder_on_coreml(const ParakeetCtcModel & model, int n_mel_frames) {
 #ifdef PARAKEET_USE_COREML
     if (n_mel_frames <= 0) return false;
     auto * ctx = selected_coreml_encoder(model, -1, n_mel_frames, n_mel_frames, false);
-    return should_use_coreml_encoder(model, n_mel_frames, true, false, true, ctx);
+    return eu_coreml_encoder_takes(model, ctx, n_mel_frames, /*capture_intermediates=*/false);
 #else
     (void) model;
     (void) n_mel_frames;
@@ -5357,11 +5946,17 @@ size_t encoder_graph_cache_size(const ParakeetCtcModel & model) {
     return model.impl ? model.impl->encoder_graphs.size() : 0;
 }
 
+static int run_encoder_ggml(ParakeetCtcModel & model, const float * mel, int n_mel_frames,
+                            int n_mels, EncoderOutputs & out, int max_layers,
+                            bool capture_intermediates, const EncoderOutputConsumer & consumer,
+                            int mel_valid, bool all_valid);
+
 int run_encoder(ParakeetCtcModel   & model,
                 const float        * mel,
                 int                  n_mel_frames,
                 int                  n_mels,
                 EncoderOutputs     & out,
+                const EncoderRoute & route,
                 int                  max_layers,
                 bool                 capture_intermediates,
                 bool                 allow_coreml_padded,
@@ -5372,13 +5967,6 @@ int run_encoder(ParakeetCtcModel   & model,
     out.used_coreml = false;
     out.encoder_consumed = false;
     if (!model.impl || !model.impl->backend_active) return -1;
-
-    ggml_backend_t backend = model.impl->backend_active;
-#ifdef PARAKEET_USE_COREML
-    model.impl->last_coreml_encoder_backend = ggml_backend_name(backend);
-#endif
-    const EncoderConfig & enc = model.encoder_cfg;
-    const int d_model = enc.d_model;
 
     // Scan from the end for the last non-zero mel frame: the mel
     // pre-processor zeros out trailing pad frames (per-feature CMVN
@@ -5402,22 +5990,71 @@ int run_encoder(ParakeetCtcModel   & model,
     const bool all_valid = (mel_valid == n_mel_frames);
 
 #ifdef PARAKEET_USE_COREML
-    // Apple Core ML sidecar: run a validated CTC/IndicConformer, Unified RNN-T,
-    // TDT, EOU, Nemotron, or Sortformer FastConformer encoder and hand
-    // encoder_out back to the ggml decoder or diarization head.
-    auto * coreml = selected_coreml_encoder(model, max_layers, n_mel_frames, mel_valid, prefer_precise_eu);
-    if (should_use_coreml_encoder(model, n_mel_frames, all_valid, capture_intermediates,
-                                  allow_coreml_padded, coreml)) {
-        const int rc = run_encoder_coreml(model, coreml, mel, n_mel_frames, mel_valid, n_mels, out);
-        if (rc == 0) return 0;
-        if (model.impl->coreml_owns_encoder) {
-            PARAKEET_LOG_ERROR("parakeet: Core ML encoder failed (rc=%d) and the GGUF holds no "
-                               "encoder weights to fall back to\n", rc);
-            return rc;
+    // TranscribePsy EU runs its own programs, picked per dispatch (its route
+    // only shaped the plan). A failure falls back to ggml, or is an error
+    // when the programs own the encoder.
+    if (model.model_variant == "transcribepsy-250m-eu") {
+        model.impl->last_coreml_encoder_backend = ggml_backend_name(model.impl->backend_active);
+        auto * coreml = selected_coreml_encoder(model, max_layers, n_mel_frames, mel_valid, prefer_precise_eu);
+        if (eu_coreml_encoder_takes(model, coreml, n_mel_frames, capture_intermediates)) {
+            const int rc = run_eu_encoder_coreml(model, coreml, mel, n_mel_frames, mel_valid, n_mels, out);
+            if (rc == 0) return 0;
+            if (model.impl->coreml_owns_encoder) {
+                PARAKEET_LOG_ERROR("parakeet: Core ML encoder failed (rc=%d) and the GGUF holds no "
+                                   "encoder weights to fall back to\n", rc);
+                return rc;
+            }
+            PARAKEET_LOG_WARN("parakeet: Core ML encoder failed (rc=%d); falling back to ggml encoder\n", rc);
         }
-        PARAKEET_LOG_WARN("parakeet: Core ML encoder failed (rc=%d); falling back to ggml encoder\n", rc);
+        return run_encoder_ggml(model, mel, n_mel_frames, n_mels, out, max_layers,
+                                capture_intermediates, consumer, mel_valid, all_valid);
     }
+#else
+    (void) prefer_precise_eu;
 #endif
+
+    // Core ML sidecar on the unit's route: a validated CTC/
+    // IndicConformer, Unified RNN-T, TDT, EOU, Nemotron, or Sortformer
+    // FastConformer encoder hands encoder_out back to the ggml decoder or
+    // diarization head. A failure retires the sidecar; this dispatch and the
+    // rest of the unit run on ggml with the plan already chosen. A pass over
+    // only the first layers (a tap) never goes to the sidecar.
+    const bool partial_layers = max_layers >= 0 && max_layers < model.encoder_cfg.n_layers;
+    const EncoderEligibility eligibility = partial_layers
+        ? EncoderEligibility::ggml
+        : coreml_encoder_eligibility(model, route, n_mel_frames, all_valid,
+                                     capture_intermediates, allow_coreml_padded);
+    bool used_coreml = false;
+    int coreml_rc = 0;
+    const int rc = dispatch_on_route(
+        route, eligibility,
+        [&] { return run_encoder_coreml(model, route, mel, n_mel_frames, mel_valid, n_mels, out); },
+        [&] {
+            if (encode_prediction_failed(coreml_rc)) {
+                PARAKEET_LOG_WARN("parakeet: Core ML encoder failed (rc=%d); retired it, "
+                                  "falling back to the ggml encoder\n", coreml_rc);
+            } else if (coreml_rc != 0) {
+                PARAKEET_LOG_WARN("parakeet: Core ML encoder cannot serve this call (rc=%d); "
+                                  "running it on the ggml encoder\n", coreml_rc);
+            }
+            return run_encoder_ggml(model, mel, n_mel_frames, n_mels, out, max_layers,
+                                    capture_intermediates, consumer, mel_valid, all_valid);
+        },
+        used_coreml, &coreml_rc);
+    if (rc != 0 && route.owner() && coreml_rc != 0 && !used_coreml) {
+        PARAKEET_LOG_ERROR("parakeet: Core ML encoder failed (rc=%d) and the GGUF holds no "
+                           "encoder weights to fall back to\n", rc);
+    }
+    return rc;
+}
+
+static int run_encoder_ggml(ParakeetCtcModel & model, const float * mel, int n_mel_frames,
+                            int n_mels, EncoderOutputs & out, int max_layers,
+                            bool capture_intermediates, const EncoderOutputConsumer & consumer,
+                            int mel_valid, bool all_valid) {
+    ggml_backend_t backend = model.impl->backend_active;
+    const EncoderConfig & enc = model.encoder_cfg;
+    const int d_model = enc.d_model;
 
     auto & cache = model.impl->encoder_graphs;
     const int layers_key = std::clamp(
@@ -5679,7 +6316,8 @@ bool resolve_transcribepsy_eu_route(ParakeetCtcModel & model,
                                     const float * cropped_mel,
                                     int cropped_mel_frames,
                                     int audio_samples,
-                                    bool * encoder_used_coreml, bool prefer_precise_eu) {
+                                    bool * encoder_used_coreml, bool prefer_precise_eu,
+                                    EncoderBackendTally * gate_tally) {
     if (encoder_used_coreml) *encoder_used_coreml = true;
     if (model.model_variant != "transcribepsy-250m-eu") return false;
     model.eu_use_adapters = false;
@@ -5700,8 +6338,11 @@ bool resolve_transcribepsy_eu_route(ParakeetCtcModel & model,
     const EuGateMel input = prepare_eu_gate_mel(
         model, mel, n_mel_frames, n_mels, cropped_mel, cropped_mel_frames);
     EncoderOutputs tap;
+    // The gate tap is a partial-layer pass: not a runtime route; run_encoder
+    // picks the EU gate program for it.
     const int rc = run_encoder(model, input.data(), input.frames, n_mels, tap,
-                               gate.layer + 1, /*capture_intermediates=*/false,
+                               EncoderRoute::ggml(), gate.layer + 1,
+                               /*capture_intermediates=*/false,
                                /*allow_coreml_padded=*/true, {},
                                eu_gate_valid_mel_frames(model, input, audio_samples), prefer_precise_eu);
     if (rc != 0 || tap.n_enc_frames <= 0 ||
@@ -5713,6 +6354,9 @@ bool resolve_transcribepsy_eu_route(ParakeetCtcModel & model,
         tap.n_enc_frames);
     const float probability = eu_gate_head(gate, eu_gate_pool(gate, tap.encoder_out, frames, dim));
     if (encoder_used_coreml) *encoder_used_coreml = tap.used_coreml;
+    // The gate is one dispatch of the call; its program is the EU dispatch
+    // label run_encoder just recorded.
+    if (gate_tally) gate_tally->add(tap.used_coreml, tap.used_coreml ? model_encoder_backend_name(model) : std::string());
     PARAKEET_LOG_INFO("TranscribePsy EU gate encoder: %s\n", tap.used_coreml ? "coreml" : "ggml");
     if (p_non_english) *p_non_english = probability;
     model.eu_use_adapters = probability >= gate.threshold;
@@ -5762,22 +6406,35 @@ int run_encoder_bypass_pre_encode(ParakeetCtcModel & model,
 #ifdef PARAKEET_USE_COREML
     // The AOSC sidecar has a fixed capacity. Shorter cache/FIFO/chunk slabs are
     // zero-padded and accompanied by an attention-validity mask inside the
-    // Core ML wrapper; oversized/custom geometries keep the ggml path.
-    if (model.impl->ctx_coreml_bypass != nullptr &&
+    // Core ML wrapper; oversized/custom geometries keep the ggml path. One
+    // AOSC step is the unit: it acquires the slot once, runs on ggml while the
+    // slot is loading, and a failure retires the sidecar.
+    if (model.impl->bypass_slot != nullptr &&
         model.model_type == ParakeetModelType::SORTFORMER &&
         model.model_variant == "sortformer-streaming-v2.1-aosc" &&
         max_layers < 0) {
-        const int fixed_frames = (int) parakeet_coreml_fixed_mel_frames(
-            model.impl->ctx_coreml_bypass, d_model);
+        pcm::Acquired acquired =
+            model.impl->bypass_slot->acquire(pcm::Demand::now, std::nullopt, model.impl->unit_cancel);
+        auto * ctx = acquired.model ? acquired.model->as<parakeet_coreml_context>() : nullptr;
+        const int fixed_frames = ctx ? (int) parakeet_coreml_fixed_mel_frames(ctx, d_model) : 0;
+        const bool strict = model.impl->coreml->resolved().strict();
+        if (strict && ctx != nullptr && !(fixed_frames > 0 && n_pre_encode_frames <= fixed_frames)) {
+            throw pcm::CoremlError("the Core ML bypass encoder cannot serve this step (" +
+                                       std::to_string(n_pre_encode_frames) +
+                                       " frames) and Core ML is required",
+                                   pcm::SlotState::ready, pcm::ErrorClass::deterministic);
+        }
         if (fixed_frames > 0 && n_pre_encode_frames <= fixed_frames) {
             out.n_enc_frames = n_pre_encode_frames;
             out.d_model = d_model;
             out.vocab_size = model.vocab_size;
             out.encoder_out.resize((size_t) n_pre_encode_frames * d_model);
-            const int rc = parakeet_coreml_encode_embeddings(
-                model.impl->ctx_coreml_bypass,
-                n_pre_encode_frames, d_model, pre_encode_in,
-                out.encoder_out.data());
+            int rc = 0;
+            {
+                auto prediction = acquired.model->lock_for_prediction();
+                rc = parakeet_coreml_encode_embeddings(ctx, n_pre_encode_frames, d_model,
+                                                       pre_encode_in, out.encoder_out.data());
+            }
             if (rc == 0) {
                 out.used_coreml = true;
                 out.subsampling_out.clear();
@@ -5790,11 +6447,24 @@ int run_encoder_bypass_pre_encode(ParakeetCtcModel & model,
                 out.logits.clear();
                 return 0;
             }
-            PARAKEET_LOG_WARN(
-                "parakeet: Core ML bypass encoder failed (rc=%d); "
-                "quarantining sidecar and falling back to ggml encoder\n", rc);
-            parakeet_coreml_free(model.impl->ctx_coreml_bypass);
-            model.impl->ctx_coreml_bypass = nullptr;
+            if (encode_prediction_failed(rc)) {
+                PARAKEET_LOG_WARN(
+                    "parakeet: Core ML bypass encoder failed (rc=%d); "
+                    "retiring the sidecar and falling back to ggml encoder\n", rc);
+                model.impl->bypass_slot->retire("prediction failed (rc=" + std::to_string(rc) + ")");
+            } else if (!strict) {
+                PARAKEET_LOG_WARN(
+                    "parakeet: Core ML bypass encoder cannot serve this step (rc=%d); "
+                    "running it on the ggml encoder\n", rc);
+            }
+            if (strict) {
+                const bool failed = encode_prediction_failed(rc);
+                throw pcm::CoremlError("the Core ML bypass encoder " +
+                                           std::string(failed ? "prediction failed" : "cannot serve this step") +
+                                           " (rc=" + std::to_string(rc) + ") and Core ML is required",
+                                       failed ? pcm::SlotState::retired : pcm::SlotState::ready,
+                                       failed ? pcm::ErrorClass::transient : pcm::ErrorClass::deterministic);
+            }
         }
     }
 #endif
@@ -5940,7 +6610,7 @@ static int build_substage_graph(const ParakeetCtcModel & model,
         ggml_tensor * xn = layer_norm_affine(g.ctx, x, W.norm_conv_w, W.norm_conv_b, eps);
         ggml_tensor * y = conformer_conv_graph(g.ctx, xn, W, d_model, T, conv_kernel,
                                                select_dw_lowering(model, backend), model.impl->glu_fused,
-                                               enc.conv_norm_type, enc.conv_causal, eps);
+                                               enc.conv_norm_type, enc.conv_causal, eps, T);
         x = ggml_add(g.ctx, r, y);
     }
     if (stage == Substage::FF2 || stage == Substage::FULL_BLOCK) {

@@ -34,6 +34,12 @@
 #include <stdexcept>
 #include <thread>
 
+#if defined(TTS_CPP_USE_CBLAS) && defined(__ELF__) && (defined(__GNUC__) || defined(__clang__))
+// Optional: TTS_CPP_USE_CBLAS can resolve to OpenBLAS, MKL, BLIS, etc.
+// OpenBLAS may have already read its environment when libtts-cpp was loaded.
+extern "C" void openblas_set_num_threads(int) __attribute__((weak));
+#endif
+
 namespace tts_cpp::supertonic::detail {
 namespace {
 
@@ -198,7 +204,7 @@ std::vector<float> expand_supertonic_tensor_to_f32(const ggml_tensor * src) {
     const void * data = ggml_get_data(src);
     // Use the public ggml_get_type_traits() API instead of the
     // internal ggml-quants.h helpers.  ggml-quants.h lives under
-    // ggml/src/ and isn't shipped by the ggml-speech vcpkg port,
+    // ggml/src/ and isn't shipped by the qvac-fabric vcpkg port,
     // so direct includes break system-ggml builds (the integrated
     // tts-cpp port path).  The type-traits to_float function pointer
     // is the public dequantization entry-point and covers F16, Q8_0
@@ -335,7 +341,7 @@ bool backend_supports_native_leaky_relu(ggml_backend_t backend) {
 }
 
 // Backend capability probe for the Supertonic fused custom ops
-// (GGML_OP_SUPERTONIC_*).  Builds a throwaway depthwise_1d node with the
+// (GGML_OP_CONV_1D_DW_DIRECT and friends).  Builds a throwaway depthwise_1d node with the
 // minimal valid shape (a=[L,C] F32, w=[K=3,1,C,1] F32, b=[C] F32) inside a
 // no-alloc scratch context and asks the backend whether it would accept it.
 // ggml-cpu and ggml-metal implement the supertonic ops; ggml-vulkan and
@@ -358,7 +364,7 @@ bool backend_supports_fused_supertonic_ops(ggml_backend_t backend) {
         ggml_tensor * a  = ggml_new_tensor_2d(probe_ctx, GGML_TYPE_F32, 8, 4);       // [L=8, C=4]
         ggml_tensor * w  = ggml_new_tensor_4d(probe_ctx, GGML_TYPE_F32, 3, 1, 4, 1); // [K=3,1,C=4,1]
         ggml_tensor * b  = ggml_new_tensor_1d(probe_ctx, GGML_TYPE_F32, 4);          // [C=4]
-        ggml_tensor * op = ggml_supertonic_depthwise_1d(probe_ctx, a, w, b, /*dilation=*/1);
+        ggml_tensor * op = ggml_conv_1d_dw_direct(probe_ctx, a, w, b, /*dilation=*/1);
         ok = (op != nullptr) && ggml_backend_supports_op(backend, op);
     } catch (...) {
         ok = false;
@@ -700,7 +706,7 @@ bool backend_supports_f16_src1_mul_mat_uncached(ggml_backend_t backend) {
 // DIFFERENT type, the stale entry replayed the old backend's
 // capabilities — e.g. a CPU backend's fused_supertonic_ops=true onto a
 // CUDA backend, which then aborted in ggml-cuda on the unimplemented
-// GGML_OP_SUPERTONIC_DEPTHWISE_1D (intermittent by allocator luck; hit
+// GGML_OP_CONV_1D_DW_DIRECT (intermittent by allocator luck; hit
 // on the qvac tts-ggml linux-x64 CUDA integration lane).  Test seam:
 // `supertonic_clear_capability_cache` drops every entry — used by the
 // unit test to verify the cache is hit on the second call.
@@ -735,7 +741,7 @@ struct backend_capabilities {
     // to skip ggml-vulkan's internal staging-buffer hop on the
     // per-step uploads.
     bool pinned_host_buffer;
-    // True iff the backend implements the GGML_OP_SUPERTONIC_* fused ops
+    // True iff the backend implements the fused Supertonic ops (GGML_OP_CONV_1D_DW_DIRECT etc.)
     // (ggml-cpu / ggml-metal yes; ggml-vulkan / ggml-opencl no).  Gates the
     // fused-op fast paths vs the pure-GGML decomposition in the graph builders.
     bool fused_supertonic_ops;
@@ -865,20 +871,30 @@ bool find_invalid_vulkan_env_key(const std::map<std::string, std::string> & over
 
 void configure_supertonic_blas_threads_once() {
 #if defined(TTS_CPP_USE_ACCELERATE)
-    static bool configured = false;
-    if (configured) return;
-    configured = true;
-    // The Supertonic CPU graphs already parallelize across GGML tasks. Letting
-    // Accelerate spawn a second worker pool for every small pointwise matmul
-    // hurts vector scaling on 3-4 thread runs.
-    set_env_if_unset("VECLIB_MAXIMUM_THREADS", "1");
+    static const bool configured = [] {
+        // The Supertonic CPU graphs already parallelize across GGML tasks.
+        // A second worker pool for each small matmul hurts scaling.
+        set_env_if_unset("VECLIB_MAXIMUM_THREADS", "1");
+        return true;
+    }();
+    (void) configured;
 #elif defined(TTS_CPP_USE_CBLAS)
-    static bool configured = false;
-    if (configured) return;
-    configured = true;
-    set_env_if_unset("OPENBLAS_NUM_THREADS", "1");
-    set_env_if_unset("MKL_NUM_THREADS", "1");
-    set_env_if_unset("BLIS_NUM_THREADS", "1");
+    static const bool configured = [] {
+        const bool openblas_threads_explicit = std::getenv("OPENBLAS_NUM_THREADS") != nullptr;
+        set_env_if_unset("OPENBLAS_NUM_THREADS", "1");
+        set_env_if_unset("MKL_NUM_THREADS", "1");
+        set_env_if_unset("BLIS_NUM_THREADS", "1");
+#if defined(__ELF__) && (defined(__GNUC__) || defined(__clang__))
+        // Setting the environment alone is too late after OpenBLAS has been
+        // loaded: it retains its original worker count. Apply the same
+        // default to the live runtime, preserving an explicit user setting.
+        if (!openblas_threads_explicit && openblas_set_num_threads) {
+            openblas_set_num_threads(1);
+        }
+#endif
+        return true;
+    }();
+    (void) configured;
 #endif
 }
 
@@ -2101,6 +2117,10 @@ static bool load_supertonic_gguf_impl(const std::string & path,
                                       const std::vector<std::string> & f16_weights_deny_list,
                                       supertonic_fit_load_measure * measure,
                                       const std::string & backend) {
+    // BLAS runtimes can read their worker count while a backend library is
+    // loaded. Configure the default before init_supertonic_backend, not only
+    // later when Engine/bench calls supertonic_set_n_threads.
+    configure_supertonic_blas_threads_once();
     model.generation_id = next_supertonic_generation_id();
     model.precision_id = static_cast<int>(precision);
     // The load path supports F32 / F16 / Q8_0 destination types.
@@ -2296,16 +2316,13 @@ static bool load_supertonic_gguf_impl(const std::string & path,
         model.ctx_w = ggml_init(params);
         if (!model.ctx_w) throw std::runtime_error("ggml_init failed");
 
-        std::unordered_map<std::string, std::vector<float>>     expanded_f32_tensors;
-        // Phase 2A: tensors materialised as F16 land their host-side
-        // F16 payload here.  `ggml_fp16_t` is a 16-bit half-float;
-        // we use `uint16_t` storage to avoid a public-header dep on
-        // ggml's f16 typedef.
-        std::unordered_map<std::string, std::vector<uint16_t>>   f16_materialised_tensors;
-        // Tensors that need a Metal-specific type conversion (e.g.
-        // f32 → q8_0 for `--precision q8_0`) keep their converted
-        // bytes here, held alive until the backend upload loop runs.
-        std::unordered_map<std::string, std::vector<uint8_t>>    converted_tensors;
+        // All destination tensors must be declared before allocating the
+        // backend weight buffer. Keep only the F16 policy decisions here;
+        // convert and upload one source tensor at a time after allocation.
+        // Retaining every expanded/converted payload until then needlessly
+        // adds their sum to peak host RSS (especially for Q8_0 GGUFs).
+        std::unordered_set<std::string> f16_materialised_names;
+        uint64_t largest_upload_staging_bytes = 0;
 
         // Ensure the source-alias map is populated even when the
         // Phase 2A `use_f16_weights` path didn't already build it —
@@ -2450,39 +2467,21 @@ static bool load_supertonic_gguf_impl(const std::string & path,
             model.tensors[name] = dst;
 
             if (measure) {
-                // No data leaves the disk.  Charge the transient host staging
-                // the real load holds until its upload loop finishes: the
-                // gguf full-copy bytes, plus (for every retyped tensor) the
-                // f32 intermediate and the destination-type payload.
+                // The GGUF reader retains the full source payload until all
+                // uploads finish. Conversion staging is now bounded by the
+                // largest single tensor, not the sum of converted tensors.
                 measure->host_transient_bytes += (uint64_t) ggml_nbytes(src);
                 if (dst_type != src->type) {
-                    measure->host_transient_bytes += (uint64_t) ggml_nelements(src) * 4;
-                    measure->host_transient_bytes += (uint64_t) ggml_nbytes(dst);
+                    largest_upload_staging_bytes = std::max(
+                        largest_upload_staging_bytes,
+                        (uint64_t) ggml_nelements(src) * 4 + (uint64_t) ggml_nbytes(dst));
                 }
             } else if (f16_materialise) {
-                // Phase 2A F16 materialise path.
-                std::vector<float> src_f32;
-                if (should_expand_supertonic_tensor(src->type)) {
-                    src_f32 = expand_supertonic_tensor_to_f32(src);
-                } else {
-                    const int64_t n = ggml_nelements(src);
-                    src_f32.resize((size_t) n);
-                    std::memcpy(src_f32.data(), ggml_get_data(src), (size_t) n * sizeof(float));
-                }
-                std::vector<uint16_t> & f16 = f16_materialised_tensors[name];
-                f16.resize(src_f32.size());
-                ggml_fp32_to_fp16_row(src_f32.data(),
-                                      reinterpret_cast<ggml_fp16_t *>(f16.data()),
-                                      (int64_t) src_f32.size());
-            } else if (needs_supertonic_tensor_conversion(src->type, dst_type)) {
-                // Precision-driven conversion (ours).  Covers f32 → q8_0,
-                // q8_0 → f32, f16 → f32 etc.  Buffered here, uploaded later.
-                convert_supertonic_tensor_data(src, dst_type, converted_tensors[name]);
-            } else if (should_stage_f32_expansion(src->type, dst_type)) {
-                // Legacy fallback: f16/q8_0 src with f32 dst that didn't go
-                // through the conversion helper above.
-                expanded_f32_tensors[name] = expand_supertonic_tensor_to_f32(src);
+                f16_materialised_names.insert(name);
             }
+        }
+        if (measure) {
+            measure->host_transient_bytes += largest_upload_staging_bytes;
         }
 
         // Audit finding F2 — declare the pre-baked vocoder BN
@@ -2560,27 +2559,28 @@ static bool load_supertonic_gguf_impl(const std::string & path,
                 // here so we don't deref a null `src`.
                 continue;
             }
-            // Phase 2A: F16-materialised tensors take precedence over
-            // the precision-converted / F32-expanded paths (they may
-            // have been promoted from either F32 or F16/Q8_0 sources).
-            auto f16_mat = f16_materialised_tensors.find(ggml_get_name(cur));
-            if (f16_mat != f16_materialised_tensors.end()) {
-                ggml_backend_tensor_set(cur, f16_mat->second.data(), 0,
-                                        f16_mat->second.size() * sizeof(uint16_t));
+            // Preserve the curated F16 materialisation path's conversion
+            // semantics while limiting both scratch arrays to one tensor.
+            if (f16_materialised_names.count(ggml_get_name(cur)) != 0) {
+                std::vector<float> src_f32;
+                if (should_expand_supertonic_tensor(src->type)) {
+                    src_f32 = expand_supertonic_tensor_to_f32(src);
+                } else {
+                    const int64_t n = ggml_nelements(src);
+                    src_f32.resize((size_t) n);
+                    std::memcpy(src_f32.data(), ggml_get_data(src), (size_t) n * sizeof(float));
+                }
+                std::vector<uint16_t> f16(src_f32.size());
+                ggml_fp32_to_fp16_row(src_f32.data(),
+                                      reinterpret_cast<ggml_fp16_t *>(f16.data()),
+                                      (int64_t) src_f32.size());
+                ggml_backend_tensor_set(cur, f16.data(), 0, f16.size() * sizeof(uint16_t));
                 continue;
             }
-            // Precision-driven conversion (`--precision q8_0`/f16 etc.) —
-            // bytes are already in dst-type representation.
-            auto converted = converted_tensors.find(ggml_get_name(cur));
-            if (converted != converted_tensors.end()) {
-                ggml_backend_tensor_set(cur, converted->second.data(), 0,
-                                        converted->second.size());
-            } else if (auto expanded = expanded_f32_tensors.find(ggml_get_name(cur));
-                       expanded != expanded_f32_tensors.end()) {
-                // Legacy f16/q8_0 → f32 expansion (used when the
-                // conversion helper didn't run).
-                ggml_backend_tensor_set(cur, expanded->second.data(), 0,
-                                        expanded->second.size() * sizeof(float));
+            if (needs_supertonic_tensor_conversion(src->type, cur->type)) {
+                std::vector<uint8_t> converted;
+                convert_supertonic_tensor_data(src, cur->type, converted);
+                ggml_backend_tensor_set(cur, converted.data(), 0, converted.size());
             } else {
                 ggml_backend_tensor_set(cur, ggml_get_data(src), 0, ggml_nbytes(src));
             }

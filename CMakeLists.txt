@@ -1,7 +1,8 @@
 # QVAC speech superbuild: feature-gated umbrella over the vendored
 # whisper.cpp (third_party/, git subtree, see third_party/whisper.cpp/PATCHES.md)
 # and our engines (engines/). Every component consumes ONE system ggml —
-# the ggml-speech vcpkg port built from qvac-ext-ggml@speech — so the
+# the ggml tree of qvac-fabric-llm.cpp, published as the qvac-fabric vcpkg
+# port and shared with the LLM stack — so the
 # stack shares a single ggml pin and file set; the ggml/ tree vendored
 # inside the whisper subtree is never compiled.
 #
@@ -24,8 +25,8 @@ if (SPEECH_BUILD_TESTS)
     enable_testing()
 endif()
 
-# One ggml for everything. Resolved from the ggml-speech vcpkg port (or
-# any qvac-ext-ggml@speech install on CMAKE_PREFIX_PATH). Every
+# One ggml for everything. Resolved from the qvac-fabric vcpkg port (or
+# any qvac-fabric-llm.cpp ggml install on CMAKE_PREFIX_PATH). Every
 # subproject below guards its own ggml acquisition with
 # `if (NOT TARGET ggml)`, so defining the target here short-circuits
 # all of them onto this single import.
@@ -110,4 +111,14 @@ if (SPEECH_BUILD_TESTS)
     target_compile_features(test-moss-gpu-arm PRIVATE cxx_std_17)
     add_test(NAME test-moss-gpu-arm COMMAND $<TARGET_FILE:test-moss-gpu-arm>)
     set_property(TEST test-moss-gpu-arm PROPERTY LABELS unit)
+
+    # Shared Core ML runtime (engines/coreml): every engine library carries its
+    # own copy in its own namespace. test-coreml-link puts tts-cpp,
+    # qvac-parakeet and audiogen (and all three runtime copies) in one binary to
+    # catch duplicate symbols. Registered on Apple when TTS_CPP_COREML,
+    # PARAKEET_COREML and AUDIOGEN_COREML are all on.
+    if (APPLE)
+        include(${CMAKE_CURRENT_SOURCE_DIR}/engines/coreml/qvac_coreml.cmake)
+        qvac_coreml_add_link_test(TARGETS tts-cpp qvac-parakeet audiogen-cpp)
+    endif()
 endif()

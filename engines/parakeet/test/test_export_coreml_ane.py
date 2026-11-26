@@ -7,9 +7,12 @@ export-decoder-coreml-ane.py against its scalar reference on random weights.
 """
 
 import importlib.util
+import platform
 import sys
+import tempfile
 import types
 import unittest
+from unittest import mock
 from pathlib import Path
 
 try:
@@ -49,6 +52,7 @@ ENCODER = load("export-encoder-coreml-ane.py", "export_encoder_coreml_ane")
 DECODER = load("export-decoder-coreml-ane.py", "export_decoder_coreml_ane")
 REFERENCE = load("ref-encoder-from-gguf.py", "ref_encoder_from_gguf")
 GENERIC = load("export-encoder-coreml.py", "export_encoder_coreml")
+EXPERIMENT = load("export-transcribepsy-eu-coreml-experiment.py", "export_eu_coreml_experiment")
 
 
 def toy_encoder_weights(d_model=8, n_layers=2, n_heads=2, n_mels=8, channels=4, ff_dim=16,
@@ -106,6 +110,107 @@ def toy_encoder_weights(d_model=8, n_layers=2, n_heads=2, n_mels=8, channels=4, 
 
 
 class EuEncoderTests(unittest.TestCase):
+    def test_routed_encoder_matches_independent_routes_and_unadapted_gate(self):
+        model = EXPERIMENT.RoutedEncoder(REFERENCE, self.weights, self.meta, 64).eval()
+        mel = torch.randn(8, 64)
+        for valid in (1, 7, 8, 17, 63, 64):
+            inputs, count = ENCODER.window_inputs(model, mel, valid)
+            for scale, route in ((0, "en"), (1, "other")):
+                with self.subTest(valid=valid, route=route), torch.inference_mode():
+                    output, gate = model(*inputs, torch.full((1, 1, 1, 1), float(scale)))
+                    want = ENCODER.reference_frames(REFERENCE, self.weights, self.meta,
+                                                     mel, valid, route)
+                    self.assertLess(ENCODER.relative_error(output[0, :, 0, :count].T, want),
+                                    ENCODER.PARITY_REL_TOLERANCE)
+                    if scale == 0:
+                        want_gate = ENCODER.reference_frames(REFERENCE, self.weights, self.meta,
+                                                              mel, valid, "gate")
+                        self.assertLess(ENCODER.relative_error(gate[0, :, 0, :count].T, want_gate),
+                                        ENCODER.PARITY_REL_TOLERANCE)
+
+    def test_tracing_preserves_runtime_adapter_selection(self):
+        model = EXPERIMENT.RoutedEncoder(REFERENCE, self.weights, self.meta, 64).eval()
+        inputs, _ = ENCODER.window_inputs(model, torch.randn(8, 64))
+        zero = torch.zeros(1, 1, 1, 1)
+        traced = torch.jit.trace(model, (*inputs, zero), check_trace=False)
+        with torch.inference_mode():
+            english, _ = traced(*inputs, zero)
+            other, _ = traced(*inputs, torch.ones_like(zero))
+            expected, _ = model(*inputs, torch.ones_like(zero))
+        torch.testing.assert_close(other, expected)
+        self.assertGreater(float((other - english).abs().max()), 0.01)
+
+    def test_multifunction_predictions_skip_on_macos14(self):
+        spec = importlib.util.spec_from_file_location("ane_tests_macos14", __file__)
+        module = importlib.util.module_from_spec(spec)
+        with mock.patch.object(sys, "platform", "darwin"), \
+                mock.patch.object(platform, "mac_ver", return_value=("14.7.0", ("", "", ""), "")):
+            spec.loader.exec_module(module)
+        case = module.EuEncoderTests("test_multifunction_shares_weights_and_preserves_route_outputs")
+        result = unittest.TestResult()
+        case.run(result)
+        self.assertEqual(result.testsRun, 1)
+        self.assertEqual(len(result.skipped), 1)
+        self.assertEqual(result.errors, [])
+        self.assertEqual(result.failures, [])
+
+    @unittest.skipUnless(sys.platform == "darwin" and int(platform.mac_ver()[0].split(".")[0]) >= 15,
+                         "Multifunction Core ML predictions require macOS 15+")
+    def test_multifunction_shares_weights_and_preserves_route_outputs(self):
+        import coremltools as ct
+
+        if not hasattr(ct, "convert"):
+            self.skipTest("coremltools is not installed")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            descriptor = ct.utils.MultiFunctionDescriptor()
+            mel = torch.randn(8, 64)
+            for route in EXPERIMENT.ROUTES:
+                model = ENCODER.AneEncoder(REFERENCE, self.weights, self.meta, 64,
+                                           eu_route=route).eval()
+                converted = EXPERIMENT.convert_encoder(model, unified=False)
+                path = root / f"{route}.mlpackage"
+                converted.save(str(path))
+                descriptor.add_function(str(path), "main", route)
+            descriptor.default_function_name = "en"
+            shared = root / "shared.mlpackage"
+            ct.utils.save_multifunction(descriptor, str(shared))
+            shared_weights = sum(path.stat().st_size for path in shared.rglob("*.bin"))
+            separate_weights = sum(path.stat().st_size for route in EXPERIMENT.ROUTES
+                                   for path in (root / f"{route}.mlpackage").rglob("*.bin"))
+            self.assertLess(shared_weights, separate_weights)
+            for route in EXPERIMENT.ROUTES:
+                model = ENCODER.AneEncoder(REFERENCE, self.weights, self.meta, 64,
+                                           eu_route=route).eval()
+                inputs, count = ENCODER.window_inputs(model, mel)
+                compiled = ct.models.MLModel(str(shared), function_name=route,
+                                              compute_units=ct.ComputeUnit.CPU_ONLY)
+                output = compiled.predict({name: value.numpy().astype(np.float16)
+                                           for name, value in zip(EXPERIMENT.INPUT_NAMES, inputs)})
+                got = torch.from_numpy(output["encoder_out"][0, :, 0, :count].T.copy())
+                want = ENCODER.reference_frames(REFERENCE, self.weights, self.meta, mel,
+                                                 eu_route=route)
+                self.assertLess(ENCODER.relative_error(got, want), 0.01)
+
+    def test_experiments_require_gate_capacity_and_preserve_existing_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "routed.mlpackage"
+            arguments = ["export", "--gguf", "source.gguf", "--route", "unified",
+                         "--out", str(output)]
+            with mock.patch("sys.stderr"):
+                with self.assertRaises(SystemExit):
+                    EXPERIMENT.parse_arguments([*arguments, "--window-mel-frames", "2000"])
+                with self.assertRaises(SystemExit):
+                    EXPERIMENT.parse_arguments([*arguments, "--palettize-workers", "0"])
+            self.assertEqual(EXPERIMENT.parse_arguments(arguments).window_mel_frames, 2001)
+            output.mkdir()
+            with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+                EXPERIMENT.parse_arguments(arguments)
+
+    def test_multifunction_palettization_requires_compressed_sources(self):
+        with self.assertRaisesRegex(ValueError, "Palettize each source route"):
+            EXPERIMENT.merge_encoders(types.SimpleNamespace(nbits=6))
+
     def test_fp32_exports_preserve_uncompressed_precision(self):
         ENCODER.validate_fixed_precision("fp32", 0)
         ENCODER.validate_fixed_precision("fp16", 6)
@@ -311,6 +416,76 @@ class DecoderExporterTests(unittest.TestCase):
     def test_default_lanes_and_width(self):
         self.assertEqual(DECODER.DEFAULT_LANES, 16)
         self.assertEqual(DECODER.DEFAULT_WIDTH, 1)
+
+
+class DecoderPalettizationTests(unittest.TestCase):
+    def test_joint_output_group_divides_real_and_other_channel_counts(self):
+        for channels, preferred, expected in ((8198, 32, 2), (8198, 16, 2),
+                                               (640, 16, 16), (8199, 16, 1)):
+            self.assertEqual(DECODER.joint_out_group_size(channels, preferred), expected)
+        for channels, preferred in ((0, 16), (8198, 0), (-1, 16)):
+            with self.assertRaises(ValueError):
+                DECODER.joint_out_group_size(channels, preferred)
+
+    @staticmethod
+    def make_model():
+        torch.manual_seed(10)
+        model = torch.nn.Sequential(torch.nn.Conv2d(64, 64, 1), torch.nn.ReLU(),
+                                    torch.nn.Conv2d(64, 70, 1)).eval()
+        traced = torch.jit.trace(model, torch.zeros(1, 64, 1, 1))
+        return DECODER.ct.convert(
+            traced, inputs=[DECODER.ct.TensorType(shape=(1, 64, 1, 1))],
+            compute_precision=DECODER.ct.precision.FLOAT16,
+            minimum_deployment_target=DECODER.ct.target.iOS18, skip_model_load=True)
+
+    @unittest.skipUnless(hasattr(DECODER.ct, "convert"), "coremltools is not installed")
+    def test_grouped_quantization_reaches_joint_output(self):
+        model = self.make_model()
+        result, names, group = DECODER.palettize_decoder_weights(model, 70, 6, 6, 16)
+        self.assertEqual(group, 2)
+        DECODER.verify_joint_out_palettization(result, names, 6, 2)
+        with self.assertRaisesRegex(RuntimeError, "requested 4-bit"):
+            DECODER.verify_joint_out_palettization(result, names, 4, 2)
+        with self.assertRaisesRegex(RuntimeError, "requested 6-bit/group 4"):
+            DECODER.verify_joint_out_palettization(result, names, 6, 4)
+
+    @unittest.skipUnless(hasattr(DECODER.ct, "convert"), "coremltools is not installed")
+    def test_output_only_and_fp16_output_modes(self):
+        for nbits, nbits_out in ((0, 6), (6, 0)):
+            with self.subTest(nbits=nbits, nbits_out=nbits_out):
+                result, names, group = DECODER.palettize_decoder_weights(
+                    self.make_model(), 70, nbits, nbits_out, 16)
+                DECODER.verify_joint_out_palettization(result, names, nbits_out, group)
+                other = [op for func in result._mil_program.functions.values()
+                         for op in func.operations if op.op_type == "conv" and op.name not in names]
+                self.assertEqual(len(other), 1)
+                self.assertEqual(other[0].weight.op.op_type,
+                                 "const" if nbits == 0 else "constexpr_lut_to_dense")
+
+    @unittest.skipUnless(hasattr(DECODER.ct, "convert"), "coremltools is not installed")
+    def test_cli_output_only_option_emits_a_compressed_package(self):
+        weights, meta = toy_tdt_weights(h_pred=64, h_joint=64, d_enc=64,
+                                       vocab=66, n_durations=3, layers=1)
+        reference = types.SimpleNamespace(load_gguf=lambda path: (weights, meta))
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "decoder.mlpackage"
+            argv = ["export-decoder", "--gguf", "unused.gguf", "--out", str(output),
+                    "--lanes", "1", "--nbits", "0", "--nbits-out", "6"]
+            with mock.patch.object(sys, "argv", argv), \
+                    mock.patch.object(DECODER, "_load_sibling", side_effect=[ENCODER, reference]):
+                self.assertEqual(DECODER.main(), 0)
+            model = DECODER.ct.models.MLModel(str(output), skip_model_load=True)
+            block = next(iter(model.get_spec().mlProgram.functions["main"].block_specializations.values()))
+            self.assertEqual(sum(op.type == "constexpr_lut_to_dense" for op in block.operations), 1)
+
+    @unittest.skipUnless(hasattr(DECODER.ct, "convert"), "coremltools is not installed")
+    def test_silently_skipped_or_missing_projection_fails(self):
+        model = self.make_model()
+        with mock.patch("coremltools.optimize.coreml.palettize_weights", return_value=model):
+            with self.assertRaisesRegex(RuntimeError, "was not palettized"):
+                DECODER.palettize_decoder_weights(model, 70, 6, 6, 16)
+        with self.assertRaisesRegex(RuntimeError, "projection missing"):
+            DECODER.palettize_decoder_weights(model, 71, 6, 6, 16)
 
 
 if __name__ == "__main__":

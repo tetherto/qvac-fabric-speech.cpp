@@ -1,4 +1,6 @@
-# ggml is cloned via scripts/setup-ggml.sh at a pinned commit; don't track it.
+# ggml is staged via scripts/setup-ggml.sh at a pinned commit (the fabric
+# clone plus the symlink to its ggml/ tree); don't track it.
+ggml-src/
 ggml/
 ggml
 

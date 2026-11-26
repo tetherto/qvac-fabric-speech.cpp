@@ -394,8 +394,10 @@ bool parler_dac_decode(const parler_model & model, const int32_t * codes, int n_
                        int n_threads, std::vector<float> & pcm_out,
                        std::vector<float> * latent_out,
                        int out_begin, int out_end, std::string * err_out,
-                       std::string * backend_out) {
+                       std::string * backend_out, bool * pending_out,
+                       const std::atomic<bool> * cancel) {
     std::string err;
+    if (pending_out) *pending_out = false;
     const parler_hparams & hp = model.hparams;
     const int n_q = hp.dac_n_q;
     // GPU: transposed-conv via phase-matmuls (fast GEMM). Env flag lets the CPU
@@ -426,19 +428,57 @@ bool parler_dac_decode(const parler_model & model, const int32_t * codes, int n_
         }
     }
 
+    // The backend of this whole call is chosen here, once: a statically
+    // attached sidecar, else whatever the pending seam has ready now.
+    parler_dac_call call;
     if (model.dac_sidecar) {
+        call.sidecar = model.dac_sidecar;
+    } else if (model.dac_pending) {
+        try {
+            call = model.dac_pending->acquire(out_end - out_begin, cancel);
+        } catch (const std::exception & e) {
+            err = e.what();
+            fprintf(stderr, "%s: %s\n", __func__, err.c_str());
+            pcm_out.clear();
+            if (latent_out) latent_out->clear();
+            if (err_out) *err_out = err;
+            return false;
+        }
+        if (cancel && cancel->load()) {
+            // the wait for the sidecar was interrupted: decode nothing
+            pcm_out.clear();
+            if (latent_out) latent_out->clear();
+            if (err_out) *err_out = "cancelled";
+            return false;
+        }
+        if (pending_out) *pending_out = call.pending;
+    }
+    if (call.sidecar) {
         pcm_out.clear();
         if (latent_out) latent_out->clear();
-        if (parler_dac_decode_sidecar(model, codes, n_frames, pcm_out, latent_out, out_begin, out_end)) {
-            if (backend_out) *backend_out = model.dac_sidecar->label();
+        if (parler_dac_decode_sidecar(model, *call.sidecar, codes, n_frames, pcm_out, latent_out, out_begin,
+                                      out_end)) {
+            if (backend_out) *backend_out = call.sidecar->label();
             return true;
         }
-        // retire the sidecar for the rest of the model's life and redo the whole
-        // range on ggml, so no output ever mixes a failed call's windows
+        // retire the sidecar and redo the whole range on ggml, so no output
+        // ever mixes a failed call's windows
         fprintf(stderr, "%s: Core ML DAC sidecar (%s) failed; retiring it, decoding on ggml\n",
-                __func__, model.dac_sidecar->label());
-        model.dac_sidecar.reset();
-        model.dac_sidecar_retired = true;
+                __func__, call.sidecar->label());
+        if (call.sidecar == model.dac_sidecar) {
+            model.dac_sidecar.reset();
+            model.dac_sidecar_retired = true;
+        } else if (call.retire) {
+            call.retire("a Core ML DAC prediction failed");
+            if (model.dac_pending && model.dac_pending->strict()) {
+                err = "the Core ML DAC sidecar failed; Core ML strict policy is enabled (use = require / " +
+                      std::string(PARLER_COREML_STRICT_ENV) + ")";
+                pcm_out.clear();
+                if (latent_out) latent_out->clear();
+                if (err_out) *err_out = err;
+                return false;
+            }
+        }
     }
     if (model.dac_sidecar_retired && model.dac_coreml_strict) {
         err = std::string("the Core ML DAC sidecar failed; Core ML strict policy is enabled (coreml_strict / ") +

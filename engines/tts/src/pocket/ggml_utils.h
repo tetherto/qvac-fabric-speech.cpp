@@ -55,7 +55,7 @@ inline uint64_t price_cpu_graph(ggml_backend_t backend, ggml_gallocr_t allocator
     const auto reg = ggml_backend_dev_backend_reg(device);
     const auto plan_graph = reinterpret_cast<decltype(&ggml_graph_plan)>(
         ggml_backend_reg_get_proc_address(reg, "ggml_graph_plan"));
-    if (!plan_graph) throw std::runtime_error("pocket: CPU backend lacks ggml_graph_plan; update ggml-speech");
+    if (!plan_graph) throw std::runtime_error("pocket: CPU backend lacks ggml_graph_plan; update the fabric ggml");
     const auto plan = plan_graph(graph, threads, nullptr);
     return uint64_t(arena) + plan.work_size;
 }
@@ -98,7 +98,7 @@ inline void validate_graph(ggml_backend_t backend, ggml_cgraph * graph, const He
             node->op == GGML_OP_PERMUTE || node->op == GGML_OP_TRANSPOSE) continue;
         if (!ggml_backend_supports_op(backend, node))
             throw std::runtime_error(std::string("pocket: ") + ggml_backend_name(backend) +
-                " does not support graph operation " + ggml_op_desc(node) + "; update ggml-speech");
+                " does not support graph operation " + ggml_op_desc(node) + "; update the fabric ggml");
     }
 }
 

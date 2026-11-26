@@ -11,7 +11,7 @@
 //
 // Everything here is in-memory (no npy / no file I/O) and depends only on ggml,
 // so it compiles unchanged against both the in-tree ggml (CLIs) and the
-// ggml-speech vcpkg port (library / addon).  Numerics validated against the
+// qvac-fabric vcpkg port (library / addon).  Numerics validated against the
 // PyTorch reference (flow_mel cosine 1.0, LM prefill cosine 1.0).
 
 #pragma once
