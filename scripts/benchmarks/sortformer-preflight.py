@@ -59,6 +59,8 @@ def arm_environment(arm):
     environment["PARAKEET_COREML_COMPUTE_UNITS"] = "cpu_and_ane"
     if arm == "metal":
         environment["PARAKEET_COREML_DISABLE"] = "1"
+    else:
+        environment["PARAKEET_COREML_STRICT"] = "1"
     return environment
 
 

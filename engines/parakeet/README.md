@@ -226,7 +226,10 @@ forced native Metal with a freshly exported fp16 2048-frame whole-network
 Core ML diarizer from the same q8_0 GGUF. The capacity covers the entire
 recording; only the full diarizer is staged beside the accelerated model, so
 `encoder_used_coreml` confirms whole-network execution. A native fallback or
-empty output fails the preflight. The audio frontend remains native.
+empty output fails the preflight. The accelerated process sets
+`PARAKEET_COREML_STRICT=1` so current runtimes wait for background sidecar
+loading and throw if the requested capacity cannot serve a call. The native
+process clears strict mode and disables Core ML. The audio frontend remains native.
 
 Artifacts retain each call's speaker probabilities, segments, routing flag,
 commands, logs, asset hashes and revisions. Probability comparisons use the

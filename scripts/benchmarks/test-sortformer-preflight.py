@@ -103,7 +103,10 @@ class FullNetworkTests(unittest.TestCase):
             PREFLIGHT.compare(self.result(), native)
 
     def test_environment_and_asset_isolation(self):
-        with patch.dict(os.environ, {"PARAKEET_COREML_DISABLE": "1", "PARAKEET_COREML_ONLY": "1"}):
+        with patch.dict(os.environ, {"PARAKEET_COREML_DISABLE": "1", "PARAKEET_COREML_ONLY": "1",
+                                     "PARAKEET_COREML_STRICT": "0"}):
+            self.assertEqual(PREFLIGHT.arm_environment("diarizer")["PARAKEET_COREML_STRICT"], "1")
+            self.assertNotIn("PARAKEET_COREML_STRICT", PREFLIGHT.arm_environment("metal"))
             self.assertNotIn("PARAKEET_COREML_DISABLE", PREFLIGHT.arm_environment("diarizer"))
             self.assertNotIn("PARAKEET_COREML_ONLY", PREFLIGHT.arm_environment("metal"))
             self.assertEqual(PREFLIGHT.arm_environment("metal")["PARAKEET_COREML_DISABLE"], "1")
