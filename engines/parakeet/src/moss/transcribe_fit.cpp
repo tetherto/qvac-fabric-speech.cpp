@@ -184,6 +184,20 @@ void measure_workload(FitResult & result, detail::TranscribeModel & model,
 
 } // namespace
 
+bool detail::charge_coreml_encoder(FitResult & result, uint64_t bytes) {
+    if (bytes == 0 || !result.device_shares_host_memory) {
+        result.reason = "coreml-memory-estimate-unavailable";
+        result.report = bytes == 0
+            ? "Core ML encoder bundle has no readable weights/weight.bin.\n"
+            : "Core ML and ggml use separate memory pools; no common fit budget is available.\n";
+        return false;
+    }
+    result.coreml.bytes = bytes;
+    result.coreml.encoder_route = "prebuilt";
+    result.host_bytes = sat_add(result.host_bytes, bytes);
+    return true;
+}
+
 void detail::finish_transcribe_fit(FitResult &result, uint64_t margin) {
   result.device.total_bytes =
       sat_add(result.device.weights_bytes,
@@ -245,16 +259,7 @@ FitResult fit_params(const TranscribeOptions & options, const TranscribeRequest 
 #ifdef PARAKEET_USE_COREML
             const std::string sidecar = detail::transcribe_encoder_sidecar_path(options.model_path);
             const uint64_t bytes = coreml_encoder_bytes(model, sidecar);
-            if (bytes == 0 || !result.device_shares_host_memory) {
-                result.reason = "coreml-memory-estimate-unavailable";
-                result.report = bytes == 0
-                    ? "Core ML encoder bundle has no readable weights/weight.bin.\n"
-                    : "Core ML and ggml use separate memory pools; no common fit budget is available.\n";
-                return result;
-            }
-            result.coreml.bytes = bytes;
-            result.coreml.encoder_route = "prebuilt";
-            result.host_bytes = sat_add(result.host_bytes, bytes);
+            if (!detail::charge_coreml_encoder(result, bytes)) return result;
 #endif
         }
         detail::finish_transcribe_fit(result, margin_bytes);

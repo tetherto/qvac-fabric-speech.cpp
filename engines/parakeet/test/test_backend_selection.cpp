@@ -162,6 +162,12 @@ void test_adreno_descriptions() {
 void test_memory_pool() {
     using parakeet::backend_device_memory;
     using parakeet::backend_shares_host_memory;
+    ggml_backend_dev_props metal = {};
+    metal.type = GGML_BACKEND_DEVICE_TYPE_GPU;
+    metal.memory_unified = false;
+    CHECK(!parakeet::backend_props_share_host_memory(metal));
+    metal.memory_unified = true;
+    CHECK(parakeet::backend_props_share_host_memory(metal));
     size_t free = 1, total = 1;
     backend_device_memory(nullptr, free, total);
     CHECK(free == 0 && total == 0);

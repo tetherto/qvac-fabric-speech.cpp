@@ -10358,6 +10358,9 @@ uint64_t whisper_fit_coreml_encoder_bytes(const std::string & path, const whispe
     if (stat(weight_path.c_str(), &weight_stat) != 0 || !S_ISREG(weight_stat.st_mode) || weight_stat.st_size <= 0) {
         return 0;
     }
+    std::FILE * weight_file = std::fopen(weight_path.c_str(), "rb");
+    if (!weight_file) return 0;
+    std::fclose(weight_file);
     const uint64_t weight_bytes = (uint64_t) weight_stat.st_size;
     uint64_t encoder_parameters = 0;
     for (const auto & ctx : model.ctxs) {
@@ -10746,7 +10749,8 @@ int whisper_fit_params(const struct whisper_fit_options * opts, struct whisper_f
     return (int) result->status;
 }
 
-int whisper_fit_actual(const struct whisper_fit_options * opts, struct whisper_fit_breakdown * out) {
+static int whisper_fit_actual_impl(const struct whisper_fit_options * opts, struct whisper_fit_breakdown * out,
+                                   bool * encoder_on_coreml) {
     if (opts == nullptr || opts->model_path == nullptr || out == nullptr ||
         opts->n_decoders < 1 || opts->n_decoders > WHISPER_MAX_DECODERS) {
         return 1;
@@ -10768,6 +10772,13 @@ int whisper_fit_actual(const struct whisper_fit_options * opts, struct whisper_f
     if (state == nullptr) {
         whisper_free(ctx);
         return 1;
+    }
+    if (encoder_on_coreml) {
+#ifdef WHISPER_USE_COREML
+        *encoder_on_coreml = state->ctx_coreml != nullptr;
+#else
+        *encoder_on_coreml = false;
+#endif
     }
 
     // n_decoders > 1: reproduce whisper_full_with_state's KV recreation (the
@@ -10872,4 +10883,15 @@ int whisper_fit_actual(const struct whisper_fit_options * opts, struct whisper_f
     whisper_free(ctx);
 
     return 0;
+}
+
+int whisper_fit_actual(const struct whisper_fit_options * opts, struct whisper_fit_breakdown * out) {
+    return whisper_fit_actual_impl(opts, out, nullptr);
+}
+
+int whisper_fit_actual_with_route(const struct whisper_fit_options * opts, struct whisper_fit_breakdown * out,
+                                  bool * encoder_on_coreml) {
+    if (!encoder_on_coreml) return 1;
+    *encoder_on_coreml = false;
+    return whisper_fit_actual_impl(opts, out, encoder_on_coreml);
 }

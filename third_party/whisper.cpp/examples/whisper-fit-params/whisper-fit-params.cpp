@@ -227,7 +227,8 @@ int main(int argc, char ** argv) {
         vopts.n_decoders = 1;
         whisper_fit_result pr1;
         whisper_fit_params(&vopts, &pr1);
-        if (whisper_fit_actual(&vopts, &actual) != 0) {
+        bool actual_uses_coreml = false;
+        if (whisper_fit_actual_with_route(&vopts, &actual, &actual_uses_coreml) != 0) {
             fprintf(stderr, "whisper-fit-params: --verify: real load failed\n");
             return (int) WHISPER_FIT_ERROR;
         }
@@ -237,7 +238,9 @@ int main(int argc, char ** argv) {
         printf("  kv cache: %14" PRIu64 " vs %14" PRIu64 "%s\n", pr1.device.kv_bytes, actual.kv_bytes,
                pr1.device.kv_bytes == actual.kv_bytes ? "" : "  MISMATCH");
         printf("  compute:  %14" PRIu64 " vs %14" PRIu64 "%s\n", pr1.device.compute_bytes, actual.compute_bytes,
-               pr1.device.compute_bytes == actual.compute_bytes ? "" : "  MISMATCH");
+               actual_uses_coreml && pr1.device.compute_bytes != actual.compute_bytes
+                   ? "  (expected: Core ML skips the ggml encoder scheduler)"
+                   : pr1.device.compute_bytes == actual.compute_bytes ? "" : "  MISMATCH");
         printf("  vad:      %14" PRIu64 " vs %14" PRIu64 "%s\n", pr1.device.vad_bytes, actual.vad_bytes,
                pr1.device.vad_bytes == actual.vad_bytes ? "" : "  MISMATCH");
         printf("  host ovf: %14" PRIu64 " vs %14" PRIu64 "%s\n", pr1.device.host_overflow_bytes, actual.host_overflow_bytes,

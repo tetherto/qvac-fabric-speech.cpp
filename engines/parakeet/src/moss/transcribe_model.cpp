@@ -529,7 +529,8 @@ uint64_t TranscribeModel::encoder_parameters() const {
     uint64_t count = 0;
     for (ggml_tensor * tensor = ggml_get_first_tensor(impl_->metadata); tensor;
          tensor = ggml_get_next_tensor(impl_->metadata, tensor)) {
-        if (std::strncmp(ggml_get_name(tensor), "enc.", 4) == 0) {
+        const char * name = ggml_get_name(tensor);
+        if (std::strncmp(name, "enc.", 4) == 0 || std::strncmp(name, "adaptor.", 8) == 0) {
             count = fitutil::sat_add(count, (uint64_t) ggml_nelements(tensor));
         }
     }

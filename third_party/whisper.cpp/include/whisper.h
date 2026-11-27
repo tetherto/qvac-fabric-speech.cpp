@@ -893,6 +893,10 @@ extern "C" {
     // the larger cache), so it matches the projection only at n_decoders = 1.
     // Returns 0 on success, non-zero on load failure.
     WHISPER_API int whisper_fit_actual(const struct whisper_fit_options * opts, struct whisper_fit_breakdown * out);
+    // As above, additionally report whether the real load selected Core ML.
+    // This keeps the existing breakdown ABI unchanged for callers of whisper_fit_actual.
+    WHISPER_API int whisper_fit_actual_with_route(const struct whisper_fit_options * opts,
+                                                  struct whisper_fit_breakdown * out, bool * encoder_on_coreml);
 
     ////////////////////////////////////////////////////////////////////////////
 

@@ -159,15 +159,29 @@ int main(int argc, char ** argv) {
         std::filesystem::create_directory(scratch / "tiny-encoder.mlmodelc" / "weights");
         std::ofstream(scratch / "tiny-encoder.mlmodelc" / "weights" / "weight.bin", std::ios::binary)
             << std::string(4096, 'w');
+        const auto weight_path = scratch / "tiny-encoder.mlmodelc" / "weights" / "weight.bin";
+        std::filesystem::permissions(weight_path, std::filesystem::perms::none);
+        whisper_fit_result unreadable;
+        expect(whisper_fit_params(&coreml_opts, &unreadable) == (int) WHISPER_FIT_ERROR &&
+               std::strcmp(unreadable.reason, "coreml-memory-estimate-unavailable") == 0,
+               "fit accepted an unreadable Core ML weight file");
+        std::filesystem::permissions(weight_path, std::filesystem::perms::owner_all);
         whisper_fit_result estimated;
-        expect(whisper_fit_params(&coreml_opts, &estimated) != (int) WHISPER_FIT_ERROR &&
-               estimated.host_bytes > plain.host_bytes &&
-               std::strstr(estimated.report, "coreml:") != nullptr,
-               "fit omits measurable Core ML encoder memory");
-        coreml_opts.margin_bytes = UINT64_MAX;
-        whisper_fit_result exhausted;
-        expect(whisper_fit_params(&coreml_opts, &exhausted) == (int) WHISPER_FIT_FAILURE && !exhausted.fits,
-               "Core ML fit accepted an exhausted memory budget");
+        const int estimated_status = whisper_fit_params(&coreml_opts, &estimated);
+        if (plain.device_shares_host_memory) {
+            expect(estimated_status != (int) WHISPER_FIT_ERROR &&
+                   estimated.host_bytes > plain.host_bytes &&
+                   std::strstr(estimated.report, "coreml:") != nullptr,
+                   "fit omits measurable Core ML encoder memory");
+            coreml_opts.margin_bytes = UINT64_MAX;
+            whisper_fit_result exhausted;
+            expect(whisper_fit_params(&coreml_opts, &exhausted) == (int) WHISPER_FIT_FAILURE && !exhausted.fits,
+                   "Core ML fit accepted an exhausted memory budget");
+        } else {
+            expect(estimated_status == (int) WHISPER_FIT_ERROR &&
+                   std::strcmp(estimated.reason, "coreml-memory-estimate-unavailable") == 0,
+                   "fit combined separate Core ML and GPU memory pools");
+        }
         std::filesystem::remove_all(scratch);
     }
 #endif
