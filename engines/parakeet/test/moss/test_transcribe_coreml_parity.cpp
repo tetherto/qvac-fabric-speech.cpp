@@ -1,5 +1,6 @@
 #include "moss/transcribe_audio.h"
 #include "moss/transcribe_coreml.h"
+#include "moss/transcribe_fit.h"
 #include "moss/transcribe_model.h"
 #include "moss/transcribe_networks.h"
 #include "moss/transcribe_text.h"
@@ -8,12 +9,14 @@
 #include "parakeet/moss_transcribe.h"
 #include "parakeet/moss_transcribe_fit.h"
 #include "transcribe_fixtures.h"
+#include "gguf.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <stdexcept>
 #include <string>
@@ -202,19 +205,76 @@ void test_invalid_sidecar(const std::string & model_path, const std::vector<floa
 
 void test_fit_sidecar_route() {
     const auto model_path = moss_transcribe_fixtures::write_transcribe_model("moss-coreml-fit", 26493);
+    ggml_context * metadata = nullptr;
+    gguf_init_params gguf_params = {};
+    gguf_params.no_alloc = true;
+    gguf_params.ctx = &metadata;
+    gguf_context * gguf = gguf_init_from_file(model_path.string().c_str(), gguf_params);
+    check(gguf != nullptr && metadata != nullptr, "read MOSS fixture tensor metadata");
+    uint64_t expected_encoder_params = 0;
+    uint64_t adaptor_params = 0;
+    if (metadata) {
+        for (ggml_tensor * tensor = ggml_get_first_tensor(metadata); tensor;
+             tensor = ggml_get_next_tensor(metadata, tensor)) {
+            const char * name = ggml_get_name(tensor);
+            if (std::strncmp(name, "enc.", 4) == 0 || std::strncmp(name, "adaptor.", 8) == 0) {
+                expected_encoder_params += (uint64_t) ggml_nelements(tensor);
+                if (std::strncmp(name, "adaptor.", 8) == 0) adaptor_params += (uint64_t) ggml_nelements(tensor);
+            }
+        }
+    }
+    if (gguf) gguf_free(gguf);
+    if (metadata) ggml_free(metadata);
+    TranscribeModel fixture_model(model_path.string(), false, 1, "auto", true);
+    check(adaptor_params > 0 && fixture_model.encoder_parameters() == expected_encoder_params,
+          "Core ML FP16 floor counts encoder and adaptor tensors");
     const auto sidecar = transcribe_encoder_sidecar_path(model_path.string());
-    const bool created = std::filesystem::create_directory(sidecar);
+    std::filesystem::create_directory(sidecar);
     parakeet::moss::TranscribeOptions options;
     options.model_path = model_path.string();
-    const auto fit = parakeet::moss::fit_params(options, {}, 0.02, 0);
-    check(fit.status == parakeet::FitStatus::Error &&
-              fit.reason == "coreml-memory-estimate-unavailable",
-          "fit refuses to omit an active Core ML encoder");
+    const auto missing_weights = parakeet::moss::fit_params(options, {}, 0.02, 0);
+    check(missing_weights.status == parakeet::FitStatus::Error &&
+              missing_weights.reason == "coreml-memory-estimate-unavailable",
+          "fit refuses a sidecar without measurable weights");
     set_env(COREML_DISABLE_ENV, "1");
-    check(parakeet::moss::fit_params(options, {}, 0.02, 0).status != parakeet::FitStatus::Error,
+    const auto plain = parakeet::moss::fit_params(options, {}, 0.02, 0);
+    check(plain.status != parakeet::FitStatus::Error,
           "disabled Core ML keeps the ggml fit verdict");
     clear_env(COREML_DISABLE_ENV);
-    if (created) std::filesystem::remove(sidecar);
+    std::filesystem::create_directory(std::filesystem::path(sidecar) / "weights");
+    {
+        std::FILE * file = std::fopen((std::filesystem::path(sidecar) / "weights" / "weight.bin").string().c_str(), "wb");
+        check(file != nullptr, "create Core ML weight fixture");
+        if (file != nullptr) {
+            const std::string weights(16, 'w');
+            check(std::fwrite(weights.data(), 1, weights.size(), file) == weights.size(), "write Core ML weight fixture");
+            std::fclose(file);
+        }
+    }
+    const auto weight_path = std::filesystem::path(sidecar) / "weights" / "weight.bin";
+    std::filesystem::permissions(weight_path, std::filesystem::perms::none);
+    const auto unreadable = parakeet::moss::fit_params(options, {}, 0.02, 0);
+    check(unreadable.status == parakeet::FitStatus::Error &&
+              unreadable.reason == "coreml-memory-estimate-unavailable",
+          "fit refuses a nonempty but unreadable Core ML weight file");
+    std::filesystem::permissions(weight_path, std::filesystem::perms::owner_all);
+    const auto routed = parakeet::moss::fit_params(options, {}, 0.02, 0);
+    check(routed.status != parakeet::FitStatus::Error && routed.coreml.bytes > 0 &&
+              expected_encoder_params * 2 > 16 &&
+              routed.coreml.bytes >= expected_encoder_params * 2 &&
+              routed.host_bytes >= plain.host_bytes + routed.coreml.bytes &&
+              routed.ggml_required_bytes > 0 && routed.coreml.fits == routed.fits,
+          "fit charges the Core ML encoder alongside ggml");
+    parakeet::FitResult separate_pool;
+    separate_pool.device_shares_host_memory = false;
+    check(!charge_coreml_encoder(separate_pool, routed.coreml.bytes) &&
+              separate_pool.status == parakeet::FitStatus::Error &&
+              separate_pool.reason == "coreml-memory-estimate-unavailable",
+          "measurable Core ML sidecar on a separate device pool has no fit verdict");
+    const auto exhausted = parakeet::moss::fit_params(options, {}, 0.02, UINT64_MAX);
+    check(exhausted.status == parakeet::FitStatus::Failure && !exhausted.fits,
+          "Core ML fit refuses an exhausted memory budget");
+    std::filesystem::remove_all(sidecar);
     std::filesystem::remove(model_path);
 }
 

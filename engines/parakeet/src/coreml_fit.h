@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -98,6 +99,7 @@ inline uint64_t coreml_encoder_envelope_bytes(const CoremlEncoderEnvelopeInputs 
 
 // The encoder route fit charges: prebuilt when Core ML is enabled and the
 // adjacent sidecar directory exists (today's path rules), none otherwise.
+// A nonempty weight file must also be readable before its size is used.
 struct CoremlEncoderFitRoute {
     bool prebuilt = false;
     uint64_t weight_file_bytes = 0;
@@ -111,7 +113,13 @@ inline CoremlEncoderFitRoute coreml_encoder_fit_route(const std::string & sideca
     r.prebuilt = true;
     const uintmax_t size = std::filesystem::file_size(
         std::filesystem::path(sidecar_dir) / "weights" / "weight.bin", ec);
-    if (!ec) r.weight_file_bytes = static_cast<uint64_t>(size);
+    if (!ec && size > 0) {
+        const std::string weight_path = (std::filesystem::path(sidecar_dir) / "weights" / "weight.bin").string();
+        if (std::FILE * file = std::fopen(weight_path.c_str(), "rb")) {
+            r.weight_file_bytes = static_cast<uint64_t>(size);
+            std::fclose(file);
+        }
+    }
     return r;
 }
 

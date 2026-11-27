@@ -194,17 +194,23 @@ inline ggml_backend_buffer_type_t weight_buffer_type(ggml_backend_t b) {
     return extra && extra[0] ? extra[0] : fallback;
 }
 
-// Unified-memory devices (CPU, integrated GPUs, Apple Metal, Hexagon, Android's
-// OpenCL GPUs) draw device buffers from the same RAM the host-side buffers live
-// in, so a memory verdict must charge both against it. Discrete GPUs keep the
-// pools separate.
+// The Metal backend reports the selected MTLDevice's hasUnifiedMemory property
+// through memory_unified. A discrete Metal GPU keeps a separate VRAM pool.
+inline bool backend_props_share_host_memory(const ggml_backend_dev_props & props) {
+    return props.type == GGML_BACKEND_DEVICE_TYPE_CPU ||
+           props.type == GGML_BACKEND_DEVICE_TYPE_IGPU || props.memory_unified;
+}
+
 inline bool backend_shares_host_memory(ggml_backend_t b) {
     ggml_backend_dev_t dev = b ? ggml_backend_get_device(b) : nullptr;
+    if (!dev) return false;
 #if defined(__ANDROID__)
     if (backend_is_opencl(b)) return true;
 #endif
-    return backend_is_cpu(b) || backend_is_metal(b) || backend_is_hexagon(b) ||
-        (dev && ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_IGPU);
+    if (backend_is_hexagon(b)) return true;
+    ggml_backend_dev_props props = {};
+    ggml_backend_dev_get_props(dev, &props);
+    return backend_props_share_host_memory(props);
 }
 
 // A device that shares host memory and reports none of its own (Hexagon, which

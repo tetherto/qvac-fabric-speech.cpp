@@ -845,7 +845,8 @@ extern "C" {
         // "fits" | "does-not-fit" | "model-unreadable" | "vad-model-unreadable" |
         // "no-backend-device" | "measurement-failed" | "invalid-arguments" |
         // "memory-capacity-unavailable" | "backend-memory-unavailable" |
-        // "coreml-memory-estimate-unavailable" (active Core ML encoder)
+        // "coreml-memory-estimate-unavailable" (active Core ML encoder with
+        // unreadable weights or a separate ggml memory pool)
         char reason[64];
 
         char model_type[32];   // "tiny" | "base" | ... | "large v3"
@@ -892,6 +893,10 @@ extern "C" {
     // the larger cache), so it matches the projection only at n_decoders = 1.
     // Returns 0 on success, non-zero on load failure.
     WHISPER_API int whisper_fit_actual(const struct whisper_fit_options * opts, struct whisper_fit_breakdown * out);
+    // As above, additionally report whether the real load selected Core ML.
+    // This keeps the existing breakdown ABI unchanged for callers of whisper_fit_actual.
+    WHISPER_API int whisper_fit_actual_with_route(const struct whisper_fit_options * opts,
+                                                  struct whisper_fit_breakdown * out, bool * encoder_on_coreml);
 
     ////////////////////////////////////////////////////////////////////////////
 

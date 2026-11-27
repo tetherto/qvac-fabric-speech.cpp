@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -123,6 +124,8 @@ void check_coreml_description_route(const fit_pair & model, bool use_gpu) {
     const auto description = scratch / "tiny.fit.gguf";
     std::filesystem::copy_file(model.artifact, artifact);
     std::filesystem::copy_file(model.description, description);
+    const whisper_fit_result sidecar_free_fit = project(artifact.string(), "", use_gpu);
+    expect(sidecar_free_fit.status != WHISPER_FIT_ERROR, "sidecar-free model fit failed");
     std::filesystem::create_directory(scratch / "tiny-encoder.mlmodelc");
     const whisper_fit_result artifact_fit = project(artifact.string(), "", use_gpu);
     const whisper_fit_result description_fit = project(description.string(), "", use_gpu);
@@ -131,7 +134,22 @@ void check_coreml_description_route(const fit_pair & model, bool use_gpu) {
            "artifact fit omitted the Core ML encoder");
     expect(description_fit.status == WHISPER_FIT_ERROR &&
            std::strcmp(description_fit.reason, "coreml-memory-estimate-unavailable") == 0,
-           "description fit omitted the Core ML encoder");
+           "description fit accepted a sidecar without weights");
+    std::filesystem::create_directory(scratch / "tiny-encoder.mlmodelc" / "weights");
+    std::ofstream(scratch / "tiny-encoder.mlmodelc" / "weights" / "weight.bin", std::ios::binary)
+        << std::string(4096, 'w');
+    const whisper_fit_result weighted_artifact = project(artifact.string(), "", use_gpu);
+    const whisper_fit_result weighted_description = project(description.string(), "", use_gpu);
+    if (!sidecar_free_fit.device_shares_host_memory) {
+        expect(weighted_artifact.status == WHISPER_FIT_ERROR &&
+               std::strcmp(weighted_artifact.reason, "coreml-memory-estimate-unavailable") == 0,
+               "discrete GPU cannot combine the Core ML and ggml memory pools");
+        expect(weighted_description.status == WHISPER_FIT_ERROR &&
+               std::strcmp(weighted_description.reason, "coreml-memory-estimate-unavailable") == 0,
+               "description on discrete GPU cannot combine memory pools");
+    } else {
+        expect_same_projection(weighted_artifact, weighted_description, "Core ML artifact and description");
+    }
     std::filesystem::remove_all(scratch);
 }
 #endif

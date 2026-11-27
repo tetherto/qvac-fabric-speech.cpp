@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <memory>
 #include <stdexcept>
 
@@ -522,6 +523,18 @@ FitResult TranscribeModel::measure_weights() {
     result.host_bytes =
         fitutil::sat_add(result.host_bytes, ggml_context_overhead() * 2);
     return result;
+}
+
+uint64_t TranscribeModel::encoder_parameters() const {
+    uint64_t count = 0;
+    for (ggml_tensor * tensor = ggml_get_first_tensor(impl_->metadata); tensor;
+         tensor = ggml_get_next_tensor(impl_->metadata, tensor)) {
+        const char * name = ggml_get_name(tensor);
+        if (std::strncmp(name, "enc.", 4) == 0 || std::strncmp(name, "adaptor.", 8) == 0) {
+            count = fitutil::sat_add(count, (uint64_t) ggml_nelements(tensor));
+        }
+    }
+    return count;
 }
 
 TranscribeMemory TranscribeModel::measure(TranscribeGraph & graph) {
