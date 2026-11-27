@@ -40,7 +40,9 @@ int main() {
         check_memory_telemetry(backend);
         {
             tts_cpp::pocket::detail::PocketGraph g(backend);
-            auto * a = ggml_new_tensor_2d(g.ctx, GGML_TYPE_F16, 64, 32);
+            // Q8_0 weights make the CPU convert src1 to Q8_0 in the work buffer;
+            // F16 no longer does since ggml's F16 vec_dot takes F32 directly.
+            auto * a = ggml_new_tensor_2d(g.ctx, GGML_TYPE_Q8_0, 64, 32);
             auto * b = ggml_new_tensor_2d(g.ctx, GGML_TYPE_F32, 64, 16);
             auto * output = ggml_mul_mat(g.ctx, a, b);
             const auto bytes = g.prepare(output, true, 4);
