@@ -53,6 +53,19 @@ Supported models without a benchmark family, and why:
 - ACE-Step sft and base: only the turbo checkpoint is registered under the benchmark's prefix.
 - MOSS-SoundEffect and MOSS-Speech outputs are timed but not scored: no sound-effect or spoken-reply reference exists in the harness.
 
+### Metal ASR memory on CI
+
+Enable `metal_asr_memory` when dispatching the desktop benchmark. It runs QVAC Metal
+on `jfk.wav` with Nemotron F16, Parakeet TDT Q8_0, Parakeet Unified Q8_0 and Whisper
+small F16. It also runs Nemotron on the 160.6-second `abcba.wav` fixture. The preset
+selects the macOS GPU runner pool and overrides the family, runner and Whisper size
+inputs.
+
+Read peak RSS and peak physical footprint independently in the workflow summary.
+The per-cell artifact includes the CPU model, macOS version, input and model hashes,
+and engine revisions. The CPU model identifies which Apple Silicon hardware handled
+the cell.
+
 ### Weekly desktop benchmark on the shared machines
 
 [`scripts/benchmarks/desktop-weekly/`](../scripts/benchmarks/desktop-weekly/README.md) runs a second,

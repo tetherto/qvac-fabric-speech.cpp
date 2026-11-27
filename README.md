@@ -298,6 +298,7 @@ speed guarantees. Full methods, build pins and limitations live in
 [docs/PERFORMANCE.md](docs/PERFORMANCE.md) and the linked engine reports;
 [benchmark coverage](docs/PERFORMANCE.md#benchmark-coverage) lists which
 model each desktop benchmark family measures and scores.
+The [Metal ASR memory preset](docs/PERFORMANCE.md#metal-asr-memory-on-ci) reports peak RSS and macOS peak physical footprint.
 
 | Task | Model | Recorded measurements |
 |---|---|---|

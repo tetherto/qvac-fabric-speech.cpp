@@ -1317,6 +1317,18 @@ plan_matrix "$TMP/plan-all.out" | jq -e --slurpfile spec "$REAL_SPEC" \
   || fail "expected_count must equal the number of planned cells"
 ok "plan: 'all' expands to every non-opt-in family on both runners"
 
+run_plan "$TMP/plan-metal-asr.out" METAL_ASR_MEMORY=1 IN_FAMILIES="moss-tts" IN_RUNNERS=linux IN_WHISPER=tiny \
+  || fail "plan rejected Metal ASR memory: $(cat "$TMP/plan-metal-asr.out.log")"
+plan_matrix "$TMP/plan-metal-asr.out" | jq -e --slurpfile weekly "$HERE/desktop-weekly/families.json" '
+  ([.include[].family] | sort) == ["nemotron", "nemotron-abcba", "parakeet-tdt", "parakeet-unified", "whisper"] and
+  all(.include[];
+    .runner_label == "macos" and .runner_os == "qvac-macos26-arm64-gpu" and
+    if .family == "whisper" then .whisper_size == "small"
+    else .whisper_size == "" and ($weekly[0][.family] | .task == "ASR" and .coreml_compare_on_darwin != true)
+    end
+  )' > /dev/null || fail "unexpected Metal ASR benchmark cells: $(plan_matrix "$TMP/plan-metal-asr.out")"
+ok "plan: Metal ASR memory selects the fixed macOS matrix and small Whisper"
+
 run_plan "$TMP/plan-optin.out" IN_FAMILIES="moss-tts,moss-speech,parakeet-ctc" \
   || fail "plan rejected explicitly named opt-in families: $(cat "$TMP/plan-optin.out.log")"
 plan_matrix "$TMP/plan-optin.out" | jq -e '
