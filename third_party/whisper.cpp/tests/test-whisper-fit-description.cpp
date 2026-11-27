@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -131,7 +132,13 @@ void check_coreml_description_route(const fit_pair & model, bool use_gpu) {
            "artifact fit omitted the Core ML encoder");
     expect(description_fit.status == WHISPER_FIT_ERROR &&
            std::strcmp(description_fit.reason, "coreml-memory-estimate-unavailable") == 0,
-           "description fit omitted the Core ML encoder");
+           "description fit accepted a sidecar without weights");
+    std::filesystem::create_directory(scratch / "tiny-encoder.mlmodelc" / "weights");
+    std::ofstream(scratch / "tiny-encoder.mlmodelc" / "weights" / "weight.bin", std::ios::binary)
+        << std::string(4096, 'w');
+    expect_same_projection(project(artifact.string(), "", use_gpu),
+                           project(description.string(), "", use_gpu),
+                           "Core ML artifact and description");
     std::filesystem::remove_all(scratch);
 }
 #endif

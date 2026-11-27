@@ -46,6 +46,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <string>
 
 namespace {
@@ -154,7 +155,19 @@ int main(int argc, char ** argv) {
         expect(routed_status == (int) WHISPER_FIT_ERROR &&
                std::strcmp(routed.reason, "coreml-memory-estimate-unavailable") == 0 &&
                routed.report[0] != '\0',
-               "fit omitted the Core ML encoder's memory");
+               "fit accepted a Core ML encoder without measurable weights");
+        std::filesystem::create_directory(scratch / "tiny-encoder.mlmodelc" / "weights");
+        std::ofstream(scratch / "tiny-encoder.mlmodelc" / "weights" / "weight.bin", std::ios::binary)
+            << std::string(4096, 'w');
+        whisper_fit_result estimated;
+        expect(whisper_fit_params(&coreml_opts, &estimated) != (int) WHISPER_FIT_ERROR &&
+               estimated.host_bytes > plain.host_bytes &&
+               std::strstr(estimated.report, "coreml:") != nullptr,
+               "fit omits measurable Core ML encoder memory");
+        coreml_opts.margin_bytes = UINT64_MAX;
+        whisper_fit_result exhausted;
+        expect(whisper_fit_params(&coreml_opts, &exhausted) == (int) WHISPER_FIT_FAILURE && !exhausted.fits,
+               "Core ML fit accepted an exhausted memory budget");
         std::filesystem::remove_all(scratch);
     }
 #endif

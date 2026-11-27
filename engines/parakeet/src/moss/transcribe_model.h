@@ -126,6 +126,7 @@ public:
     std::vector<int32_t> tokenizer_types() const;
 
     FitResult measure_weights();
+    uint64_t encoder_parameters() const;
     uint64_t weight_bytes() const;
     TranscribeMemory allocated_memory() const;
     TranscribeMemory measure(TranscribeGraph & graph);

@@ -10348,6 +10348,37 @@ std::string whisper_fit_fmt_mib(uint64_t bytes) {
     return buf;
 }
 
+#ifdef WHISPER_USE_COREML
+// Charge the compiled encoder alongside the ggml buffers kept for fallback.
+// This mirrors Parakeet's conservative prebuilt Core ML envelope: expanded
+// fp16 weights, two I/O buffers, an all-units load transient, and 25% margin.
+uint64_t whisper_fit_coreml_encoder_bytes(const std::string & path, const whisper_model & model) {
+    struct stat weight_stat;
+    const std::string weight_path = path + "/weights/weight.bin";
+    if (stat(weight_path.c_str(), &weight_stat) != 0 || !S_ISREG(weight_stat.st_mode) || weight_stat.st_size <= 0) {
+        return 0;
+    }
+    const uint64_t weight_bytes = (uint64_t) weight_stat.st_size;
+    uint64_t encoder_parameters = 0;
+    for (const auto & ctx : model.ctxs) {
+        for (ggml_tensor * tensor = ggml_get_first_tensor(ctx); tensor; tensor = ggml_get_next_tensor(ctx, tensor)) {
+            if (std::strncmp(ggml_get_name(tensor), "encoder.", 8) == 0) {
+                encoder_parameters = whisper_fit_sat_add(encoder_parameters, (uint64_t) ggml_nelements(tensor));
+            }
+        }
+    }
+    const auto & hp = model.hparams;
+    const uint64_t input = whisper_fit_sat_mul((uint64_t) 2*hp.n_audio_ctx, (uint64_t) hp.n_mels);
+    const uint64_t output = whisper_fit_sat_mul((uint64_t) hp.n_audio_ctx, (uint64_t) hp.n_audio_state);
+    const uint64_t io_bytes = whisper_fit_sat_mul(whisper_fit_sat_add(input, output), sizeof(float));
+    const uint64_t resident = whisper_fit_sat_add(
+        std::max(weight_bytes, whisper_fit_sat_mul(encoder_parameters, (uint64_t) 2)),
+        whisper_fit_sat_mul(io_bytes, (uint64_t) 2));
+    const uint64_t total = whisper_fit_sat_add(resident, weight_bytes);
+    return whisper_fit_sat_add(total, total / 4);
+}
+#endif
+
 void whisper_fit_set_str(char * dst, size_t dst_size, const char * src) {
     snprintf(dst, dst_size, "%s", src ? src : "");
 }
@@ -10437,13 +10468,17 @@ int whisper_fit_params(const struct whisper_fit_options * opts, struct whisper_f
     }
 
 #ifdef WHISPER_USE_COREML
+    uint64_t coreml_bytes = 0;
     struct stat coreml_stat;
     const std::string coreml_path = whisper_get_coreml_path_encoder(opts->model_path);
     if (stat(coreml_path.c_str(), &coreml_stat) == 0 && S_ISDIR(coreml_stat.st_mode)) {
-        whisper_fit_set_str(result->reason, sizeof(result->reason), "coreml-memory-estimate-unavailable");
-        whisper_fit_set_str(result->report, sizeof(result->report),
-                            "Core ML encoder memory cannot be projected by the ggml fit estimator.\n");
-        return (int) result->status;
+        coreml_bytes = whisper_fit_coreml_encoder_bytes(coreml_path, ctx->model);
+        if (coreml_bytes == 0) {
+            whisper_fit_set_str(result->reason, sizeof(result->reason), "coreml-memory-estimate-unavailable");
+            whisper_fit_set_str(result->report, sizeof(result->report),
+                                "Core ML encoder bundle has no readable weights/weight.bin.\n");
+            return (int) result->status;
+        }
     }
 #endif
 
@@ -10479,6 +10514,15 @@ int whisper_fit_params(const struct whisper_fit_options * opts, struct whisper_f
     result->device_is_cpu = ggml_backend_dev_type(main_dev) == GGML_BACKEND_DEVICE_TYPE_CPU;
     const auto memory = whisper_fit_query_memory(main_dev);
     result->device_shares_host_memory = memory.shares_host;
+#ifdef WHISPER_USE_COREML
+    if (coreml_bytes > 0 && !result->device_shares_host_memory) {
+        whisper_free_state(state);
+        whisper_fit_set_str(result->reason, sizeof(result->reason), "coreml-memory-estimate-unavailable");
+        whisper_fit_set_str(result->report, sizeof(result->report),
+                            "Core ML and ggml use separate memory pools; no common fit budget is available.\n");
+        return (int) result->status;
+    }
+#endif
     result->device_free_bytes = memory.free_bytes;
     result->device_total_bytes = memory.total_bytes;
     if (memory.total_bytes == 0) {
@@ -10622,6 +10666,9 @@ int whisper_fit_params(const struct whisper_fit_options * opts, struct whisper_f
         host = whisper_fit_sat_add(host, whisper_fit_sat_mul(n_samples/(uint64_t) vad_n_window, sizeof(float))); // vad probs
         host = whisper_fit_sat_add(host, whisper_fit_sat_mul(n_samples, sizeof(float)));     // vad-filtered sample copy
     }
+#ifdef WHISPER_USE_COREML
+    host = whisper_fit_sat_add(host, coreml_bytes);
+#endif
     result->host_bytes = host;
 
     result->device.weights_bytes = weights.device;
@@ -10676,6 +10723,13 @@ int whisper_fit_params(const struct whisper_fit_options * opts, struct whisper_f
         snprintf(line, sizeof(line), "host extras:%13s%s\n", whisper_fit_fmt_mib(result->host_bytes).c_str(),
                  result->device_shares_host_memory ? " (same RAM pool as the device projection)" : "");
         s += line;
+#ifdef WHISPER_USE_COREML
+        if (coreml_bytes > 0) {
+            snprintf(line, sizeof(line), "coreml:    %14s (encoder, included in host extras)\n",
+                     whisper_fit_fmt_mib(coreml_bytes).c_str());
+            s += line;
+        }
+#endif
         snprintf(line, sizeof(line), "margin:    %14s\n", whisper_fit_fmt_mib(opts->margin_bytes).c_str());
         s += line;
         if (result->fits) {

@@ -1,4 +1,5 @@
 #include "moss/transcribe_fit.h"
+#include "coreml_fit.h"
 #include "fit_util.h"
 #include "moss/transcribe_audio.h"
 #include "moss/transcribe_coreml.h"
@@ -6,6 +7,9 @@
 #include "moss/transcribe_request.h"
 #include "parakeet/moss_transcribe_fit.h"
 #include "parakeet_ctc.h"
+#ifdef PARAKEET_USE_COREML
+#include "coreml/parakeet-encoder.h"
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -32,6 +36,26 @@ bool uses_coreml(const TranscribeOptions & options) {
     return false;
 #endif
 }
+
+#ifdef PARAKEET_USE_COREML
+uint64_t coreml_encoder_bytes(const detail::TranscribeModel & model, const std::string & sidecar) {
+    const CoremlEncoderFitRoute route = coreml_encoder_fit_route(sidecar, true);
+    if (route.weight_file_bytes == 0) return 0;
+    const auto & config = model.config();
+    const uint64_t input = sat_mul((uint64_t) config.audio.chunk_frames, (uint64_t) config.audio.n_mels);
+    const uint64_t output = sat_mul((uint64_t) (config.encoder.n_ctx / config.merge_size),
+                                    (uint64_t) config.text.n_embd);
+    CoremlFitProgram program;
+    program.weight_file_bytes = route.weight_file_bytes;
+    program.runtime_floor_bytes = sat_mul(model.encoder_parameters(), (uint64_t) 2);
+    program.io_bytes = std::max(sat_mul(sat_add(input, output), sizeof(float)),
+                                parakeet_coreml_declared_io_bytes(sidecar.c_str()));
+    // The all-units load transient also covers explicit CPU/GPU/ANE policies.
+    program.units = CoremlFitUnits::all;
+    const CoremlCharge charge = coreml_programs_charge({program});
+    return sat_add(charge.resident, charge.transient);
+}
+#endif
 
 struct Workload {
     size_t samples;
@@ -181,7 +205,10 @@ void detail::finish_transcribe_fit(FitResult &result, uint64_t margin) {
          << " bytes\nadditional decoder compute: "
          << result.device.decoder_compute_bytes
          << " bytes\nhost: " << result.host_bytes
-         << " bytes\nmargin: " << margin << " bytes\nverdict: " << result.reason
+         << " bytes\n";
+  if (result.coreml.bytes > 0)
+    report << "Core ML encoder (included in host): " << result.coreml.bytes << " bytes\n";
+  report << "margin: " << margin << " bytes\nverdict: " << result.reason
          << '\n';
   result.report = report.str();
 }
@@ -210,15 +237,34 @@ FitResult fit_params(const TranscribeOptions & options, const TranscribeRequest 
             result.report = error.what();
             return result;
         }
-        if (uses_coreml(options)) {
-            result.reason = "coreml-memory-estimate-unavailable";
-            result.report = "Core ML encoder memory cannot be projected by the ggml fit estimator.\n";
-            return result;
-        }
         result = model.measure_weights();
         result.model_type = "moss-transcribe";
         measure_workload(result, model, tokenizer, workload);
+        const uint64_t ggml_host_bytes = result.host_bytes;
+        if (uses_coreml(options)) {
+#ifdef PARAKEET_USE_COREML
+            const std::string sidecar = detail::transcribe_encoder_sidecar_path(options.model_path);
+            const uint64_t bytes = coreml_encoder_bytes(model, sidecar);
+            if (bytes == 0 || !result.device_shares_host_memory) {
+                result.reason = "coreml-memory-estimate-unavailable";
+                result.report = bytes == 0
+                    ? "Core ML encoder bundle has no readable weights/weight.bin.\n"
+                    : "Core ML and ggml use separate memory pools; no common fit budget is available.\n";
+                return result;
+            }
+            result.coreml.bytes = bytes;
+            result.coreml.encoder_route = "prebuilt";
+            result.host_bytes = sat_add(result.host_bytes, bytes);
+#endif
+        }
         detail::finish_transcribe_fit(result, margin_bytes);
+        if (result.coreml.bytes > 0) {
+            result.ggml_required_bytes = sat_add(result.device.total_bytes, margin_bytes);
+            result.ggml_required_bytes = sat_add(result.ggml_required_bytes, ggml_host_bytes);
+            result.ggml_only_fits = result.ggml_required_bytes != std::numeric_limits<uint64_t>::max() &&
+                result.ggml_required_bytes <= result.device_free_bytes;
+            result.coreml.fits = result.fits;
+        }
     } catch (const std::exception & error) {
         const std::string message = error.what();
         result.reason = message.find("no compute backend") != std::string::npos ? "no-backend-device"
