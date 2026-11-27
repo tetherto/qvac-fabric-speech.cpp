@@ -597,7 +597,8 @@ jq -n --arg sha "$hello_sha" \
 
 cat > "$BUILD/bin/nat-ok" <<'STUB'
 #!/usr/bin/env bash
-printf '{"stages":{"tot":{"median_ms":100,"min_ms":90,"max_ms":110}},"rtf":{"median":0.5},"backend":"StubGPU"}' > "$1"
+printf '{"stages":{"tot":{"median_ms":100,"min_ms":90,"max_ms":110}},"rtf":{"median":0.5},"backend":"%s","encoder_backend":"%s"}' \
+  "${NATIVE_TEST_DECODER:-StubGPU}" "${NATIVE_TEST_ENCODER:-unknown}" > "$1"
 STUB
 
 cat > "$BUILD/bin/nat-control" <<'STUB'
@@ -817,6 +818,48 @@ cat > "$1" <<'EOJ'
 EOJ
 STUB
 
+cat > "$BUILD/bin/strict-whisper" <<'STUB'
+#!/usr/bin/env bash
+[[ "${5:-}" == --device && "${6:-}" == MTL0 ]] || exit 2
+echo 'whisper_backend_init_gpu: using Metal backend' >&2
+if [[ -f "$WHISPER_TEST_STATE" ]]; then
+  echo second > "$WHISPER_TEST_STATE"
+  if [[ "$WHISPER_TEST_MODE" == fallback ]]; then
+    echo "requested backend 'MTL0' did not initialize (primary backend: CPU)" >&2
+    exit 1
+  fi
+else
+  echo first > "$WHISPER_TEST_STATE"
+fi
+STUB
+
+cat > "$STUBBIN/memory-time" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1" != --version ]] || exit 0
+shift
+"$@" || exit $?
+if [[ "$WHISPER_TEST_MODE" == gnu ]]; then
+  printf '\tMaximum resident set size (kbytes): 65536\n' >&2
+  exit 0
+fi
+if [[ "$WHISPER_TEST_MODE" != missing-rss ]] || [[ "$(cat "$WHISPER_TEST_STATE")" != second ]]; then
+  printf '    67108864 maximum resident set size\n' >&2
+fi
+if [[ "$WHISPER_TEST_MODE" != missing-footprint ]] || [[ "$(cat "$WHISPER_TEST_STATE")" != second ]]; then
+  printf '    54525952 peak memory footprint\n' >&2
+fi
+STUB
+
+cat > "$STUBBIN/sw_vers" <<'STUB'
+#!/usr/bin/env bash
+echo 'ProductVersion: 26.0'
+STUB
+
+cat > "$STUBBIN/sysctl" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' 'machdep.cpu.brand_string: Apple M4' 'hw.memsize: 17179869184'
+STUB
+
 cat > "$STUBBIN/aws" <<'STUB'
 #!/usr/bin/env bash
 # Invoked as: aws s3 cp <s3url> <dest> --no-progress
@@ -848,11 +891,17 @@ chmod +x "$BUILD"/bin/* "$STUBBIN"/* "$TMP"/extbin/*
 run_driver() {
   # run_driver <family> <out.json> <stderr-log> [extra env as VAR=VALUE...]
   local family="$1" out="$2" errlog="$3"; shift 3
+  local -a extra_args=()
+  if [[ "${1:-}" == --require-metal-memory ]]; then
+    extra_args+=("$1")
+    shift
+  fi
   env -i PATH="$STUBBIN:$PATH" HOME="$TMP" "$@" \
     bash "$DRIVER" \
       --family "$family" --runs 2 --warmup 0 \
       --build-dir "$BUILD" --models-root "$MODELS" \
       --audio-dir "$AUDIO" --runner test \
+      ${extra_args[@]+"${extra_args[@]}"} \
       --out "$out" 2> "$errlog"
 }
 
@@ -861,6 +910,80 @@ run_driver nat-ok "$OUT/nat-ok.json" "$OUT/nat-ok.err" BENCH_FAMILIES_JSON="$SPE
 jq -e '.status == "ok" and .backend == "StubGPU" and .wall_ms_median == 100 and .rtf_median == 0.5' \
   "$OUT/nat-ok.json" > /dev/null || fail "nat-ok: $(cat "$OUT/nat-ok.json")"
 ok "native bench JSON drives stats, rtf, and backend"
+
+run_driver nat-ok "$OUT/nat-darwin-memory.json" "$OUT/nat-darwin-memory.err" BENCH_FAMILIES_JSON="$SPEC" \
+  BENCH_TEST_TIME="$STUBBIN/memory-time" WHISPER_TEST_MODE=darwin
+jq -e '.status == "ok" and .peak_rss_mib == 64 and .peak_phys_footprint_mib == 52' \
+  "$OUT/nat-darwin-memory.json" >/dev/null || fail "native Darwin process memory"
+run_driver nat-ok "$OUT/nat-gnu-memory.json" "$OUT/nat-gnu-memory.err" BENCH_FAMILIES_JSON="$SPEC" \
+  BENCH_TEST_TIME="$STUBBIN/memory-time" WHISPER_TEST_MODE=gnu
+jq -e '.status == "ok" and .peak_rss_mib == 64 and .peak_phys_footprint_mib == null' \
+  "$OUT/nat-gnu-memory.json" >/dev/null || fail "native GNU process memory"
+ok "ordinary native benchmarks record Darwin and GNU time memory"
+
+mkdir -p "$TMP/summary/measured" "$TMP/summary/legacy"
+cp "$OUT/nat-darwin-memory.json" "$TMP/summary/measured/result.json"
+jq '.family = "legacy" | del(.peak_phys_footprint_mib)' "$OUT/nat-gnu-memory.json" > "$TMP/summary/legacy/result.json"
+GITHUB_STEP_SUMMARY= python3 -B "$HERE/summarize.py" --results-dir "$TMP/summary" \
+  --expected-count 2 --out "$OUT/memory-summary.md" >/dev/null || fail "desktop memory summary"
+grep -Fq '| Peak RSS MiB | Peak physical footprint MiB |' "$OUT/memory-summary.md" &&
+grep -F '| nat-ok |' "$OUT/memory-summary.md" | grep -Fq '| 64 | 52 |' &&
+grep -F '| legacy |' "$OUT/memory-summary.md" | grep -Fq '| 64 | — |' || fail "desktop memory summary columns"
+ok "desktop summary displays physical footprint for current and historical results"
+
+metal_spec="$TMP/metal-spec.json"
+jq '.whisper.binary = "bin/strict-whisper" |
+    .whisper.args = ["-m", "${MODEL_PATH}", "-f", "${AUDIO_DIR}/metal-jfk.wav"]' "$SPEC" > "$metal_spec"
+mkdir -p "$MODELS/whisper"
+printf 'model' > "$MODELS/whisper/ggml-tiny.bin"
+printf 'audio' > "$AUDIO/metal-jfk.wav"
+
+native_metal_spec="$TMP/native-metal-spec.json"
+jq --arg model "$MODELS/whisper/ggml-tiny.bin" '.["nat-ok"].args += ["--model", $model, "--wav", "${AUDIO_DIR}/metal-jfk.wav"]' \
+  "$metal_spec" > "$native_metal_spec"
+run_driver nat-ok "$OUT/nat-metal-fallback.json" "$OUT/nat-metal-fallback.err" --require-metal-memory \
+  BENCH_FAMILIES_JSON="$native_metal_spec" GGML_SHA=fixture BENCH_TEST_TIME="$STUBBIN/memory-time" \
+  WHISPER_TEST_MODE=darwin NATIVE_TEST_DECODER=ggml-mtl0 NATIVE_TEST_ENCODER=CPU
+jq -e '.status == "run-failed" and (.notes | contains("requires Metal for both encoder and decoder"))' \
+  "$OUT/nat-metal-fallback.json" >/dev/null || fail "strict native benchmark accepted CPU encoder"
+ok "strict native benchmarks reject a CPU encoder even with a Metal decoder"
+
+run_strict_whisper() {
+  local mode="$1"
+  run_driver whisper "$OUT/metal-$mode.json" "$OUT/metal-$mode.err" --require-metal-memory \
+    BENCH_FAMILIES_JSON="$metal_spec" GGML_SHA=fixture BENCH_TEST_TIME="$STUBBIN/memory-time" \
+    WHISPER_TEST_MODE="$mode" WHISPER_TEST_STATE="$OUT/metal-$mode.state"
+}
+
+run_strict_whisper complete
+jq -e '.status == "ok" and .backend == "MTL0" and .peak_rss_mib == 64 and .peak_phys_footprint_mib == 52' \
+  "$OUT/metal-complete.json" >/dev/null || fail "strict Whisper memory"
+grep -Fq "$AUDIO/metal-jfk.wav" "$OUT/metal-complete.metal-asr-inputs.txt" &&
+grep -Fq "$MODELS/whisper/ggml-tiny.bin" "$OUT/metal-complete.metal-asr-inputs.txt" \
+  || fail "strict Whisper input hashes"
+ok "strict Whisper verifies both timed invocations and hashes the selected inputs"
+
+run_strict_whisper fallback
+jq -e '.status == "run-failed" and .backend == "unknown" and (.notes | contains("timed run 2 failed"))' \
+  "$OUT/metal-fallback.json" >/dev/null || fail "strict Whisper accepted fallback"
+grep -Fq "did not initialize (primary backend: CPU)" "$OUT/metal-fallback.err" || fail "fallback diagnostic missing"
+ok "strict Whisper rejects a later CPU fallback after a successful Metal run"
+
+for mode in missing-rss missing-footprint; do
+  run_strict_whisper "$mode"
+  jq -e '.status == "run-failed" and (.notes | contains("timed run 2 requires peak RSS and peak physical footprint"))' \
+    "$OUT/metal-$mode.json" >/dev/null || fail "strict Whisper accepted $mode"
+done
+ok "strict Whisper rejects either missing measurement before aggregation"
+
+cp "$OUT/metal-complete.json" "$OUT/metal-hash-failed.json"
+rm "$AUDIO/metal-jfk.wav"
+run_strict_whisper hash-failed
+jq -e '.status == "run-failed" and (.notes | contains("could not record Metal ASR input provenance"))' \
+  "$OUT/metal-hash-failed.json" >/dev/null || fail "provenance error left a successful result"
+[[ ! -e "$OUT/metal-hash-failed.metal-asr-inputs.txt" && "$(cat "$OUT/metal-hash-failed.state")" == second ]] \
+  || fail "provenance error left partial hashes or interrupted the measurements"
+ok "a required hash failure overwrites a successful row with a failure"
 
 # an external engine names its binary through ${BENCH_HOME}; without BENCH_HOME
 # the placeholder stays and the driver reports the binary as missing.

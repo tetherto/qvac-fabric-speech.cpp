@@ -396,6 +396,7 @@ names; missing fixtures and runtime skips cannot satisfy a required test. See
 | MOSS-Transcribe-Diarize (conversion, CLI, API, tests) | [docs/moss-transcribe.md](docs/moss-transcribe.md) |
 | Benchmark method, CI snapshots, decode optimization history | [docs/performance.md](docs/performance.md) |
 | Desktop benchmark coverage (CTC, IndicConformer, TDT, Unified, EOU, Nemotron ASR, Sortformer batch and streaming, Nemotron 3 Diarization, MOSS-Transcribe-Diarize), metrics and runner limits | [Benchmark coverage](../../docs/PERFORMANCE.md#benchmark-coverage) |
+| Metal memory benchmarks for Parakeet TDT, Unified and Nemotron | [Metal ASR memory on CI](../../docs/PERFORMANCE.md#metal-asr-memory-on-ci) |
 
 ## License
 

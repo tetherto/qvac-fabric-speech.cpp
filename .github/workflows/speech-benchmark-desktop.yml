@@ -760,12 +760,17 @@ jobs:
           # The scorer remains CPU-only; the macOS generator explicitly uses Metal.
           MUSIC_DEVICE: ${{ matrix.family == 'minimax' && runner.os == 'macOS' && 'gpu' || 'cpu' }}
           MODEL_S3_BUCKET: ${{ secrets.MODEL_S3_BUCKET }}
+          METAL_ASR_MEMORY: ${{ inputs.metal_asr_memory && '1' || '0' }}
+          GGML_SHA: ${{ steps.ggml.outputs.sha }}
           RUNS_PER_BENCH:  ${{ needs.plan.outputs.runs_per_bench }}
           PARAKEET_COREML_PYTHON: ${{ github.workspace }}/.venv-coreml/bin/python
           LD_LIBRARY_PATH: ${{ github.workspace }}/ggml-install/lib
         run: |
           set -euo pipefail
           extra_args=()
+          if [[ "$METAL_ASR_MEMORY" == 1 ]]; then
+            extra_args+=(--require-metal-memory)
+          fi
           warmup_runs=1
           if [[ -n "$WHISPER_SIZE" ]]; then
             extra_args+=(--whisper-size "$WHISPER_SIZE")
@@ -791,31 +796,12 @@ jobs:
             ${extra_args[@]+"${extra_args[@]}"} \
             --out "artifacts/result.json"
 
-      - name: Record and verify Metal ASR measurements
+      - name: Verify Metal ASR result
         if: inputs.metal_asr_memory
-        env:
-          GGML_SHA: ${{ steps.ggml.outputs.sha }}
         run: |
           set -euo pipefail
-          {
-            sw_vers
-            sysctl machdep.cpu.brand_string hw.memsize
-            printf 'Speech revision %s\nGGML revision %s\n' "$(git rev-parse HEAD)" "$GGML_SHA"
-            shasum -a 256 "$BENCH_FAMILIES_JSON" engines/parakeet/test/samples/{jfk,abcba}.wav
-            if [[ -d "bench-models/$FAMILY" ]]; then
-              find "bench-models/$FAMILY" -type f \( -name '*.gguf' -o -name '*.bin' \) -exec shasum -a 256 {} +
-            fi
-          } > artifacts/metal-asr-inputs.txt
-          cat artifacts/metal-asr-inputs.txt >> "$GITHUB_STEP_SUMMARY"
-          jq 'if .status == "ok" and (
-            (.backend | test("metal|(^|-)mtl[0-9]+$"; "i") | not) or
-            .peak_rss_mib == null or .peak_phys_footprint_mib == null
-          ) then
-            .status = "run-failed" |
-            .notes += " Expected Metal, peak RSS, and peak physical footprint."
-          else . end' artifacts/result.json > artifacts/metal-result.json
-          mv artifacts/metal-result.json artifacts/result.json
           jq -e '.status == "ok"' artifacts/result.json
+          cat artifacts/result.metal-asr-inputs.txt >> "$GITHUB_STEP_SUMMARY"
 
       - name: Audio8 streaming API and latency comparison
         if: inputs.audio8_pcm_streaming && matrix.family == 'audio8-tts'
