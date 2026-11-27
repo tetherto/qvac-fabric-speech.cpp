@@ -69,7 +69,8 @@ and the TTS intelligibility WER (pinned Whisper tiny on CPU); music rows report 
 at seed 42. A family with its own input names it in `scenario` (`abcba`); the report keeps every input in its own chart.
 A provision entry with `as` links the file into the family directory under another name (CosyVoice3 requires
 `voice.gguf` even when cloning). Memory is the peak RSS from
-`/usr/bin/time` and, on NVIDIA backends, the rise of `nvidia-smi` memory.used over the run.
+`/usr/bin/time`, the process lifetime peak physical footprint when macOS `time -l` reports it, and the
+rise of `nvidia-smi` memory.used on NVIDIA backends. Interpret peak RSS and peak physical footprint independently.
 
 Next to the weekly rows the dashboards and task pages show two copied sets, never mixed with the weekly charts: the
 campaign rows of `comparisons.json` (ratios from the October 2026 report) and the report rows of `report-rows.json`,
@@ -227,10 +228,11 @@ report still goes out.
   every model file with its size, sha256 and origin (registry key, HuggingFace URL, repo fixture or derived cut).
 - **Results on &lt;backend&gt;** has one row per family: status (`ok (under load)` for a cell that started on a busy
   machine, see below), wall median with its min and max, speed (seconds of audio per second of wall clock), peak RSS,
-  GPU memory rise and peak, quality, the backend the driver observed in the logs, and the iteration count.
+  peak physical footprint, GPU memory rise and peak, quality, the backend the driver observed in the logs,
+  and the iteration count.
 - **Speed across backends** is the same matrix transposed for a quick look.
-- **Changes** compares every ok cell with the previous finished run: wall median and peak RSS moves over 5%, and
-  whether the engine, ggml or model pins changed in between. A slower cell with unchanged pins usually means
+- **Changes** compares every ok cell with the previous finished run. It records changes over 5% in wall
+  median, peak RSS or peak physical footprint, along with changes to engine, ggml or model pins. A slower cell with unchanged pins usually means
   another user loaded the machine, which the under-load flag confirms when that load was there as the cell started;
   a changed pin points at a commit or a model cut.
 - **Problems** lists build failures, timeouts, every non-ok cell with the driver's note, and every cell measured

@@ -52,6 +52,15 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(tts["quality"], {"kind": "tts_wer", "value": 0.05})
         self.assertIsNone(tts["gpu_memory_rise_mib"])
 
+    def test_rows_keep_physical_footprint_from_macos(self):
+        (self.run_dir / "results" / "metal").mkdir()
+        self.write_result("metal", "asr", {**ASR_RESULT, "backend": "Metal", "peak_phys_footprint_mib": 1152.0})
+        summary = summarize.build_summary(self.run_dir, self.specs(), ["cuda", "metal"], ["asr"], "")
+        cuda, metal = summary["results"]
+        self.assertEqual(metal["peak_rss_mib"], 900.0)
+        self.assertEqual(metal["peak_phys_footprint_mib"], 1152.0)
+        self.assertIsNone(cuda["peak_phys_footprint_mib"])
+
     def test_rows_carry_the_core_ml_encoder_and_the_forced_ggml_time(self):
         result = {"status": "ok", "backend": "ggml-mtl0", "encoder_backend": "coreml-all", "baseline_inference_ms_median": 37.034,
                   "wall_ms_median": 36.669, "wall_ms_min": 36.0, "wall_ms_max": 37.5, "rtf_median": 0.0033, "runs": 10, "notes": ""}

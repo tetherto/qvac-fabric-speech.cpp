@@ -544,6 +544,10 @@ jq -n --arg sha "$hello_sha" \
     bench_kind: "time-wrapped", binary: "bin/tw-marker", cmake_target: "x",
     args: [], audio_duration_seconds: 1.0, notes: "n"
   },
+  "tw-memory": {
+    bench_kind: "time-wrapped", binary: "bin/tw-memory", cmake_target: "x",
+    args: ["${SCRATCH_DIR}"], audio_duration_seconds: null
+  },
   "tw-evidence": {
     bench_kind: "time-wrapped", binary: "bin/tw-evidence", cmake_target: "x",
     args: [], audio_duration_seconds: 1.0, notes: "n"
@@ -616,10 +620,12 @@ STUB
 cat > "$BUILD/bin/nat-coreml-baseline-empty" <<'STUB'
 #!/usr/bin/env bash
 if [[ "${PARAKEET_COREML_DISABLE:-0}" == "1" ]]; then
+  printf '    33554432 maximum resident set size\n    89128960 peak memory footprint\n' >&2
   cat > "$1" <<'EOJ'
 {"backend":"MTL0","encoder_backend":"MTL0","encoder_coreml_all_runs":false,"encoder_ms":{"median":20},"inference_ms":{"median":40,"min":39,"max":41},"rtf_median":0.004,"transcript":""}
 EOJ
 else
+  printf '    67108864 maximum resident set size\n    54525952 peak memory footprint\n' >&2
   cat > "$1" <<'EOJ'
 {"backend":"MTL0","encoder_backend":"coreml-all","encoder_coreml_all_runs":true,"encoder_ms":{"median":10},"inference_ms":{"median":30,"min":29,"max":31},"rtf_median":0.003,"transcript":"the quick brown fox"}
 EOJ
@@ -629,6 +635,16 @@ STUB
 cat > "$BUILD/bin/tw-marker" <<'STUB'
 #!/usr/bin/env bash
 echo "  backend: Metal (kv_attn_type=f16)"
+STUB
+
+cat > "$BUILD/bin/tw-memory" <<'STUB'
+#!/usr/bin/env bash
+if [[ -e "$1/first-memory-run" ]]; then
+  printf '    33554432 maximum resident set size\n    89128960 peak memory footprint\n' >&2
+else
+  touch "$1/first-memory-run"
+  printf '    67108864 maximum resident set size\n    54525952 peak memory footprint\n' >&2
+fi
 STUB
 
 cat > "$BUILD/bin/tw-evidence" <<'STUB'
@@ -880,6 +896,10 @@ run_driver coreml-no-correctness "$OUT/coreml-no-correctness.json" "$OUT/coreml-
 jq -e '.status == "ok" and .wall_ms_median == 30 and .baseline_inference_ms_median == 40 and .wer_median == null' \
   "$OUT/coreml-no-correctness.json" > /dev/null || fail "coreml-no-correctness: $(cat "$OUT/coreml-no-correctness.json")"
 ok "a Core ML comparison without a correctness spec keeps both timings and scores nothing"
+jq -e '.peak_rss_mib == 64 and .peak_phys_footprint_mib == 85' \
+  "$OUT/coreml-no-correctness.json" > /dev/null || fail "coreml-no-correctness memory: $(cat "$OUT/coreml-no-correctness.json")"
+ok "a Core ML comparison keeps independent memory peaks from the two processes"
+
 
 mkdir -p "$MODELS/coreml-baseline-empty/stub-encoder.mlmodelc"
 printf 'stub' > "$MODELS/coreml-baseline-empty/stub.f16.gguf"
@@ -900,6 +920,11 @@ run_driver tw-marker "$OUT/tw-marker.json" "$OUT/tw-marker.err" BENCH_FAMILIES_J
 jq -e '.status == "ok" and .backend == "Metal" and .rtf_median != null' \
   "$OUT/tw-marker.json" > /dev/null || fail "tw-marker: $(cat "$OUT/tw-marker.json")"
 ok "time-wrapped run scrapes 'backend:' markers from stdout"
+
+run_driver tw-memory "$OUT/tw-memory.json" "$OUT/tw-memory.err" BENCH_FAMILIES_JSON="$SPEC"
+jq -e '.status == "ok" and .peak_rss_mib == 64 and .peak_phys_footprint_mib == 85' \
+  "$OUT/tw-memory.json" > /dev/null || fail "tw-memory: $(cat "$OUT/tw-memory.json")"
+ok "time-wrapped benchmarks take independent maxima for RSS and physical footprint"
 
 # time-wrapped, ggml compute-init evidence on stderr (acestep-on-Metal shape).
 run_driver tw-evidence "$OUT/tw-evidence.json" "$OUT/tw-evidence.err" BENCH_FAMILIES_JSON="$SPEC"

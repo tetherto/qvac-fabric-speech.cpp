@@ -491,7 +491,8 @@ write_failed_result() {
   jq -n --arg family "$family" --arg runner "$(hostname -s)-$backend" --arg os "$OS_NAME" --arg status "$status" \
     --arg notes "the weekly driver wrote this row: $status" \
     '{family:$family, model:$family, runner:$runner, os:$os, backend:"unknown", wall_ms_median:null, wall_ms_min:null,
-      wall_ms_max:null, rtf_median:null, peak_rss_mib:null, runs:0, status:$status, notes:$notes}' > "$out"
+      wall_ms_max:null, rtf_median:null, peak_rss_mib:null, peak_phys_footprint_mib:null,
+      runs:0, status:$status, notes:$notes}' > "$out"
 }
 
 run_family_driver() {

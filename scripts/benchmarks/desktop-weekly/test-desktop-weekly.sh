@@ -348,6 +348,7 @@ check_failed_result() {
   write_failed_result moss-tts-f16 cuda timeout "$TMP/failed.json"
   [ "$(jq -r .status "$TMP/failed.json")" = "timeout" ] || fail "failed result status"
   [ "$(jq -r .family "$TMP/failed.json")" = "moss-tts-f16" ] || fail "failed result family"
+  jq -e 'has("peak_phys_footprint_mib") and .peak_phys_footprint_mib == null' "$TMP/failed.json" > /dev/null || fail "failed result footprint"
   ok "write_failed_result emits a driver-shaped row"
 }
 

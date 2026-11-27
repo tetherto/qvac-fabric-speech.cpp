@@ -46,6 +46,7 @@ def load_results(root: pathlib.Path) -> list[dict[str, Any]]:
                 "wall_ms_median": None,
                 "rtf_median": None,
                 "peak_rss_mib": None,
+                "peak_phys_footprint_mib": None,
                 "runs": 0,
                 "status": "artifact-corrupt",
                 "notes": f"could not parse {path}: {e}",
@@ -168,15 +169,15 @@ def render_markdown(results: list[dict[str, Any]]) -> str:
         "| Family | Model | Runner | OS | Decoder | Encoder | Baseline encoder | Core ML verified "
         "| Encoder ms | Baseline encoder ms | Encoder speedup | End-to-end ms "
         "| Min | Max | Baseline end-to-end ms | E2E speedup | RTF | Correctness "
-        "| Peak RSS MiB | Runs | Status | Notes |\n"
-        "|---|---|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|\n"
+        "| Peak RSS MiB | Peak physical footprint MiB | Runs | Status | Notes |\n"
+        "|---|---|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|\n"
     )
     rows = []
     for r in results:
         rows.append(
             "| {family} | {model} | {runner} | {os} | {backend} | {encoder_backend} | {baseline_encoder_backend} "
             "| {coreml_verified} | {encoder_ms} | {baseline_encoder_ms} | {encoder_speedup} "
-            "| {median} | {min} | {max} | {baseline_inference_ms} | {inference_speedup} | {rtf} | {correctness} | {rss} "
+            "| {median} | {min} | {max} | {baseline_inference_ms} | {inference_speedup} | {rtf} | {correctness} | {rss} | {footprint} "
             "| {runs} | {status} | {notes} |".format(
                 family=r.get("family", "?"),
                 model=r.get("model", "?"),
@@ -197,13 +198,14 @@ def render_markdown(results: list[dict[str, Any]]) -> str:
                 rtf=fmt_rtf(r.get("rtf_median")),
                 correctness=(fmt_music_alignment(r.get("music_alignment")) if r.get("music_alignment") is not None else fmt_audio_quality(r.get("audio_quality")) if r.get("correctness_kind") == "audio" else fmt_correctness(r.get("correctness_kind"), r.get("wer_median"), r.get("der_median"), r.get("f1_median"), r.get("tts_intelligibility"))),
                 rss=fmt_rss(r.get("peak_rss_mib")),
+                footprint=fmt_rss(r.get("peak_phys_footprint_mib")),
                 runs=r.get("runs", 0),
                 status=r.get("status", "?"),
                 notes=(r.get("notes") or "").replace("|", "\\|"),
             )
         )
     if not rows:
-        rows.append("| _no results collected_ | | | | | | | | | | | | | | | | | | | | | |")
+        rows.append("| _no results collected_ | | | | | | | | | | | | | | | | | | | | | | |")
     return header + "\n".join(rows) + "\n"
 
 
@@ -239,6 +241,8 @@ def render_legend() -> str:
         "- **CLAP** — non-gating text/music cosine similarity, higher means stronger prompt alignment; not overall music quality. Equal-weight mean across timed runs with scored/expected coverage; failed scores remain null. Opt-in diagnostic generation writes WAVs within timing and uses a longer workload; compare only matching diagnostic configurations. CLAP preparation/scoring are excluded from generation timing.\n"
         "- **Peak RSS MiB** — maximum resident set size across all timed runs, via "
         "`/usr/bin/time` (GNU `-v` on Linux, BSD `-l` on macOS).\n"
+        "- **Peak physical footprint MiB** — macOS process lifetime peak from `/usr/bin/time -l`. "
+        "Interpret physical footprint and RSS independently.\n"
         "- **Backend** — from the bench binary's JSON when it reports one, else the "
         "engine's `using <NAME> backend` / `backend: <NAME>` log lines, else ggml's "
         "own GPU compute-init logs; a green run with no GPU-engagement evidence is "

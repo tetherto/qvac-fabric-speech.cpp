@@ -26,6 +26,7 @@
 #     "wall_ms_max":    1301.2,
 #     "rtf_median":     0.612,        # null when the family's rtf can't be measured
 #     "peak_rss_mib":   1024.5,       # null on runners without /usr/bin/time -v/-l
+#     "peak_phys_footprint_mib": 900.5, # null when macOS time does not report it
 #     "runs":           3,
 #     "status":         "ok" | "not-in-registry" | "missing-model"
 #                       | "build-failed" | "run-failed" | "fetch-failed"
@@ -189,7 +190,8 @@ BASELINE_RTF_MEDIAN="null"
 BASELINE_WER_MEDIAN="null"
 ENCODER_SPEEDUP="null"
 INFERENCE_SPEEDUP="null"
-PEAK_RSS_MIB="null"   # tracked across runs; max seen
+PEAK_RSS_MIB="null"
+PEAK_PHYS_FOOTPRINT_MIB="null"
 RTF_MEDIAN="null"     # from bench JSON (native) or computed (time-wrapped w/ audio_duration_seconds)
 # Correctness fields — populated only when the family carries a `correctness`
 # block AND the run produced enough output to score against a reference. All
@@ -255,6 +257,7 @@ emit_json() {
     --argjson wall_max    "$wmax" \
     --argjson rtf_median  "$RTF_MEDIAN" \
     --argjson peak_rss    "$PEAK_RSS_MIB" \
+    --argjson peak_phys_footprint "$PEAK_PHYS_FOOTPRINT_MIB" \
     --argjson runs        "$RUNS" \
     --argjson wer_median  "$WER_MEDIAN" \
     --argjson der_median  "$DER_MEDIAN" \
@@ -279,7 +282,7 @@ emit_json() {
       baseline_wer_median:$baseline_wer_median,
       encoder_speedup:$encoder_speedup, inference_speedup:$inference_speedup,
       wall_ms_median:$wall_median, wall_ms_min:$wall_min, wall_ms_max:$wall_max,
-      rtf_median:$rtf_median, peak_rss_mib:$peak_rss,
+      rtf_median:$rtf_median, peak_rss_mib:$peak_rss, peak_phys_footprint_mib:$peak_phys_footprint,
       wer_median:$wer_median, der_median:$der_median, f1_median:$f1_median,
       audio_quality:$audio_quality,
       correctness_kind:$correctness_kind,
@@ -669,9 +672,9 @@ if [[ "$MUSIC_ENABLED" == 1 ]]; then
   fi
 fi
 
-# ---- /usr/bin/time wrapper (portable RSS capture) --------------------------
+# ---- /usr/bin/time wrapper (portable memory capture) --------------------------
 # Linux GNU time: --verbose prints 'Maximum resident set size (kbytes): NNN'.
-# macOS BSD time: -l prints '  NNN  maximum resident set size' in BYTES.
+# macOS BSD time: -l reports resident set size and physical footprint in bytes.
 # Both write to stderr. We capture stderr into a file and parse after the run.
 have_gnu_time() {
   /usr/bin/time --version >/dev/null 2>&1
@@ -688,24 +691,26 @@ wrap_time() {
   fi
 }
 
-parse_rss_from_time_stderr() {
-  # $1: path to a stderr log produced by wrap_time.
-  # Emits the peak RSS in MiB (or empty when none can be parsed).
-  local file="$1"
-  local kb bytes
-  # GNU time: kbytes
-  kb="$(grep -oE 'Maximum resident set size \(kbytes\): [0-9]+' "$file" 2>/dev/null | grep -oE '[0-9]+' | head -1 || true)"
-  if [[ -n "$kb" ]]; then
-    awk -v k="$kb" 'BEGIN { printf "%.1f", k / 1024.0 }'
-    return
-  fi
-  # BSD time: bytes on a line ending 'maximum resident set size'
-  bytes="$(grep -oE '[0-9]+  *maximum resident set size' "$file" 2>/dev/null | grep -oE '^[0-9]+' | head -1 || true)"
-  if [[ -n "$bytes" ]]; then
-    awk -v b="$bytes" 'BEGIN { printf "%.1f", b / (1024.0 * 1024.0) }'
-    return
-  fi
-  echo ""
+capture_peak_memory() {
+  IFS='|' read -r PEAK_RSS_MIB PEAK_PHYS_FOOTPRINT_MIB < <(
+    LC_ALL=C awk '
+      /^[[:space:]]*Maximum resident set size \(kbytes\):[[:space:]]+[0-9]+[[:space:]]*$/ {
+        bytes = $NF * 1024
+        if (bytes > rss || rss == "") rss = bytes
+      }
+      /^[[:space:]]*[0-9]+[[:space:]]+maximum resident set size[[:space:]]*$/ {
+        if ($1 + 0 > rss || rss == "") rss = $1 + 0
+      }
+      /^[[:space:]]*[0-9]+[[:space:]]+peak memory footprint[[:space:]]*$/ {
+        if ($1 + 0 > footprint || footprint == "") footprint = $1 + 0
+      }
+      END {
+        mib = 1024 * 1024
+        printf "%s|%s\n", (rss == "" ? "null" : sprintf("%.1f", rss / mib)),
+                           (footprint == "" ? "null" : sprintf("%.1f", footprint / mib))
+      }
+    ' "$@"
+  )
 }
 
 # ---- backend extraction ----------------------------------------------------
@@ -1228,15 +1233,7 @@ case "$BENCH_KIND" in
         INFERENCE_SPEEDUP="$(jq -n --argjson base "$BASELINE_INFERENCE_MS_MEDIAN" --argjson active "$coreml_inference" 'if $active > 0 then $base / $active else null end')"
       fi
 
-      coreml_rss="$(parse_rss_from_time_stderr "$coreml_stderr")"
-      baseline_rss="$(parse_rss_from_time_stderr "$baseline_stderr")"
-      if [[ -n "$coreml_rss" && -n "$baseline_rss" ]]; then
-        PEAK_RSS_MIB="$(awk -v a="$coreml_rss" -v b="$baseline_rss" 'BEGIN { print (a > b ? a : b) }')"
-      elif [[ -n "$coreml_rss" ]]; then
-        PEAK_RSS_MIB="$coreml_rss"
-      elif [[ -n "$baseline_rss" ]]; then
-        PEAK_RSS_MIB="$baseline_rss"
-      fi
+      capture_peak_memory "$coreml_stderr" "$baseline_stderr"
 
       artifact_dir="$(dirname "$OUT")"
       mkdir -p "$artifact_dir"
@@ -1318,8 +1315,7 @@ case "$BENCH_KIND" in
     ENCODER_BACKEND="$(jq -r '.encoder_backend // "unknown"' "$JSON_OUT")"
     ENCODER_COREML_ALL_RUNS="$(jq -r '.encoder_coreml_all_runs // null' "$JSON_OUT")"
     ENCODER_MS_MEDIAN="$(jq -r '.encoder_ms.median // null' "$JSON_OUT")"
-    rss="$(parse_rss_from_time_stderr "$stderr_log")"
-    [[ -n "$rss" ]] && PEAK_RSS_MIB="$rss"
+    capture_peak_memory "$stderr_log"
 
     # Correctness scoring — no-op unless the family declares a correctness
     # block. Runs after perf is captured so a scoring failure never
@@ -1354,7 +1350,6 @@ case "$BENCH_KIND" in
     done
 
     declare -a wall_ms=()
-    max_rss_seen=""
     combined_stderr="$tmp_dir/combined.err"
     combined_stdout="$tmp_dir/combined.out"
     : > "$combined_stderr"
@@ -1372,12 +1367,6 @@ case "$BENCH_KIND" in
       wall_ms+=("$ms")
       cat "$r_stderr" >> "$combined_stderr"
       cat "$r_stderr.stdout" >> "$combined_stdout" 2>/dev/null || true
-      rss_i="$(parse_rss_from_time_stderr "$r_stderr")"
-      if [[ -n "$rss_i" ]]; then
-        if [[ -z "$max_rss_seen" ]] || awk -v a="$rss_i" -v b="$max_rss_seen" 'BEGIN{exit !(a>b)}'; then
-          max_rss_seen="$rss_i"
-        fi
-      fi
     done
 
     stats="$(printf '%s\n' "${wall_ms[@]}" | jq -s '{
@@ -1391,7 +1380,7 @@ case "$BENCH_KIND" in
 
     BACKEND="$(parse_backend_from_logs "$combined_stderr" "$combined_stdout")"
     BACKEND="${BACKEND:-CPU}"
-    if [[ -n "$max_rss_seen" ]]; then PEAK_RSS_MIB="$max_rss_seen"; fi
+    capture_peak_memory "$combined_stderr"
 
     # Compute RTF only when families.json declared audio_duration_seconds.
     if [[ "$AUDIO_DURATION_S" != "null" && -n "$AUDIO_DURATION_S" ]]; then
