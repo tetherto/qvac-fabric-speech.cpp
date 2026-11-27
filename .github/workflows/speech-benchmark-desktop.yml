@@ -64,6 +64,11 @@ on:
         required: false
         default: false
         type: boolean
+      metal_asr_memory:
+        description: "Measure Metal-only ASR memory for Nemotron, Parakeet TDT, Unified, and Whisper small. Uses a fixed macOS matrix."
+        required: false
+        default: false
+        type: boolean
       runs_per_bench:
         description: "Timed iterations per bench (median reported). Positive integer, max 20."
         required: false
@@ -115,6 +120,13 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Install benchmark test dependency
+        run: python3 -m pip install numpy==2.2.6
+
       # Fail the whole dispatch before any runner minutes are spent when the
       # bench driver or the family spec regressed — the suite runs the driver
       # against stub binaries, so it needs neither models nor engines.
@@ -136,6 +148,7 @@ jobs:
           IN_RUNNERS:  ${{ inputs.runners }}
           IN_WHISPER:  ${{ inputs.whisper_sizes }}
           IN_RUNS:     ${{ inputs.runs_per_bench }}
+          METAL_ASR_MEMORY: ${{ inputs.metal_asr_memory && '1' || '0' }}
           IN_MINIMAX_DIR: ${{ inputs.minimax_model_dir }}
           IN_MINIMAX_RUN: ${{ inputs.minimax_artifact_run_id }}
         run: |
@@ -155,6 +168,13 @@ jobs:
             exit 1
           fi
           echo "runs_per_bench=$IN_RUNS" >> "$GITHUB_OUTPUT"
+
+          if [[ "${METAL_ASR_MEMORY:-0}" == "1" ]]; then
+            IN_FAMILIES="parakeet-tdt,parakeet-unified,nemotron,nemotron-abcba,whisper"
+            IN_RUNNERS="macos"
+            IN_WHISPER="small"
+            ALL_FAMILIES="$IN_FAMILIES"
+          fi
 
           # "all" (or empty, since the dispatch UI can save an empty string as
           # a default) → every family the spec does not mark opt_in; otherwise
@@ -302,6 +322,7 @@ jobs:
       FAMILY:       ${{ matrix.family }}
       WHISPER_SIZE: ${{ matrix.whisper_size }}
       RUNNER_LABEL: ${{ matrix.runner_label }}
+      BENCH_FAMILIES_JSON: ${{ inputs.metal_asr_memory && matrix.family != 'whisper' && 'scripts/benchmarks/desktop-weekly/families.json' || 'scripts/benchmarks/families.json' }}
     steps:
       # Hardened-runner audit mode. Actual coverage is narrower than it
       # looks: harden-runner is a no-op on self-hosted runners without a
@@ -368,7 +389,7 @@ jobs:
               baseline_inference_ms_median:null,
               encoder_speedup:null, inference_speedup:null,
               wall_ms_median:null, wall_ms_min:null, wall_ms_max:null,
-              rtf_median:null, peak_rss_mib:null,
+              rtf_median:null, peak_rss_mib:null, peak_phys_footprint_mib:null,
               runs:0, status:"infrastructure-failed",
               notes:"pre-flight seed — an infrastructure step (AWS OIDC, ggml build, cmake configure) did not complete; the row was never overwritten by run-family.sh."}' \
             > artifacts/result.json
@@ -401,7 +422,7 @@ jobs:
           key: parakeet-eou-f16-coreml-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('engines/parakeet/scripts/export-encoder-coreml.py', 'engines/parakeet/scripts/ref-encoder-from-gguf.py', 'engines/parakeet/scripts/requirements-coreml.txt') }}
 
       - name: Cache generated Unified Parakeet Core ML sidecar
-        if: runner.os == 'macOS' && matrix.family == 'parakeet-unified'
+        if: runner.os == 'macOS' && !inputs.metal_asr_memory && matrix.family == 'parakeet-unified'
         id: parakeet-unified-coreml-cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -420,7 +441,7 @@ jobs:
           key: parakeet-nemotron-f16-coreml-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/benchmarks/families.json', 'engines/parakeet/scripts/export-encoder-coreml.py', 'engines/parakeet/scripts/ref-encoder-from-gguf.py', 'engines/parakeet/scripts/requirements-coreml.txt') }}
 
       - name: Install Core ML exporter dependencies
-        if: runner.os == 'macOS' && ((matrix.family == 'parakeet' && (steps.parakeet-f16-cache.outputs.cache-hit != 'true' || steps.parakeet-coreml-cache.outputs.cache-hit != 'true')) || (matrix.family == 'parakeet-unified' && steps.parakeet-unified-coreml-cache.outputs.cache-hit != 'true') || (matrix.family == 'parakeet-eou' && steps.parakeet-eou-coreml-cache.outputs.cache-hit != 'true') || (matrix.family == 'parakeet-nemotron' && steps.parakeet-nemotron-coreml-cache.outputs.cache-hit != 'true'))
+        if: runner.os == 'macOS' && !inputs.metal_asr_memory && ((matrix.family == 'parakeet' && (steps.parakeet-f16-cache.outputs.cache-hit != 'true' || steps.parakeet-coreml-cache.outputs.cache-hit != 'true')) || (matrix.family == 'parakeet-unified' && steps.parakeet-unified-coreml-cache.outputs.cache-hit != 'true') || (matrix.family == 'parakeet-eou' && steps.parakeet-eou-coreml-cache.outputs.cache-hit != 'true') || (matrix.family == 'parakeet-nemotron' && steps.parakeet-nemotron-coreml-cache.outputs.cache-hit != 'true'))
         run: |
           set -euo pipefail
           coreml_python="$(command -v python3.11 || true)"
@@ -545,7 +566,7 @@ jobs:
       - name: Configure umbrella build
         env:
           STREAMING_TESTS: ${{ inputs.audio8_pcm_streaming && matrix.family == 'audio8-tts' && 'ON' || 'OFF' }}
-          PARAKEET_COREML_FLAG: ${{ runner.os == 'macOS' && (matrix.family == 'parakeet' || matrix.family == 'parakeet-unified' || matrix.family == 'parakeet-eou' || matrix.family == 'parakeet-nemotron') && 'ON' || 'OFF' }}
+          PARAKEET_COREML_FLAG: ${{ runner.os == 'macOS' && !inputs.metal_asr_memory && (matrix.family == 'parakeet' || matrix.family == 'parakeet-unified' || matrix.family == 'parakeet-eou' || matrix.family == 'parakeet-nemotron') && 'ON' || 'OFF' }}
         run: |
           cmake -S . -B build \
             -DCMAKE_BUILD_TYPE=Release \
@@ -563,7 +584,7 @@ jobs:
       - name: Build reference ASR
         continue-on-error: true
         run: |
-          if [[ "$(jq -r --arg f "$FAMILY" '.[$f].correctness.kind // ""' scripts/benchmarks/families.json)" == "tts_intelligibility" ]]; then
+          if [[ "$(jq -r --arg f "$FAMILY" '.[$f].correctness.kind // ""' "$BENCH_FAMILIES_JSON")" == "tts_intelligibility" ]]; then
             cmake --build build --target whisper-cli -j4
           fi
 
@@ -574,7 +595,7 @@ jobs:
           set -euo pipefail
           # $FAMILY is validated by the plan job (whitelist) and comes in via
           # env, so jq can lookup the target safely.
-          target="$(jq -r --arg f "$FAMILY" '.[$f].cmake_target' scripts/benchmarks/families.json)"
+          target="$(jq -r --arg f "$FAMILY" '.[$f].cmake_target' "$BENCH_FAMILIES_JSON")"
           if [[ -z "$target" || "$target" == "null" ]]; then
             echo "no cmake_target for family '$FAMILY'" >&2; exit 1
           fi
@@ -739,12 +760,17 @@ jobs:
           # The scorer remains CPU-only; the macOS generator explicitly uses Metal.
           MUSIC_DEVICE: ${{ matrix.family == 'minimax' && runner.os == 'macOS' && 'gpu' || 'cpu' }}
           MODEL_S3_BUCKET: ${{ secrets.MODEL_S3_BUCKET }}
+          METAL_ASR_MEMORY: ${{ inputs.metal_asr_memory && '1' || '0' }}
+          GGML_SHA: ${{ steps.ggml.outputs.sha }}
           RUNS_PER_BENCH:  ${{ needs.plan.outputs.runs_per_bench }}
           PARAKEET_COREML_PYTHON: ${{ github.workspace }}/.venv-coreml/bin/python
           LD_LIBRARY_PATH: ${{ github.workspace }}/ggml-install/lib
         run: |
           set -euo pipefail
           extra_args=()
+          if [[ "$METAL_ASR_MEMORY" == 1 ]]; then
+            extra_args+=(--require-metal-memory)
+          fi
           warmup_runs=1
           if [[ -n "$WHISPER_SIZE" ]]; then
             extra_args+=(--whisper-size "$WHISPER_SIZE")
@@ -769,6 +795,13 @@ jobs:
             --runner "$RUNNER_LABEL" \
             ${extra_args[@]+"${extra_args[@]}"} \
             --out "artifacts/result.json"
+
+      - name: Verify Metal ASR result
+        if: inputs.metal_asr_memory
+        run: |
+          set -euo pipefail
+          jq -e '.status == "ok"' artifacts/result.json
+          cat artifacts/result.metal-asr-inputs.txt >> "$GITHUB_STEP_SUMMARY"
 
       - name: Audio8 streaming API and latency comparison
         if: inputs.audio8_pcm_streaming && matrix.family == 'audio8-tts'

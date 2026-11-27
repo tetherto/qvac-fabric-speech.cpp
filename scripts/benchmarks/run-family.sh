@@ -26,6 +26,7 @@
 #     "wall_ms_max":    1301.2,
 #     "rtf_median":     0.612,        # null when the family's rtf can't be measured
 #     "peak_rss_mib":   1024.5,       # null on runners without /usr/bin/time -v/-l
+#     "peak_phys_footprint_mib": 900.5, # null when macOS time does not report it
 #     "runs":           3,
 #     "status":         "ok" | "not-in-registry" | "missing-model"
 #                       | "build-failed" | "run-failed" | "fetch-failed"
@@ -48,12 +49,14 @@ OUT="result.json"
 RUNNER_LABEL="${RUNNER_OS:-unknown}"
 AUDIO_DIR="engines/parakeet/test/samples"
 WHISPER_SIZE="tiny"
+REQUIRE_METAL_MEMORY=0
+METAL_DEVICE=MTL0
 
 usage() {
   cat <<EOF >&2
 usage: $0 --family FAMILY [--runs N] [--warmup N]
           [--build-dir DIR] [--models-root DIR] [--audio-dir DIR]
-          [--runner LABEL] [--whisper-size tiny|base|small]
+          [--runner LABEL] [--whisper-size tiny|base|small] [--require-metal-memory]
           --out result.json
 EOF
 }
@@ -68,6 +71,7 @@ while [[ $# -gt 0 ]]; do
     --audio-dir)      AUDIO_DIR="$2"; shift 2 ;;
     --runner)         RUNNER_LABEL="$2"; shift 2 ;;
     --whisper-size)   WHISPER_SIZE="$2"; shift 2 ;;
+    --require-metal-memory) REQUIRE_METAL_MEMORY=1; shift ;;
     --out)            OUT="$2"; shift 2 ;;
     -h|--help)        usage; exit 0 ;;
     *) echo "unknown arg: $1" >&2; usage; exit 2 ;;
@@ -75,6 +79,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$FAMILY" ]]; then usage; exit 2; fi
+
+if [[ "$REQUIRE_METAL_MEMORY" == 1 ]]; then
+  metal_inputs="${OUT%.json}.metal-asr-inputs.txt"
+  rm -f "$metal_inputs"
+fi
 
 # ---- read families.json -----------------------------------------------------
 # BENCH_FAMILIES_JSON overrides the spec path so the driver's own test suite
@@ -189,7 +198,8 @@ BASELINE_RTF_MEDIAN="null"
 BASELINE_WER_MEDIAN="null"
 ENCODER_SPEEDUP="null"
 INFERENCE_SPEEDUP="null"
-PEAK_RSS_MIB="null"   # tracked across runs; max seen
+PEAK_RSS_MIB="null"
+PEAK_PHYS_FOOTPRINT_MIB="null"
 RTF_MEDIAN="null"     # from bench JSON (native) or computed (time-wrapped w/ audio_duration_seconds)
 # Correctness fields — populated only when the family carries a `correctness`
 # block AND the run produced enough output to score against a reference. All
@@ -230,6 +240,11 @@ esac
 emit_json() {
   local status="$1" median="${2:-null}" wmin="${3:-null}" wmax="${4:-null}" extra="${5:-}"
   local uname_s; uname_s="$(uname -s)"
+  if [[ "$REQUIRE_METAL_MEMORY" == 1 && "$status" == "ok" ]] && ! record_metal_inputs > "$metal_inputs"; then
+    rm -f "$metal_inputs"
+    status="run-failed"
+    extra=" (could not record Metal ASR input provenance)"
+  fi
   if [[ "$MUSIC_ENABLED" == 1 && "$status" != "ok" && "$status" != "preparation-failed" ]]; then
     MUSIC_RESULT="$(printf '%s' "$MUSIC_RESULT" | jq --arg status "$status" '.reason = ("generation unavailable: " + $status) | .stage = "generation" | .status = (if $status == "missing-model" then "model-missing" else "unavailable" end)')"
   fi
@@ -255,6 +270,7 @@ emit_json() {
     --argjson wall_max    "$wmax" \
     --argjson rtf_median  "$RTF_MEDIAN" \
     --argjson peak_rss    "$PEAK_RSS_MIB" \
+    --argjson peak_phys_footprint "$PEAK_PHYS_FOOTPRINT_MIB" \
     --argjson runs        "$RUNS" \
     --argjson wer_median  "$WER_MEDIAN" \
     --argjson der_median  "$DER_MEDIAN" \
@@ -279,7 +295,7 @@ emit_json() {
       baseline_wer_median:$baseline_wer_median,
       encoder_speedup:$encoder_speedup, inference_speedup:$inference_speedup,
       wall_ms_median:$wall_median, wall_ms_min:$wall_min, wall_ms_max:$wall_max,
-      rtf_median:$rtf_median, peak_rss_mib:$peak_rss,
+      rtf_median:$rtf_median, peak_rss_mib:$peak_rss, peak_phys_footprint_mib:$peak_phys_footprint,
       wer_median:$wer_median, der_median:$der_median, f1_median:$f1_median,
       audio_quality:$audio_quality,
       correctness_kind:$correctness_kind,
@@ -559,7 +575,7 @@ fi
 # The Core ML bundle is derived from the family's configured source GGUF. A restored
 # Actions cache makes this a no-op on subsequent runs; the first run exports and
 # compiles locally on the Apple Silicon benchmark host.
-if [[ "$(benchmark_platform)" == "Darwin" ]] &&
+if [[ "$REQUIRE_METAL_MEMORY" == 0 && "$(benchmark_platform)" == "Darwin" ]] &&
    [[ "$(spec_field coreml_compare_on_darwin)" == "true" ]]; then
   coreml_basename="$(spec_field coreml_model_basename)"
   coreml_source_gguf="$(spec_field coreml_source_gguf)"
@@ -644,6 +660,9 @@ build_bench_args() {
     expanded="$(expand_placeholder "$line"; printf '.')"
     BENCH_ARGS+=("${expanded%.}")
   done < <(jq -r --arg family "$FAMILY" --argjson music "$MUSIC_ENABLED" ' .[$family] | if $music == 1 then .music_alignment.args[]? else .args[]? end' "$FAMILIES_JSON")
+  if [[ "$REQUIRE_METAL_MEMORY" == 1 && "$FAMILY" == "whisper" ]]; then
+    BENCH_ARGS+=(--device "$METAL_DEVICE")
+  fi
   if [[ "$MUSIC_ENABLED" == 1 ]]; then
     if [[ "$FAMILY" == "minimax" ]]; then BENCH_ARGS+=(--device "$MUSIC_DEVICE");
     elif [[ "$MUSIC_DEVICE" == gpu ]]; then BENCH_ARGS+=(--gpu); fi
@@ -669,43 +688,83 @@ if [[ "$MUSIC_ENABLED" == 1 ]]; then
   fi
 fi
 
-# ---- /usr/bin/time wrapper (portable RSS capture) --------------------------
-# Linux GNU time: --verbose prints 'Maximum resident set size (kbytes): NNN'.
-# macOS BSD time: -l prints '  NNN  maximum resident set size' in BYTES.
-# Both write to stderr. We capture stderr into a file and parse after the run.
-have_gnu_time() {
-  /usr/bin/time --version >/dev/null 2>&1
+bench_arg_value() {
+  local flag="$1"
+  shift
+  while [[ $# -gt 1 ]]; do
+    if [[ "$1" == "$flag" ]]; then
+      printf '%s\n' "$2"
+      return
+    fi
+    shift
+  done
+  return 1
 }
 
+record_metal_inputs() {
+  local model_flag=--model audio_flag=--wav model audio speech_sha
+  if [[ "$FAMILY" == "whisper" ]]; then
+    model_flag=-m
+    audio_flag=-f
+  fi
+  model="$(bench_arg_value "$model_flag" "${BENCH_ARGS[@]}")" || return
+  audio="$(bench_arg_value "$audio_flag" "${BENCH_ARGS[@]}")" || return
+  speech_sha="$(git -C "$(dirname "$0")" rev-parse HEAD)" || return
+  [[ -n "${GGML_SHA:-}" ]] || return 1
+  sw_vers &&
+    sysctl machdep.cpu.brand_string hw.memsize &&
+    printf 'Speech revision %s\nGGML revision %s\n' "$speech_sha" "$GGML_SHA" &&
+    shasum -a 256 "$FAMILIES_JSON" "$audio" "$model"
+}
+
+if [[ "$REQUIRE_METAL_MEMORY" == 1 && "$BENCH_KIND" == "time-wrapped" && "$FAMILY" != "whisper" ]]; then
+  emit_json "run-failed" null null null " (Metal memory mode supports Whisper for time-wrapped benchmarks)"
+  exit 0
+fi
+
+# ---- /usr/bin/time wrapper (portable memory capture) --------------------------
+# Linux GNU time: --verbose prints 'Maximum resident set size (kbytes): NNN'.
+# macOS BSD time: -l reports resident set size and physical footprint in bytes.
+# Both write to stderr. We capture stderr into a file and parse after the run.
 wrap_time() {
-  # Prepend the correct time invocation. When neither is available, skip.
+  local time_command="${BENCH_TEST_TIME:-/usr/bin/time}"
   if [[ "$(uname -s)" == "Darwin" ]]; then
-    /usr/bin/time -l "$@"
-  elif have_gnu_time; then
-    /usr/bin/time -v "$@"
+    "$time_command" -l "$@"
+  elif "$time_command" --version >/dev/null 2>&1; then
+    "$time_command" -v "$@"
   else
     "$@"
   fi
 }
 
-parse_rss_from_time_stderr() {
-  # $1: path to a stderr log produced by wrap_time.
-  # Emits the peak RSS in MiB (or empty when none can be parsed).
-  local file="$1"
-  local kb bytes
-  # GNU time: kbytes
-  kb="$(grep -oE 'Maximum resident set size \(kbytes\): [0-9]+' "$file" 2>/dev/null | grep -oE '[0-9]+' | head -1 || true)"
-  if [[ -n "$kb" ]]; then
-    awk -v k="$kb" 'BEGIN { printf "%.1f", k / 1024.0 }'
-    return
-  fi
-  # BSD time: bytes on a line ending 'maximum resident set size'
-  bytes="$(grep -oE '[0-9]+  *maximum resident set size' "$file" 2>/dev/null | grep -oE '^[0-9]+' | head -1 || true)"
-  if [[ -n "$bytes" ]]; then
-    awk -v b="$bytes" 'BEGIN { printf "%.1f", b / (1024.0 * 1024.0) }'
-    return
-  fi
-  echo ""
+capture_peak_memory() {
+  IFS='|' read -r PEAK_RSS_MIB PEAK_PHYS_FOOTPRINT_MIB < <(
+    LC_ALL=C awk '
+      /^[[:space:]]*Maximum resident set size \(kbytes\):[[:space:]]+[0-9]+[[:space:]]*$/ {
+        bytes = $NF * 1024
+        if (bytes > rss || rss == "") rss = bytes
+      }
+      /^[[:space:]]*[0-9]+[[:space:]]+maximum resident set size[[:space:]]*$/ {
+        if ($1 + 0 > rss || rss == "") rss = $1 + 0
+      }
+      /^[[:space:]]*[0-9]+[[:space:]]+peak memory footprint[[:space:]]*$/ {
+        if ($1 + 0 > footprint || footprint == "") footprint = $1 + 0
+      }
+      END {
+        mib = 1024 * 1024
+        printf "%s|%s\n", (rss == "" ? "null" : sprintf("%.1f", rss / mib)),
+                           (footprint == "" ? "null" : sprintf("%.1f", footprint / mib))
+      }
+    ' "$@"
+  )
+}
+
+has_peak_memory() {
+  [[ "$PEAK_RSS_MIB" != "null" && "$PEAK_PHYS_FOOTPRINT_MIB" != "null" ]]
+}
+
+is_metal_backend() {
+  [[ "$1" =~ ^(ggml-)?([Mm]etal|[Mm][Tt][Ll][0-9]+)$ ]]
 }
 
 # ---- backend extraction ----------------------------------------------------
@@ -1165,7 +1224,7 @@ score_tts_intelligibility() {
 case "$BENCH_KIND" in
   native)
     coreml_compare="$(spec_field coreml_compare_on_darwin)"
-    if [[ "$(benchmark_platform)" == "Darwin" && "$coreml_compare" == "true" ]]; then
+    if [[ "$REQUIRE_METAL_MEMORY" == 0 && "$(benchmark_platform)" == "Darwin" && "$coreml_compare" == "true" ]]; then
       coreml_json="$tmp_dir/native-coreml.json"
       coreml_stderr="$tmp_dir/coreml.err"
       JSON_OUT="$coreml_json"
@@ -1228,15 +1287,7 @@ case "$BENCH_KIND" in
         INFERENCE_SPEEDUP="$(jq -n --argjson base "$BASELINE_INFERENCE_MS_MEDIAN" --argjson active "$coreml_inference" 'if $active > 0 then $base / $active else null end')"
       fi
 
-      coreml_rss="$(parse_rss_from_time_stderr "$coreml_stderr")"
-      baseline_rss="$(parse_rss_from_time_stderr "$baseline_stderr")"
-      if [[ -n "$coreml_rss" && -n "$baseline_rss" ]]; then
-        PEAK_RSS_MIB="$(awk -v a="$coreml_rss" -v b="$baseline_rss" 'BEGIN { print (a > b ? a : b) }')"
-      elif [[ -n "$coreml_rss" ]]; then
-        PEAK_RSS_MIB="$coreml_rss"
-      elif [[ -n "$baseline_rss" ]]; then
-        PEAK_RSS_MIB="$baseline_rss"
-      fi
+      capture_peak_memory "$coreml_stderr" "$baseline_stderr"
 
       artifact_dir="$(dirname "$OUT")"
       mkdir -p "$artifact_dir"
@@ -1318,8 +1369,12 @@ case "$BENCH_KIND" in
     ENCODER_BACKEND="$(jq -r '.encoder_backend // "unknown"' "$JSON_OUT")"
     ENCODER_COREML_ALL_RUNS="$(jq -r '.encoder_coreml_all_runs // null' "$JSON_OUT")"
     ENCODER_MS_MEDIAN="$(jq -r '.encoder_ms.median // null' "$JSON_OUT")"
-    rss="$(parse_rss_from_time_stderr "$stderr_log")"
-    [[ -n "$rss" ]] && PEAK_RSS_MIB="$rss"
+    capture_peak_memory "$stderr_log"
+    if [[ "$REQUIRE_METAL_MEMORY" == 1 ]] &&
+       { ! is_metal_backend "$n_backend" || ! is_metal_backend "$ENCODER_BACKEND" || ! has_peak_memory; }; then
+      emit_json "run-failed" null null null " (native benchmark requires Metal for both encoder and decoder, peak RSS, and peak physical footprint)"
+      exit 0
+    fi
 
     # Correctness scoring — no-op unless the family declares a correctness
     # block. Runs after perf is captured so a scoring failure never
@@ -1348,13 +1403,15 @@ case "$BENCH_KIND" in
       wu_stderr="$tmp_dir/warmup-$i.err"
       wu_rss="$tmp_dir/warmup-$i.rss"
       if ! run_one_time_wrapped "$i" "$wu_stderr" "$wu_rss" >/dev/null; then
-        BACKEND="$(parse_backend_from_logs "$wu_stderr" "$wu_stderr.stdout")"; BACKEND="${BACKEND:-unknown}"
+        if [[ "$REQUIRE_METAL_MEMORY" == 0 ]]; then
+          BACKEND="$(parse_backend_from_logs "$wu_stderr" "$wu_stderr.stdout")"
+          BACKEND="${BACKEND:-unknown}"
+        fi
         emit_json "run-failed" null null null " (warmup failed)"; exit 0
       fi
     done
 
     declare -a wall_ms=()
-    max_rss_seen=""
     combined_stderr="$tmp_dir/combined.err"
     combined_stdout="$tmp_dir/combined.out"
     : > "$combined_stderr"
@@ -1366,18 +1423,22 @@ case "$BENCH_KIND" in
       if ! ms="$(run_one_time_wrapped "$i" "$r_stderr" "$r_rss")"; then
         cat "$r_stderr" >> "$combined_stderr"
         cat "$r_stderr.stdout" >> "$combined_stdout" 2>/dev/null || true
-        BACKEND="$(parse_backend_from_logs "$combined_stderr" "$combined_stdout")"; BACKEND="${BACKEND:-unknown}"
+        if [[ "$REQUIRE_METAL_MEMORY" == 0 ]]; then
+          BACKEND="$(parse_backend_from_logs "$combined_stderr" "$combined_stdout")"
+          BACKEND="${BACKEND:-unknown}"
+        fi
         emit_json "run-failed" null null null " (timed run $i failed)"; exit 0
+      fi
+      if [[ "$REQUIRE_METAL_MEMORY" == 1 ]]; then
+        capture_peak_memory "$r_rss"
+        if ! has_peak_memory; then
+          emit_json "run-failed" null null null " (timed run $i requires peak RSS and peak physical footprint)"
+          exit 0
+        fi
       fi
       wall_ms+=("$ms")
       cat "$r_stderr" >> "$combined_stderr"
       cat "$r_stderr.stdout" >> "$combined_stdout" 2>/dev/null || true
-      rss_i="$(parse_rss_from_time_stderr "$r_stderr")"
-      if [[ -n "$rss_i" ]]; then
-        if [[ -z "$max_rss_seen" ]] || awk -v a="$rss_i" -v b="$max_rss_seen" 'BEGIN{exit !(a>b)}'; then
-          max_rss_seen="$rss_i"
-        fi
-      fi
     done
 
     stats="$(printf '%s\n' "${wall_ms[@]}" | jq -s '{
@@ -1389,9 +1450,13 @@ case "$BENCH_KIND" in
     mn="$(echo "$stats" | jq '.min')"
     mx="$(echo "$stats" | jq '.max')"
 
-    BACKEND="$(parse_backend_from_logs "$combined_stderr" "$combined_stdout")"
-    BACKEND="${BACKEND:-CPU}"
-    if [[ -n "$max_rss_seen" ]]; then PEAK_RSS_MIB="$max_rss_seen"; fi
+    if [[ "$REQUIRE_METAL_MEMORY" == 1 ]]; then
+      BACKEND="$METAL_DEVICE"
+    else
+      BACKEND="$(parse_backend_from_logs "$combined_stderr" "$combined_stdout")"
+      BACKEND="${BACKEND:-CPU}"
+    fi
+    capture_peak_memory "$combined_stderr"
 
     # Compute RTF only when families.json declared audio_duration_seconds.
     if [[ "$AUDIO_DURATION_S" != "null" && -n "$AUDIO_DURATION_S" ]]; then

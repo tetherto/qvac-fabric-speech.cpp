@@ -24,7 +24,8 @@ PERCENT = 100.0
 SHA_SHORT = 12
 DEFAULT_THRESHOLD_PERCENT = 5.0
 GPU_BACKENDS = ("cuda", "vulkan", "metal")
-COMPARED_METRICS = (("wall_ms_median", "wall median"), ("peak_rss_mib", "peak RSS"))
+COMPARED_METRICS = (("wall_ms_median", "wall median"), ("peak_rss_mib", "peak RSS"),
+                    ("peak_phys_footprint_mib", "peak physical footprint"))
 
 
 def load(path):
@@ -148,8 +149,9 @@ def pins_section(pins):
 
 def measured_cells(row):
     if row["status"] != STATUS_OK:
-        return ["-", "-", "-", "-", "-"]
-    return [fmt_range(row), fmt_speed(row.get("speed_x")), fmt_gib(row.get("peak_rss_mib")), fmt_gpu_memory(row), fmt_quality(row)]
+        return ["-"] * 6
+    return [fmt_range(row), fmt_speed(row.get("speed_x")), fmt_gib(row.get("peak_rss_mib")),
+            fmt_gib(row.get("peak_phys_footprint_mib")), fmt_gpu_memory(row), fmt_quality(row)]
 
 
 def result_row(row):
@@ -158,7 +160,7 @@ def result_row(row):
 
 
 def backend_section(backend, rows):
-    head = ["model", "weights", "status", "wall median (min to max)", "speed", "peak RSS", "GPU memory", "quality",
+    head = ["model", "weights", "status", "wall median (min to max)", "speed", "peak RSS", "peak physical footprint", "GPU memory", "quality",
             "observed backend", "runs"]
     return [f"## Results on {backend}", "",
             "Speed is seconds of audio per second of wall clock: input audio for ASR, generated audio for TTS and music. "

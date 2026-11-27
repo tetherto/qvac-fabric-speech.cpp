@@ -38,8 +38,8 @@ class ReportTest(unittest.TestCase):
                         "## Speed across backends", "## Changes since the previous run", "## Problems"):
             self.assertIn(heading, text)
         self.assertIn("**Status: partial** (3 of 4 cells ok)", text)
-        self.assertIn("| Model a | Q8_0 | ok | 1,000 ms (990 ms to 1,010 ms) | 11x | 1.0 GiB | 2.0 GiB rise (peak 3.0 GiB) | WER 0.0% | CUDA | 10 |", text)
-        self.assertIn("| Model b | Q8_0 | **timeout** | - | - | - | - | - | CUDA | 10 |", text)
+        self.assertIn("| Model a | Q8_0 | ok | 1,000 ms (990 ms to 1,010 ms) | 11x | 1.0 GiB | - | 2.0 GiB rise (peak 3.0 GiB) | WER 0.0% | CUDA | 10 |", text)
+        self.assertIn("| Model b | Q8_0 | **timeout** | - | - | - | - | - | - | CUDA | 10 |", text)
         self.assertIn("| Model a | Q8_0 | 11x | 2.20x |", text)
         self.assertIn("| Model b | Q8_0 | timeout | 1.80x |", text)
         self.assertIn("| m.gguf | 1.0 GiB | `0123456789ab` | registry x |", text)
@@ -70,7 +70,7 @@ class ReportTest(unittest.TestCase):
 
     def test_cpu_rows_hide_gpu_memory(self):
         text = report.render(summary(), None, 5.0)
-        self.assertIn("| Model a | Q8_0 | ok | 5,000 ms (4,990 ms to 5,010 ms) | 2.20x | 1.0 GiB | - | WER 0.0% | CPU | 10 |", text)
+        self.assertIn("| Model a | Q8_0 | ok | 5,000 ms (4,990 ms to 5,010 ms) | 2.20x | 1.0 GiB | - | - | WER 0.0% | CPU | 10 |", text)
 
     def test_changes_list_only_moves_over_threshold(self):
         previous = summary("2026-11-01")
@@ -82,6 +82,16 @@ class ReportTest(unittest.TestCase):
         self.assertIn("| Model a (Q8_0) on cuda: wall median | 1,000 ms | 1,100 ms | +10.0% |", text)
         self.assertNotIn("Model a (Q8_0) on cpu: peak RSS", text)
         self.assertIn("Pins that changed: none.", text)
+
+    def test_physical_footprint_has_its_own_column_and_comparison(self):
+        previous = summary("2026-11-01")
+        current = summary()
+        previous["results"][0]["peak_phys_footprint_mib"] = 1024.0
+        current["results"][0]["peak_phys_footprint_mib"] = 1536.0
+        text = report.render(current, previous, 5.0)
+        self.assertIn("| peak RSS | peak physical footprint | GPU memory |", text)
+        self.assertIn("| 11x | 1.0 GiB | 1.5 GiB | 2.0 GiB rise", text)
+        self.assertIn("| Model a (Q8_0) on cuda: peak physical footprint | 1.0 GiB | 1.5 GiB | +50.0% |", text)
 
     def test_pin_changes_are_named(self):
         previous = summary("2026-11-01")
